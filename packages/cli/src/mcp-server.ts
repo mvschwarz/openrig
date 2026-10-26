@@ -149,27 +149,85 @@ type Scope = {
   paths: boolean;
   /** Whether every list is limited to the caller's own items. */
   ownListsOnly: boolean;
-  /** For a customer: whether a handoff's target may be shown. A target it may not see is redacted (redactHandoff), and
-   *  successors are checked whole (successorOf). Absent for every other caller, whose responses are as they were. */
-  handoff?: (target: unknown) => boolean;
+  /** For a customer: whether a party a row names (a handoff's new owner, a closure target, a blocker) may be shown. Every
+   *  row a customer receives goes through projectForCustomer, and successors are checked whole (successorOf). Absent for
+   *  every other caller, whose responses are as they were. */
+  shows?: (party: unknown) => boolean;
+  /** For a customer: whether a seat named inside a transition note may stay (its own seat and its team's). */
+  names?: (seat: string) => boolean;
 };
 
-const HANDED_ON = "handed on (out of scope)";
+type CustomerView = { shows: (party: unknown) => boolean; names: (seat: string) => boolean };
 
-/** A row or a transition with a handoff target the caller may not see: the fact that it was handed on stays, and the new
- *  owner goes from handedOffTo, the closure target and the handoff's note (by default "handed off to <seat>"). */
-function redactHandoff<T>(row: T, shown: (target: unknown) => boolean): T {
+/** The customer projection's predicates, for a customer's scope only; null for every other caller. */
+function customerView(scope: Scope | null): CustomerView | null {
+  return scope?.shows && scope.names ? { shows: scope.shows, names: scope.names } : null;
+}
+
+const ITEM_ID = /qitem-[A-Za-z0-9][A-Za-z0-9_-]*(?:@[A-Za-z0-9._-]+)?/g;
+const SEAT = /[A-Za-z0-9._-]+@[A-Za-z0-9._-]+(?:@[A-Za-z0-9._-]+)?/g;
+
+/** A transition note with every item id but the row's own, and every seat the customer may not see, replaced. Notes the
+ *  daemon writes on a parked row name its blocker ("blocker <id> wake attempted", "auto-unparked: blocker <id> …"), and a
+ *  team's note can name anyone. */
+function maskNote(note: string, ownId: unknown, names: (seat: string) => boolean): string {
+  const ids: string[] = [];
+  // Item ids first, set aside so a host-qualified id isn't read as a seat.
+  const kept = note.replace(ITEM_ID, (id) => { ids.push(id === ownId ? id : "(out of scope)"); return `\u0000${ids.length - 1}\u0000`; });
+  return kept.replace(SEAT, (seat) => names(seat) ? seat : "(out of scope)").replace(/\u0000(\d+)\u0000/g, (_m, i: string) => ids[Number(i)]!);
+}
+
+/** Whether a row's closure target names a party: a new owner, an escalation target, a replacement item or a blocker.
+ *  A denial's or a cancel's target is the team's own text, kept unless it names a seat or an item. */
+function namesParty(fields: Record<string, unknown>): boolean {
+  const reason = fields.closureReason;
+  return reason === "handed_off_to" || reason === "escalation" || reason === "superseded" || reason === "blocked_on"
+    || fields.state === "blocked" || (typeof fields.closureTarget === "string" && /^qitem-|@/.test(fields.closureTarget));
+}
+
+/** What a hidden closure target's note says instead: the fact, without the party. */
+const OUT_OF_SCOPE_NOTE: Readonly<Record<string, string>> = {
+  handed_off_to: "handed on (out of scope)", escalation: "escalated (out of scope)", superseded: "superseded (out of scope)",
+  blocked_on: "parked (out of scope)",
+};
+
+/**
+ * One projection for every row a customer receives (show's item and transitions, list rows, create's return). The row's
+ * facts stay (state, closure reason); a party it names that the customer may not see goes, whatever put it there: a
+ * handoff, a park, an escalation or a supersede. That is handedOffTo, the closure target (and the note of that closure,
+ * which can name it), blockedOn, the daemon's custody advisory, the waiting view's blocker, liveness and backstop owners,
+ * the pickup receipt's evidence, a transition's wake arrangement, and the names inside transition notes. The team's answer
+ * (resolution) and the task's body are left as written.
+ */
+function projectForCustomer<T>(row: T, view: CustomerView): T {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const { shows, names } = view;
   const fields = { ...(row as Record<string, unknown>) };
-  if (typeof fields.handedOffTo === "string" && !shown(fields.handedOffTo)) fields.handedOffTo = null;
-  if (fields.closureReason === "handed_off_to" && fields.closureTarget != null && !shown(fields.closureTarget)) {
+  if (typeof fields.transitionNote === "string") fields.transitionNote = maskNote(fields.transitionNote, fields.qitemId, names);
+  // A transition's wake arrangement names what it waits on (a blocker's id).
+  const wake = fields.wake as { ref?: unknown } | null | undefined;
+  if (wake && typeof wake === "object" && wake.ref != null && !shows(wake.ref)) delete fields.wake;
+  if (typeof fields.handedOffTo === "string" && !shows(fields.handedOffTo)) fields.handedOffTo = null;
+  if (fields.closureTarget != null && !shows(fields.closureTarget) && namesParty(fields)) {
     fields.closureTarget = null;
-    if ("transitionNote" in fields) fields.transitionNote = HANDED_ON;
+    if ("transitionNote" in fields) {
+      const reason = typeof fields.closureReason === "string" ? fields.closureReason : null;
+      fields.transitionNote = (reason && OUT_OF_SCOPE_NOTE[reason]) ?? `${reason ?? (fields.state === "blocked" ? "parked" : String(fields.state))} (out of scope)`;
+    }
   }
-  if (fields.closingTransition) fields.closingTransition = redactHandoff(fields.closingTransition, shown);
+  if (fields.blockedOn != null && !shows(fields.blockedOn)) fields.blockedOn = null;
+  if (fields.closingTransition) fields.closingTransition = projectForCustomer(fields.closingTransition, view);
   // The daemon's custody advisory names the target in its target and its message.
   const advisory = fields.handoffAdvisory as { target?: unknown } | null | undefined;
-  if (advisory && typeof advisory === "object" && !shown(advisory.target)) delete fields.handoffAdvisory;
+  if (advisory && typeof advisory === "object" && !shows(advisory.target)) delete fields.handoffAdvisory;
+  // Who owes the next step, only when that's the row's own destination; a blocker's id, owner and state never.
+  const waiting = fields.waiting as { owner?: unknown; state?: unknown } | null | undefined;
+  if (waiting && typeof waiting === "object") {
+    if (waiting.owner === fields.destinationSession) fields.waiting = { owner: waiting.owner, state: waiting.state };
+    else delete fields.waiting;
+  }
+  const pickup = fields.pickup as { state?: unknown } | null | undefined;
+  if (pickup && typeof pickup === "object") fields.pickup = { state: pickup.state };
   return fields as T;
 }
 
@@ -239,7 +297,8 @@ function customerScope(access: McpAccess, seatOf: () => string | undefined): Sco
     artifact: (row) => caller(field(row, "sourceSession")),
     paths: false,
     ownListsOnly: true,
-    handoff: caller,
+    shows: caller,
+    names: (seat) => caller(seat) || team(seat),
   };
 }
 
@@ -1016,12 +1075,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         });
         // A customer reusing the id of an item it can't see learns only that the id is taken, never that item's parties.
         const conflict = (res.data ?? {}) as { error?: unknown; existingSource?: unknown; existingDestination?: unknown };
-        if (scope?.handoff && res.status === 409 && conflict.error === "qitem_id_reuse"
+        if (scope?.shows && res.status === 409 && conflict.error === "qitem_id_reuse"
           && !scope.item({ sourceSession: conflict.existingSource, destinationSession: conflict.existingDestination })) {
-          const message = `qitemId ${id} is already taken. Retry with a new one.`;
-          return errorResult(JSON.stringify({ ok: false, error: "qitem_id_reuse", message }), "qitem_id_reuse", message);
+          return mapResult({ status: 409, data: { error: "qitem_id_reuse", message: `qitemId ${id} is already taken. Retry with a new one.` } }, undefined, { structured: true });
         }
-        return mapResult(res, undefined, { structured: true });
+        // A create's return, a retry's stored row included, goes through the same customer projection as show and list.
+        const view = customerView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForCustomer(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
         const text = `${(err as Error).message} The outcome is unknown: check rig_queue_show with qitemId ${id} before retrying, and retry only with that same qitemId.`;
@@ -1048,11 +1108,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
-        const shown = scope?.handoff;
-        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, shown ? scope!.item : undefined) : undefined;
-        if (scope && !shown && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
-        const data = shown
-          ? { item: redactHandoff(item.data, shown), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => redactHandoff(t, shown)) : transitions.data }
+        const view = customerView(scope);
+        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, view ? scope!.item : undefined) : undefined;
+        if (scope && !view && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
+        const data = view
+          ? { item: projectForCustomer(item.data, view), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => projectForCustomer(t, view)) : transitions.data }
           : { item: item.data, transitions: transitions.data };
         return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
@@ -1113,9 +1173,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         // An authenticated caller sees only the rows in its scope, whatever the filters matched.
         if (scope && res.status < 400 && Array.isArray(res.data)) {
-          const shown = scope.handoff;
+          const view = customerView(scope);
           const rows = res.data.filter((row) => scope.item(row));
-          return mapResult({ ...res, data: shown ? rows.map((row) => redactHandoff(row, shown)) : rows }, undefined, { structured: true });
+          return mapResult({ ...res, data: view ? rows.map((row) => projectForCustomer(row, view)) : rows }, undefined, { structured: true });
         }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {

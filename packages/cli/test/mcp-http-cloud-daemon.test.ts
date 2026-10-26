@@ -298,6 +298,70 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     expect(mine.text).toContain(CALLER);
   });
 
+  /** A customer connection, the team lead's daemon writes, and the customer's own task creator. */
+  async function customerAndLead() {
+    const served = await listen();
+    const asCustomer = await connect(served.url);
+    const asLead = (path: string, body: unknown) => fetch(`${daemonUrl}/api/queue/${path}`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "lead@team-a" }, body: JSON.stringify(body) });
+    const mine = async (body: string) => (await asCustomer("rig_queue_create", { destination: "lead@team-a", body })).structured.qitemId as string;
+    return { asCustomer, asLead, mine };
+  }
+
+  it("a create retry after a handoff returns the stored row through the same projection, creating nothing again", async () => {
+    const { asCustomer, asLead, mine } = await customerAndLead();
+    const count = (sql: string, id: string) => (db.prepare(sql).get(id) as { n: number }).n;
+    const retried = await mine("retry me");
+    expect((await asLead(`${retried}/handoff`, { toSession: "impl@team-a", nudge: false })).status).toBe(201);
+    for (const body of ["retry me", "retry me, changed"]) {
+      const again = await asCustomer("rig_queue_create", { destination: "lead@team-a", body, qitemId: retried });
+      expect(again.isError).toBe(false);
+      expect(again.text).not.toContain("impl@team-a");
+    }
+    expect(count("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = ?", retried)).toBe(1);
+    expect(count("SELECT COUNT(*) AS n FROM queue_items WHERE handed_off_from = ?", retried)).toBe(1);
+    const far = await mine("far");
+    db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'qitem-far02@other-host', handed_off_to = 'impl@team-a@other-host' WHERE qitem_id = ?").run(far);
+    expect((await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "far", qitemId: far })).text).not.toContain("other-host");
+  });
+
+  it("a task parked on an internal child reads blocked, with no child id, owner or state anywhere", async () => {
+    const { asCustomer, asLead, mine } = await customerAndLead();
+    const child = await create("lead@team-a", "qa@team-b", "SECRET child");
+    const parked = await mine("park me");
+    expect((await asLead(`${parked}/update`, { state: "blocked", blockedOn: child.qitemId, transitionNote: `waiting on ${child.qitemId} (qa@team-b)` })).status).toBe(200);
+    const shown = await asCustomer("rig_queue_show", { qitemId: parked });
+    expect(shown.structured.item).toMatchObject({ state: "blocked", blockedOn: null });
+    for (const text of [shown.text, (await asCustomer("rig_queue_list", { all: true })).text]) {
+      expect(text).not.toContain(child.qitemId);
+      expect(text).not.toContain("qa@team-b");
+    }
+  });
+
+  it("an escalated task keeps its closure, without the escalation target or the note naming it", async () => {
+    const { asCustomer, asLead, mine } = await customerAndLead();
+    const escalated = await mine("escalate me");
+    expect((await asLead(`${escalated}/update`, { state: "done", closureReason: "escalation", closureTarget: "alex@external", transitionNote: "escalated to alex@external" })).status).toBe(200);
+    const shown = await asCustomer("rig_queue_show", { qitemId: escalated });
+    expect(shown.structured.item).toMatchObject({ closureReason: "escalation", closureTarget: null,
+      closingTransition: { closureTarget: null, transitionNote: "escalated (out of scope)" } });
+    expect(shown.text).not.toContain("alex@external");
+  });
+
+  it("a superseded task keeps its closure without the replacement's id, while a denial's reason stays readable", async () => {
+    const { asCustomer, asLead, mine } = await customerAndLead();
+    const replacement = await create("lead@team-a", "impl@team-a", "the replacement");
+    const superseded = await mine("supersede me");
+    expect((await asLead(`${superseded}/update`, { state: "done", closureReason: "superseded", closureTarget: replacement.qitemId })).status).toBe(200);
+    const shown = await asCustomer("rig_queue_show", { qitemId: superseded });
+    expect(shown.structured.item).toMatchObject({ closureReason: "superseded", closureTarget: null });
+    expect(shown.text).not.toContain(replacement.qitemId);
+    // A denial's reason is the team's own text, not a party.
+    const denied = await mine("deny me");
+    expect((await asLead(`${denied}/update`, { state: "done", closureReason: "denied", closureTarget: "outside what this team does" })).status).toBe(200);
+    expect((await asCustomer("rig_queue_show", { qitemId: denied })).structured.item).toMatchObject({ closureReason: "denied", closureTarget: "outside what this team does" });
+  });
+
   it("reads the grant request's header from a one-line secret file, and refuses one that would replace the request's own", () => {
     const file = path.join(home, "header");
     fs.writeFileSync(file, "x-vercel-protection-bypass: preview-secret\n");
