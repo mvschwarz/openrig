@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import nodePath from "node:path";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders, type DaemonClient, type DaemonResponse } from "./client.js";
@@ -8,6 +9,8 @@ import { readOpenRigEnv } from "./openrig-compat.js";
 import { resolveRigHandle } from "./rig-handle.js";
 import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity.js";
 import { CLI_VERSION } from "./version.js";
+import { ConfigStore } from "./config-store.js";
+import { readRosters } from "./commands/roster.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -121,6 +124,34 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
     return { rig, lead: null, leadNote: "No single lead: the rig has no one seat that delegates to others and that nothing delegates to, or that seat has no session.", seats };
   }
   return { rig, lead: { session, logicalId: seats.find((seat) => seat.session === session)?.logicalId ?? null }, seats };
+}
+
+/** A rig's hosted member: a tool that lives outside a terminal (an assistant, a bot) and reaches the team over this server
+ *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
+ *  observe it between calls, so its activity is unknown, never idle. */
+type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown" };
+
+/** The roster members on this host whose seat is in this rig and that have no node. A missing roster folder means none; a
+ *  roster that can't be read, or a host id that isn't known yet, is said, never read as none. */
+async function hostedMembersOf(folder: string, rigName: string, nodeSessions: ReadonlySet<string>,
+  selfHostId: () => Promise<string | null>): Promise<{ members: HostedMember[]; note?: string }> {
+  if (!existsSync(folder)) return { members: [] };
+  const { rosters, warnings } = readRosters(folder);
+  const unread = warnings.length > 0 ? { note: `Some rosters couldn't be read, so hosted members may be missing: ${warnings.join("; ")}` } : {};
+  const candidates = rosters.flatMap((roster) => roster.members
+    .filter((member) => member.seat.endsWith(`@${rigName}`) && !nodeSessions.has(member.seat))
+    .map((member) => ({ roster: roster.id, member })));
+  if (candidates.length === 0) return { members: [], ...unread };
+  const host = await selfHostId();
+  if (!host) return { members: [], note: "This daemon's host id isn't known yet, so hosted members on its rosters can't be matched to it." };
+  // A seat in two rosters is one member: the first roster (by file name) supplies its entry.
+  const members = new Map<string, HostedMember>();
+  for (const { roster, member } of candidates) {
+    if (member.host !== host || members.has(member.seat)) continue;
+    members.set(member.seat, { session: member.seat, roster, capabilities: member.capabilities, useWhen: member.use_when,
+      caveat: member.caveat ?? null, pane: null, activity: "unknown" });
+  }
+  return { members: [...members.values()], ...unread };
 }
 
 type SliceEntry = { name?: string; missionId?: string | null; displayName?: string; status?: string; description?: string | null; qitemCount?: number; lastActivityAt?: string | null };
@@ -282,7 +313,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive", access: "work" },
   { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read", access: "owner" },
   { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read", access: "work" },
-  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes"], effect: "read", access: "work" },
+  { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes", "GET /healthz"], effect: "read", access: "work" },
   { tool: "rig_slices", routes: ["GET /api/slices"], effect: "read", access: "workspace" },
   { tool: "rig_mission", routes: ["GET /api/missions/:missionId"], effect: "read", access: "workspace" },
   { tool: "rig_context_pack", routes: ["GET /api/context-packs/library/by-ref"], effect: "read", access: "workspace" },
@@ -298,6 +329,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
 const INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
+  "Work addressed to this seat is listed by rig_queue_list with owned set. Claim an item with rig_queue_claim before working it, then answer it: close it done with a resolution (rig_queue_update), or hand it on with rig_queue_handoff. Listing or reading an item doesn't take it.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
 ].join("\n");
@@ -349,12 +381,13 @@ function mapResult(
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; rostersFolder?: () => string } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
   }, { instructions: INSTRUCTIONS });
   const { access } = options;
+  const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
@@ -1112,7 +1145,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // 27. rig_team — a rig's seats and its lead
   if (offered("rig_team")) server.tool(
     "rig_team",
-    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle.",
+    "Show a rig's team: its lead, the rig's one delegates_to root (the seat that delegates to others and that nothing delegates to: the seat to delegate to), and each seat's pod, role, runtime, delegation (reportsTo, delegatesTo) and activity as the daemon reports it. Activity the daemon doesn't know reads unknown, never idle. hostedMembers are the rig's members that live outside a terminal (from its rosters): their authored capabilities and limits, with no pane and activity unknown.",
     {
       rigId: z.string().describe("Rig name or identifier"),
     },
@@ -1127,7 +1160,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (scope && !scope.rig(((detail.data ?? {}) as RigDetail).rig?.name)) return outOfScope(`Rig ${rigId}`);
         const nodes = await client.get(`/api/rigs/${id}/nodes`);
         if (nodes.status >= 400) return mapResult(nodes);
-        return mapResult({ status: 200, data: teamView((detail.data ?? {}) as RigDetail, nodes.data) }, undefined, { structured: true });
+        const view = teamView((detail.data ?? {}) as RigDetail, nodes.data);
+        const inventory = Array.isArray(nodes.data) ? nodes.data as Array<{ canonicalSessionName?: string | null; hostSelfId?: string | null }> : [];
+        const hosted = await hostedMembersOf(rostersFolder(), ((detail.data ?? {}) as RigDetail).rig?.name ?? "",
+          new Set(inventory.map((seat) => seat.canonicalSessionName).filter((name): name is string => typeof name === "string")),
+          async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
+            ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null));
+        return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }

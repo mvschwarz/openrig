@@ -86,3 +86,6 @@ UNKNOWN is `{ "status": "unknown", "reason": "..." }`; older daemons may yield
 `null`. `--full` and `--fields modelObservation` retain the full object, including
 its status and occupant generation. Human output and roster reports use the full
 labelled observation.
+
+A member whose seat has no node in its rig is a hosted member: a tool outside the terminal that reaches the team over MCP.
+`rig_team` lists it with its capabilities and caveat, no pane and activity unknown. See [Hosted members](hosted-members.md).
