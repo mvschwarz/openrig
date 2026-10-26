@@ -1002,7 +1002,7 @@ describe("MCP Server", () => {
     });
 
     it("rig_queue_create drops OpenRig's provenance tags only from a Cloud customer's create and revision; other callers' pass as sent", async () => {
-      const sent = ["mission:m", "project:p", "custom", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39"];
+      const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate"];
       const tagsSent = async (access?: McpAccess, revises?: string) => {
         const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
         const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
@@ -1021,8 +1021,8 @@ describe("MCP Server", () => {
       const customer: McpAccess = { ...work, principal: "cus_A1", customer: { objects: { queue: ["create", "show", "list"] } } };
       expect(await tagsSent()).toEqual(sent);
       expect(await tagsSent(work)).toEqual(sent);
-      expect(await tagsSent(customer)).toEqual(["mission:m", "project:p", "custom"]);
-      expect(await tagsSent(customer, "qitem-0")).toEqual(["mission:m", "project:p", "custom"]);
+      expect(await tagsSent(customer)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+      expect(await tagsSent(customer, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
     });
 
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {

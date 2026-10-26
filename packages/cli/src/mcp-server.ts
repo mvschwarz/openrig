@@ -330,10 +330,12 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
  *  this shape is never the team's question to a customer. The shape never grants anything. */
 const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 
-/** OpenRig's own provenance tags: what Slack ingestion records on a row about where it came from and which parts of its
- *  body OpenRig wrote (the sender's channel, the attachments block, the body's digest). A person asked about the row sees
- *  a body shaped by them, so a Cloud customer's create can't claim them; its other tags are kept. */
-const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel)$|^participant:|^slack-/;
+/** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
+ *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
+ *  digest), and `gate`, which with `workflow` marks a workflow's internal sign-off so the person's post shows its summary in
+ *  place of the body. A Cloud customer's create can't claim them; its other tags (`workflow` and `workflow:`/`instance:`
+ *  among them) are kept. */
+const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
 
 /** A Cloud customer grant (openrig.cloud.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' seats (never a person or another host's seat), read the items it sent and

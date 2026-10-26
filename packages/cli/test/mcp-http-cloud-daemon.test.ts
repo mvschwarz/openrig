@@ -245,6 +245,16 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
       expect(alert?.body).toBe(body);
       expect(buildOutboundMessage(alert!, { sourceLabel: "test" }).text).toContain("THE REST OF MY MESSAGE");
     }
+    // A workflow's internal sign-off (blocked, `gate` + `workflow`, a summary) shows the person its summary in place of the
+    // body. A customer can't claim it; its workflow tags are kept.
+    const gated = await asCustomer("rig_queue_create", { destination: "lead@team-a", summary: "Approve the refund?",
+      body: "Please confirm the refund amount.\n\nTHE REST OF MY MESSAGE", tags: ["project:acme", "gate", "workflow", "workflow:x", "instance:y"] });
+    expect(gated.isError).toBe(false);
+    asker.update({ qitemId: gated.structured.qitemId, actorSession: "lead@team-a", state: "blocked", blockedOn: "ana@external", transitionNote: "asking Ana" });
+    const gatedAlert = (await makeQueuePorts(asker, { loadHumanRegistry: people, sharedChannels: () => [] }).listHumanAlerts({}))
+      .find((item) => item.qitemId === gated.structured.qitemId);
+    expect(buildOutboundMessage(gatedAlert!, { sourceLabel: "test" }).text).toContain("THE REST OF MY MESSAGE");
+    expect(repo.getById(gated.structured.qitemId)!.tags).toEqual(["project:acme", "workflow", "workflow:x", "instance:y"]);
   });
 
   it("reaches only the customer's own items and the team's questions to it: never team-internal, another caller's, another rig's or a person's", async () => {
