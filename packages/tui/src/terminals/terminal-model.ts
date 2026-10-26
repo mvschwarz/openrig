@@ -38,7 +38,7 @@ export interface TerminalRead {
   error?: string;
 }
 
-export async function readTerminals(client: DaemonClient, view?: string | null, provider: () => Promise<"herdr" | "rex"> = windowProvider): Promise<TerminalRead> {
+export async function readTerminals(client: DaemonClient, view?: string | null, provider: () => Promise<"herdr" | "rex" | "cmux"> = windowProvider): Promise<TerminalRead> {
   const result: TerminalRead = { catalog: [], preview: null };
   // Display the endpoint without URL credentials, query parameters or fragments.
   try { result.daemonTarget = new URL(client.baseUrl).origin; } catch { /* unavailable target */ }
@@ -137,7 +137,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   lines.push({ text: "Auto-layout: equal cells, at most 9 members per page. Blank cells fill incomplete rectangles. Saved views store membership only; no custom geometry editor." });
   for (const member of [...plan.absent, ...plan.degraded]) lines.push({ text: `Unavailable · ${member.seat}: ${member.reason}` });
   if (page.length) {
-    lines.push({ text: "On a desktop, opens a new terminal tab or window: a Rex session when run inside Rex, Herdr if installed, otherwise the same layout in plain tmux." });
+    lines.push({ text: "On a desktop, opens a new terminal tab or window: a Rex session when run inside Rex, a new cmux workspace when run inside cmux, Herdr if installed, otherwise the same layout in plain tmux." });
     lines.push({ text: `Run this TUI on the selected daemon's desktop (${read.daemonTarget ?? "address unreported"}). Existing conversations stay in place.` });
     lines.push({ text: `Headless or remote: open a NEW terminal/tab on the machine running the selected daemon (${read.daemonTarget ?? "address unreported"}), then attach with one command below per terminal. Existing conversations stay in place.` });
     lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
