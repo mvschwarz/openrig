@@ -148,7 +148,9 @@ Agent's CLI.
   flags and then reopens it, refusing any creation flag (model, provider, `--max-turns`) that differs. So the preset's
   command carries none, and each seat's `config.yaml`, in its Hermes home, sets them before the seat's first start:
   the model and provider, and `agent.max_turns` if you want a cap (nothing else sets it once the flag is gone).
-- **Let Hermes run `rig` as the seat:** Hermes runs every tool command in one gateway per machine, with that gateway's
+- **Let Hermes run `rig` as the seat:** Hermes runs every tool command in its gateway, one per Hermes home, so with
+  this launcher one per seat (a two-seat run showed separate gateways, homes and sockets, and stopping one seat left
+  the other's running). It runs them with that gateway's
   environment, and swaps in a session's own values only for its toolchain names and the names its profile lists in
   `terminal.client_env_passthrough`. So put the seat's OpenRig variables in that list, in each seat's `config.yaml`
   ([`config.yaml.example`](community-harness-examples/hermes/config.yaml.example)). Without it, `rig` inside Hermes
