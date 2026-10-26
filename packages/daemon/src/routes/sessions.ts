@@ -771,9 +771,12 @@ sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), a
       if (!live.ok) return c.json({ error: "record_identity_unverified", message: live.reason }, 409);
       sessionId = live.id;
       transcriptPath = store.readCodexTranscriptPath(sessionId);
-      // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root.
-      if ((identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId)
-        || registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
+      // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root. A different
+      // conversation under a surviving wrapper isn't a binding change, so it says what it is.
+      if (identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId) {
+        return c.json({ error: "record_identity_unverified", message: `The Codex conversation in the pane for '${sessionName}' isn't the one its verified process owned, so no generation record is served.` }, 409);
+      }
+      if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
         || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
         || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {
         return c.json({ error: "record_identity_unverified", message: `The occupant binding changed while resolving '${sessionName}'.` }, 409);
