@@ -190,8 +190,9 @@ Supported notes:
     its own window-size setting, so Herdr, tmux attach and other clients size it as before. The
     seat redraws twice, and anyone watching it sees the resize briefly. A window that's already big
     enough is read as it is, and so is one whose size is pinned (window-size manual, as while the
-    web terminal shows it), one whose sizing can't be read, and one with several panes. A stderr
-    note says which; --json has it as readable.
+    web terminal shows it), one whose sizing can't be read, and one with several panes. With --rig
+    or --pod, small seats are read at that size for up to 8 seconds in all, and the rest as they
+    are. A stderr note says which; --json has it as readable.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace
