@@ -72,7 +72,11 @@ person at the terminal unnamed. Whatever the TUI shows, its acts are theirs.
 - **Viewing Sarah isn't acting as Sarah.** Only Sarah, from her own channel, answers as Sarah. Without the primary
   user's authority, one registered person can't answer, approve, deny or resolve what was asked of another; that's
   refused (`answer_not_recorded`) and nothing changes.
-- With no one registered, the TUI and its acts are as before.
+- With no one registered, the TUI and its acts are as before, except on a shared channel's ask: the act is recorded as
+  `human@host`, the person at the terminal, never as the channel.
+- **A shared channel never acts.** Its messages are correspondence, so nothing it says answers, approves, denies or
+  resolves an ask, and a customer's earlier message in an ask's thread is never taken as its answer. A request without
+  the primary user's authority that acts as a channel is refused (`answer_not_recorded`) and nothing changes.
 - **Where the authority applies:** only on a request that carries no seat identity header, which is how the TUI calls
   the daemon. Seats and the CLI send that header, so their acts stay theirs. This is the existing trusted-network
   distinction, not an authentication check: a request that leaves the header out is taken as the terminal's, as any
@@ -132,7 +136,9 @@ the thread.
 For a one-person install, nothing to do: it keeps working as before, that person stays the default, pending rows keep
 their addresses, and no new file is written until you use one of the commands above.
 
-A TUI older than the daemon still works: it sends the person asked as the actor, which is still their own act.
+A TUI older than the daemon still works: it sends the person asked as the actor, which is still their own act. On a
+shared channel's ask that actor would be the channel, so an older TUI's answer, approve, deny or resolve there is refused
+(`answer_not_recorded`) and nothing changes. Use a current TUI, or let the asking seat close it.
 
 **If several people are already registered** (earlier versions listed hand-added people with an advisory), choose a
 default with `rig gateway default <id>` after upgrading. Until you do, escalations report

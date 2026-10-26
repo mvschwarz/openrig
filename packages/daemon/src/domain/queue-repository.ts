@@ -1715,10 +1715,10 @@ export class QueueRepository {
   }
 
   /** First committed return of a direct ask, including pre-shared-ID Slack replies. `primaryUser`: the actor is the
-   *  primary user, who may answer anyone's ask. */
+   *  primary user, who may answer anyone's ask. A shared channel's rows are correspondence, never an answer. */
   getHumanAnswer(qitemId: string, actorSession: string, opts: { primaryUser?: boolean } = {}): QueueItem | null {
     const ask = this.getById(qitemId);
-    if (!this.hasReplyToColumn || !ask || (ask.destinationSession !== actorSession && !opts.primaryUser)
+    if (!this.hasReplyToColumn || !ask || this.isSharedChannel(actorSession) || (ask.destinationSession !== actorSession && !opts.primaryUser)
       || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return null;
     const row = this.db.prepare(`SELECT qitem_id FROM queue_items
       WHERE reply_to = ? AND source_session = ? AND destination_session = ?
@@ -2014,6 +2014,11 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** A registered shared channel. It takes correspondence, so it never answers, approves, resolves or denies (0.7.3). */
+  isSharedChannel(address: string | null | undefined): boolean {
+    return !!address && this.sharedChannelsFn().some((channel) => channel.address === address);
   }
 
   /** The registered people this queue resolves addresses against. */

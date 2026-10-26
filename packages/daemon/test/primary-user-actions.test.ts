@@ -17,7 +17,7 @@ import { MissionControlWriteContract } from "../src/domain/mission-control/missi
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
-import { setDefaultPerson } from "../src/domain/gateway/participants.js";
+import { setDefaultPerson, setSharedChannel } from "../src/domain/gateway/participants.js";
 
 const ASKER = "writer@rig";
 
@@ -178,5 +178,72 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
     expect((await act({ verb: "answer", qitemId: legacy.qitemId, actorSession: "human@host", authority: "primary-user", decision: "Yes" })).status).toBe(200);
     expect(audit(legacy.qitemId)).toEqual({ verb: "answer", actor: "human@host", notes: { authority: "primary-user", asked: "human@host" } });
     expect(repo.list({ limit: 50 }).find((item) => item.replyTo === legacy.qitemId)?.summary).toBe("human@host answered: Ship the draft?");
+  });
+
+  describe("a shared channel, with no one registered, never acts and never answers", () => {
+    const CHANNEL = "acme-customers@external";
+    const addChannel = () => expect(setSharedChannel("acme-customers", { displayName: "Acme customers", policy: "Customers of Acme.",
+      channel: { connector: "slack", connectorRef: "primary", secretsRef: "vault://slack/bot", channelId: "CACME" } }, {}, home).ok).toBe(true);
+    const parkedOnChannel = async () => {
+      const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Plan", summary: "Plan", evidenceRef: "/fixture/plan", nudge: false });
+      await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: CHANNEL } as never);
+      return work;
+    };
+
+    it("the terminal's answer is the decision, as the person at the terminal, and a customer's earlier message isn't an answer", async () => {
+      addChannel();
+      const channels = await ask(CHANNEL, { summary: "Which plan?", body: "Which plan?" });
+      // A customer already wrote "Pro" in the ask's thread: correspondence from the channel, as the inbound path records it.
+      const customer = await repo.create({ qitemId: "qitem-slack-inbound-customer-pro", sourceSession: CHANNEL, destinationSession: ASKER,
+        body: "Pro", summary: "Pro", inboundReplyTo: channels.qitemId, nudge: false } as never);
+      expect(repo.getHumanAnswer(channels.qitemId, CHANNEL, { primaryUser: true })).toBeNull();
+      // The TUI claims the actor the Feed serves, the channel; the person at the terminal answers "Basic".
+      const result = await act({ verb: "answer", qitemId: channels.qitemId, actorSession: CHANNEL, authority: "primary-user", decision: "Basic" });
+      expect(result.status).toBe(200);
+      expect(JSON.stringify(result.body)).not.toContain("Already answered");
+      expect(repo.getById(channels.qitemId)?.state).toBe("done");
+      expect(lastTransition(channels.qitemId)).toMatchObject({ state: "done", actor_session: "human@host" });
+      expect(audit(channels.qitemId)).toEqual({ verb: "answer", actor: "human@host", notes: { authority: "primary-user", asked: CHANNEL } });
+      const reply = repo.list({ limit: 50 }).find((item) => item.replyTo === channels.qitemId && item.qitemId !== customer.qitemId)!;
+      expect(reply).toMatchObject({ sourceSession: "human@host", destinationSession: ASKER });
+      expect(reply.body.startsWith("Basic")).toBe(true);
+      expect(repo.getById(customer.qitemId)).toMatchObject({ state: "pending", body: "Pro", sourceSession: CHANNEL });
+    });
+
+    it("approves the channel's ask and resolves a row parked on it from the terminal, recorded as the person at the terminal", async () => {
+      addChannel();
+      const channels = await ask(CHANNEL);
+      expect((await act({ verb: "approve", qitemId: channels.qitemId, actorSession: CHANNEL, authority: "primary-user" })).status).toBe(200);
+      expect(lastTransition(channels.qitemId)).toMatchObject({ state: "done", actor_session: "human@host",
+        transition_note: `mission-control:approve; by human@host, the primary user at the terminal, on ${CHANNEL}'s ask` });
+      expect(audit(channels.qitemId)).toEqual({ verb: "approve", actor: "human@host", notes: { authority: "primary-user", asked: CHANNEL } });
+
+      const work = await parkedOnChannel();
+      expect((await act({ verb: "resolve", qitemId: work.qitemId, actorSession: CHANNEL, authority: "primary-user", decision: "Use the plan" })).status).toBe(200);
+      expect(lastTransition(work.qitemId)).toMatchObject({ state: "in-progress", actor_session: "human@host",
+        transition_note: `Use the plan; by human@host, the primary user at the terminal, on ${CHANNEL}'s ask` });
+    });
+
+    it("without the authority, acting as the channel is refused and nothing changes", async () => {
+      addChannel();
+      const channels = await ask(CHANNEL);
+      for (const body of [{ verb: "answer", decision: "Basic" }, { verb: "approve" }, { verb: "deny", reason: "no" }]) {
+        expect(await act({ qitemId: channels.qitemId, actorSession: CHANNEL, ...body }), body.verb)
+          .toMatchObject({ status: 400, body: { error: "answer_not_recorded", channel: CHANNEL } });
+      }
+      expect(repo.getById(channels.qitemId)?.state).toBe("pending");
+      expect(repo.list({ limit: 50 }).some((item) => item.replyTo === channels.qitemId)).toBe(false);
+      const work = await parkedOnChannel();
+      expect(await act({ verb: "resolve", qitemId: work.qitemId, actorSession: CHANNEL, decision: "Use the plan" }))
+        .toMatchObject({ status: 400, body: { error: "answer_not_recorded", channel: CHANNEL } });
+      expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: CHANNEL });
+    });
+
+    it("leaves the legacy human seat as it was when a channel is registered", async () => {
+      addChannel();
+      const legacy = await ask("human@host");
+      expect((await act({ verb: "answer", qitemId: legacy.qitemId, actorSession: "human@host", authority: "primary-user", decision: "Yes" })).status).toBe(200);
+      expect(audit(legacy.qitemId)).toEqual({ verb: "answer", actor: "human@host", notes: { authority: "primary-user", asked: "human@host" } });
+    });
   });
 });
