@@ -43,6 +43,8 @@ entry. The entry holds secret names, never values:
 - **The secrets:**
   - `url_ref` names the secret holding the webhook URL.
   - `authorization_ref`, when the tool needs one, names the secret holding the `Authorization` header value.
+  - Credentials in the URL itself (`https://user:pass@host/…`) are sent as Basic `Authorization` instead, unless
+    `authorization_ref` is set: then its value is sent, and the URL's credentials are dropped.
   - The daemon reads each from its environment (the name, or `OPENRIG_<NAME>`), else from `secrets_env_file`, an env file kept at mode 0600.
 - **The ring:** when a row lands for the member, the daemon POSTs
   `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.

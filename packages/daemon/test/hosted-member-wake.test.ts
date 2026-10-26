@@ -175,6 +175,25 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     }
   });
 
+  it("a new wake for the same row rings: parked on a blocker that completes, the member is rung again, and recovery adds none", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = hostedRepo(db, `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`);
+    repo.attachOutbox(new OutboxHandler(db));
+    const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    // The member claims it over MCP, then parks it on another row.
+    repo.claim({ qitemId: row.qitemId, destinationSession: "grok@lab" });
+    const blocker = await repo.create({ sourceSession: "grok@lab", destinationSession: "lead@lab", body: "needs a file", summary: "Needs a file" });
+    await repo.update({ qitemId: row.qitemId, actorSession: "grok@lab", state: "blocked", blockedOn: blocker.qitemId, transitionNote: "waiting on the file" });
+    // The blocker completes: the row is unparked, and its new wake rings the member.
+    await repo.update({ qitemId: blocker.qitemId, actorSession: "lead@lab", state: "done", closureReason: "no-follow-on", transitionNote: "file attached" });
+    await vi.waitFor(() => expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2));
+    await repo.drainPendingWakeIntents();
+    expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
+    db.close();
+  });
+
   it("reads the trigger from the authored roster for a hosted member on this host only", () => {
     const roster = {
       version: 1, id: "lab", name: "Lab", purpose: "trials", curator: { seat: "lead@lab", host: "h1" }, updated_at: "2026-10-26",

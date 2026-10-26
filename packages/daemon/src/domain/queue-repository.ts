@@ -1432,7 +1432,7 @@ export class QueueRepository {
     };
     const outcome = await this.performWakeSend(
       qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
-      trigger, recheckMembers,
+      trigger, recheckMembers, group.every((entry) => entry.deliveryState === "indeterminate"),
     );
     let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered" : outcome.classified;
     for (const intent of group) {
@@ -1584,10 +1584,11 @@ export class QueueRepository {
     sourceSession?: string,
     bodyOverride?: string,
     trigger: WakeTrigger = "agent",
+    retryOfIndeterminate = false,
   ): Promise<void> {
     if (nudgeOpt === false) return;
     if (!this.transport) return;
-    const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger);
+    const outcome = await this.performWakeSend(qitemId, destinationSession, sourceSession, bodyOverride, undefined, undefined, trigger, undefined, retryOfIndeterminate);
     this.recordNudgeAttempt(qitemId, outcome.nudgeResult);
   }
 
@@ -1596,8 +1597,9 @@ export class QueueRepository {
   async recoverLostNudge(qitemId: string, destinationSession: string, sourceSession?: string): Promise<void> {
     const outboxId = `${WAKE_INTENT_PREFIX}${qitemId}`;
     if (this.outbox?.getById(outboxId) && this.getById(qitemId)?.state === "pending") return;
-    // Boot recovery is OpenRig's own scheduling, whoever created the row.
-    await this.maybeNudge(qitemId, destinationSession, undefined, sourceSession, undefined, "openrig");
+    // Boot recovery is OpenRig's own scheduling, whoever created the row. It re-sends a wake with no intent, so an
+    // accepted ring isn't rung again.
+    await this.maybeNudge(qitemId, destinationSession, undefined, sourceSession, undefined, "openrig", true);
   }
 
   /** One recovery pass on a positive attention-clear transition; the existing sweep remains the backstop. */
@@ -1654,6 +1656,8 @@ export class QueueRepository {
     committedOutboxIds?: string[],
     trigger: WakeTrigger = "agent",
     recheckMembers?: import("./session-transport.js").SendOpts["recheckMembers"],
+    /** This attempt only retries a wake already recorded as indeterminate (recovery), not a new wake. */
+    retryOfIndeterminate = false,
   ): Promise<WakeAttemptOutcome> {
     // DEFECT FIX qitem-20260827065907-b9ae334c (S1-class, 3 live specimens): a virtual
     // @external destination has NO pane — the queue row ITSELF is the gateway
@@ -1688,10 +1692,10 @@ export class QueueRepository {
     // A hosted member with a trigger: ring it. Accepted is indeterminate, never verified: pickup is its claim.
     if (destClass.class === "hosted") {
       const row = this.getById(qitemId);
-      // An accepted ring is the trigger's receipt: startup recovery or a later attempt doesn't ring it again (each ring
-      // can start a run). A failed ring stays retryable.
+      // Recovery retrying a wake whose ring the trigger accepted doesn't ring it again (each ring can start a run). A new
+      // wake for the row (a blocker resolved, a decision) rings, and a failed ring stays retryable.
       const prior = row?.lastNudgeWireResult ?? null;
-      if (prior?.startsWith("wake-accepted:")) return { classified: "indeterminate", nudgeResult: prior };
+      if (retryOfIndeterminate && prior?.startsWith("wake-accepted:")) return { classified: "indeterminate", nudgeResult: prior };
       return ringHostedWake({ qitemId, destination: destinationSession, summary: row?.summary ?? null, source: sourceSession ?? row?.sourceSession ?? null },
         destClass.wake, { fetchImpl: this.hostedWakeFetch });
     }
