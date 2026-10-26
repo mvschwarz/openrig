@@ -193,8 +193,11 @@ export class DaemonClient {
     // Only beside a seat this client was built for, and only to this host's own daemon: the endpoint itself must answer
     // as this host's instance, whichever way it was chosen (OPENRIG_URL, or an explicit URL such as rig mcp serve --port,
     // which can be a forwarded port). The daemon records it only on a direct, attributed request.
-    const sends = this.principal && this.sessionName !== undefined && local && await this.endpointIsThisHost();
-    return sends ? { ...headers, "X-OpenRig-Principal": JSON.stringify(this.principal) } : headers;
+    if (!this.principal || this.sessionName === undefined || !local || !(await this.endpointIsThisHost())) return headers;
+    // A header value can't carry characters beyond Latin-1 (fetch throws), and a grant name may hold any: everything past
+    // ASCII travels as JSON's own \u escapes, which the daemon's JSON.parse reads back.
+    const principal = JSON.stringify(this.principal).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    return { ...headers, "X-OpenRig-Principal": principal };
   }
 
   /** Whether this client's endpoint answers /healthz with the id this host's own daemon minted. */

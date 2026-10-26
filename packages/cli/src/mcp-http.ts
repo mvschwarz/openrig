@@ -227,8 +227,8 @@ async function cloudCaller(cloud: CloudGrantOptions, url: URL, key: string, inst
     : grant.expires_at !== null && grant.expires_at !== undefined && !(Date.parse(grant.expires_at) > Date.now()) ? "expired" : null;
   if (problem === "expired") return unauthenticated("This credential has expired.");
   if (problem) return unavailable(`an active answer with an unusable ${problem}`);
-  // The principal the daemon records beside this caller's rows. A version that isn't a number is left out: the daemon would
-  // refuse the whole principal for it.
+  // The principal the daemon records beside this caller's rows. A version that isn't a finite number is left out (Cloud's
+  // v1 sends a number).
   return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false, customer: { objects } },
     principal: { source: "cloud", id: principal.id, grant: grant.id, ...(Number.isFinite(grant.version) ? { version: grant.version } : {}) } };
 }

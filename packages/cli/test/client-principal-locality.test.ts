@@ -21,7 +21,7 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
   });
 
   /** The headers of the first daemon request, with the endpoint answering /healthz as `endpointId`. */
-  async function headersSent(opts: { direct?: boolean; endpointId?: string; remote?: boolean }): Promise<Record<string, string>> {
+  async function headersSent(opts: { direct?: boolean; endpointId?: string; remote?: boolean; principal?: { source: "file" | "cloud"; id: string } }): Promise<Record<string, string>> {
     vi.stubEnv("OPENRIG_URL", opts.direct ? BASE : "");
     const sent: Array<Record<string, string>> = [];
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
@@ -29,7 +29,7 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
       sent.push({ ...(init?.headers as Record<string, string>) });
       return Response.json([]);
     }) as typeof fetch;
-    const client = new DaemonClient(BASE, { sessionName: "alice@team", principal: PRINCIPAL, fetchImpl });
+    const client = new DaemonClient(BASE, { sessionName: "alice@team", principal: opts.principal ?? PRINCIPAL, fetchImpl });
     client.originSelfHostId = "this-host";
     if (opts.remote) client.remoteTarget = true;
     await client.get("/api/queue/list");
@@ -41,6 +41,15 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
       expect(headers["X-OpenRig-Principal"]).toBe(JSON.stringify(PRINCIPAL));
       expect(headers["X-OpenRig-Session"]).toBe("alice@team");
     }
+  });
+
+  it("carries a name beyond Latin-1 as JSON escapes, which a real request's headers accept and the daemon parses back", async () => {
+    const principal = { source: "file" as const, id: "测试-café" };
+    const headers = await headersSent({ endpointId: "this-host", principal });
+    const value = headers["X-OpenRig-Principal"]!;
+    expect(value).toMatch(/^[\x20-\x7e]*$/);
+    expect(() => new Headers(headers)).not.toThrow();
+    expect(JSON.parse(value)).toEqual(principal);
   });
 
   it("never sends it to a forwarded endpoint (another instance's id, or none) or a remote target", async () => {
