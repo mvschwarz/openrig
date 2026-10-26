@@ -103,7 +103,7 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
     expect(Buffer.byteLength(s.tmuxSocketPath)).toBeLessThan(104);
   });
 
-  it("waits for a pane's delayed child writer before removing scratch HOME", async () => {
+  it.each([false, true])("waits for a pane's delayed child writer before removing scratch HOME (repeated HUP: %s)", async (repeatedHup) => {
     const { execFile } = await import("node:child_process");
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { promisify } = await import("node:util");
@@ -117,16 +117,24 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
     writeFileSync(writer, `
 const { writeFileSync, mkdirSync } = require("node:fs");
 if (process.argv[2] === "child") {
-  process.once("SIGHUP", () => setTimeout(() => {
-    mkdirSync(${JSON.stringify(s.home)}, { recursive: true });
-    writeFileSync(${JSON.stringify(join(s.home, "late-write"))}, "last write");
-    writeFileSync(${JSON.stringify(done)}, "exiting");
-    process.exit(0);
-  }, 150));
+  let hups = 0;
+  // The terminal's hangup and the parent's forwarding can both reach this child.
+  process.on("SIGHUP", () => {
+    if (++hups === 1) process.send?.("hup");
+    if (hups !== ${repeatedHup ? 2 : 1}) return;
+    setTimeout(() => {
+      mkdirSync(${JSON.stringify(s.home)}, { recursive: true });
+      writeFileSync(${JSON.stringify(join(s.home, "late-write"))}, "last write");
+      writeFileSync(${JSON.stringify(done)}, JSON.stringify({ hups }));
+      process.exit(0);
+    }, 150);
+  });
   writeFileSync(${JSON.stringify(ready)}, String(process.pid));
 } else {
-  const child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: "ignore" });
-  process.once("SIGHUP", () => { child.kill("SIGHUP"); process.exit(0); });
+  const child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: ${repeatedHup ? '["ignore", "ignore", "ignore", "ipc"]' : '"ignore"'} });
+  // Handshake guarantees the second HUP follows the child's first handler, rather than coalescing.
+  if (${repeatedHup}) child.once("message", () => { child.kill("SIGHUP"); process.exit(0); });
+  process.once("SIGHUP", () => { child.kill("SIGHUP"); if (!${repeatedHup}) process.exit(0); });
 }
 setInterval(() => {}, 1000);
 `);
@@ -141,6 +149,7 @@ setInterval(() => {}, 1000);
       // The parent pane exits immediately; the child has a controlled final write.
       // Teardown must wait for that child, rather than racing recursive removal.
       await vi.waitFor(() => expect(existsSync(done)).toBe(true), { timeout: 2_000, interval: 10 });
+      expect(JSON.parse(readFileSync(done, "utf8")).hups).toBeGreaterThanOrEqual(repeatedHup ? 2 : 1);
       expect(existsSync(s.root)).toBe(false);
     } finally {
       try { process.kill(childPid, "SIGTERM"); }
