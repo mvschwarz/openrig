@@ -14,10 +14,10 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { hostedWakeFor, parseRoster, type RosterWake } from "../src/domain/rosters.js";
 import { ringHostedWake } from "../src/domain/hosted-wake.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
 
-type Received = { path: string; headers: IncomingMessage["headers"]; body: Record<string, unknown> };
+type Received = { path: string; headers: IncomingMessage["headers"]; body: Record<string, unknown>; status: number };
 type Reply = { status: number; headers?: Record<string, string> } | "hang";
 
 describe("a hosted member with a webhook trigger is rung when work lands for it", () => {
@@ -35,7 +35,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
       let data = "";
       req.on("data", (chunk) => { data += chunk; });
       req.on("end", () => {
-        received.push({ path: req.url ?? "", headers: req.headers, body: data ? JSON.parse(data) as Record<string, unknown> : {} });
+        received.push({ path: req.url ?? "", headers: req.headers, body: data ? JSON.parse(data) as Record<string, unknown> : {}, status: reply === "hang" ? 0 : reply.status });
         if (reply === "hang") return;
         res.writeHead(reply.status, reply.headers);
         res.end();
@@ -117,15 +117,17 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
   });
 
   // Real topology and a repository whose trigger comes from a secrets file, as on a running daemon.
-  function hostedRepo(db: Database.Database, envLines: string, declared: RosterWake["webhook"] = wake.webhook) {
-    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-lab', 'lab')").run();
-    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-lab', 'lead', 'claude-code', '/tmp')").run();
+  // A repository over the same database stands in for the daemon after a restart; `transport: false` for one that
+  // stops before sending.
+  function hostedRepo(db: Database.Database, envLines: string, declared: RosterWake["webhook"] = wake.webhook, opts: { transport?: boolean } = {}) {
+    db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES ('rig-lab', 'lab')").run();
+    db.prepare("INSERT OR IGNORE INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-lab', 'lead', 'claude-code', '/tmp')").run();
     const secrets = join(dir, "grok.env");
     writeFileSync(secrets, envLines, { mode: 0o600 });
     return new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
-      transport: { send: async () => ({ ok: true, verified: true }) },
+      ...(opts.transport === false ? {} : { transport: { send: async () => ({ ok: true, verified: true }) } }),
       hostedWake: (destination) => destination === "grok@lab" ? { webhook: { ...declared, secrets_env_file: secrets } } : null,
     });
   }
@@ -191,6 +193,62 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     await vi.waitFor(() => expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2));
     await repo.drainPendingWakeIntents();
     expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
+    db.close();
+  });
+
+  it("a new wake claimed but never sent before a restart rings on recovery, though the row's last ring was accepted; recovery of that one adds none", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const env = `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`;
+    const live = hostedRepo(db, env);
+    live.attachOutbox(new OutboxHandler(db));
+    const row = await live.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    live.claim({ qitemId: row.qitemId, destinationSession: "grok@lab" });
+    const blocker = await live.create({ sourceSession: "grok@lab", destinationSession: "lead@lab", body: "needs a file", summary: "Needs a file" });
+    await live.update({ qitemId: row.qitemId, actorSession: "grok@lab", state: "blocked", blockedOn: blocker.qitemId, transitionNote: "waiting on the file" });
+    // The blocker completes, and the daemon claims the new wake but stops before sending it.
+    const stopping = hostedRepo(db, env, wake.webhook, { transport: false });
+    const outbox = new OutboxHandler(db);
+    stopping.attachOutbox(outbox);
+    await stopping.update({ qitemId: blocker.qitemId, actorSession: "lead@lab", state: "done", closureReason: "no-follow-on", transitionNote: "file attached" });
+    const fresh = db.prepare("SELECT outbox_id FROM outbox_entries WHERE audit_pointer = ? AND delivery_state = 'pending'").all(row.qitemId) as Array<{ outbox_id: string }>;
+    expect(fresh).toHaveLength(1);
+    expect(outbox.claimForDelivery(fresh[0]!.outbox_id)).toBe(true);
+    // After the restart, the abandoned wake reads indeterminate, as a sent one would, and the row's last result is still
+    // the first ring's acceptance; it rings anyway, because this intent never rang.
+    expect(outbox.reconcileAbandonedSending(WAKE_INTENT_PREFIX)).toBe(1);
+    expect(stopping.getById(row.qitemId)!.lastNudgeWireResult).toMatch(/^wake-accepted:/);
+    const restarted = hostedRepo(db, env);
+    restarted.attachOutbox(new OutboxHandler(db));
+    await restarted.drainPendingWakeIntents();
+    expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
+    // Recovery of that accepted unblock doesn't ring a third time.
+    await hostedRepo(db, env).drainPendingWakeIntents();
+    expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
+    db.close();
+  });
+
+  it("after one wake was accepted and a later one failed, recovery rings only the failed one", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const env = `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`;
+    const live = hostedRepo(db, env);
+    live.attachOutbox(new OutboxHandler(db));
+    const row = await live.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    live.claim({ qitemId: row.qitemId, destinationSession: "grok@lab" });
+    const blocker = await live.create({ sourceSession: "grok@lab", destinationSession: "lead@lab", body: "needs a file", summary: "Needs a file" });
+    await live.update({ qitemId: row.qitemId, actorSession: "grok@lab", state: "blocked", blockedOn: blocker.qitemId, transitionNote: "waiting on the file" });
+    reply = { status: 500 };
+    await live.update({ qitemId: blocker.qitemId, actorSession: "lead@lab", state: "done", closureReason: "no-follow-on", transitionNote: "file attached" });
+    await vi.waitFor(() => expect(live.getById(row.qitemId)!.lastNudgeWireResult).toMatch(/^failed:webhook/));
+    reply = { status: 202 };
+    const restarted = hostedRepo(db, env);
+    restarted.attachOutbox(new OutboxHandler(db));
+    await restarted.drainPendingWakeIntents();
+    // The first ring (202), the failed one (500), and only that one again on recovery (202).
+    expect(received.filter((r) => r.body.qitem_id === row.qitemId).map((r) => r.status)).toEqual([202, 500, 202]);
     db.close();
   });
 
