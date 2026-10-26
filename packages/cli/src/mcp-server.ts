@@ -133,11 +133,24 @@ function sliceSummary(slice: SliceEntry): Record<string, unknown> {
   };
 }
 
-type Scope = { session(value: unknown): boolean; item(row: unknown): boolean; owner(row: unknown): boolean; rig(name: unknown): boolean; root(name: unknown): boolean };
+type Scope = {
+  session(value: unknown): boolean; item(row: unknown): boolean; owner(row: unknown): boolean; rig(name: unknown): boolean; root(name: unknown): boolean;
+  /** A new item's destination. */
+  destination(value: unknown): boolean;
+  /** A handed-on item's successor, by its destination. */
+  successor(destination: unknown): boolean;
+  /** An item whose artifact may be read. */
+  artifact(row: unknown): boolean;
+  /** Whether a file may be read by root and path, without an item. */
+  paths: boolean;
+  /** Whether every list is limited to the caller's own items. */
+  ownListsOnly: boolean;
+};
 
 /** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own (to read),
  *  the items they own (to change), and its shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
 function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
+  if (access.customer) return customerScope(access, seatOf);
   const rigs = new Set(access.rigs);
   const session = (value: unknown): boolean => {
     if (typeof value !== "string" || !value) return false;
@@ -146,17 +159,58 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
     const rig = value.split("@")[1];
     return rig !== undefined && rig !== "external" && rigs.has(rig);
   };
+  const item = (row: unknown): boolean => {
+    const fields = (row ?? {}) as { sourceSession?: unknown; destinationSession?: unknown };
+    return session(fields.sourceSession) || session(fields.destinationSession);
+  };
   return {
     session,
-    item: (row) => {
-      const item = (row ?? {}) as { sourceSession?: unknown; destinationSession?: unknown };
-      return session(item.sourceSession) || session(item.destinationSession);
-    },
+    item,
     // The daemon's update has no owner check, so changing a row needs its owner in scope: a row a team seat handed to
     // another team, or a person's pending ask, stays readable and isn't the sender's to close or settle.
     owner: (row) => session(((row ?? {}) as { destinationSession?: unknown }).destinationSession),
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
+    destination: session,
+    successor: session,
+    artifact: item,
+    paths: true,
+    ownListsOnly: false,
+  };
+}
+
+/** Cloud names a customer's caller seat cus-<id>-caller@<rig>. v1 marks no seat as a caller, so an item from a seat of
+ *  this shape is never the team's question to a customer. The shape never grants anything. */
+const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
+
+/** A Cloud customer grant (openrig.cloud.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
+ *  only caller. It may hand tasks to its rigs' seats (never a person or another host's seat), read the items it sent and
+ *  the team's questions to it (never team-internal or another caller's items), follow a handed-on item only where it
+ *  came back to it, and read the artifacts of its own items under its named roots. */
+function customerScope(access: McpAccess, seatOf: () => string | undefined): Scope {
+  const rigs = new Set(access.rigs);
+  const caller = (value: unknown): boolean => typeof value === "string" && value !== "" && value === seatOf();
+  // A seat of one of its rigs on this instance: member@rig, never a person or another host's seat.
+  const member = (value: unknown): boolean => {
+    if (typeof value !== "string") return false;
+    const parts = value.split("@");
+    return parts.length === 2 && parts[0] !== "" && parts[1] !== "external" && rigs.has(parts[1]!);
+  };
+  const team = (value: unknown): boolean => member(value) && !caller(value) && !CALLER_SHAPED.test(value as string);
+  const field = (row: unknown, name: "sourceSession" | "destinationSession"): unknown => ((row ?? {}) as Record<string, unknown>)[name];
+  const item = (row: unknown): boolean => caller(field(row, "sourceSession"))
+    || (caller(field(row, "destinationSession")) && team(field(row, "sourceSession")));
+  return {
+    session: (value) => caller(value) || team(value),
+    item,
+    owner: () => false,
+    rig: (name) => typeof name === "string" && rigs.has(name),
+    root: (name) => typeof name === "string" && access.roots.includes(name),
+    destination: member,
+    successor: caller,
+    artifact: (row) => caller(field(row, "sourceSession")),
+    paths: false,
+    ownListsOnly: true,
   };
 }
 
@@ -249,8 +303,29 @@ export type McpAccessClass = "work" | "workspace" | "owner";
 
 /** An authenticated HTTP caller: the seat it acts as comes with it (the DaemonClient built for it); this is what it may
  *  reach. A session is in scope when it is the caller's seat or a seat of one of its rigs; an item, when its source or
- *  destination is. */
-export type McpAccess = { principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean };
+ *  destination is. A Cloud customer grant (`customer`) is narrower: see customerScope. */
+export type McpAccess = {
+  principal: string; owner: boolean; rigs: readonly string[]; roots: readonly string[]; workspace: boolean;
+  /** A Cloud customer's grant: the object/action pairs it names (openrig.cloud.grant/v1 `objects`). */
+  customer?: { objects: Readonly<Record<string, readonly string[]>> };
+};
+
+/** The tool each customer object/action pair offers. A pair not listed here offers nothing. */
+const CUSTOMER_TOOLS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  queue: { create: "rig_queue_create", show: "rig_queue_show", list: "rig_queue_list" },
+  artifact: { read: "rig_artifact_read" },
+};
+
+function customerTools(objects: Readonly<Record<string, readonly string[]>>): Set<string> {
+  const tools = new Set<string>();
+  for (const [object, actions] of Object.entries(objects)) {
+    for (const action of Array.isArray(actions) ? actions : []) {
+      const tool = Object.hasOwn(CUSTOMER_TOOLS, object) && Object.hasOwn(CUSTOMER_TOOLS[object]!, action) ? CUSTOMER_TOOLS[object]![action] : undefined;
+      if (tool) tools.add(tool);
+    }
+  }
+  return tools;
+}
 
 /** What each tool calls and what it does, kept beside the registrations. The MCP contract tests check that it names every
  *  registered tool, that each tool's annotations match its effect, and that each route is mounted in the daemon. Tools that
@@ -358,8 +433,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
-  // A local caller (no access) is offered every tool; an authenticated one, its class's.
+  // A local caller (no access) is offered every tool; an authenticated one, its class's; a customer, its grant's pairs.
+  const customer = access?.customer ? customerTools(access.customer.objects) : null;
   const offered = (tool: string): boolean => {
+    if (customer) return customer.has(tool);
     if (!access || access.owner) return true;
     const kind = accessClass.get(tool);
     return kind === "work" || (kind === "workspace" && access.workspace);
@@ -885,7 +962,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
     },
     ADDITIVE,
     async ({ destination, body, summary, tags, priority, tier, qitemId, revises, alert }) => {
-      if (scope && !scope.session(destination)) return outOfScope(`Destination ${destination}`);
+      if (scope && !scope.destination(destination)) return outOfScope(`Destination ${destination}`);
       // A revision carries its original's lineage as a handoff does: the original's chain, then the original.
       let lineage: { chainOfRecord: string[]; body: string } | undefined;
       if (revises) {
@@ -936,7 +1013,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
         let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget) : undefined;
-        if (scope && successor && "destinationSession" in successor && !scope.session(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
+        if (scope && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
         return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
@@ -960,10 +1037,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       limit: z.number().int().positive().optional().describe("Result limit (default 100)"),
     },
     READ_ONLY,
-    async ({ owned, mine, destination, source, state, all, since, handedOffFrom, limit }) => {
+    async ({ owned, mine: mineAsked, destination, source, state, all, since, handedOffFrom, limit }) => {
       try {
         const params = new URLSearchParams();
         const sessionName = seatOf();
+        // A customer lists its own items only, so the daemon's limit counts those and not the team's.
+        const mine = mineAsked || (scope?.ownListsOnly === true && !owned);
         if ((owned || mine) && !sessionName) {
           const message = "owned and mine need this server's seat: set OPENRIG_SESSION_NAME in its env, or filter by destination or source";
           return errorResult(JSON.stringify({ ok: false, error: message }), "seat_required", message);
@@ -1246,6 +1325,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           return mapResult({ status: 200, data: artifactView(source, (res.data ?? {}) as FileRead, offset ?? 0) }, undefined, { structured: true });
         };
         if (scope && root && !scope.root(root)) return outOfScope(`Root ${root}`);
+        if (scope && !scope.paths && !qitemId) return outOfScope("A file named by root and path");
         if (!qitemId) {
           if (root && path) return await read("path", root, path);
           const message = "Name an item (qitemId), or a file (root and path).";
@@ -1253,7 +1333,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         }
         const item = await client.get(`/api/queue/${encodeURIComponent(qitemId)}`);
         if (item.status >= 400) return mapResult(item);
-        if (scope && !scope.item(item.data)) return outOfScope(`Item ${qitemId}`);
+        if (scope && !scope.artifact(item.data)) return outOfScope(`Item ${qitemId}`);
         const ref = ((item.data ?? {}) as { evidenceRef?: unknown }).evidenceRef;
         const rootsRes = await client.get("/api/files/roots");
         if (rootsRes.status >= 400) return mapResult(rootsRes);
