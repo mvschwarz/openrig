@@ -122,6 +122,7 @@ export class RigInstantiator {
             effort: specNode.effort,
             advisor: specNode.advisor,
             claudePermissions: specNode.claudePermissions,
+            codexPermissions: specNode.codexPermissions,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1333,7 +1334,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "codex_permissions", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1674,6 +1675,7 @@ export class PodRigInstantiator {
             // createMemberNode or `rig up <spec>` seats lose their policy ref.
             permissionPolicy: member.permissionPolicy,
             claudePermissions: member.claudePermissions,
+            codexPermissions: member.codexPermissions,
             env: member.env,
             sessionSource: member.sessionSource,
             cwd: configResult.config.cwd,
@@ -2064,6 +2066,7 @@ export class PodRigInstantiator {
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
       permissionPolicy: input.member.permissionPolicy,
       claudePermissions: input.member.claudePermissions,
+      codexPermissions: input.member.codexPermissions,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
       cwd: effectiveCwd,
@@ -2602,7 +2605,8 @@ export class PodRigInstantiator {
       // updateNodeResolvedConfig; a seat without one launches with exactly that authored value.
       effort: (readSeatEffort(this.deps.rigRepo.db, input.nodeId) ?? { effective: configResult.config.effort ?? null }).effective ?? undefined,
       advisor: configResult.config.advisor,
-      codexConfigProfile: input.member.codexConfigProfile,
+      // The seat's live record: the spec wrote it at creation, and a setter may have changed it since.
+      codexConfigProfile: this.liveCodexProfile(input.nodeId, input.member.codexConfigProfile),
       // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
       // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
       launchPosture,
@@ -2884,6 +2888,14 @@ export class PodRigInstantiator {
       sessionName: canonicalSessionName,
       warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
+  }
+
+  /** A node's current Codex profile, cleared included; the member's authored value only when no row is readable. */
+  private liveCodexProfile(nodeId: string, authored: string | undefined): string | undefined {
+    try {
+      const row = this.db.prepare("SELECT codex_config_profile FROM nodes WHERE id = ?").get(nodeId) as { codex_config_profile: string | null } | undefined;
+      return row ? row.codex_config_profile ?? undefined : authored;
+    } catch { return authored; }
   }
 
   private updateNodeResolvedConfig(

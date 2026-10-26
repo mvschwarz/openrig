@@ -49,6 +49,10 @@ export interface EnvelopeMeta {
    *  ABSENT ⇒ UNKNOWN (cross-host --from relay whose sender isn't local, or pre-tenure daemon) —
    *  the render omits it, never forges a generation. Render is a PROJECTION of this machine truth. */
   genUuid?: string;
+  /** The row this message delivers. For a person's message (an @external sender) the reply hint
+   *  names it with --reply-to, so the answer joins the Slack thread the message came from (#822
+   *  records that thread on the row). ABSENT ⇒ the hint stays the plain new-conversation form. */
+  replyToQitem?: string;
 }
 
 /** The To-line projection + anti-storm scale (header-alone distinguishability, ruling pin 2). */
@@ -121,7 +125,7 @@ export function wrapPaneEnvelope(
     header.push(`Sent: ${renderShortStamp(meta.stampISO)}${genSuffix}`);
   }
   const reply = senderLabel.endsWith("@external")
-    ? `↩ Reply if needed: rig queue create --destination ${senderLabel} --summary "<one line>" --body "..." --verify`
+    ? `↩ Reply if needed: rig queue create --destination ${senderLabel}${meta?.replyToQitem ? ` --human-intent update --reply-to ${meta.replyToQitem}` : ""} --summary "<one line>" --body "..." --verify`
     : isOpenRigSender(senderLabel)
       ? "↩ Sent by OpenRig itself, not by a seat. Act on the row it names."
       : `↩ Reply: rig send ${senderLabel} "..."`;

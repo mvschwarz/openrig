@@ -1,4 +1,5 @@
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { decodeStoredSnapshotData } from "./snapshot-repository.js";
@@ -310,6 +311,7 @@ interface NodeOptions {
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
   cwd?: string;
@@ -606,6 +608,12 @@ export class RigRepository {
       // Required rule persistence is atomic with creation, including direct repository callers.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.codexPermissions !== undefined) {
+      if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
+      validateCodexMemberPermissions(opts.codexPermissions);
+      // The envelope is written atomically with creation, including direct repository callers.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     // Same-rig guard for podId
     if (opts?.podId) {
       const pod = this.db.prepare("SELECT rig_id FROM pods WHERE id = ?").get(opts.podId) as { rig_id: string } | undefined;
@@ -706,6 +714,12 @@ export class RigRepository {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?")
         .run(JSON.stringify(validateClaudePermissionRules(opts.claudePermissions)), id);
+    }
+
+    if (opts?.codexPermissions !== undefined) {
+      if (opts.runtime !== "codex") throw new Error("codex_permissions requires a codex seat");
+      this.db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?")
+        .run(JSON.stringify(validateCodexMemberPermissions(opts.codexPermissions)), id);
     }
 
     if (opts?.sessionSource && this.hasNodeColumn("session_source_json")) {

@@ -1,6 +1,7 @@
 // OPR.0.7.0.13 (B): the seat mode of `rig skill loadout`. It never changes folder mode, never guesses a seat, and
 // describes delivery only by the transport's evidence.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DaemonClient } from "../src/client.js";
 import { skillCommand } from "../src/commands/skill.js";
 
 function makeDeps(get: { status: number; data: unknown }, post: { status: number; data: unknown } = { status: 200, data: {} }) {
@@ -119,11 +120,48 @@ describe("rig skill loadout --seat", () => {
       logs.length = 0; process.exitCode = undefined;
       const { deps, client } = makeDeps({ status: 200, data: inspection }, { status: 200, data: { inspection, disk: { ok: true, receipts: [], removed: [], errors: [] }, delivery } });
       await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--apply", "--wait-for-idle", "5000"]);
-      expect(client.post).toHaveBeenCalledWith("/api/skills/seat/apply", { session: "dev-impl@team", waitForIdleMs: 5000 });
+      expect(client.post).toHaveBeenCalledWith("/api/skills/seat/apply", { session: "dev-impl@team", waitForIdleMs: 5000 }, { timeoutMs: 10000 });
       expect(logs).toContain("on disk     reconciled");
       expect(logs.some((l) => l.includes(expected)), expected).toBe(true);
       expect(process.exitCode).toBe(exit);
     }
+  });
+
+  it.each([60000, 600000])("waits past five seconds through the real client, in one %ims request", async (waitMs) => {
+    vi.useFakeTimers();
+    try {
+      const response = { inspection, disk: { ok: true, receipts: [], removed: [], errors: [] },
+        delivery: { state: "sent", record: { outcome: "delivered", deliveryId: "done" } } };
+      const reply = ((_url, init) => new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(Response.json(response)), 6000);
+        init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); }, { once: true });
+      })) as typeof fetch;
+      const fetchImpl = vi.fn(reply);
+      const longFetchImpl = vi.fn(reply);
+      const client = new DaemonClient("http://fixture.invalid", { sessionName: "", fetchImpl, longFetchImpl });
+      vi.spyOn(client, "assertLocalOwner").mockResolvedValue();
+      const { deps } = makeDeps({ status: 200, data: inspection });
+      const outcome = skillCommand({ ...deps, clientFactory: () => client })
+        .parseAsync(["node", "rig", "loadout", "--seat", "dev-impl@team", "--apply", "--wait-for-idle", String(waitMs), "--json"])
+        .then(() => "completed", (error: Error) => error.message);
+      await vi.advanceTimersByTimeAsync(6001);
+      expect(await outcome).toBe("completed");
+      const selected = waitMs >= 300000 ? longFetchImpl : fetchImpl;
+      const other = waitMs >= 300000 ? fetchImpl : longFetchImpl;
+      expect(selected).toHaveBeenCalledTimes(1);
+      expect(other).not.toHaveBeenCalled();
+      expect(JSON.parse(String(selected.mock.calls[0]![1]!.body))).toEqual({ session: "dev-impl@team", waitForIdleMs: waitMs });
+      expect(JSON.parse(logs.at(-1)!)).toEqual(response);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([60000, 600000])("bounds the %ims wait with a five-second response margin and never repeats an apply", async (waitMs) => {
+    const response = { inspection, disk: { ok: true, receipts: [], removed: [], errors: [] },
+      delivery: { state: "sent", record: { outcome: "failed", deliveryId: "busy" }, transportOutcome: "failed", detail: "wait_for_idle_timeout" } };
+    const { deps, client } = makeDeps({ status: 200, data: inspection }, { status: 200, data: response });
+    await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "dev-impl@team", "--apply", "--wait-for-idle", String(waitMs), "--json"]);
+    expect(client.post).toHaveBeenCalledExactlyOnceWith("/api/skills/seat/apply", { session: "dev-impl@team", waitForIdleMs: waitMs }, { timeoutMs: waitMs + 5000 });
+    expect(JSON.parse(logs.at(-1)!)).toEqual(response);
   });
 
   it("--resend asks the daemon to send again, only with --apply, and an undelivered earlier attempt says how", async () => {
@@ -133,7 +171,7 @@ describe("rig skill loadout --seat", () => {
     await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--apply"]);
     expect(logs.some((l) => l.includes("then add --resend to send it again"))).toBe(true);
     await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--apply", "--resend"]);
-    expect(client.post).toHaveBeenLastCalledWith("/api/skills/seat/apply", { session: "dev-impl@team", resend: true });
+    expect(client.post).toHaveBeenLastCalledWith("/api/skills/seat/apply", { session: "dev-impl@team", resend: true }, undefined);
     client.post.mockClear();
     await skillCommand(deps).parseAsync(["node", "rig", "loadout", "--seat", "self", "--resend"]);
     expect(errors).toContain("--resend needs --apply");

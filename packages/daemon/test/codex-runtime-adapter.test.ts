@@ -2194,6 +2194,92 @@ describe("Codex runtime adapter", () => {
       .toBe("https://exa.internal.example/mcp");
   });
 
+  // Codex 0.164.0's own saves, run natively in a scratch CODEX_HOME (fixtures/codex-config-saves-0.164.0.json): `codex mcp
+  // add` prints every [mcp_servers] table after the others and drops the comment above the first, so OpenRig's markers
+  // come apart from its tables; `codex features enable` prints a new [features] table between OpenRig's markers.
+  const codexSaves = JSON.parse(fs.readFileSync(new URL("./fixtures/codex-config-saves-0.164.0.json", import.meta.url), "utf8")) as
+    Record<string, { before: string; after: string }>;
+  const savedByCodex = (name: string) => codexSaves[name]!.after.replaceAll("shared:codex-default-config", "codex-default-config");
+  const FRAGMENT_BEGIN = "# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config";
+  const FRAGMENT_END = "# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config";
+  const fragmentMarkers = (text: string) => text.split("\n").filter((line) => line === FRAGMENT_BEGIN || line === FRAGMENT_END);
+  const fragmentBlock = (text: string) => text.slice(text.indexOf(FRAGMENT_BEGIN), text.indexOf(FRAGMENT_END));
+  async function projectsOnceAndStays(before: string) {
+    const { project, read } = await projectFragment(before);
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect(read()).toBe(after);
+    // Nothing the person or Codex set changes, and there's one block.
+    expect(parseToml(after)).toEqual(parseToml(before));
+    expect(fragmentMarkers(after)).toEqual([FRAGMENT_BEGIN, FRAGMENT_END]);
+    return after;
+  }
+
+  it.each(["mcpAddMidFile", "mcpAddBlockLast"])("keeps managing its tables after Codex's save moved them (%s)", async (name) => {
+    const after = await projectsOnceAndStays(savedByCodex(name));
+    expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+    expect(fragmentBlock(after)).toContain("[mcp_servers.context7]");
+    expect(fragmentBlock(after)).not.toContain("[mcp_servers.gk]");
+  });
+
+  it("keeps a table Codex printed between OpenRig's markers", async () => {
+    const after = await projectsOnceAndStays(savedByCodex("featuresEnableBlockLast"));
+    expect((parseToml(after) as Record<string, any>).features.unified_exec).toBe(true);
+    expect(fragmentBlock(after)).not.toContain("[features]");
+  });
+
+  it("gathers its moved tables back from the empty block an earlier launch appended", async () => {
+    // What the previous writer made of the moved save: a stray END, OpenRig's tables where Codex left them, an empty block.
+    const after = await projectsOnceAndStays(`${savedByCodex("mcpAddMidFile").replace(/\n*$/, "")}\n\n${FRAGMENT_BEGIN}\n\n${FRAGMENT_END}\n`);
+    expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+  });
+
+  it("leaves a moved table the person has since changed as theirs", async () => {
+    const after = await projectsOnceAndStays(savedByCodex("mcpAddMidFile").replace("https://mcp.exa.ai/mcp", "https://exa.internal.example/mcp"));
+    expect((parseToml(after) as Record<string, any>).mcp_servers.exa.url).toBe("https://exa.internal.example/mcp");
+    expect(fragmentBlock(after)).not.toContain("[mcp_servers.exa]");
+    expect(fragmentBlock(after)).toContain("[mcp_servers.context7]");
+  });
+
+  // A fragment may add array-of-tables entries, such as a Codex hook group with its handler.
+  const HOOK_GROUP = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo done"\n';
+  const stopGroups = (text: string) => (parseToml(text) as Record<string, any>).hooks.Stop as unknown[];
+  async function projectsArrayFragment(before: string, fragment: string) {
+    const { project, read } = await projectFragment(before, fragment);
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect(read()).toBe(after);
+    expect(fragmentMarkers(after)).toEqual([FRAGMENT_BEGIN, FRAGMENT_END]);
+    return after;
+  }
+
+  it.each([
+    ["on its own", HOOK_GROUP],
+    ["beside tables", `${SHIPPED_FRAGMENT.replace(/\n*$/, "")}\n${HOOK_GROUP}`],
+  ])("projects a fragment's array-of-tables entries once, and again unchanged (%s)", async (_, fragment) => {
+    const after = await projectsArrayFragment('model = "person-model"\n', fragment);
+    expect(stopGroups(after)).toEqual([{ hooks: [{ type: "command", command: "echo done" }] }]);
+    expect((parseToml(after) as Record<string, any>).model).toBe("person-model");
+    if (fragment !== HOOK_GROUP) expect(fragmentBlock(after)).toContain("[mcp_servers.exa]");
+  });
+
+  it("keeps the person's own entries in the array, and a table Codex printed between the markers", async () => {
+    const theirs = '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "their-notifier"\n';
+    const before = `${theirs}\n${FRAGMENT_BEGIN}\n${HOOK_GROUP}\n[features]\nunified_exec = true\n${FRAGMENT_END}\n`;
+    const after = await projectsArrayFragment(before, HOOK_GROUP);
+    expect(stopGroups(after).map((group: any) => group.hooks[0].command)).toEqual(["their-notifier", "echo done"]);
+    expect((parseToml(after) as Record<string, any>).features.unified_exec).toBe(true);
+    expect(fragmentBlock(after)).not.toContain("[features]");
+  });
+
+  it("replaces its array-of-tables entries when the fragment changes them", async () => {
+    const before = `model = "person-model"\n\n${FRAGMENT_BEGIN}\n${HOOK_GROUP.replace("echo done", "echo old")}${FRAGMENT_END}\n`;
+    const after = await projectsArrayFragment(before, HOOK_GROUP);
+    expect(stopGroups(after)).toEqual([{ hooks: [{ type: "command", command: "echo done" }] }]);
+  });
+
   it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
     const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
     const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';
@@ -2606,5 +2692,69 @@ describe("rebuild permission continuity", () => {
     expect(resolveGitAddDirs).not.toHaveBeenCalled();
     expect(prepareTeamWorkspace).not.toHaveBeenCalled();
     expect(prepareSeatFolder).not.toHaveBeenCalled();
+  });
+});
+
+describe("a seat's own permission envelope (argv only, not native enforcement)", () => {
+  const lease = { sandbox: "workspace-write" as const, approval: "never" as const, network_access: false,
+    writable_roots: ["/lease/a"], exclude_tmpdir_env_var: false, exclude_slash_tmp: true };
+  const reader = { sandbox: "read-only" as const, approval: "on-request" as const };
+  const launch = async (binding: NodeBinding, name: string) => {
+    const tmux = mockTmux();
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {}, readNetworkDefault,
+      resolveGitAddDirs: vi.fn(async () => ["/same/.git"]), prepareTeamWorkspace: vi.fn(() => ["/workspace"]),
+      verifyProfilePreflight: async profile => ({ ok: true, profile }) });
+    const result = await adapter.launchHarness(binding, { name });
+    return { result, command: vi.mocked(tmux.sendText).mock.calls[0]![1], readNetworkDefault, adapter };
+  };
+
+  it("gives two seats in one folder their own flags in place of the posture decision", async () => {
+    const a = await launch({ ...makeBinding("/same"), codexPermissions: lease, launchPosture: "full_bypass", teamPermissionDefault: true }, "dev-a@test-rig");
+    const b = await launch({ ...makeBinding("/same"), codexPermissions: reader }, "dev-b@test-rig");
+    expect(a.result).toMatchObject({ ok: true, appliedLaunch: { state: "observed", value: "workspace-write", approvalPolicy: "never" } });
+    expect(a.command).toContain(" -s workspace-write -a never");
+    expect(a.command).toContain('sandbox_workspace_write.writable_roots=["/lease/a"]');
+    expect(a.command).toContain("sandbox_workspace_write.exclude_slash_tmp=true");
+    expect(a.command).not.toContain("danger-full-access");
+    expect(a.command).not.toContain("hide_full_access_warning");
+    // OpenRig's own roots stay for workspace-write, with no second network grant and no team workspace.
+    expect(a.command).toContain("--add-dir '/same/.git'");
+    expect(a.command).toContain("--add-dir");
+    expect(a.command).not.toContain("/workspace");
+    expect(a.command.match(/network_access/g)).toHaveLength(1);
+    expect(a.readNetworkDefault).not.toHaveBeenCalled();
+    expect(b.command).toContain(" -s read-only -a on-request");
+    expect(b.command).not.toContain("--add-dir");
+    expect(b.command).not.toContain("sandbox_workspace_write");
+  });
+
+  it("wins over ambient YOLO and keeps a named profile for the settings it doesn't state", async () => {
+    vi.stubEnv("OPENRIG_YOLO", "1");
+    try {
+      const { command } = await launch({ ...makeBinding("/same"), codexConfigProfile: "lease", codexPermissions: lease }, "dev-a@test-rig");
+      expect(command).toContain(" -p 'lease' -s workspace-write -a never");
+      expect(command).not.toContain("danger-full-access");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("carries the same flags into a pod-aware resume", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {},
+      readNetworkDefault: vi.fn(async () => ({ apply: true, elapsedMs: 0 })) });
+    const built = await adapter.buildResumeCommand({ ...makeBinding("/same"), codexPermissions: lease, launchPosture: "full_bypass" },
+      { name: "dev-a@test-rig", resumeToken: "thread-1" });
+    expect(built).toMatchObject({ ok: true });
+    if (!built.ok) return;
+    expect(built.core).toContain(" -s workspace-write -a never");
+    expect(built.core).toContain(" resume ");
+    expect(built.core).not.toContain("danger-full-access");
+  });
+
+  it("leaves an unconfigured seat's launch as it was", async () => {
+    const { command } = await launch({ ...makeBinding("/same") }, "dev-c@test-rig");
+    expect(command).toContain(" -s workspace-write");
+    expect(command).not.toContain(" -a ");
+    expect(command).not.toContain("exclude_slash_tmp");
   });
 });

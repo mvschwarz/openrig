@@ -1,4 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -165,6 +166,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
   private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
+  private profileFingerprint: (path: string) => Promise<ProfileFingerprint>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -217,6 +219,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
+    /** The setter's optional profile hash; defaults to a bounded, non-blocking read. */
+    profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
@@ -248,6 +252,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
     this.seatHome = deps.seatHome;
+    this.profileFingerprint = deps.profileFingerprint ?? readProfileFingerprint;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
@@ -985,6 +990,31 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...(home ? { home } : this.ownHomeOpt({ nodeId })) });
   }
 
+  /** The setter's check of a profile, in the config home this seat's launches use: its own CODEX_HOME, else the
+   *  daemon's, resolved as launch resolves it. An absent file is reported, not refused: Codex loads a missing profile as
+   *  an empty layer. A real load failure fails here as it does at launch. */
+  async observeProfile(profile: string, cwd: string, nodeId: string): Promise<CodexProfileObservation> {
+    const observedAt = new Date().toISOString();
+    const home = this.homeFor({ nodeId });
+    const own = this.ownHome({ nodeId });
+    if (!home) {
+      return { vantage: "unestablished", home: null, file: "unverified", load: "not_run", observedAt,
+        detail: "Neither this seat's env: nor the daemon sets CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
+    }
+    const path = nodePath.join(home, `${profile}.config.toml`);
+    // The hash is optional evidence, read without blocking; the native loader check below decides.
+    const print = await this.profileFingerprint(path).catch((error: unknown): ProfileFingerprint => ({ state: "unreadable", reason: (error as Error).message }));
+    const base = { vantage: "configured_codex_home" as const, home, file: print.state,
+      ...(print.state === "present" ? { sha256: print.sha256 } : {}), observedAt };
+    let probe: CodexProfileProbeResult;
+    // Only a confirmed native load failure is refused; a check that couldn't run is reported, not refused.
+    try { probe = await (own ? this.verifyProfilePreflight(profile, cwd, own) : this.verifyProfilePreflight(profile, cwd)); }
+    catch (error) { return { ...base, load: "not_run", detail: `The native profile check couldn't run (${(error as Error).message}); each launch runs it again.` }; }
+    if (!probe.ok) return { ...base, load: "failed", detail: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
+    const unread = print.state === "unreadable" ? ` Its bytes weren't read for a hash (${print.reason}).` : "";
+    return { ...base, load: "ok", detail: print.state === "absent" ? `${path} is absent; Codex loads it as an empty layer, so base config applies.` : `${path} loads.${unread}` };
+  }
+
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
@@ -1007,14 +1037,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const posture = binding.codexRebuildPermissions
-      ? profileArg + codexEnvelopeArgs(binding.codexRebuildPermissions)
+    // A handover rebuild's observed predecessor envelope, else the seat's own envelope, replaces the posture decision.
+    const memberEnvelope = binding.codexRebuildPermissions || !binding.codexPermissions ? undefined : codexMemberEnvelope(binding.codexPermissions);
+    const envelope = binding.codexRebuildPermissions ?? memberEnvelope;
+    const posture = envelope
+      ? profileArg + codexEnvelopeArgs(envelope)
       : codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch: AppliedLaunchObservation = binding.codexRebuildPermissions
-      ? { runtime: "codex", axis: "sandbox", state: "observed", value: binding.codexRebuildPermissions.sandboxPolicy.type,
-          reason: "emitted_launch_arguments", ...(binding.codexRebuildPermissions.approvalPolicy === "never" ? { approvalPolicy: "never" } : {}) }
-      : observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
+    const appliedLaunch: AppliedLaunchObservation = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    // The seat's envelope is not full access, so a policy's full_bypass extras don't follow it.
+    const postureArg = posture + operationalLaunchArg(this.runtime, memberEnvelope ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
@@ -1043,8 +1074,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
-    const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
-      && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
+    // A seat envelope states its sandbox: read-only gets no generated roots; workspace-write keeps them.
+    const suppressAutoAddDirs = memberEnvelope ? memberEnvelope.sandboxPolicy.type === "read-only"
+      : Boolean(!binding.codexRebuildPermissions && profile && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
     // Issue #121: fresh, resume and fork get the same git metadata dirs, so a restored or forked seat can still commit.
     // A rebuild keeps the writable roots its observed envelope names instead.
     const gitDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
@@ -1052,7 +1084,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // The seat's own topology folder, so it can keep its LEARNED.md and recap: the same launches and the same suppression.
     const seatFolder = binding.codexRebuildPermissions || suppressAutoAddDirs ? undefined : this.prepareSeatFolder?.(name);
     const seatFolderArg = seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "";
-    const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
+    const teamWorkspaceArg = !envelope && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
@@ -1065,8 +1097,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
-    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
-    const networkArg = binding.codexRebuildPermissions ? ""
+    // #275: on the plain floor, network access unless Codex reports an opt-out or policy. An envelope states its own.
+    const networkArg = envelope ? ""
       : await codexNetworkDefaultArg(own && this.readNetworkDefault ? ((cwd: string) => this.readNetworkDefault!(cwd, own)) : this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
@@ -1443,6 +1475,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     assertFragmentOpensWithTable(fragment, entry.absolutePath, entry.effectiveId);
     const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
     assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
+    if (!changesOnlyFragmentTables(existing, rendered, entry.effectiveId, fragment)) {
+      throw new Error(`Codex config projection '${entry.effectiveId}' would change more than its own tables in ${configPath}; left unchanged.`);
+    }
     this.fs.writeFile(configPath, rendered);
     return true;
   }
@@ -2602,25 +2637,144 @@ function dropCollidingFragmentTables(
   };
 }
 
-function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
+/** `content`'s lines and this fragment's marker pair: the first document-level BEGIN and the first END after it. */
+function fragmentMarkerPair(content: string, id: string) {
   const start = `# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
   const end = `# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
-  const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  const isMarker = (at: number) => topLevel[at] === true && (lines[at]!.trim() === start || lines[at]!.trim() === end);
+  const begin = lines.findIndex((line, at) => isMarker(at) && line.trim() === start);
+  const close = begin < 0 ? -1 : lines.findIndex((line, at) => at > begin && isMarker(at) && line.trim() === end);
+  return { start, end, lines, isMarker, begin, close };
+}
 
-  // Everything outside THIS block is what the fragment must not collide with.
-  // Our own previous block is excluded because re-projection replaces it
-  // wholesale — counting it would make the second projection drop everything
-  // the first one legitimately landed.
-  const userOwned = content.replace(pattern, "");
-  const { kept } = dropCollidingFragmentTables(fragment, userOwned);
-  const block = `${start}\n${kept}\n${end}\n`;
+function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
+  const { start, end, lines, isMarker, begin, close } = fragmentMarkerPair(content, id);
+  const inBlock = (at: number) => close >= 0 && at > begin && at < close;
 
-  if (pattern.test(content)) {
-    return content.replace(pattern, () => block); // literal: a string would expand `$` patterns in the fragment
+  // Codex 0.164.0 prints every table it rewrites (all of `[mcp_servers]` on `codex mcp add`) after the others, and the
+  // comment above the first goes with it, so a save can leave our markers apart from our tables. Outside the block, a
+  // fragment table still holding exactly the fragment's values is ours where Codex left it, and our stray markers go.
+  const ours = fragmentTableValues(fragment);
+  const drop = new Set<number>();
+  for (const section of tomlSections(content)) {
+    const value = ours.get(JSON.stringify(section.path));
+    if (inBlock(section.header) || value === undefined) continue;
+    let stop = section.end;
+    while (stop - 1 > section.header && /^\s*(?:#.*)?$/.test(lines[stop - 1]!)) stop--;
+    if (!isDeepStrictEqual(tomlTableValue(lines.slice(section.header, stop).join("\n"), section.path), value)) continue;
+    for (let at = section.start; at < stop; at++) if (at >= section.header || !/\S/.test(lines[at]!)) drop.add(at);
+  }
+  lines.forEach((_, at) => { if (isMarker(at) && !(close >= 0 && (at === begin || at === close))) drop.add(at); });
+  const outside = (from: number, to: number) => lines.slice(from, to).filter((_, offset) => !drop.has(from + offset));
+
+  if (close >= 0) {
+    // Codex can print a table of its own between our markers (a new `[features]`, say): that's the person's, and it's
+    // kept after the block. Our tables and array-of-tables entries inside are replaced whole.
+    const inner = lines.slice(begin + 1, close);
+    const roots = fragmentArrayRoots(fragment);
+    const theirs = tomlSections(inner.join("\n"))
+      .filter((section) => !ours.has(JSON.stringify(section.path)) && !underTomlRoot(section.path, roots))
+      .map(({ start: from, end: to }) => inner.slice(from, to).join("\n")).join("\n").trim();
+    const before = outside(0, begin);
+    const after = outside(close + 1, lines.length);
+    const { kept } = dropCollidingFragmentTables(fragment, [...before, theirs, ...after].join("\n"));
+    const block = `${start}\n${kept}\n${end}${theirs ? `\n\n${theirs}` : ""}`;
+    return [...before, block, ...(after.length > 0 ? after : [""])].join("\n");
   }
 
-  const prefix = content.replace(/\n*$/, "");
+  const rest = outside(0, lines.length).join("\n");
+  const { kept } = dropCollidingFragmentTables(fragment, rest);
+  const block = `${start}\n${kept}\n${end}\n`;
+  const prefix = rest.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/** The fragment's tables by key path (JSON), each with the values it sets. A table under one of its array-of-tables
+ *  roots is part of that entry, not a table of its own. */
+function fragmentTableValues(fragment: string): Map<string, unknown> {
+  const roots = fragmentArrayRoots(fragment);
+  const values = new Map<string, unknown>();
+  for (const block of splitAtTableHeaders(fragment)) {
+    const path = block.header === null ? null : tomlTableHeaderPath(block.header);
+    if (path && !underTomlRoot(path, roots)) values.set(JSON.stringify(path), tomlTableValue(block.text, path));
+  }
+  return values;
+}
+
+/** The fragment's array-of-tables roots: each `[[path]]` that isn't under another (`[[hooks.Stop]]`, whose
+ *  `[[hooks.Stop.hooks]]` belong to its entry). An entry has no single path, so it's only ever recognized between our
+ *  markers. */
+function fragmentArrayRoots(fragment: string): string[][] {
+  const roots: string[][] = [];
+  for (const { header } of splitAtTableHeaders(fragment)) {
+    const path = header === null ? null : tomlArrayTableHeaderPath(header);
+    if (path && !underTomlRoot(path, roots)) roots.push(path);
+  }
+  return roots;
+}
+
+function underTomlRoot(path: string[], roots: string[][]): boolean {
+  return roots.some((root) => root.length <= path.length && root.every((key, at) => path[at] === key));
+}
+
+/** The array-of-tables entries between this fragment's markers in `content`, by root (JSON): OpenRig's, whatever they
+ *  now hold. */
+function blockArrayEntries(content: string, id: string, roots: string[][]): Map<string, unknown[]> {
+  const entries = new Map<string, unknown[]>();
+  const { lines, begin, close } = fragmentMarkerPair(content, id);
+  if (close < 0 || roots.length === 0) return entries;
+  const inner = lines.slice(begin + 1, close);
+  const text = tomlSections(inner.join("\n")).filter((section) => underTomlRoot(section.path, roots))
+    .map(({ start: from, end: to }) => inner.slice(from, to).join("\n")).join("\n");
+  for (const root of roots) {
+    const value = tomlTableValue(text, root);
+    if (Array.isArray(value)) entries.set(JSON.stringify(root), value);
+  }
+  return entries;
+}
+
+/** The value one table's text sets at `path`, or undefined when it doesn't parse. */
+function tomlTableValue(text: string, path: string[]): unknown {
+  let node: unknown;
+  try { node = parseToml(text); } catch { return undefined; }
+  for (const key of path) node = node !== null && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+  return node;
+}
+
+/** Whether `next` changes nothing in `content` but the fragment's own tables and the array-of-tables entries between
+ *  its markers: the person's settings, and every table and entry Codex wrote, read the same. Both must parse. */
+function changesOnlyFragmentTables(content: string, next: string, id: string, fragment: string): boolean {
+  const paths = [...fragmentTableValues(fragment).keys()].map((key) => JSON.parse(key) as string[]);
+  const roots = fragmentArrayRoots(fragment);
+  const rest = (text: string) => {
+    const root = parseToml(text) as Record<string, unknown>;
+    for (const path of paths) withoutTomlPath(root, path);
+    for (const [key, entries] of blockArrayEntries(text, id, roots)) withoutTomlPath(root, JSON.parse(key) as string[], entries);
+    return root;
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
+/** Delete `path` from a parsed document in place, or with `entries`, one equal entry for each from the array there; and
+ *  any table that leaves empty. */
+function withoutTomlPath(node: Record<string, unknown>, path: string[], entries?: unknown[]): void {
+  const [key, ...more] = path;
+  if (key === undefined || !Object.hasOwn(node, key)) return;
+  const child = node[key];
+  if (more.length === 0) {
+    if (entries === undefined) { delete node[key]; return; }
+    if (!Array.isArray(child)) return;
+    for (const entry of entries) {
+      for (let at = child.length - 1; at >= 0; at--) if (isDeepStrictEqual(child[at], entry)) { child.splice(at, 1); break; }
+    }
+    if (child.length === 0) delete node[key];
+    return;
+  }
+  if (child === null || typeof child !== "object" || Array.isArray(child)) return;
+  withoutTomlPath(child as Record<string, unknown>, more, entries);
+  if (Object.keys(child).length === 0) delete node[key];
 }
 
 /**

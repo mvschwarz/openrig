@@ -290,6 +290,74 @@ managed-launch path. Other version pairs and native enforcement need their own c
 The launch still uses inline JSON, subject to the operating system's argument-size
 limits.
 
+### Per-member Codex permissions
+
+Codex members can record their own sandbox and approval choice, even when they share a project folder:
+
+```yaml
+codex_permissions:
+  sandbox: workspace-write        # workspace-write or read-only
+  approval: never                 # never, on-request or untrusted
+  network_access: false           # workspace-write only
+  writable_roots: ["/abs/lease"]  # workspace-write only; absolute paths
+  exclude_tmpdir_env_var: false   # workspace-write only
+  exclude_slash_tmp: false        # workspace-write only
+```
+
+OpenRig emits this envelope as explicit `-s`, `-a` and `sandbox_workspace_write.*` flags on
+every managed launch and resume of the seat (fresh, both resume paths, restore and same-seat
+handover), so a named `codex_config_profile` or a policy posture doesn't override those fields.
+Omitted workspace-write fields are recorded as `false` or `[]` and emitted as such. Full access
+is not an envelope: it stays the `full_bypass` mode. The envelope is the seat's explicit choice,
+so team and kernel launch defaults don't apply to it, and status names the policy posture or
+ambient `OPENRIG_YOLO` it replaces. With workspace-write, OpenRig still adds its queue-state root
+and, on a fresh launch, git metadata folders; with read-only it adds no writable roots. It adds
+no network setting of its own. Codex's implicit roots (the working directory and temporary
+folders) still apply: this is a native sandbox and approval selection, not a complete
+filesystem or credential-isolation guarantee. The field is also supported on legacy flat
+Codex nodes; other runtimes reject it.
+
+For an existing seat, put the envelope in a JSON file, or change its profile, with the existing
+audited permission command:
+
+```sh
+rig seat set-permissions dev-impl@team --codex-permissions envelope.json --reason "Narrow the implementer"
+rig seat set-permissions dev-impl@team --codex-profile lease-impl --reason "Use the lease profile"
+rig seat status dev-impl@team --json
+```
+
+Choose one of `--mode`, `--rules`, `--codex-permissions` or `--codex-profile` per call. A seat
+keeps one explicit permission choice: setting an envelope replaces a recorded mode, and setting
+a mode (including `inherit`) clears the envelope, in the same audited write that names both.
+A runtime switch keeps the envelope while the seat runs Claude Code and applies it again when
+`rig seat set-runtime` brings the seat back to Codex. A switch back to Codex with an explicit
+`--permission-mode` replaces the envelope when the switch commits, and the switch's plan and
+event name it. A switch that doesn't commit leaves it in place.
+A profile name is separate from the envelope and from approval: a resumed conversation keeps
+its saved approval unless an envelope sets one. `--codex-profile inherit` clears the profile.
+
+The profile command checks the profile in the config home this seat's launches use: the seat's
+own `CODEX_HOME` when its `env:` declares one, else the daemon's explicit `CODEX_HOME`. There it
+reports an absent file (Codex loads it as an empty layer, so base config applies), records the
+file's hash so a later check can report a change, and refuses a profile that fails to load,
+keeping the previous one. When neither sets a `CODEX_HOME`, a seat's pane keeps its own, and the
+command reports the profile as unverified rather than checking a different home. Every launch
+still runs the native profile check.
+
+Updates leave the running process and history unchanged; they apply at the next separately
+authorized managed launch or resume. Restore reads the seat's current record, so an older
+snapshot doesn't bring back a replaced profile. A fork copies the source's current profile and
+envelope independently. Export contains the current record. A new generation from `rig up
+<spec>` starts from the spec. An invalid or unreadable envelope refuses that seat's launch, fork
+or export with a repair message rather than launching broader. Without the field or a recorded
+update, launch arguments are unchanged.
+
+**Downgrade:** an older OpenRig keeps the stored envelope but doesn't read it, so its launches
+of the seat use the earlier posture decision, which can be broader. This is not
+restriction-preserving. Keep a copy of the intended envelope and establish equivalent native
+restrictions before using an older managed-launch path. Native enforcement must be checked on
+the Codex version and configuration being used.
+
 ### Team launch defaults
 
 A non-kernel Claude or Codex seat with no authored permission policy, explicit
@@ -525,6 +593,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
+| `codex_permissions` | mapping | no | — | Codex-only sandbox and approval envelope, emitted as explicit flags on every managed launch and resume; see [per-member Codex permissions](#per-member-codex-permissions). |
 | `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec). If that path exists as written, it is used. Otherwise a leading `~` or `~/` expands to the home directory (`~user` does not) and `$VAR` / `${VAR}` expand from the daemon host's environment; a relative result still resolves against the rig root. A reference to an unset variable stays as written, so the cwd is that literal path and works only if it exists. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. Editing this declaration does not update an existing seat; use [`rig seat set-cwd`](agent-startup-guide.md#change-an-existing-seats-working-directory) to save its future launch directory. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |

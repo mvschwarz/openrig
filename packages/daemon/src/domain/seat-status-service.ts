@@ -105,6 +105,16 @@ export class SeatStatusService {
     return { ok: true, status: this.projectStatus(ref, matches[0]!.entry) };
   }
 
+  getStatusByNodeId(nodeId: string): SeatStatusResult {
+    const id = nodeId.trim();
+    if (!id) return { ok: false, code: "seat_ref_required", message: "node ID is required", guidance: SEAT_LOOKUP_GUIDANCE };
+    const row = this.rigRepo.db.prepare(`SELECT n.rig_id FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      WHERE n.id = ? AND r.archived_at IS NULL`).get(id) as { rig_id: string } | undefined;
+    const entry = row && this.entriesForRig(row.rig_id).find(candidate => candidate.nodeId === id);
+    if (!entry) return { ok: false, code: "seat_not_found", message: `Node "${id}" not found in an active rig.`, guidance: SEAT_LOOKUP_GUIDANCE };
+    return { ok: true, status: this.projectStatus(entry.canonicalSessionName ?? deriveCanonicalFromEntry(entry) ?? entry.logicalId, entry) };
+  }
+
   private findMatches(ref: string): SeatMatch[] {
     // OPR.0.4.6.MH1 FR-8: the shared parse contract (greedy first-@ rig).
     const parsed = parseSessionName(ref);

@@ -37,6 +37,7 @@ function daemon(calls: string[] = [], summaryStatus?: number) {
   return new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (input) => {
     const u = new URL(String(input)); calls.push(u.pathname);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
+    if (u.pathname === "/api/hosts") return Response.json({ ownName: "fixture", selected: "local", hosts: [] });
     if (u.pathname === "/api/rigs/summary") return summaryStatus ? Response.json({ error: "busy" }, { status: summaryStatus }) : Response.json(rigs);
     if (u.pathname === "/api/terminal/views") return Response.json({ saved: [], rigs: rigs.map((r) => r.name) });
     if (u.pathname === "/api/rigs/r-workshop/nodes") return Response.json([seat]);

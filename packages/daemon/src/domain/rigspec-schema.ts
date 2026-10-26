@@ -1,4 +1,5 @@
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
   LegacyRigSpecNode,
@@ -62,7 +63,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "codex_permissions", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs",
 ]);
@@ -524,6 +525,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (member["claude_permissions"] !== undefined) {
     if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_permissions: only valid when runtime is "claude-code"`);
     try { validateClaudePermissionRules(member["claude_permissions"], `${prefix}.claude_permissions`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["codex_permissions"] !== undefined) {
+    if (member["runtime"] !== "codex") errors.push(`${prefix}.codex_permissions: only valid when runtime is "codex"`);
+    try { validateCodexMemberPermissions(member["codex_permissions"], `${prefix}.codex_permissions`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_config_profile"] !== undefined) {
@@ -1258,6 +1264,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     ...(m["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(m["claude_permissions"]) }),
+    ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
@@ -1379,6 +1386,11 @@ export class LegacyRigSpecSchema {
           try { validateClaudePermissionRules(node["claude_permissions"], `nodes.${nodeWhere}.claude_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        if (node["codex_permissions"] !== undefined) {
+          if (node["runtime"] !== "codex") errors.push(`nodes.${nodeWhere}.codex_permissions: only valid when runtime is "codex"`);
+          try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1444,6 +1456,7 @@ export class LegacyRigSpecSchema {
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),
+      ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

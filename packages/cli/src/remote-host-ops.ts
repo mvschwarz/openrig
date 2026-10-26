@@ -26,14 +26,14 @@ export interface RemoteOpResult {
   outcomeUnknown?: true;
 }
 
-// Connection failures that prove the request never reached the remote daemon. Codes the kernel can also report on a
+// Connection failures that prove the request never reached the target daemon. Codes the kernel can also report on a
 // socket that already sent the request (route loss, an interface going down, a firewall change mid-flow: EHOSTUNREACH,
 // ENETUNREACH, EHOSTDOWN, ENETDOWN, EPERM, EACCES) are left out, so they read as an unknown outcome.
 const NOT_CONNECTED_CODES = new Set([
   "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EADDRNOTAVAIL", "UND_ERR_CONNECT_TIMEOUT", "ERR_INVALID_URL",
 ]);
 
-function requestMayHaveArrived(err: unknown): boolean {
+export function requestMayHaveArrived(err: unknown): boolean {
   if (err instanceof DaemonTimeoutError) return true;
   if (err instanceof DaemonConnectionError) return err.causeCode === undefined || !NOT_CONNECTED_CODES.has(err.causeCode);
   return true;

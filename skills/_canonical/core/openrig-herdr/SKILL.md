@@ -124,8 +124,11 @@ system-clipboard copy works immediately (it's server-wide).
   doesn't recognise, has none. Those come back as empty shells while the seats keep running: reopen
   the view, then close the old space.
 - **Herdr's status for a tile is Herdr's own reading** of its screen. It can show a seat as idle or
-  unknown while OpenRig shows it waiting (`needs-input`). To find waiting seats, use OpenRig's own
-  view (`rig ps --nodes` or the TUI) or the Feed.
+  unknown while OpenRig shows it waiting (`needs-input`). Two cases are known: a narrow tile that
+  wraps Claude's footer, and a tile that shows the inner tmux status line. That line shows when
+  `terminal.status_bar` is on, or for a seat session OpenRig adopted rather than created, which keeps
+  its own tmux `status`. To find waiting seats, use OpenRig's own view (`rig ps --nodes` or the TUI)
+  or the Feed.
 
 ## Saved views — the library (`terminal-views.yaml`)
 

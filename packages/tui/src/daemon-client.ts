@@ -279,8 +279,13 @@ export class DaemonClient {
   ps() {
     return this.get(`/api/ps`);
   }
-  rigsSummary() {
-    return this.get(`/api/rigs/summary`);
+  /** With `host`, the rigs of that registered host, read through this daemon (its read-only `?host=` forwarding). */
+  rigsSummary(host?: string) {
+    return this.get(host ? `/api/rigs/summary?host=${encodeURIComponent(host)}` : `/api/rigs/summary`);
+  }
+  /** The registered hosts (`rig host list`), each with a quick reachability probe. */
+  hosts() {
+    return this.get(`/api/hosts`);
   }
   rigNodes(rigId: string) {
     return this.get(`/api/rigs/${encodeURIComponent(rigId)}/nodes`);

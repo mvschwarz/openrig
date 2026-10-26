@@ -85,8 +85,8 @@ describe("B8-2 — send transport honesty (indeterminate ≠ failed)", () => {
     expect(out).not.toMatch(/was not sent/i);
   });
 
-  it("a connection REFUSAL keeps the hard 'not sent' truth", () => {
-    printTransportFailureForTest(new DaemonConnectionError("fetch failed: ECONNREFUSED"));
+  it.each(["ECONNREFUSED", "ENOTFOUND"])("a coded %s keeps the hard 'not sent' truth", (code) => {
+    printTransportFailureForTest(new DaemonConnectionError(`fetch failed: ${code}`, code));
     const out = errSpy2.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(out).toMatch(/was not sent/i);
   });

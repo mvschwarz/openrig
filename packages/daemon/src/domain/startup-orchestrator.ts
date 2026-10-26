@@ -19,7 +19,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -30,16 +30,6 @@ import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
-
-// Expanded startup text can put the current input marker above 50 scrollback lines.
-const STARTUP_SUBMIT_CAPTURE_LINES = 200;
-// Claude Code 2.1.289 has taken Enter on a large startup paste after the first look, while the composer
-// still showed that paste collapsed. Only that transient is looked at again, 200 ms apart, up to this many
-// times: about 5 s of waiting per send, plus capture time. Nothing is typed meanwhile.
-const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
-// A prompt still staged after a guarded retry is retried again, up to this many retries in all, each after
-// the 200 ms look. Every retry is guarded: Enter goes in only while the composer holds exactly the text we typed.
-const STARTUP_SUBMIT_RETRIES = 2;
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -1282,7 +1272,10 @@ export class StartupOrchestrator {
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
     input.lastSubmissionUnconfirmedReason = undefined;
-    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore) await this.awaitClaudeInputBox(input.binding.tmuxPane);
+    const firstPane = input.binding.tmuxPane;
+    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore && firstPane) {
+      await waitForClaudeInputBox(() => this.tmuxAdapter.capturePaneScreen(firstPane), this.sleep);
+    }
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -1322,7 +1315,8 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter.", UNCONFIRMED_UNOBSERVABLE); }
-      const { pane, state: before, looks } = await this.settleOwnPaste(tmuxSession, first, text, input.adapter.runtime);
+      const { pane, state: before, looks } = await settleOwnStartupPaste(
+        () => this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES), first, text, input.adapter.runtime, this.sleep);
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         if (looks) record(first, 0);
@@ -1379,46 +1373,6 @@ export class StartupOrchestrator {
     } finally {
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
     }
-  }
-
-  /**
-   * A fresh launch can read ready before Claude has drawn its input box: on Linux the pane names `claude` the moment
-   * Claude starts, and startup text pasted then sat unsent. Before a fresh start's first send, look at the visible
-   * screen until the input box the startup check reads is drawn, at most STARTUP_SUBMIT_SETTLE_LOOKS looks 200 ms
-   * apart. A screen that never shows one within that, or can't be read, is sent to as before. Observation only.
-   */
-  private async awaitClaudeInputBox(pane: string | null | undefined): Promise<void> {
-    if (!pane) return;
-    for (let look = 0; look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
-      let screen: string | null;
-      try { screen = await this.tmuxAdapter.capturePaneScreen(pane); } catch { return; }
-      if (screen === null || claudeInputBoxDrawn(screen)) return;
-      await this.sleep(200);
-    }
-  }
-
-  /**
-   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed, and a
-   * fresh Claude can still be drawing its screen, with no input line at all, when the first look comes. Only those
-   * two transients are looked at again, until the composer reads clear or staged, shows anything else, or the looks
-   * run out. A draft, ghost text, a dialog or any other mismatch keeps its verdict. Observation only.
-   * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
-   * as submitted.
-   */
-  private async settleOwnPaste(tmuxSession: string, pane: string, text: string, runtime: string | null): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
-    let state = inspectStartupStagedText(pane, text, runtime);
-    let looks = 0;
-    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS
-      && (startupOwnCollapsedPaste(pane, text, runtime) || startupNoInputLine(pane, runtime))) {
-      await this.sleep(200);
-      // A failed re-look adds nothing; the last usable observation stands.
-      const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);
-      if (!next?.trim()) break;
-      pane = next;
-      state = inspectStartupStagedText(pane, text, runtime);
-      looks++;
-    }
-    return { pane, state, looks };
   }
 }
 

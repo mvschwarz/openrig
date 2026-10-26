@@ -698,9 +698,11 @@ partial terminal view is not a healthy team. Each `--provider herdr` open adds
 a new workspace, numbered when the name is taken; return to the one already open
 when you want to preserve it. From inside Herdr, `rig terminal open <view> --window`
 focuses a matching space instead of adding one. Herdr's own status for a seat can
-read idle or unknown while OpenRig shows it waiting (`needs-input`); use OpenRig's
-view or the Feed to find waiting seats. This is terminal integration, not native
-plugin enrollment.
+read idle or unknown while OpenRig shows it waiting (`needs-input`), for example in
+a narrow tile that wraps Claude's footer, or in a tile that shows the inner tmux
+status line (with `terminal.status_bar` on, or for a seat session OpenRig
+adopted rather than created). Use OpenRig's view or the Feed to find waiting
+seats. This is terminal integration, not native plugin enrollment.
 
 For team views with interactive panes, the open result distinguishes the dashboard
 overview from the team's lead conversation and asks whether you can see the team.

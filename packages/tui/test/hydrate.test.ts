@@ -13,6 +13,7 @@ import { rowStatusGlyph, statusGlyph } from "../src/topology/glyphs.js";
 
 const FIXTURES: Record<string, unknown> = {
   "/healthz": { ok: true, selfHostId: "mm2-openrig1" },
+  "/api/hosts": { ownName: "localhost", selected: "local", hosts: [] },
   "/api/health?limit=200": {
     schema: "openrig.health-list/v0alpha1",
     evaluatedAt: "2026-09-05T12:00:00.000Z",

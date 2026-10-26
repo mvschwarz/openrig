@@ -433,3 +433,29 @@ describe("CodexResumeAdapter", () => {
     });
   });
 });
+
+describe("a seat's own permission envelope on the legacy resume (argv only)", () => {
+  it("replaces the posture decision with its flags and adds no network or team grants", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const prepareTeamWorkspace = vi.fn(() => ["/workspace"]);
+    const adapter = new CodexResumeAdapter(mockTmux({ sendText }), { readNetworkDefault, prepareTeamWorkspace });
+    await adapter.resume("dev-a@rig", "codex_id", "uuid-1", "/repo", null, "full_bypass", null, undefined, true, false, false, undefined,
+      { sandbox: "workspace-write", approval: "never", network_access: false, writable_roots: ["/lease"], exclude_tmpdir_env_var: false, exclude_slash_tmp: false });
+    const command = (sendText.mock.calls[0] as unknown as [string, string])[1];
+    expect(command).toContain(" -s workspace-write -a never");
+    expect(command).toContain("sandbox_workspace_write.network_access=false");
+    expect(command).toContain(" resume ");
+    expect(command).not.toContain("danger-full-access");
+    expect(command).not.toContain("hide_full_access_warning");
+    expect(command).not.toContain("/workspace");
+    expect(readNetworkDefault).not.toHaveBeenCalled();
+    expect(prepareTeamWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("keeps the call unchanged without an envelope", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    await new CodexResumeAdapter(mockTmux({ sendText })).resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
+  });
+});

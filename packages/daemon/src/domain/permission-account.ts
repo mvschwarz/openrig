@@ -3,7 +3,9 @@
 // harness, probes Codex or reads native settings files, so what only a launch or the harness knows is listed as unknown.
 import type Database from "better-sqlite3";
 import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
-import { claudePostureFlag, codexPostureArg, planModelAliasNotice } from "../adapters/yolo-mode.js";
+import { claudePostureFlag, codexPostureArg, planModelAliasNotice, yoloEnabled } from "../adapters/yolo-mode.js";
+import { codexEnvelopeArgs } from "./codex-rebuild-permissions.js";
+import { codexMemberEnvelope } from "./codex-member-permissions.js";
 import { KERNEL_CLAUDE_ALLOW, TEAM_CLAUDE_ALLOW, TEAM_CLAUDE_ASK } from "../adapters/kernel-authority.js";
 import { RigRepository } from "./rig-repository.js";
 import type { NodeBinding } from "./runtime-adapter.js";
@@ -68,7 +70,7 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const resolved = store.resolve(nodeId, runtime);
   const refs = policyRefs(db, nodeId);
 
-  const source: PermissionAccountSource = override.kernelAuthority ? "kernel_default" : explicit ? "explicit"
+  const source: PermissionAccountSource = override.kernelAuthority ? "kernel_default" : explicit || override.codexPermissions ? "explicit"
     : resolved.source === "member_spec" ? "member_policy" : resolved.source === "rig_spec" ? "rig_policy"
     : override.teamPermissionDefault ? "team_default" : "floor";
 
@@ -89,11 +91,16 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
   const planNote = planModelAliasNotice(runtime, { model, permissionMode: mode }, seat);
 
   const profile = runtime === "codex" ? refs.profile : null;
+  // A Codex seat's envelope replaces the posture decision with its own flags, as the launch does.
+  const envelope = runtime === "codex" ? planned.codexPermissions : undefined;
   const nativeArgument = runtime === "claude-code" ? claudePostureFlag(env, posture, mode)
+    : envelope ? `${profile ? ` -p ${profile}` : ""}${codexEnvelopeArgs(codexMemberEnvelope(envelope))}`.trim()
     : codexPostureArg(profile ? ` -p ${profile}` : "", env, posture).trim();
   const openRigAdds: PermissionAccount["openRigAdds"] = { claudeAllow: [], claudeAsk: [], notes: [] };
   const unknown = [NOT_READ, UNVERIFIED,
-    runtime === "codex"
+    runtime === "codex" && envelope
+      ? "This is the saved plan for a fresh launch. Resumes, restores and handovers emit the same envelope."
+      : runtime === "codex"
       ? "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, and a rebuild handover can carry the previous occupant's observed Codex sandbox and approvals instead, without the extra roots or network setting."
       : "This is the saved plan for a fresh launch. A restore re-reads a custom policy file, which can differ from what's saved."];
   if (runtime === "claude-code" && planned.kernelAuthority) openRigAdds.claudeAllow = [...KERNEL_CLAUDE_ALLOW];
@@ -111,7 +118,14 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     if (posture === "full_bypass" || mode === "bypassPermissions") openRigAdds.notes.push("In bypassPermissions, allow rules do not constrain access; native deny behavior remains subject to the harness's documented exceptions.");
     controls.push(`rig seat set-permissions ${seat} --rules <file.json> --reason "<why>"`);
   }
-  if (runtime === "codex") {
+  if (envelope) {
+    openRigAdds.notes.push(envelope.sandbox === "workspace-write"
+      ? "Extra writable roots for OpenRig's queue state, and git metadata folders on a fresh launch, beside the envelope's own roots."
+      : "No extra writable roots: the envelope is read-only.",
+    `Network access ${envelope.sandbox === "workspace-write" && envelope.network_access ? "on" : "off"}, as the envelope states; OpenRig adds no network setting of its own.`,
+    "Codex's own implicit roots (the working directory and temporary folders) still apply; this isn't a complete filesystem or credential-isolation guarantee.",
+    "Older readers may ignore the envelope; check rollback compatibility and preserve restrictions before downgrading.");
+  } else if (runtime === "codex") {
     openRigAdds.notes.push(planned.teamPermissionDefault && !profile && nativeArgument === "-s workspace-write"
       ? "Extra writable roots: the shared workspace and the pod's state folder; git metadata folders on a fresh launch."
       : "Extra writable roots for OpenRig's queue state, unless a read-only profile rules them out; git metadata folders on a fresh launch.");
@@ -122,15 +136,36 @@ export function planPermissionAccount(db: Database.Database, nodeId: string, sea
     openRigAdds.notes.push("Non-interruptive: supported harness warnings are accepted or hidden with launch flags.");
   }
 
-  const overrides = explicit ? [refs.member ? `member policy ${refs.member}` : null, refs.rig ? `rig policy ${refs.rig}` : null].filter((v): v is string => !!v) : [];
+  const overrides = explicit || envelope ? [refs.member ? `member policy ${refs.member}` : null, refs.rig ? `rig policy ${refs.rig}` : null].filter((v): v is string => !!v) : [];
+  if (runtime === "codex") {
+    controls.push(`rig seat set-permissions ${seat} --codex-permissions <file.json> --reason "<why>" (replaces a recorded mode)`,
+      `rig seat set-permissions ${seat} --codex-profile <name|inherit> --reason "<why>"`);
+    if (profile) {
+      // The setter's last check of this profile, as recorded: observation, not a launch pin.
+      let recorded: { to?: string | null; observation?: { file?: string; vantage?: string; home?: string | null; observedAt?: string; changedSinceRecorded?: boolean } } | undefined;
+      try {
+        const last = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.codex_profile_changed' ORDER BY seq DESC LIMIT 1").get(nodeId) as { payload: string } | undefined;
+        recorded = last ? JSON.parse(last.payload) as typeof recorded : undefined;
+      } catch { /* no audit history in this database */ }
+      const seen = recorded?.to === profile ? recorded.observation : undefined;
+      if (seen) {
+        openRigAdds.notes.push(`Profile file ${profile}: ${seen.file ?? "unverified"}${seen.changedSinceRecorded ? " and changed since the record before it" : ""} when the setter checked it at ${seen.observedAt ?? "an unknown time"}${seen.vantage === "configured_codex_home" ? ` in ${seen.home}` : "; the pane's own config home wasn't established"}. It can have changed since; each launch runs the native profile check.`);
+      } else unknown.push(`Profile file ${profile}: not checked by the setter; each launch runs the native profile check, and Codex loads a missing file as an empty layer.`);
+    }
+  }
+  // What the envelope replaces for this seat: a policy's posture and an ambient YOLO setting.
+  const replacedPosture = envelope ? [bindingPosture !== "floor" ? `the policy's ${bindingPosture} posture` : null,
+    yoloEnabled(env, undefined) ? "the ambient OPENRIG_YOLO setting" : null].filter((v): v is string => !!v) : [];
   // The resolver's own fallback (Codex has no auto mode), and a named Codex profile that supplies the argument under a
   // policy or seat choice; the floor's own wording already names its profile.
   const notes = [
     (source === "member_policy" || source === "rig_policy") && resolved.fallbackReason ? resolved.fallbackReason : null,
     profile && source !== "floor" && nativeArgument === `-p ${profile}` ? `the named Codex profile ${profile} governs its sandbox and approvals` : null,
+    replacedPosture.length ? `the envelope replaces ${replacedPosture.join(" and ")} for this seat` : null,
+    envelope && profile ? `the named Codex profile ${profile} supplies only the settings the envelope doesn't state` : null,
   ].filter((n): n is string => !!n).map((n) => `; ${n}`).join("");
   const where: Record<PermissionAccountSource, string> = {
-    explicit: `this seat's own choice (${explicit?.actor ?? "unknown"}: ${explicit?.reason ?? ""})`,
+    explicit: envelope ? "this seat's own permission envelope" : `this seat's own choice (${explicit?.actor ?? "unknown"}: ${explicit?.reason ?? ""})`,
     member_policy: `the member's policy ${refs.member ?? ""}`.trim(),
     rig_policy: `the rig's policy ${refs.rig ?? ""}`.trim(),
     kernel_default: "the kernel's operational default",
