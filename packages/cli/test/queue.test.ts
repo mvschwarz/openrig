@@ -166,6 +166,24 @@ describe("rig queue CLI", () => {
     expect(errors.join("\n")).toContain("--source is required");
   });
 
+  it("verbs whose actor is the seat's identity name OPENRIG_SESSION_NAME outside a managed seat, never their ignored flag", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    for (const [flag, argv] of [["actor", ["update", "q1", "--note", "x", "--actor", "me@rig"]], ["from", ["handoff", "q1", "--to", "bob@rig", "--body", "next"]],
+      ["destination", ["claim", "q1"]]] as const) {
+      errors.length = 0;
+      process.exitCode = undefined;
+      const { deps, calls } = makeDeps();
+      await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", ...argv]);
+      expect(process.exitCode, argv[0]).toBe(1);
+      expect(calls, argv[0]).toEqual([]);
+      const text = errors.join("\n");
+      expect(text, argv[0]).toContain("OPENRIG_SESSION_NAME is not set");
+      expect(text, argv[0]).toContain(`--${flag} is ignored`);
+      expect(text, argv[0]).not.toContain("is required when OPENRIG_SESSION_NAME is not set");
+    }
+  });
+
   it("create preserves the legacy managed source env without forwarding an explicit body claim", async () => {
     vi.stubEnv("OPENRIG_SESSION_NAME", "");
     vi.stubEnv("RIGGED_SESSION_NAME", "legacy@rig");
