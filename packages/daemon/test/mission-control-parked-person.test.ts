@@ -81,7 +81,7 @@ describe("Steering resolves a registered person's park without changing its owne
     expect(log.listForQitem(id)).toMatchObject([{ actionVerb: "resolve", actorSession: "fixture-person@external",
       reason: "Use the wide layout", identityProvenance: "transport:v1" }]);
     const history = repo.transitionLog.listForQitem(id);
-    expect(await act(id)).toMatchObject({ status: 400, body: { error: "qitem_not_leg1_parked" } });
+    expect(await act(id)).toMatchObject({ status: 409, body: { error: "qitem_not_leg1_parked" } });
     expect(repo.transitionLog.listForQitem(id)).toEqual(history);
     expect(log.listForQitem(id)).toHaveLength(1);
     expect(nudges).toHaveLength(1);
