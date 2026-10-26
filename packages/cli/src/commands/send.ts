@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
-import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonConnectionError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, fetchSelfHostId, resolveOriginSelfHostId } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -8,7 +8,7 @@ import { loadHostRegistry, resolveHost, hostDisplayTarget, type HttpHostEntry } 
 import { runCrossHostCommand, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { emitCrossHostError, emitCrossHostFailure, emitRemoteHttpFailure } from "../cross-host-cli-helpers.js";
 import { resolveCrossHostTarget } from "../cross-host-target.js";
-import { runRemoteHttpOp } from "../remote-host-ops.js";
+import { requestMayHaveArrived, runRemoteHttpOp } from "../remote-host-ops.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
@@ -114,10 +114,9 @@ export function wrapSendBody(
  * running." + restart advice) is the probe-derived claim qitem-c113bd41
  * removed. The SHAPE is reused; the TEXT is not.
  *
- * A `DaemonConnectionError` proves the resolved target was UNREACHABLE — not
- * why. Daemon down, wrong port, wrong host, firewall, and a wedged event loop
- * are all live explanations, so the action stays diagnostic and asserts no
- * daemon state. It also refuses to oversell `rig status`: with an env URL set,
+ * A connection error can follow delivery; only positive no-connect evidence
+ * earns a non-delivery claim. Share that distinction with remote sends. The
+ * diagnostic action asserts no daemon state: with an env URL set,
  * that command's own probe can report `stopped` for a mere timeout
  * (`daemon-lifecycle.ts:575-585`) — the same false-stopped class this slice
  * exists to remove — so the copy names that limitation instead of hiding it,
@@ -134,14 +133,13 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
   // (daemon-lifecycle.ts) so an agent on the --json path gets a parseable record
   // instead of empty stdout plus human prose on stderr.
   const fact = err.message;
-  // B8-2 (shape 73ee4b25): a TIMEOUT is delivery-UNCONFIRMED — the daemon may have
-  // received AND delivered (two seats proved delivery-after-"not sent" live). Only a
-  // hard connection failure earns the "was not sent" consequence.
-  const timedOut = err instanceof DaemonTimeoutError;
-  const consequence = timedOut
+  // A timeout or lost connection can hide a completed send. Use the existing
+  // remote-request classification rather than treating every non-timeout as unsent.
+  const outcomeUnknown = requestMayHaveArrived(err);
+  const consequence = outcomeUnknown
     ? "Delivery UNCONFIRMED — the daemon may have received and delivered the message."
     : "The message was not sent.";
-  const action = timedOut
+  const action = outcomeUnknown
     ? "Reconcile by EFFECT before any resend: check the pane/target for the message (rig capture <session>). " +
       "A resend without checking risks a duplicate. Then 'rig daemon status' for the probe picture."
     : "Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
