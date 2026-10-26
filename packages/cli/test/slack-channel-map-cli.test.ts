@@ -30,7 +30,11 @@ describe("rig slack channel-map", () => {
     expect(cfg.channelMap).toEqual([{ match: "my-rig", channel: "C0EXAMPLE3" }, { match: "pr@my-rig", channel: "C0EXAMPLE2" }]);
     expect(cfg.channel).toBe("C0DEFAULT");
     expect(process.exitCode ?? 0).toBe(0);
-    expect(logs.filter((l) => l.startsWith("Next: Invite the app to every mapped channel"))).toHaveLength(3);
+    const next = logs.filter((l) => l.startsWith("Next: Invite the app to every mapped channel"));
+    expect(next).toHaveLength(3);
+    // The change applies at a daemon restart; disable then enable isn't offered as the way to apply it.
+    expect(next[0]).toContain("at a daemon restart (`rig daemon stop`, then `rig daemon start`)");
+    expect(next[0]).toContain("Don't use `rig slack disable` then `rig slack enable` for it");
     const receipts = readFileSync(join(home, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(receipts.filter((r) => r.effect === "applied")).toHaveLength(3);
     expect(receipts.at(-1)).toMatchObject({ action: "configure", subject: "slack", reason: "configure the slack channel map" });

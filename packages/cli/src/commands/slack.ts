@@ -112,10 +112,12 @@ const RETIRED_TEACHING =
 const MANIFEST_FIRST_STEP =
   "`rig slack manifest --url` prints a link that creates your own Slack app from OpenRig's manifest (see `rig slack manifest --help`)";
 
-// #192: a saved config change reaches the running connector when it next rewires.
+// #192: a saved map change reaches the running connector at a daemon restart. Disable then enable rewires too, but
+// enabling marks alerts still waiting to be posted as already seen, so it isn't the advice.
 const CHANNEL_MAP_APPLY =
   "Invite the app to every mapped channel, then `rig slack verify`. A running connector picks up the change " +
-  "when it next rewires (`rig slack disable` then `rig slack enable`, or a daemon restart).";
+  "at a daemon restart (`rig daemon stop`, then `rig daemon start`). Don't use `rig slack disable` then " +
+  "`rig slack enable` for it: enabling marks alerts still waiting to be posted as already seen.";
 
 function resolveSecrets(surface: SlackSurface, cfg: SlackConnectorConfig): { bot: string | null; app: string | null } {
   const envFile = cfg.secretsEnvFile ?? undefined;
