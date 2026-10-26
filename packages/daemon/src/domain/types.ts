@@ -399,6 +399,10 @@ export interface SnapshotData {
    *  this never overloads null: zero candidates is absent, one live candidate
    *  is resolved, and multiple candidates retain their exact ids. */
   activeOccupantsByNode?: Record<string, SnapshotOccupantState>;
+  /** Resume sources retained by a periodic capture for absent agents. These are
+   * history, not running occupants; only an automatic, explicitly named launch
+   * may select one without an additional history decision. */
+  periodicResumeSourcesByNode?: Record<string, Session>;
   /** The immutable intended membership for this snapshot's restore attempt.
    *  Historical node records remain in `nodes` but are not in this roster. */
   topologyRoster?: SnapshotTopologyRoster;

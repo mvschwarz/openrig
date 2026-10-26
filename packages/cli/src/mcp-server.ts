@@ -330,6 +330,13 @@ function scopeFor(access: McpAccess, seatOf: () => string | undefined): Scope {
  *  this shape is never the team's question to a customer. The shape never grants anything. */
 const CALLER_SHAPED = /^cus-.+-caller@[^@]+$/;
 
+/** OpenRig's own tags that decide what a person asked about a row sees of its body: what Slack ingestion records about where
+ *  the row came from and which parts of its body OpenRig wrote (the sender's channel, the attachments block, the body's
+ *  digest), and `gate`, which with `workflow` marks a workflow's internal sign-off so the person's post shows its summary in
+ *  place of the body. A Cloud customer's create can't claim them; its other tags (`workflow` and `workflow:`/`instance:`
+ *  among them) are kept. */
+const OPENRIG_PROVENANCE_TAG = /^(?:founder-slack|inbound|shared-channel|gate)$|^participant:|^slack-/;
+
 /** A Cloud customer grant (openrig.cloud.grant/v1): a requester, narrower than a work grant. The grant's own seat is the
  *  only caller. It may hand tasks to its rigs' seats (never a person or another host's seat), read the items it sent and
  *  the team's questions to it (never team-internal or another caller's items), follow a handed-on item only where it
@@ -1190,7 +1197,8 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       const id = qitemId ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
       try {
         const res = await client.post("/api/queue/create", {
-          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, tags, priority, tier,
+          qitemId: id, destinationSession: destination, body: lineage?.body ?? body, summary, priority, tier,
+          tags: access?.customer ? tags?.filter((tag) => !OPENRIG_PROVENANCE_TAG.test(tag)) : tags,
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });

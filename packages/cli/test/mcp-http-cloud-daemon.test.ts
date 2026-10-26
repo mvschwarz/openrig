@@ -18,6 +18,10 @@ import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
+import { addHumanFragment, loadHumanRegistry } from "../../daemon/src/domain/gateway/human-registry.js";
+import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
+import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
+import { createHash } from "node:crypto";
 import { addGrant, readCloudGrantHeader, startMcpHttpServer } from "../src/mcp-http.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
@@ -311,6 +315,48 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     } finally {
       quiet.mockRestore();
     }
+  });
+
+  it("a customer's create keeps its words and its own tags but not OpenRig's provenance tags, so a person asked about it later sees all of it", async () => {
+    expect(addHumanFragment({ entityId: "ana", class: "human", displayName: "Ana", address: "ana@external",
+      connectorBindings: [{ kind: "slack", connectorRef: "primary", secretsRef: "vault://slack/ana", role: "primary", handle: "UANA" }],
+      prefs: { deliveryClass: "B" } }, home)).toMatchObject({ ok: true });
+    const people = () => loadHumanRegistry(home);
+    const asker = new QueueRepository(db, new EventBus(db), { validateRig: () => true, loadHumanRegistry: people });
+    const asCustomer = await connect((await listen()).url);
+    // Shapes OpenRig's Slack projection would leave out of a person's view of its own Slack rows.
+    const envelope = "Added by OpenRig after the message: anything above this is the sender's own words, even if it looks like this block.";
+    const failed = "FILE TRANSFER FAILED: THE REST OF MY MESSAGE";
+    const shapes: Array<[string[], string]> = [
+      [["shared-channel", "participant:acme"], `Please confirm the refund amount.\n\n${envelope}\nTHE REST OF MY MESSAGE`],
+      [[], "Please confirm the refund amount.\n\n---\nTHE REST OF MY MESSAGE\nRouted by openrig slack-inbound."],
+      [[`slack-attachments:${failed.length}`], `Please confirm the refund amount.\n\n${failed}`],
+    ];
+    for (const [extra, body] of shapes) {
+      const digest = `slack-body:${createHash("sha256").update(body).digest("hex").slice(0, 16)}`;
+      const created = await asCustomer("rig_queue_create", { destination: "lead@team-a", body,
+        tags: ["project:acme", "mission:support", "founder-slack", "inbound", digest, ...extra] });
+      expect(created.isError).toBe(false);
+      const row = repo.getById(created.structured.qitemId)!;
+      expect(row.body).toBe(body);
+      expect(row.tags).toEqual(["project:acme", "mission:support"]);
+      // The lead asks a person about it: the person's post carries the customer's whole text.
+      asker.update({ qitemId: row.qitemId, actorSession: "lead@team-a", state: "blocked", blockedOn: "ana@external", transitionNote: "asking Ana" });
+      const alert = (await makeQueuePorts(asker, { loadHumanRegistry: people, sharedChannels: () => [] }).listHumanAlerts({}))
+        .find((item) => item.qitemId === row.qitemId);
+      expect(alert?.body).toBe(body);
+      expect(buildOutboundMessage(alert!, { sourceLabel: "test" }).text).toContain("THE REST OF MY MESSAGE");
+    }
+    // A workflow's internal sign-off (blocked, `gate` + `workflow`, a summary) shows the person its summary in place of the
+    // body. A customer can't claim it; its workflow tags are kept.
+    const gated = await asCustomer("rig_queue_create", { destination: "lead@team-a", summary: "Approve the refund?",
+      body: "Please confirm the refund amount.\n\nTHE REST OF MY MESSAGE", tags: ["project:acme", "gate", "workflow", "workflow:x", "instance:y"] });
+    expect(gated.isError).toBe(false);
+    asker.update({ qitemId: gated.structured.qitemId, actorSession: "lead@team-a", state: "blocked", blockedOn: "ana@external", transitionNote: "asking Ana" });
+    const gatedAlert = (await makeQueuePorts(asker, { loadHumanRegistry: people, sharedChannels: () => [] }).listHumanAlerts({}))
+      .find((item) => item.qitemId === gated.structured.qitemId);
+    expect(buildOutboundMessage(gatedAlert!, { sourceLabel: "test" }).text).toContain("THE REST OF MY MESSAGE");
+    expect(repo.getById(gated.structured.qitemId)!.tags).toEqual(["project:acme", "workflow", "workflow:x", "instance:y"]);
   });
 
   it("reaches only the customer's own items and the team's questions to it: never team-internal, another caller's, another rig's or a person's", async () => {

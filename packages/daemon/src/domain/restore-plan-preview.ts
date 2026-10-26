@@ -328,7 +328,7 @@ export function buildRestorePlanPreview(
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
       : intendedActionFor(resolution.kind === "resolved" ? resolution.session : null,
         resolution.kind === "ambiguous" ? resolution : null, freshRequested, seat,
-        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: snapshot?.data.periodicResumeSourcesByNode?.[savedNodeId] ?? absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;

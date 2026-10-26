@@ -23,6 +23,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
+import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -154,17 +155,19 @@ function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | nu
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
-export function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null, savedRuntime: string | null):
+export function snapshotLaunchOutcome(data: SnapshotData, nodeId: string, runtime: string | null, savedRuntime: string | null, resumePeriodicCarry = false):
   { kind: "resume" } | { kind: "fresh" | "decision" | "unrecoverable"; why: string } {
   const occupant = resolveActiveSnapshotSession(data, nodeId);
   if (occupant.kind === "ambiguous") return { kind: "unrecoverable", why: "can't tell which saved session is this seat's" };
-  const session = occupant.kind === "resolved" ? occupant.session : null;
+  const session = occupant.kind === "resolved" ? occupant.session
+    : occupant.kind === "none" && resumePeriodicCarry ? data.periodicResumeSourcesByNode?.[nodeId] ?? null : null;
+  if (session && session.nodeId !== nodeId) return { kind: "decision", why: "the periodic resume source belongs to another agent" };
   const runtimeError = restoreRuntimeCompatibilityError(runtime,
     data.nodeStartupContext?.[nodeId]?.runtime);
   if (runtimeError) return { kind: "decision", why: runtimeError };
   if (!session) {
     // The restore's own rule for a seat stopped at capture whose earlier occupant left a token.
-    const prior = occupant.kind === "none" ? absentSeatResumeHistory(data.sessions, nodeId) : null;
+    const prior = occupant.kind === "none" ? data.periodicResumeSourcesByNode?.[nodeId] ?? absentSeatResumeHistory(data.sessions, nodeId) : null;
     return prior
       ? { kind: "decision", why: `had no running occupant for this seat when it was taken, but an earlier occupant left a '${prior.resumeType}' resume token` }
       : { kind: "fresh", why: "saves no session for this seat" };
@@ -595,7 +598,7 @@ export class RestoreOrchestrator {
     keepPane?: boolean;
     selectedHistory?: SelectedRestoreHistory;
   }): Promise<NarrowLaunchResult> {
-    return this.launchNodeTargets(rigId, [logicalId], { ...opts, nonTargetMode: "unchanged" });
+    return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
   }
 
   private async launchNodeTargets(rigId: string, logicalIds: string[], opts: {
@@ -605,6 +608,7 @@ export class RestoreOrchestrator {
     snapshotId?: string;
     keepPane?: boolean;
     selectedHistory?: SelectedRestoreHistory;
+    namedAgent?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
   }): Promise<NarrowLaunchResult> {
     const rig = this.rigRepo.getRig(rigId);
@@ -613,6 +617,8 @@ export class RestoreOrchestrator {
     const selected = this.snapshotRepo.selectRestoreUsable(rigId, opts.snapshotId);
     if (!selected.ok) return selected;
     const { snapshot, selection: snapshotSelection } = selected;
+    const resumePeriodicCarry = opts.namedAgent === true && snapshot.kind === "auto-periodic"
+      && snapshotSelection.mode === "automatic";
     if (opts.selectedHistory && (opts.snapshotId !== snapshot.id || !opts.selectedHistory.beforeEffect())) {
       return { ok: false, code: "selection_changed", message: "The selected history or seat changed. Refresh the review." };
     }
@@ -653,7 +659,7 @@ export class RestoreOrchestrator {
       }
       if (opts.keepPane) {
         launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
-          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true }, subsetWarnings));
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry }, subsetWarnings));
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
@@ -703,12 +709,19 @@ export class RestoreOrchestrator {
         // Keep the pane/history and the existing per-target failure contract.
         // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
         // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
-        // message says what that launch would do instead. The command pins the snapshot that was checked.
+        // message says what that launch would do instead. Only resolved occupants
+        // can pin this snapshot; an automatic carry must be selected automatically again.
         const liveNode = allNodes.find(current => current.logicalId === node.logicalId);
-        const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime, node.runtime);
-        const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
+        const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime, node.runtime,
+          resumePeriodicCarry && liveNode?.id === node.id);
+        const automaticCarry = resumePeriodicCarry
+          && resolveActiveSnapshotSession(snapshot.data, node.id).kind === "none"
+          && !!snapshot.data.periodicResumeSourcesByNode?.[node.id];
+        const launchCommand = `rig launch ${rigId} ${node.logicalId}${automaticCarry ? "" : ` --snapshot-id ${snapshot.id}`}`;
         const relaunch = outcome.kind === "resume"
-          ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
+          ? automaticCarry
+            ? `To retry automatic resume: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane; launch reselects the latest usable snapshot rather than pinning this one, so the result depends on that new selection). `
+            : `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
           : `Stopping it and launching from snapshot ${snapshot.id} won't resume this conversation: that snapshot ${outcome.why}, so launch would `
             + `${outcome.kind === "fresh" ? "start a fresh conversation" : outcome.kind === "decision" ? "start nothing and ask for a decision" : "fail"}. `;
         launched.push({
@@ -742,7 +755,7 @@ export class RestoreOrchestrator {
       }
       const planEntry = { node };
       const result = await this.restoreNodeWithCompensation(
-        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory }, subsetWarnings,
+        planEntry, rigId, snapshot.id, snapshot.data, { adapters: opts?.adapters, fsOps: opts?.fsOps, selectedHistory: opts.selectedHistory, resumePeriodicCarry }, subsetWarnings,
       );
       launched.push(result);
     }
@@ -1028,7 +1041,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; selectedHistory?: SelectedRestoreHistory },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1071,7 +1084,30 @@ export class RestoreOrchestrator {
     }
 
     const freshRequested = opts?.freshLogicalIds?.includes(node.logicalId) ?? false;
-    if (occupantResolution.kind === "none" && preserveStoppedCurrent && !freshRequested) {
+    const carried = opts?.resumePeriodicCarry && !selectedHistory && !freshRequested
+      && occupantResolution.kind === "none" && liveNode?.id === nodeId
+      ? data.periodicResumeSourcesByNode?.[nodeId] : undefined;
+    if (carried && carried.nodeId !== nodeId) {
+      return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "The periodic resume source belongs to another agent. No session was started." };
+    }
+    if (carried) {
+      // The launch lifecycle lease is held here, before any stale-state cleanup
+      // or destination registration. Capture-time eligibility can have expired
+      // without another tick; never resume a conversation a fresh launch retired.
+      const newest = this.sessionRegistry.getSessionsForRig(rigId).filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      const fresh = readFreshOccupantRelations(this.db, rigId);
+      if (!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
+        || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
+        || liveNode?.runtime !== node.runtime
+        || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
+        || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id)) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
+      }
+    }
+    const resumeSession = occupantResolution.kind === "resolved" ? occupantResolution.session : carried ?? null;
+    if (occupantResolution.kind === "none" && preserveStoppedCurrent && !freshRequested && !carried) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: stoppedSnapshotReason(node.logicalId, data.rig.name) };
     }
     const runtimeError = restoreRuntimeCompatibilityError(liveNode ? liveNode.runtime : node.runtime,
@@ -1082,8 +1118,8 @@ export class RestoreOrchestrator {
 
     // Classify absent-seat history before the continuity short-circuit: a
     // restoring seat must not report fresh while its forecast awaits a decision.
-    const priorWithToken = occupantResolution.kind === "none" && !freshRequested
-      ? absentSeatResumeHistory(data.sessions, nodeId)
+    const priorWithToken = occupantResolution.kind === "none" && !freshRequested && !carried
+      ? data.periodicResumeSourcesByNode?.[nodeId] ?? absentSeatResumeHistory(data.sessions, nodeId)
       : null;
     if (priorWithToken) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: absentSeatResumeHistoryError(node.logicalId, priorWithToken.resumeType, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name) };
@@ -1125,7 +1161,7 @@ export class RestoreOrchestrator {
       // OPR.0.5.7.1 D1 — the active occupant was RESOLVED once at the top of
       // this function (before the continuity consult); ambiguity already
       // returned there, so only resolved/none reach here.
-      const snapSession = occupantResolution.kind === "resolved" ? occupantResolution.session : null;
+      const snapSession = resumeSession;
       const policy = effectiveRestorePolicy(seatFacts(data, nodeId, node.runtime, liveNode ? liveNode.runtime : node.runtime), snapSession?.restorePolicy);
       const resumeSourceRecorded = !!snapSession?.resumeType && snapSession.resumeType !== "none";
       // A community harness that can't resume this seat's token (launch-only, or a former runtime's id) stops here; a seat
@@ -1310,7 +1346,7 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState, seatRehydration);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState, seatRehydration, resumeSession);
     const checked = this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
@@ -1404,6 +1440,7 @@ export class RestoreOrchestrator {
     return freshSeatLaunchCommand(logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name);
   }
 
+  /** Replay the preflight-selected source after launch, keeping native identity and startup checks. */
   private async postLaunchRestore(
     entry: PlanEntry,
     rigId: string,
@@ -1414,6 +1451,7 @@ export class RestoreOrchestrator {
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
+    resumeSource?: import("./types.js").Session | null,
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
@@ -1455,7 +1493,7 @@ export class RestoreOrchestrator {
         error: activeOccupantAmbiguityError(sessionResolution.candidateIds, sessionResolution.detail),
       };
     }
-    const session = sessionResolution.kind === "resolved" ? sessionResolution.session : null;
+    const session = resumeSource ?? (sessionResolution.kind === "resolved" ? sessionResolution.session : null);
     const checkpoint = data.checkpoints[node.id] ?? null;
     // Relaunching a seat that was launched for a community harness keeps that selection on the session registered
     // for it, whether or not the app can start now: never a fallback to a built-in reading.

@@ -517,6 +517,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(listProcesses).not.toHaveBeenCalled();
   });
 
+  it("#1822 automatic carry idle-shell advice does not pin an explicit snapshot", async () => {
+    const { rigId, session } = seedPreservedShell();
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "idle-conversation");
+    const capture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore: new CheckpointStore(db) });
+    capture.captureSnapshot(rigId, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const periodic = capture.captureSnapshot(rigId, "auto-periodic");
+    sessionRegistry.updateStatus(session.id, "running"); // preserved shell, not a live agent
+    const automatic = await orchestrator.launchSingleNode(rigId, "dev.driver");
+    const advice = automatic.launched?.[0]?.error;
+    expect(advice).toContain("To retry automatic resume:");
+    expect(advice).toContain(`then rig launch ${rigId} dev.driver (`);
+    expect(advice).toContain("reselects the latest usable snapshot");
+    expect(advice).not.toContain("--snapshot-id");
+    const explicit = await orchestrator.launchSingleNode(rigId, "dev.driver", { snapshotId: periodic.id });
+    expect(explicit.launched?.[0]?.error).toContain("start nothing and ask for a decision");
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("single-seat launch also reports the stopped agent", async () => {
     const { rigId } = seedPreservedShell();
     const result = await orchestrator.launchSingleNode(rigId, "dev.driver");

@@ -22,6 +22,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
+import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { RestoreOrchestrator, rollupRestoreRigResult } from "../src/domain/restore-orchestrator.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -206,6 +207,193 @@ describe("RestoreOrchestrator", () => {
     if (!updated) throw new Error("expected updated snapshot");
     return updated;
   }
+
+  it.each(["intact ledger", "pruned predecessor"])("#1822 resumes the second named agent after a periodic capture between separate launches (%s)", async (mode) => {
+    const original = seedRigAndSnapshot({ nodes: [
+      { logicalId: "lead", role: "lead", runtime: "claude-code" },
+      { logicalId: "worker", role: "worker", runtime: "claude-code" },
+    ], edges: [], resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ claude, listProcesses: nativeLineage("claude-code", "carried-conversation") });
+    const first = await orch.launchSingleNode(original.rigId, "lead");
+    expect(first.launched?.[0]?.status).toBe("resumed");
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    const periodic = snapshotRepo.findLatestRestoreUsable(original.rigId)!;
+    expect(periodic.kind).toBe("auto-periodic");
+    const worker = original.data.nodes.find(node => node.logicalId === "worker")!;
+    expect(periodic.data.activeOccupantsByNode?.[worker.id]).toEqual({ kind: "absent" });
+    // Lose the live ledger token and prune the older source. A later periodic
+    // snapshot must be independently sufficient for the named resume.
+    if (mode === "pruned predecessor") {
+      db.prepare("UPDATE sessions SET resume_token = NULL WHERE node_id = ?").run(worker.id);
+      db.prepare("DELETE FROM snapshots WHERE id != ?").run(periodic.id);
+      await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    }
+    const finalSource = snapshotRepo.findLatestRestoreUsable(original.rigId)!;
+    const second = await orch.launchSingleNode(original.rigId, "worker");
+    expect(second.snapshotSelection?.mode).toBe("automatic");
+    expect(second.snapshotSelection?.snapshotId).toBe(finalSource.id);
+    expect(second.launched?.[0]?.status).toBe("resumed");
+    expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "carried-conversation"]);
+  });
+
+  it("#1822 keeps the down agent's source when the tick happens during another agent's launch", async () => {
+    const original = seedRigAndSnapshot({ nodes: [
+      { logicalId: "lead", role: "lead", runtime: "claude-code" },
+      { logicalId: "worker", role: "worker", runtime: "claude-code" },
+    ], edges: [], resumeType: "claude_id", resumeToken: "during-launch" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const claude = mockClaudeResume();
+    let entered!: () => void;
+    let release!: (value: ResumeResult) => void;
+    const atResume = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<ResumeResult>(resolve => { release = resolve; });
+    vi.mocked(claude.resume).mockImplementationOnce(async () => { entered(); return held; });
+    const orch = createOrchestrator({ claude, listProcesses: nativeLineage("claude-code", "during-launch") });
+    const launching = orch.launchSingleNode(original.rigId, "lead");
+    await atResume;
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    const periodic = snapshotRepo.findLatestRestoreUsable(original.rigId)!;
+    const worker = original.data.nodes.find(node => node.logicalId === "worker")!;
+    expect(periodic.data.periodicResumeSourcesByNode?.[worker.id]?.resumeToken).toBe("during-launch");
+    release({ ok: true });
+    expect((await launching).launched?.[0]?.status).toBe("resumed");
+    expect((await orch.launchSingleNode(original.rigId, "worker")).launched?.[0]?.status).toBe("resumed");
+  });
+
+  it.each(["newer session", "fresh successor", "changed policy", "dangling fresh effect", "missing source", "changed native token", "changed runtime"])(
+    "#1822 rejects stale carried history changed after capture: %s", async (mode) => {
+      const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [], resumeType: "claude_id", resumeToken: "retired-after-tick" });
+      snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+      db.prepare("UPDATE sessions SET status = 'exited'").run();
+      const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+      const node = original.data.nodes[0]!;
+      const source = periodic.data.periodicResumeSourcesByNode![node.id]!;
+      expect(source.resumeToken).toBe("retired-after-tick");
+      let successorId = "missing-session";
+      if (mode === "newer session" || mode === "fresh successor") {
+        const next = sessionRegistry.registerSession(node.id, "r99-successor", mode === "fresh successor" ? "fresh" : undefined);
+        successorId = next.id;
+        sessionRegistry.updateResumeToken(next.id, "claude_id", "new-conversation");
+        sessionRegistry.updateStatus(next.id, "exited");
+      }
+      if (mode === "changed policy") db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(source.id);
+      if (mode === "changed native token") sessionRegistry.updateResumeToken(source.id, "claude_id", "new-conversation");
+      if (mode === "changed runtime") db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(node.id);
+      if (mode === "missing source") db.prepare("DELETE FROM sessions WHERE id = ?").run(source.id);
+      if (mode === "fresh successor" || mode === "dangling fresh effect") {
+        db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(original.rigId, node.id,
+          JSON.stringify({ nodeId: node.id, sessionId: successorId, newGeneration: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid }));
+      }
+      // No new tick: the selected snapshot still offers the now-retired source.
+      expect(snapshotRepo.findLatestRestoreUsable(original.rigId)?.id).toBe(periodic.id);
+      const before = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const result = await createOrchestrator({ tmux, claude, listProcesses: nativeLineage("claude-code", "retired-after-tick") })
+        .launchSingleNode(original.rigId, "worker");
+      expect(result.launched?.[0]?.status).toBe("awaiting-decision");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(claude.resume).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+    });
+
+  it("#1822 passes the carried source to a pod-aware runtime adapter", async () => {
+    const { StubRuntimeAdapter } = await import("../src/adapters/stub-runtime-adapter.js");
+    const rig = rigRepo.createRig("carried-pod");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("carry-pod", rig.id, "Dev");
+    const lead = rigRepo.addNode(rig.id, "dev.lead", { runtime: "stub", podId: "carry-pod" });
+    const worker = rigRepo.addNode(rig.id, "dev.worker", { runtime: "stub", podId: "carry-pod" });
+    for (const node of [lead, worker]) {
+      const row = sessionRegistry.registerSession(node.id, `${node.logicalId.replace(".", "-")}@carried-pod`);
+      sessionRegistry.updateStatus(row.id, "running");
+      sessionRegistry.updateResumeToken(row.id, "stub_id", "pod-conversation");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "stub");
+    }
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(worker.id);
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    const adapter = new StubRuntimeAdapter({ tmux: {} as unknown, runtime: "stub" });
+    const launch = vi.spyOn(adapter, "launchHarness");
+    const result = await createOrchestrator().launchSingleNode(rig.id, worker.logicalId, { adapters: { stub: adapter } });
+    expect(result.launched?.[0]?.status).toBe("resumed");
+    expect(launch.mock.calls.at(-1)?.[1]).toMatchObject({ resumeType: "stub_id", resumeToken: "pod-conversation" });
+  });
+
+  it.each(["failure", "cancelled"])("#1822 leaves periodic capture working for this and unrelated rigs after %s", async (code) => {
+    const original = seedRigAndSnapshot({ nodes: [
+      { logicalId: "lead", role: "lead", runtime: "claude-code" },
+      { logicalId: "worker", role: "worker", runtime: "claude-code" },
+    ], edges: [], resumeType: "claude_id", resumeToken: "retry-original" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    const worker = original.data.nodes.find(node => node.logicalId === "worker")!;
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id = ?").run(worker.id);
+    snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+    const claude = mockClaudeResume({ ok: false, code, message: "synthetic resume did not finish" });
+    const result = await createOrchestrator({ claude }).launchSingleNode(original.rigId, "worker");
+    expect(result.launched?.[0]?.status).not.toBe("resumed");
+    expect(claude.resume).toHaveBeenCalled();
+    const other = rigRepo.createRig("unrelated");
+    const node = rigRepo.addNode(other.id, "terminal", { role: "worker", runtime: "terminal" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, "r01-other").id, "running");
+    const count = snapshotRepo.listSnapshots(original.rigId).length;
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    expect(snapshotRepo.listSnapshots(original.rigId).length).toBeGreaterThan(count);
+    expect(snapshotRepo.findLatestRestoreUsable(other.id)?.kind).toBe("auto-periodic");
+  });
+
+  it.each(["explicit snapshot", "whole rig", "foreign source"])("#1822 preserves the decision boundary for %s", async (mode) => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "saved-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+    if (mode === "foreign source") {
+      updateSnapshotData(periodic, data => { data.periodicResumeSourcesByNode[original.data.nodes[0]!.id].nodeId = "another-agent"; });
+    }
+    const tmux = mockTmux();
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ tmux, claude });
+    if (mode === "whole rig") {
+      const result = await orch.restore(periodic.id);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.result.nodes[0]?.status).toBe("awaiting-decision");
+    } else {
+      const result = await orch.launchSingleNode(original.rigId, "worker", mode === "explicit snapshot" ? { snapshotId: periodic.id } : undefined);
+      expect(result.launched?.[0]?.status).toBe("awaiting-decision");
+    }
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(claude.resume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["automatic", "claude-code"], ["explicit", "claude-code"], ["whole rig", "claude-code"],
+    ["explicit", "terminal"], ["whole rig", "terminal"],
+  ])("#1822 missing token keeps the existing fresh path for %s (%s)", async (mode, runtime) => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime }],
+      edges: [], resumeType: "claude_id" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+    expect(periodic.data.periodicResumeSourcesByNode).toBeUndefined();
+    const tmux = mockTmux();
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ tmux, claude });
+    if (mode === "whole rig") {
+      const result = await orch.restore(periodic.id);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.result.nodes[0]?.status).toBe("fresh-primed");
+    } else {
+      const result = await orch.launchSingleNode(original.rigId, "worker", mode === "explicit" ? { snapshotId: periodic.id } : undefined);
+      expect(result.launched?.[0]?.status).toBe("fresh-primed");
+    }
+    expect(tmux.createSession).toHaveBeenCalled();
+    expect(claude.resume).not.toHaveBeenCalled();
+  });
 
   it("restores only the snapshot's intended roster and reports historical exclusions", async () => {
     const snap = seedRigAndSnapshot({
