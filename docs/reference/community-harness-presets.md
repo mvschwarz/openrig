@@ -24,6 +24,11 @@ it never reads an unsupported capability as idle, working, ready or verified.
 **Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
 configuration.
 
+**Check that the harness answers on its own first.** Before writing a preset, start the harness in a terminal outside OpenRig, with the
+same configuration and credentials your launcher will give it, and send it one prompt. If no answer comes back, the problem is in the
+harness's own setup, such as its model, provider or login, and relaunching an OpenRig seat won't fix it. Fix it in the harness, then
+connect it.
+
 ## The preset
 
 One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. `rig community-harness list` shows what's
@@ -223,7 +228,8 @@ Presets without `first_input` and built-in runtimes keep their existing behavior
 
 ## Write your own
 
-Start from the example closest to your harness, and change it.
+Start from the example closest to your harness, and change it. First check that the harness answers a prompt on its own
+([above](#what-a-community-harness-gets)).
 
 1. **Choose how the conversation is named.**
    - **Your harness creates an id you can read before it starts,** as Cursor's `create-chat` does: declare `launch_result: true`, and the
