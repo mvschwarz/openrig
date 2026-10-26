@@ -542,6 +542,21 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
+  it("doesn't give a Cloud customer's connection the member workflow or its authority, only the shared lines", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, customer: { objects: { queue: ["create", "show", "list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const customer = new Client({ name: "customer-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await customer.connect(clientTransport);
+    const instructions = customer.getInstructions() ?? "";
+    expect(instructions).toContain("reserved for a person");
+    expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
+    expect(instructions).not.toContain("basically authorized");
+    await customer.close();
+    await server.close();
+  });
+
   it("rig_down calls POST /api/down with correct params", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,

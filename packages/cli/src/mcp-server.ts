@@ -528,19 +528,21 @@ export const MEMBER_WORKFLOW = [
   "For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it.",
   MEMBER_AUTHORITY,
   "When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask.",
-  "If it came from a person (its source ends in @external), set it blocked with blockedOn that person, the question as its summary and your draft in note: their answer returns it to you in progress.",
-  "Otherwise create an item to its source with your question and draft, then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
+  "If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress.",
+  "Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again.",
   "Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.",
 ].join(" ");
 
-// Short guidance a client may show the model (the server's MCP instructions).
-const INSTRUCTIONS = [
+// Short guidance a client may show the model (the server's MCP instructions). A Cloud customer's connection asks the team
+// for work and isn't one of its members, so it isn't given the member workflow.
+const SHARED_INSTRUCTIONS = [
   "This server reaches an OpenRig team as one seat: the one named by OPENRIG_SESSION_NAME where the server was configured, or, over authenticated HTTP, the seat of the caller's grant (rig_whoami shows which, and whether the caller is authenticated; rig_team shows a rig's seats and its lead). The daemon attributes this server's writes to that seat.",
   "To hand work to a seat, use rig_queue_create and keep its qitemId; read the answer later with rig_queue_show, which names the next item when the work was handed on. To pass on work this seat holds, use rig_queue_handoff rather than closing it and creating another, so the work stays one chain. Queue items are durable: they outlive this conversation and this server.",
   "Tools marked read-only change nothing. A seat whose activity is unknown is not idle, and an accepted request (a restore's attemptId) is not a finished one.",
   "A question reserved for a person is theirs to answer: don't answer it on their behalf. rig_queue_decide records a decision only inside the decision room of the mode they have on, beside their answers and never as one.",
-  MEMBER_WORKFLOW,
-].join("\n");
+];
+const INSTRUCTIONS = [...SHARED_INSTRUCTIONS, MEMBER_WORKFLOW].join("\n");
+const CUSTOMER_INSTRUCTIONS = SHARED_INSTRUCTIONS.join("\n");
 
 /**
  * Maps a DaemonResponse to MCP tool result.
@@ -593,7 +595,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
-  }, { instructions: INSTRUCTIONS });
+  }, { instructions: options.access?.customer ? CUSTOMER_INSTRUCTIONS : INSTRUCTIONS });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
   const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
@@ -1341,7 +1343,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         reopen: z.boolean().optional().describe("Reopen a closed item: give an active state (pending, in-progress or blocked) and a note (as rig queue update --reopen)"),
         summary: z.string().optional().describe("Replace the one-line summary"),
         evidenceRef: z.string().optional().describe("Pointer to the durable artifact, stored on the item when closing with state done or parking on a human seat; other updates refuse it"),
-        blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from (they're asked, and their answer returns it to you in progress)"),
+        blockedOn: z.string().optional().describe("What it waits on, when blocking: another qitemId (this item returns to pending when that one closes), or the address of the person this item came from, not a shared channel (they're asked with this item's summary, and their answer returns it to you in progress)"),
         wakeAfterSeconds: z.number().int().positive().optional().describe("Wake this seat after this many seconds, when blocking. Delivered only to a seat with a terminal: an attached app can't receive it today, so the item just waits until it is checked."),
       }),
       annotations: DESTRUCTIVE,
@@ -1415,11 +1417,12 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         const targetRepo = readOpenRigEnv("OPENRIG_TARGET_REPO", "RIGGED_TARGET_REPO")?.trim();
         if (targetRepo) params.set("targetRepo", targetRepo);
         const res = await client.get(`/api/whoami?${params.toString()}`);
-        // whoami knows a seat by its node or session. A hosted member (a tool outside any terminal) has neither: the seat
-        // is its grant's, so the authenticated caller is answered with that seat. Read only.
+        // whoami knows a seat by its session. A hosted member (a tool outside any terminal) has none: the seat is its
+        // grant's, so the authenticated caller is answered with that seat. Read only.
         if (res.status === 404 && access && !access.customer && options.seat === seat) {
-          const member = { ok: true, seat, rig: seat.slice(seat.indexOf("@") + 1), session: null, caller,
-            message: "This seat has no node or session on this instance: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
+          const at = seat.indexOf("@");
+          const member = { ok: true, seat, rig: at >= 0 ? seat.slice(at + 1) : null, session: null, caller,
+            message: "This seat has no session here: it's the seat this connection's grant names, such as a hosted member's. rig_team shows its rig and hosted members, and rig_queue_list with owned set lists its work." };
           return { content: [{ type: "text" as const, text: JSON.stringify(member) }], structuredContent: member };
         }
         if (res.status >= 400) return mapResult(res);

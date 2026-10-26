@@ -22,6 +22,8 @@ import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { MissionControlWriteContract } from "../../daemon/src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../../daemon/src/domain/mission-control/mission-control-action-log.js";
 import { loadHumanRegistry, type HumanFragment } from "../../daemon/src/domain/gateway/human-registry.js";
+import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
+import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
@@ -310,14 +312,25 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const me = await asGrok("rig_whoami");
     expect(me.isError).toBe(false);
     expect(me.structured).toMatchObject({ ok: true, seat: "grok@team", rig: "team", session: null, caller: { authenticated: true, principal: "grok" } });
+    expect(me.structured.message).toContain("no session here");
 
-    // From a person: the member parks the item on her, she's asked, and her answer returns it in progress.
+    // From a person: the member parks the item on her with the question and its draft as the summary, she's asked with
+    // that draft, and her answer returns it in progress.
     const fromAna = await repo.create({ sourceSession: ANA, destinationSession: "grok@team", summary: "Announce the release", body: "Post the 0.7.3 note publicly.", nudge: false } as never);
     expect((await asGrok("rig_queue_claim", { qitemId: fromAna.qitemId })).isError).toBe(false);
-    const asked = await asGrok("rig_queue_update", { qitemId: fromAna.qitemId, state: "blocked", blockedOn: ANA, summary: "May I post this note publicly?", note: "Draft: 0.7.3 is out." });
+    const draft = "May I post this publicly? \"0.7.3 is out: connected assistants can now ask before they act.\"";
+    const asked = await asGrok("rig_queue_update", { qitemId: fromAna.qitemId, state: "blocked", blockedOn: ANA, summary: draft, note: "Asked Ana before posting." });
     expect(asked.isError).toBe(false);
     expect(repo.getById(fromAna.qitemId)).toMatchObject({ state: "blocked", blockedOn: ANA });
     expect(repo.listTransitions(fromAna.qitemId).at(-1)).toMatchObject({ state: "blocked", ownerNotificationKind: "human-required" });
+    // The ask she gets, through the projection and render the Slack post uses, carries the exact draft.
+    const ports = makeQueuePorts(repo, { loadHumanRegistry: () => ({ ok: true as const, entities: people ?? [] }), sharedChannels: () => [] });
+    const ask = (await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).find((item) => item.qitemId === fromAna.qitemId);
+    expect(ask).toMatchObject({ ownerNotificationKind: "human-required", summary: draft });
+    const rendered = buildOutboundMessage({ qitemId: ask!.qitemId, ownerNotificationKind: ask!.ownerNotificationKind, summary: ask!.summary,
+      body: ask!.body, state: ask!.state, tags: ask!.tags, evidenceRef: ask!.evidenceRef }, { sourceLabel: "team" });
+    expect(rendered.text).toContain("0.7.3 is out: connected assistants can now ask before they act.");
+    expect(rendered.text).not.toContain("Asked Ana before posting.");
     await contract.act({ verb: "resolve", qitemId: fromAna.qitemId, actorSession: ANA, decision: "Yes, post it.", notify: true } as never);
     expect(repo.getById(fromAna.qitemId)).toMatchObject({ state: "in-progress", blockedOn: null, destinationSession: "grok@team" });
     expect((await asGrok("rig_queue_show", { qitemId: fromAna.qitemId })).text).toContain("Yes, post it.");

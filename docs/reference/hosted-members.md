@@ -18,7 +18,8 @@ address work to it like any seat. It reaches the team through OpenRig's MCP serv
    It prints the token once. The member acts as `grok@research`: every row it creates or changes is attributed to that seat, and it reaches only
    that rig's seats and work.
 4. **Serve the MCP server over HTTP** behind a tunnel or proxy that adds TLS: `rig mcp serve --http`. See `rig mcp serve --help` for binding and
-   for how authentication works.
+   for how authentication works. If the proxy runs browser checks (such as Cloudflare's Browser Integrity Check), skip them for `/mcp`:
+   MCP clients aren't browsers.
 5. **Add the server in the tool:** its `https://…/mcp` URL and the token as a bearer credential.
 
 ## How it works its rows
@@ -30,22 +31,27 @@ address work to it like any seat. It reaches the team through OpenRig's MCP serv
   - `rig_queue_update` closes it done with the answer in `resolution`, or `rig_queue_handoff` hands it on to a seat in its rig.
 - **It can send work too:** `rig_queue_create` to its rig's seats.
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
-- **`rig_whoami`** answers the seat its grant names, though the member has no node or session.
+- **`rig_whoami`** answers the seat its grant names, though the member has no session.
 
 ## Asking a person while keeping the work
 
 When a row needs a person's approval before the member can finish it, the member keeps the row and asks:
-- **The row came from a person:** the member sets it `blocked` with `blockedOn` that person. They're asked, and their answer returns
-  the row to the member in progress.
-- **The row came from a seat:** the member hands that seat its question as a new row, then sets its own row `blocked` on the new
-  row's id. When the question closes, the member's row returns to pending.
+- **The row came from a person:** the member sets it `blocked` with `blockedOn` that person, and puts the question, with a short form of
+  what it will do, in the row's `summary`. The person is asked with the summary and the row; a transition note stays in the row's history
+  and isn't part of the ask. A longer draft goes at an https link in `evidenceRef`, which the ask carries. The person's answer returns the
+  row to the member in progress.
+- **The row came from a seat, or from a shared channel:** the member asks as a new row, to that seat, or for a channel's row to its rig's
+  lead (a shared channel takes correspondence and can't answer an ask). Then it sets its own row `blocked` on the new row's id. When the
+  question closes, the member's row returns to pending.
+- **The ask must fit one Slack message:** a summary and row body too long for one message aren't posted, so a longer draft goes in
+  `evidenceRef`.
 
 Either way the row reads blocked, not done, while it waits, and the member finishes that same row. Nothing promises to wake the
 member, so it checks its rows again.
 
 The server tells the member this in its MCP instructions. The text is versioned, so you can check which version a tool received:
 
-> Member workflow (member-workflow/v1). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (its source ends in @external), set it blocked with blockedOn that person, the question as its summary and your draft in note: their answer returns it to you in progress. Otherwise create an item to its source with your question and draft, then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
+> Member workflow (member-workflow/v1). Your inbox is the items addressed to your seat: rig_queue_list with owned set. It's yours, not the team's queue. A wake, a ring or a message only points at it: list your inbox, then act. For each item: claim it (rig_queue_claim), do it, then close it done with the answer in resolution (rig_queue_update), or hand it on (rig_queue_handoff). Listing or reading an item doesn't take it. If the person connected you, that's basically authorized: claim the items in your inbox and do them without asking whether you may. When an item needs a person's approval before you can finish it, don't close it and don't take the action: keep the item and ask. If it came from a person (an address ending in @external that isn't a shared channel; the item's 'Shared channel:' line names one), set it blocked with blockedOn that person and, as its summary, the question with a short form of what you'll do: the person sees the summary and the item, not your note, which keeps the record. Link a longer draft as an https evidenceRef. Their answer returns the item to you in progress. Otherwise ask as a new item, to the seat it came from or, for a shared channel's item, to your rig's lead (rig_team shows it), with your question and draft. Then set yours blocked with blockedOn that new qitemId: when that item closes, yours returns to pending, to claim again. Nothing promises to wake you, so check your inbox again. Then finish the same item; don't open a new one.
 
 ## Ring it when work lands
 
