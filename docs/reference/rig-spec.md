@@ -314,8 +314,11 @@ ambient `OPENRIG_YOLO` it replaces. With workspace-write, OpenRig still adds its
 and, on a fresh launch, git metadata folders; with read-only it adds no writable roots. It adds
 no network setting of its own. Codex's implicit roots (the working directory and temporary
 folders) still apply: this is a native sandbox and approval selection, not a complete
-filesystem or credential-isolation guarantee. The field is also supported on legacy flat
-Codex nodes; other runtimes reject it.
+filesystem or credential-isolation guarantee. OpenRig's tests prove these launch flags, not
+that Codex enforces them, so check the seat's actual behaviour before relying on a narrower
+envelope. An OpenRig older than 0.7.3 doesn't read a recorded envelope, so after a downgrade
+the seat launches without it. The field is also supported on legacy flat Codex nodes; other
+runtimes reject it.
 
 For an existing seat, put the envelope in a JSON file, or change its profile, with the existing
 audited permission command:

@@ -956,6 +956,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig seat` | — | — |
+| `rig seat history` | — | `--rig <id>` **required**<br>`--node-id <id>` **required**<br>`--snapshot-id <id>`<br>`--history-session-id <id>`<br>`--json` |
 | `rig seat set-typing-guard <seat>` | — | `--enabled <boolean>`<br>`--mode <mode>`<br>`--reason <text>` **required**<br>`--json` |
 | `rig seat held-messages <seat>` | — | `--limit <n>`<br>`--offset <n>`<br>`--id <id>`<br>`--json` |
 | `rig seat retire-held-message <seat> <id>` | — | `--reason <text>` **required**<br>`--json` |

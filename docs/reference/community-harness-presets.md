@@ -161,7 +161,8 @@ Agent's CLI.
 - **The preset:** it declares `names_conversation` but not `resume`, until reopening a named session, and a missing one,
   have been checked with a real Hermes.
 - **Stopping:** Hermes's CLI is a client of a gateway, so closing a seat's pane detaches it. Hermes finishes any turn it
-  accepted, and the seat's gateway exits once idle. The preset says so in its limits.
+  accepted. Whether the seat's gateway then exits once idle hasn't been checked: check with `ps` that a stopped seat's
+  gateway has gone before relying on it. The preset says so in its limits.
 
 Copy them and maintain them as your own.
 
@@ -182,7 +183,8 @@ OpenClaw's CLI.
 Copy the launcher and the preset for your mode, and maintain them as your own.
 
 **Stopping a community seat stops its pane.** `rig down` names those seats ("Pane stopped: …"), since a harness's own
-processes, a gateway say, may keep running after it. OpenRig doesn't stop them; each preset's limits say what to expect.
+processes, a gateway say, may keep running after it. OpenRig doesn't stop them, and whether they survive isn't exercised
+by OpenRig's tests, so check the harness's own processes after `rig down`. Each preset's limits say what to expect.
 
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.

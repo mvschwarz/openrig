@@ -147,8 +147,9 @@ issue's current status; a similar symptom alone is not a diagnosis.
   daemon, when its Codex configuration sets network access off, a managed requirement could restrict it, or Codex
   doesn't answer OpenRig's configuration read in time: [#275](https://github.com/mvschwarz/openrig/issues/275).
 - Kernel seats fail within a second of the first start on a distribution tmux whose server exits on `capture-pane`
-  (`tmux -V` prints `next-3.4`): [#980](https://github.com/mvschwarz/openrig/issues/980). The check and recovery
-  are in [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart).
+  (`tmux -V` prints `next-3.4`): [#980](https://github.com/mvschwarz/openrig/issues/980). `rig doctor` checks for
+  it (`tmux_capture`); the manual check and recovery are in
+  [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart).
 
 For everything else, search [open issues](https://github.com/mvschwarz/openrig/issues).
 

@@ -847,8 +847,10 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 
 **When the kernel's seats all fail at the first start.** A report on Oracle Linux 10
 ([#980](https://github.com/mvschwarz/openrig/issues/980)) traced this to the distribution's packaged tmux, whose
-`tmux -V` prints `next-3.4`: its server exited on every `capture-pane -p`, also outside OpenRig. To check your tmux on
-a throwaway socket, without touching your own sessions:
+`tmux -V` prints `next-3.4`: its server exited on every `capture-pane -p`, also outside OpenRig. `rig setup` (its tmux
+step) and `rig doctor` (`tmux_capture` in `rig doctor --json`) run this check for you on a throwaway server and name the
+fix when capture fails; they test what tmux does, not its version. To run it by hand, without touching your own
+sessions:
 
 ```sh
 tmux -L "openrig-check-$$" -f /dev/null new-session -d -s check
