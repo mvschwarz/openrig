@@ -193,6 +193,18 @@ it as the step to finish: sign in, then continue at step 3.
   otherwise, or when the width can't be measured, the dashboard is on its own page. `saved:kernel` in
   `rig terminal open saved:kernel` is the name of this saved view.
 
+## Learn it in this order
+
+1. **How OpenRig works:** [the world and its purpose](https://github.com/mvschwarz/openrig/blob/main/packages/daemon/assets/onboarding/01-world-and-purpose.md),
+   the first page a new agent in a team gets. It's written to agents, and it's the shortest account of rigs, seats and
+   queued work. Your install has the same page under `$(npm root -g)/@openrig/cli/daemon/assets/onboarding/`.
+2. **First use:** this page, and [what these words mean](#what-these-words-mean).
+3. **One command:** `rig <command> --help` is the exact answer for the version you have installed, and `rig --help`
+   lists every command.
+4. **Every command and flag:** the [CLI reference](https://github.com/mvschwarz/openrig/blob/main/docs/as-built/cli-reference.md).
+   It describes the source commit it names, so where it and your installed `--help` disagree, `--help` is right for
+   your version.
+
 ## More
 
 - **Every detail of setup:** troubleshooting, permissions, headless and SSH use, and what can stop the view from
