@@ -235,6 +235,14 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(result.warning).toMatch(/bookkeeping|receipt/i);
   });
 
+  it("keeps the MCP adapter's principal on the outbox row a draft-aware send writes", async () => {
+    const f = fixture(); await f.enable();
+    const principal = JSON.stringify({ source: "file", id: "alice" });
+    expect(await f.send("with-principal", "for alice", { identityProvenance: "principal:v1", identityPrincipal: principal })).toMatchObject({ ok: true, sent: true });
+    expect(f.db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM outbox_entries WHERE body = 'for alice'").all())
+      .toEqual([{ p: "principal:v1", who: principal }]);
+  });
+
   it("protects a human draft without claiming custody when its record cannot be saved", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "unfinished human input";
     f.db.exec("CREATE TRIGGER fail_held_receipt BEFORE UPDATE OF guard_delivery ON outbox_entries BEGIN SELECT RAISE(ABORT, 'fixture receipt unavailable'); END;");

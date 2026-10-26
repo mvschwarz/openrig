@@ -21,6 +21,7 @@ import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
+import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
 
@@ -151,6 +152,15 @@ describe("rig mcp serve --http on the daemon's routes", () => {
   });
 
   it("tells the daemon which grant's caller acted: concurrent callers' rows each carry their own principal, never one a caller sends", async () => {
+    // This host's own daemon, provably: the id it minted (read from its database) is the id its /healthz answers with.
+    const identity = path.join(home, "identity.sqlite");
+    const idDb = createDb(identity);
+    idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+    idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'test-host')").run();
+    idDb.close();
+    vi.stubEnv("OPENRIG_DB", identity);
+    setSelfHostId("test-host");
+    closers.push(async () => { setSelfHostId(null); vi.unstubAllEnvs(); });
     const alice = await grant("alice");
     const bob = await grant("bob");
     const served = await listen();

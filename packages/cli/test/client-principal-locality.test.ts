@@ -36,8 +36,8 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
     return sent[0]!;
   }
 
-  it("sends it with no direct endpoint configured, or to one that answers with this host's own id", async () => {
-    for (const headers of [await headersSent({}), await headersSent({ direct: true, endpointId: "this-host" })]) {
+  it("sends it to an endpoint that answers with this host's own id, configured or not", async () => {
+    for (const headers of [await headersSent({ endpointId: "this-host" }), await headersSent({ direct: true, endpointId: "this-host" })]) {
       expect(headers["X-OpenRig-Principal"]).toBe(JSON.stringify(PRINCIPAL));
       expect(headers["X-OpenRig-Session"]).toBe("alice@team");
     }
@@ -47,6 +47,9 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
     for (const headers of [
       await headersSent({ direct: true, endpointId: "other-host" }),
       await headersSent({ direct: true }),
+      // rig mcp serve --port <forwarded port>: no OPENRIG_URL, an explicit loopback URL that reaches another instance.
+      await headersSent({ endpointId: "other-host" }),
+      await headersSent({}),
       await headersSent({ remote: true }),
     ]) {
       expect(headers["X-OpenRig-Principal"]).toBeUndefined();

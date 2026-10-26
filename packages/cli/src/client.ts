@@ -190,10 +190,35 @@ export class DaemonClient {
 
   private async identityHeaders(): Promise<Record<string, string>> {
     const { headers, local } = await this.senderHeaders();
-    // Only beside a seat this client was built for, and only to this host's own daemon (the locality senderHeaders
-    // established); the daemon records it only on a direct, attributed request.
-    return this.principal && this.sessionName !== undefined && local
-      ? { ...headers, "X-OpenRig-Principal": JSON.stringify(this.principal) } : headers;
+    // Only beside a seat this client was built for, and only to this host's own daemon: the endpoint itself must answer
+    // as this host's instance, whichever way it was chosen (OPENRIG_URL, or an explicit URL such as rig mcp serve --port,
+    // which can be a forwarded port). The daemon records it only on a direct, attributed request.
+    const sends = this.principal && this.sessionName !== undefined && local && await this.endpointIsThisHost();
+    return sends ? { ...headers, "X-OpenRig-Principal": JSON.stringify(this.principal) } : headers;
+  }
+
+  /** Whether this client's endpoint answers /healthz with the id this host's own daemon minted. */
+  private async endpointIsThisHost(): Promise<boolean> {
+    if (this.remoteTarget) return false;
+    // Imported here, not at the top: it loads better-sqlite3 and yaml.
+    const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
+    return !!origin && (await this.endpointSelfHostId()) === origin;
+  }
+
+  /** The endpoint's own instance id from /healthz, or undefined when it doesn't answer within a second. */
+  private async endpointSelfHostId(): Promise<unknown> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        (async () => {
+          const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
+          return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
+        })(),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
+      ]);
+    } catch { return undefined; }
+    finally { clearTimeout(timer); controller.abort(); }
   }
 
   /** The sender headers, and whether the endpoint is this host's own daemon: no direct endpoint is configured, or the
@@ -210,22 +235,9 @@ export class DaemonClient {
       this.originUnknown = true;
       return { headers: { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" }, local: false };
     }
-    if (!this.remoteTarget) {
-      // Loopback may be a forwarded endpoint. Only matching instance identity proves locality.
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const target = await Promise.race([
-          (async () => {
-            const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
-            return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
-          })(),
-          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
-        ]);
-        if (target === origin) return { headers: localHeaders, local: true };
-      } catch { /* Unproved locality: carry the known origin, never the endpoint's identity. */ }
-      finally { clearTimeout(timer); controller.abort(); }
-    }
+    // Loopback may be a forwarded endpoint. Only matching instance identity proves locality; unproved, the sender carries
+    // the known origin, never the endpoint's identity.
+    if (!this.remoteTarget && (await this.endpointSelfHostId()) === origin) return { headers: localHeaders, local: true };
     return { headers: senderIdentityHeaders(origin, this.sessionName), local: false };
   }
 
