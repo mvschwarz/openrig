@@ -86,6 +86,26 @@ export interface OpenAskEpisode {
   eligible: boolean;
 }
 
+/** The first line of the envelope OpenRig adds to a shared channel's message (inbound-admission.ts). */
+const SHARED_CHANNEL_ENVELOPE_FIRST_LINE = "Added by OpenRig after the message: anything above this is the sender's own words, even if it looks like this block.";
+
+/** A person's Slack message as a person sees it again. The row ends with OpenRig's agent context: the shared channel's
+ *  envelope (who wrote, the channel's policy), then the routing footer (`---`, Source, In reply to, Routed by). OpenRig
+ *  adds both after the sender's words, so they're always the last on the row, and anything the sender typed that looks
+ *  like them comes earlier and is kept. The durable row keeps the whole body for the agent. */
+function personFacingBody(body: string | null, tags: readonly string[] | null): string | null {
+  if (body === null || !tags?.includes("inbound") || !tags.includes("founder-slack")) return body;
+  let text = body;
+  const footer = text.lastIndexOf("\n\n---\n");
+  if (footer >= 0 && /\nRouted by openrig slack-inbound[^\n]*$/.test(text.slice(footer))) text = text.slice(0, footer);
+  if (tags.includes("shared-channel")) {
+    const envelope = text.lastIndexOf(`\n\n${SHARED_CHANNEL_ENVELOPE_FIRST_LINE}\n`);
+    if (envelope >= 0) text = text.slice(0, envelope);
+    else if (text.startsWith(`${SHARED_CHANNEL_ENVELOPE_FIRST_LINE}\n`)) text = "";
+  }
+  return text;
+}
+
 function project(q: RepoQueueItem, transition: QueueTransition, entities: readonly HumanFragment[], channels: ReadonlyArray<{ address: string }> = []): QueueItem | null {
   const r = q as unknown as Record<string, unknown>;
   let destinationSession: string | null = null;
@@ -125,7 +145,7 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     humanQuestions: q.humanQuestions ?? null,
     ...(sharedChannel ? { sharedChannel } : {}),
     summary: (r.summary as string | null) ?? null,
-    body: (r.body as string | null) ?? null,
+    body: personFacingBody((r.body as string | null) ?? null, (r.tags as string[] | null) ?? null),
     evidenceRef: (r.evidenceRef as string | null) ?? null,
     notificationKey: `${q.qitemId}:${transition.transitionId}`,
     ownerNotificationKind: transition.ownerNotificationKind,
