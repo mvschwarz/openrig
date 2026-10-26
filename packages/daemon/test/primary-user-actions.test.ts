@@ -239,6 +239,20 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
       expect(repo.getById(work.qitemId)).toMatchObject({ state: "blocked", blockedOn: CHANNEL });
     });
 
+    it("without the authority, a channel can't drop, hold, route or hand off a row either; with it, the person at the terminal acts", async () => {
+      addChannel();
+      for (const body of [{ verb: "drop", reason: "spam" }, { verb: "hold", reason: "later" }, { verb: "route", destinationSession: "support@rig" },
+        { verb: "handoff", destinationSession: "support@rig" }]) {
+        const row = await ask(CHANNEL);
+        expect(await act({ qitemId: row.qitemId, actorSession: CHANNEL, ...body }), body.verb)
+          .toMatchObject({ status: 400, body: { error: "answer_not_recorded", channel: CHANNEL } });
+        expect(repo.getById(row.qitemId)?.state, body.verb).toBe("pending");
+      }
+      const dropped = await ask(CHANNEL);
+      expect((await act({ verb: "drop", qitemId: dropped.qitemId, actorSession: CHANNEL, authority: "primary-user", reason: "spam" })).status).toBe(200);
+      expect(audit(dropped.qitemId)).toMatchObject({ verb: "drop", actor: "human@host" });
+    });
+
     it("leaves the legacy human seat as it was when a channel is registered", async () => {
       addChannel();
       const legacy = await ask("human@host");
