@@ -185,7 +185,11 @@ export class OpenRouterChargeLookup {
   private async flushAlone(): Promise<void> {
     if (this.running) return; // the pump in progress flushes on its own
     this.running = true;
-    try { await this.flush(); } finally { this.running = false; }
+    try { await this.flush(); } finally {
+      this.running = false;
+      // A retry that came due during this post found the pump busy and only queued itself: run it now.
+      if (this.queue.length > 0) void this.pump();
+    }
   }
 
   private async lookUp(p: Pending): Promise<PiProviderCharge | "retry"> {

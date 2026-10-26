@@ -455,6 +455,22 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     expect(p.timers).toEqual([]);
   });
 
+  it("a lookup retry that comes due while a re-post is in flight is looked up once the re-post ends", async () => {
+    let up = false;
+    const p = pipeline({ postChargesOk: () => up, replies: (id, n) => id === "gen-x-2" && n === 1 ? { status: 404, body: null } : generation(id, 0.5) });
+    // a1 is charged but its post fails (a re-post is scheduled first); a2 isn't there yet (its retry is scheduled after).
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.02, responseId: "gen-x-2" })]);
+    expect(p.timers).toHaveLength(2);
+    up = true;
+    await p.runTimers(); // the re-post starts, then a2's retry fires while it's still posting; no new usage fact follows
+    await p.runTimers();
+    expect(p.lookups).toEqual(["gen-x-1", "gen-x-2", "gen-x-2"]);
+    expect(p.rows()).toEqual([
+      expect.objectContaining({ entry_id: "a1", status: "charged" }),
+      expect.objectContaining({ entry_id: "a2", status: "charged" }),
+    ]);
+  });
+
   it("a reply field that reflects the key is never stored or shown", async () => {
     const key = "sk-or-fixture-secret";
     const fake = (async () => new Response(JSON.stringify(generation("gen-x-1", 0.5, { model: `echo ${key}`, workspace_id: key }).body), { status: 200 })) as unknown as typeof fetch;
