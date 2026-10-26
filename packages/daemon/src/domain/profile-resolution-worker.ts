@@ -5,10 +5,10 @@ import { resolveNodeConfig, type ResolutionContext, type ResolutionResult } from
 
 // Keep the resolver's filesystem and catalog semantics in one place. In particular, a missing named skill can
 // require a full library scan, and catalog inspection runs synchronous git commands. Neither belongs on the
-// daemon's request thread during preflight (#1653). Reuse the imported module within a preflight. Its members share
-// the raw catalog scan and the full skill-scan fallback, keyed by the context's scanScope and dropped when the
-// preflight ends; the named-skill lookup and each member's own resolution read fresh. Never cache across
-// preflights, or by a root directory's mtime.
+// daemon's request thread during preflight or member launch (#1653). Reuse the imported module within an operation.
+// Preflight members share raw catalog scans and full skill-scan fallbacks through the context's scanScope, dropped
+// when preflight ends; named-skill lookups and each member's own resolution read fresh. Launch leaves scanScope
+// unset so an earlier member's startup cannot make later reads stale. Never cache across operations or by root mtime.
 const SOURCE = new URL(`data:text/javascript,${encodeURIComponent(`
 import { parentPort, workerData } from "node:worker_threads";
 let resolver;
@@ -22,7 +22,7 @@ parentPort.on("message", async ({ id, context }) => {
 
 type Resolve = (context: ResolutionContext) => Promise<ResolutionResult>;
 
-/** One lazy worker per preflight, never a persistent daemon-wide cache or one worker per member. */
+/** One lazy worker per scoped operation, terminated on success or failure; never a daemon-wide cache. */
 export async function withNodeConfigResolver<T>(run: (resolve: Resolve) => Promise<T>): Promise<T> {
   let worker: Worker | undefined;
   let failure: Error | undefined;

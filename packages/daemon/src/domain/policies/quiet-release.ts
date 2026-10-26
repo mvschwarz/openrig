@@ -114,14 +114,33 @@ export async function releaseVerdict(input: {
   alerts?: QueueItem[];
 }): Promise<ReleaseVerdict> {
   let quiet: ReturnType<typeof quietHoldFor>;
-  let alerts: QueueItem[] | null;
   try {
     quiet = quietHoldFor(input.queueRepo.db, input.entityId, input.now);
-    alerts = quiet ? [] : input.alerts ?? await currentAlerts(input.queueRepo, input.home, input.registry);
   } catch (error) {
     return { kind: "unavailable", detail: (error as Error).message };
   }
   if (quiet) return { kind: "quiet", windowId: quiet.windowId };
+  return currentAskVerdict(input);
+}
+
+/** Whether this episode is still the person's current alert, quiet hours aside: the row, the recipient and the posting
+ *  threshold as they are now. An ask shown again after enable (`rig slack post-open-asks`) is checked with this at post
+ *  time, and then goes through ordinary delivery, which decides quiet hours itself. */
+export async function currentAskVerdict(input: {
+  queueRepo: QueueRepository;
+  home: string;
+  registry: RunQuietReleaseInput["registry"];
+  entityId: string;
+  qitemId: string;
+  notificationKey: string;
+  alerts?: QueueItem[];
+}): Promise<Exclude<ReleaseVerdict, { kind: "quiet" }>> {
+  let alerts: QueueItem[] | null;
+  try {
+    alerts = input.alerts ?? await currentAlerts(input.queueRepo, input.home, input.registry);
+  } catch (error) {
+    return { kind: "unavailable", detail: (error as Error).message };
+  }
   if (!alerts) return { kind: "unavailable", detail: "the human registry couldn't be loaded" };
   const alert = alerts.find((a) => (a.notificationKey ?? a.qitemId) === input.notificationKey);
   if (alert && (alert.destinationSession ?? "").split("@")[0] === input.entityId) return { kind: "post", alert };

@@ -16,6 +16,7 @@ import type { QueueRepository } from "../domain/queue-repository.js";
 import { loadConfig, saveConfig } from "../domain/gateway/slack/config.js";
 import { SeenStore } from "../domain/gateway/slack/state-store.js";
 import { makeQueuePorts, seedBacklogAsHistory } from "../domain/gateway/slack/queue-access.js";
+import { postOpenAsks } from "../domain/gateway/slack/open-asks.js";
 import { DispatchBuffer } from "../domain/gateway/dispatch-buffer.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { loadHumanRegistry } from "../domain/gateway/human-registry.js";
@@ -35,6 +36,7 @@ import { armModeScheduledEnd } from "../domain/policies/mode-scheduled-end.js";
 interface SubsystemHandle {
   restart: () => void;
   status: () => Record<string, unknown>;
+  dispatch?: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => { ok: true; decisionId: string } | { ok: false; error: string };
   connectorStatus?: () => Record<string, unknown>;
   acceptForwarded?: (env: unknown) => Promise<{ status: string; reason?: string } | null>;
 }
@@ -255,6 +257,45 @@ export function gatewayRoutes(opts: {
     const ended = modes.end(entityId, reason, actor);
     return { ended, atDesk: modes.current(entityId) === null, unresolved: modes.unresolved(entityId) };
   }));
+
+  // Slack slice 05 (#1679): show the asks still open that enable seeded as history, through ordinary delivery, and say
+  // what became of each. Run after enable; enable itself is unchanged. Recorded like enable, with its actor and reason.
+  // Registered before /slack/:operation, which answers any other operation with 404.
+  app.post("/slack/post-open-asks", async (c) => {
+    const body = (await c.req.json<{ actor?: string; reason?: string; waitSeconds?: number }>().catch(() => ({} as { actor?: string; reason?: string; waitSeconds?: number }))) ?? {};
+    const actor = requireSenderIdentity(c, { verb: "slack post-open-asks", bodyClaim: typeof body.actor === "string" ? body.actor : null });
+    if (!actor.ok) return actor.response;
+    const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    if (!subsystem?.dispatch || !queueRepo) return c.json({ error: "gateway_admin_unavailable" }, 503);
+    const home = opts.home ?? OPENRIG_HOME;
+    const status = subsystem.status();
+    const outboundReady = (status.connector as { outboundReady?: unknown } | undefined)?.outboundReady === true;
+    if (!loadConfig(home).enabled || status.state !== "active" || !outboundReady) {
+      return c.json({ error: "slack_not_posting", message: loadConfig(home).enabled
+        ? "Slack is enabled here but can't post yet (rig slack status says why), so no ask was shown."
+        : "Slack isn't enabled on this machine, so no ask was shown. Run rig slack enable first, then this." }, 409);
+    }
+    const registry = loadHumanRegistry(home);
+    if (!registry.ok) return c.json({ error: "human_registry_unavailable", message: `Can't tell whose asks are open: ${registry.error}` }, 503);
+    const waitSeconds = typeof body.waitSeconds === "number" && body.waitSeconds >= 0 ? Math.min(body.waitSeconds, 60) : 10;
+    const pending = adminTail.then(() => runChannelOperation({
+      action: "post-open-asks", subject: "slack", actor: actor.session, provenance: actor.provenance,
+      reason: (typeof body.reason === "string" && body.reason.trim()) || "show the asks still open after enable",
+      before: { enabled: true, active: true },
+      run: async () => {
+        const value = await postOpenAsks({
+          queueRepo, home, loadHumanRegistry: () => registry, minimumLevelThatPosts: loadConfig(home).minimumLevelThatPosts,
+          dispatch: (op, ref, payload, o) => subsystem.dispatch!(op, ref, payload, o), actor: actor.session, waitMs: waitSeconds * 1000,
+        });
+        return { value, after: { enabled: loadConfig(home).enabled, active: subsystem.status().state === "active" },
+          effect: value.asks.some((a) => a.reshown) ? "applied" as const : "no-op" as const };
+      },
+    }, home));
+    adminTail = pending.catch(() => undefined);
+    const result = await pending;
+    return c.json({ ok: true, ...result.value, receipt: result.receipt });
+  });
 
   app.post("/slack/:operation", async (c) => {
     const operation = c.req.param("operation");

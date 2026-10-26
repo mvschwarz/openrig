@@ -4,6 +4,26 @@ A community harness is a coding harness an outside contributor maintains. You in
 rig member runs it by naming it as its `runtime`. OpenRig doesn't test these harnesses. It shows them as community
 harnesses, and it reads their activity only from what the screen shows.
 
+## What a community harness gets
+
+What OpenRig does for a community-harness seat, capability by capability. **Partly** and **no** mean OpenRig shows that it doesn't know;
+it never reads an unsupported capability as idle, working, ready or verified.
+
+| Capability | Supported | How it works, or what you see instead |
+|---|---|---|
+| Launch | yes | OpenRig types the preset's `command` into the seat's pane, with its variables passed through `/usr/bin/env`. The seat reads as ready once something other than a shell runs in the pane; that's a process check, not proof of which conversation it runs. With `startup_assisted`, the seat reports attention required until a person checks it. |
+| Delivery | yes | `rig send` and queue wakes paste the text into the pane and press Enter, as for any seat. A pane that's back at a shell is refused (`target_runtime_unverified`) and nothing is typed. OpenRig doesn't confirm the harness took the message; `rig send --verify` checks the pane afterwards. |
+| Identity | when declared | With `launch_result`, the conversation is shown as reported by its launcher; with `names_conversation`, as named by OpenRig. Neither is observed by OpenRig. Without either, the identity is unavailable. |
+| Resume | when declared | `resume: true` with one of the two above (see [Reopening a conversation](#reopening-a-conversation-resume-true)). Without it, a resume says `Resume is unsupported: community harness "<name>" is launch-only`, and a restore stops and asks. |
+| Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. |
+| Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
+| Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. |
+| Cancel | no | OpenRig has no verb that cancels a running turn. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
+| Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
+
+**Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
+configuration.
+
 ## The preset
 
 One YAML file per harness: `$OPENRIG_HOME/community-harnesses/<name>.yaml`. `rig community-harness list` shows what's
@@ -159,6 +179,9 @@ OpenClaw's CLI.
 
 Copy the launcher and the preset for your mode, and maintain them as your own.
 
+**Stopping a community seat stops its pane.** `rig down` names those seats ("Pane stopped: …"), since a harness's own
+processes, a gateway say, may keep running after it. OpenRig doesn't stop them; each preset's limits say what to expect.
+
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.
 
@@ -193,3 +216,47 @@ The contributor-owned launcher reads the file and uses its harness’s supported
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 
 Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.
+
+## Write your own
+
+Start from the example closest to your harness, and change it.
+
+1. **Choose how the conversation is named.**
+   - **Your harness creates an id you can read before it starts,** as Cursor's `create-chat` does: declare `launch_result: true`, and the
+     launcher writes the record.
+   - **Your harness takes a name from its caller and creates or reopens it,** as Hermes's `-c <name>` and OpenClaw's session key do: declare
+     `names_conversation: true`, and the launcher passes `OPENRIG_CONVERSATION` on.
+   - **Neither:** leave both out. The seat starts and works, its identity shows as unavailable, and it can't be resumed.
+2. **Write the launcher:** a small script your package installs on the seat's `PATH`. It reads OpenRig's variables, starts the harness with
+   `exec`, and does nothing else.
+   - `OPENRIG_CONVERSATION` with `names_conversation`, or `OPENRIG_LAUNCH_RESULT` and `OPENRIG_LAUNCH_ATTEMPT` with `launch_result`.
+   - **On a resume,** `OPENRIG_RESUME_REF`: reopen exactly that conversation. Check that it exists first, and when it doesn't, end with an
+     error (or report `error: "missing"`) instead of creating one.
+   - **With `first_input: true`,** `OPENRIG_FIRST_INPUT`: pass the file's exact bytes through your harness's own first-prompt route.
+   - **Keep each seat's harness state apart** (Cursor's config folder, Hermes's home, OpenClaw's state folder), so two seats never share a
+     conversation.
+3. **Write the preset** at `$OPENRIG_HOME/community-harnesses/<name>.yaml`, and check it with `rig community-harness list`.
+   - Declare `resume` only after checking, with the real harness, that a reopen works and that a missing conversation is refused.
+   - List what doesn't work under `limits`.
+4. **Try it in a rig:** give a member `runtime: <name>`, then go through the checks in the promotion test below.
+5. **Publish the preset and the launcher in your own package,** and maintain them. OpenRig runs no code from a preset, so the launcher is
+   yours.
+
+## The promotion test
+
+A community harness stays a community harness: you maintain it, and OpenRig shows it as one. **Promotion** means OpenRig takes a harness on
+as a built-in runtime that it maintains and tests itself. **Promotion is decided by the OpenRig maintainers, on evidence from OpenRig's own
+testing.** Passing these checks isn't automatic promotion, and it isn't a promise of upstream support.
+
+What the maintainers look at:
+1. **Everything the preset declares works on a real install,** end to end through OpenRig:
+   - a seat starts and takes its first turn (`rig up`);
+   - a message arrives (`rig send`), and the reply can be read (`rig capture`);
+   - the seat stops (`rig down`) without leaving work running that the person can't see, or the preset's `limits` say what keeps running;
+   - with `resume`, `rig up <rig> --existing` reopens the same conversation, and a missing one is refused, never replaced.
+2. **What it doesn't support reads as not known,** never as idle, working, ready or verified.
+3. **Its `limits` are true,** and name anything a person would otherwise be surprised by.
+4. **The built-in runtimes are unchanged.**
+5. **It's maintained:** a named maintainer, and a launcher that keeps working with the harness's current release.
+
+There's no score or threshold. The maintainers weigh the evidence.

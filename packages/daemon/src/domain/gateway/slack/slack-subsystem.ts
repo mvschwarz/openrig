@@ -59,7 +59,8 @@ import {
   type DeliveryDecision,
 } from "../delivery-rules-engine.js";
 import { armDeliveryDeferral } from "../../policies/delivery-deferral.js";
-import { confirmReleaseAtPost, holdForQuiet } from "../../policies/quiet-release.js";
+import { confirmReleaseAtPost, currentAskVerdict, holdForQuiet } from "../../policies/quiet-release.js";
+import { noteRePresentNotPosted, RE_PRESENT_DECISION_PREFIX } from "./open-asks.js";
 import { quietHoldFor } from "../human-quiet-windows.js";
 import { WatchdogJobsRepository } from "../../watchdog-jobs-repository.js";
 
@@ -806,6 +807,49 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       releaseRef(p.qitemId);
       return { ok: true as const };
     }
+    // An open ask shown again after enable (`rig slack post-open-asks`): checked here, at post time, against the row, the
+    // recipient and the posting threshold as they are now, then delivered like any fresh ask below (the delivery rules,
+    // quiet hours, digest, thread). One that's no longer current, or can't be checked, posts nothing and its row says why,
+    // unless an earlier attempt of it may already be in Slack (below).
+    if (decision.decisionId.startsWith(RE_PRESENT_DECISION_PREFIX) && p.qitemId) {
+      const key = p.notificationKey ?? p.qitemId;
+      if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, key)) {
+        releaseRef(key);
+        return { ok: true as const };
+      }
+      // Whether an earlier attempt can be in Slack is read from the attempt log, which the landing check below reads
+      // leniently. A log that exists but can't be read is unknown, not "never attempted": the decision stays in the buffer,
+      // with no post (delivery's reconcile reads the same log) and no not-posted record, until it reads.
+      try {
+        attempted.statuses();
+      } catch (error) {
+        log(`re-shown ${decision.decisionId} retained: the attempt log couldn't be read (${(error as Error).message})`);
+        return { ok: false as const, class: "re-present-attempt-log-unreadable", detail: (error as Error).message };
+      }
+      // An earlier attempt of this decision found in Slack goes to delivery, which records it.
+      const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
+      if (landing === "found" || landing === "partial") return deliver(decision);
+      const verdict = await currentAskVerdict({
+        queueRepo: opts.queueRepo,
+        home: opts.home,
+        registry: { loadHumanRegistry: () => registrySurface.loadHumanRegistry(opts.home) },
+        entityId: (p.destinationSession ?? "").split("@")[0] ?? "",
+        qitemId: p.qitemId,
+        notificationKey: key,
+      });
+      if (verdict.kind !== "post") {
+        // One whose earlier attempt Slack couldn't rule out may already be posted: it's never recorded as not posted, and
+        // it stays in the buffer, so its replay decides again (and reconciles) instead of the uncertainty being dropped.
+        if (landing === "maybe") {
+          const why = verdict.kind === "unavailable" ? verdict.detail : verdict.reason;
+          log(`re-shown ${decision.decisionId} retained: an earlier attempt may be in Slack, and it can't go on now (${why})`);
+          return { ok: false as const, class: "re-present-earlier-attempt-unconfirmed", detail: why };
+        }
+        noteRePresentNotPosted(opts.queueRepo, p.qitemId, key, verdict);
+        releaseRef(key);
+        return { ok: true as const };
+      }
+    }
     if (p.deliveryDeferralFire) {
       const fireKey = p.notificationKey ?? p.qitemId;
       if (p.qitemId && opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(p.qitemId, fireKey)) {
@@ -836,6 +880,11 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // The decision couldn't be made (for example the person's quiet hours couldn't be read): post nothing and record
       // nothing. Releasing the in-flight guard lets the outbound sweep offer this still-unseen ask again and decide afresh.
       log(`delivery decision for ${p.qitemId} deferred: ${(error as Error).message}`);
+      // A re-shown ask is seen, so no sweep offers it again: its row says it wasn't posted, and the person who ran
+      // `rig slack post-open-asks` runs it again once the state reads (same decision id).
+      if (decision.decisionId.startsWith(RE_PRESENT_DECISION_PREFIX) && p.qitemId) {
+        noteRePresentNotPosted(opts.queueRepo, p.qitemId, p.notificationKey ?? p.qitemId, { kind: "unavailable", detail: (error as Error).message });
+      }
       // Released by notification key, the guard's own key: nothing marks this ask seen, so the next sweep must see it.
       releaseRef(p.notificationKey ?? p.qitemId!);
       return { ok: true as const };

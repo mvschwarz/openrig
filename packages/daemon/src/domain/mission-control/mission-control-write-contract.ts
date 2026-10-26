@@ -54,7 +54,7 @@ import { resolveDefaultPerson } from "../gateway/participants.js";
 
 /** The primary user when several people are registered and none is the default, or when no one is registered and the
  *  claimed actor is a shared channel: the generic human seat the web UI also records. */
-const UNNAMED_PRIMARY_USER = "human@host";
+export const UNNAMED_PRIMARY_USER = "human@host";
 /** Verbs that settle what a person was asked. */
 const SETTLING_VERBS = new Set<MissionControlVerb>(["approve", "deny", "resolve", "answer"]);
 
@@ -324,6 +324,9 @@ export class MissionControlWriteContract {
       );
     }
     const source = this.requireMutableQitem(input.qitemId);
+    // The same actor rule as every other verb: a channel never annotates, and the terminal's authority names the primary
+    // user. An annotation settles no ask.
+    input = this.asActor(input, null).input;
     const snapshot = snapshotQitem(source);
     const evaluatedAt = this.now().toISOString();
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
@@ -627,15 +630,15 @@ export class MissionControlWriteContract {
    * several people and none chosen, the generic human seat. With no one registered it's the claimed actor, as before,
    * unless that's a shared channel: then it's the generic human seat. The audit notes record the authority and the person
    * asked, and the transition says so when they differ. Without it, a registered person can't settle what was asked of
-   * another registered person: that's someone else's answer. A shared channel never settles anything: its messages are
-   * correspondence, so the asking seat or the person at the terminal settles a channel's ask.
+   * another registered person: that's someone else's answer. A shared channel never acts on a row, for any verb: its
+   * messages are correspondence, so the asking seat or the person at the terminal acts on a channel's row.
    */
   private asActor(input: MissionControlActionInput, asked: string | null): { input: MissionControlActionInput; note: string } {
     const channel = this.queueRepo.isSharedChannel(input.actorSession);
     if (input.authority !== "primary-user") {
-      if (channel && SETTLING_VERBS.has(input.verb)) {
+      if (channel) {
         throw new MissionControlWriteContractError("answer_not_recorded",
-          `${input.actorSession} is a shared channel, and a channel's messages never settle an ask, so nothing was recorded on qitem ${input.qitemId}. The asking seat or the person at the terminal settles it.`,
+          `${input.actorSession} is a shared channel, and a channel never acts on a row: its messages are correspondence. Nothing was recorded on qitem ${input.qitemId}; the asking seat or the person at the terminal acts on it.`,
           { qitemId: input.qitemId, channel: input.actorSession });
       }
       const someoneElse = SETTLING_VERBS.has(input.verb) ? this.queueRepo.askedSomeoneElse(input.actorSession, asked) : null;

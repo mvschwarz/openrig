@@ -17,6 +17,9 @@ import os from "node:os";
 import path from "node:path";
 import { checkRunningNameGuard, makeRunningSessionCounter, confirmStoppedGenerations } from "../src/domain/running-name-guard.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
 
@@ -63,6 +66,55 @@ describe("RigTeardownOrchestrator", () => {
   afterEach(() => {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")("community contract: stop and down remove only their panes, leaving a sibling session untouched", async () => {
+    // Stay inside CI's IPC allowlist, with a short path for macOS sockaddr_un.
+    const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), "h1-"));
+    const socket = "community";
+    const env = { ...process.env, TMUX_TMPDIR: socketDir };
+    delete env.TMUX;
+    const exec = promisify(execFile);
+    const tmux = async (...args: string[]) => (await exec("tmux", ["-L", socket, "-f", "/dev/null", ...args], { env, timeout: 3000 })).stdout;
+    const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell execution"); }, undefined,
+      async argv => tmux(...argv.slice(1)));
+    try {
+      const targetRig = rigRepo.createRig("community-target");
+      const siblingRig = rigRepo.createRig("community-sibling");
+      const seed = async (rigId: string, name: string) => {
+        const node = rigRepo.addNode(rigId, "dev.worker", { runtime: "synth", cwd: tmpDir });
+        const session = sessionRegistry.registerSession(node.id, name);
+        sessionRegistry.recordCommunityHarnessSelection(session.id, "synth");
+        sessionRegistry.updateStatus(session.id, "running");
+        sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: name });
+        await tmux("new-session", "-d", "-s", name, "sleep 60");
+        return { node, session };
+      };
+      const target = await seed(targetRig.id, "worker@community-target");
+      const sibling = await seed(siblingRig.id, "worker@community-sibling");
+      const siblingBefore = db.prepare("SELECT * FROM sessions WHERE id=?").get(sibling.session.id);
+      const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter });
+      expect(await lifecycle.stopSeat({ seatRef: "worker@community-target", reason: "contract stop test" })).toMatchObject({ ok: true });
+      expect(await adapter.hasSession("worker@community-target")).toBe(false);
+      expect(await adapter.hasSession("worker@community-sibling")).toBe(true);
+      // A later normal down of the target rig must have the same ownership boundary.
+      await tmux("new-session", "-d", "-s", "worker@community-target", "sleep 60");
+      sessionRegistry.updateStatus(target.session.id, "running");
+      sessionRegistry.updateBinding(target.node.id, { attachmentType: "tmux", tmuxSession: "worker@community-target" });
+      const teardown = new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus,
+        tmuxAdapter: adapter, snapshotCapture: mockSnapshotCapture(db) });
+      expect(await teardown.teardown(targetRig.id, { snapshot: false })).toMatchObject({ errors: [], sessionsKilled: 1,
+        paneOnly: ["worker@community-target"] });
+      expect(await adapter.hasSession("worker@community-target")).toBe(false);
+      expect(await adapter.hasSession("worker@community-sibling")).toBe(true);
+      expect(db.prepare("SELECT * FROM sessions WHERE id=?").get(sibling.session.id)).toEqual(siblingBefore);
+    } finally {
+      try { await tmux("kill-server"); }
+      catch (error) {
+        if (!/no server running|No such file or directory/.test(String((error as { stderr?: string }).stderr))) throw error;
+      }
+      fs.rmSync(socketDir, { recursive: true, force: true });
+    }
   });
 
   function seedRig(): { rigId: string; nodeId: string; sessionId: string } {
@@ -674,6 +726,21 @@ describe("RigTeardownOrchestrator", () => {
     expect(tmux.probeSession).not.toHaveBeenCalledWith("desktop@test-rig");
     expect(tmux.killSession).not.toHaveBeenCalledWith("desktop@test-rig");
     expect(result).toMatchObject({ sessionsKilled: 1, errors: [], deleted: del, leftRunning: ["desktop@test-rig"] });
+  });
+
+  it("names the community-harness seats whose pane it stopped, since the harness's own processes may outlive it", async () => {
+    const { rigId } = seedRigWithNode({ runtime: "claude-code", cwd: "/tmp" });
+    const hermes = rigRepo.addNode(rigId, "hermes", { runtime: "synth-harness" });
+    const launched = sessionRegistry.registerSession(hermes.id, "hermes@test-rig");
+    sessionRegistry.updateStatus(launched.id, "running");
+    sessionRegistry.recordCommunityHarnessSelection(launched.id, "synth-harness");
+    // A free-text runtime with a preset's name, never launched for that preset, isn't one.
+    const namesake = rigRepo.addNode(rigId, "namesake", { runtime: "synth-harness" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(namesake.id, "namesake@test-rig").id, "running");
+
+    const result = await buildTeardown().teardown(rigId);
+
+    expect(result).toMatchObject({ sessionsKilled: 3, errors: [], paneOnly: ["hermes@test-rig"] });
   });
 
   // T13: Stale session (tmux gone) -> benign

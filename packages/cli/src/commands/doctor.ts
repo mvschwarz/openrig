@@ -13,7 +13,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
-import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -31,7 +31,8 @@ export interface DoctorDeps {
   exists: (p: string) => boolean;
   baseDir: string;
   readFile: (path: string) => string | null;
-  exec: (cmd: string) => string;
+  /** `timeoutMs` bounds one command; without it a command runs to completion, as before. */
+  exec: (cmd: string, opts?: { timeoutMs?: number }) => string;
   checkPort: (port: number, host: string) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
   platform?: NodeJS.Platform;
@@ -128,6 +129,16 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     });
   } else if (tmuxProbe.available && tmuxProbe.version) {
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
+    // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    if (capture.status === "fail") {
+      const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
+      checks.push({ name: "tmux_capture", status: "fail", message: failure.message, reason: failure.reason, fix: failure.fix });
+    } else {
+      checks.push(capture.status === "pass"
+        ? { name: "tmux_capture", status: "pass", message: "tmux can capture a pane (checked on a throwaway server)." }
+        : { name: "tmux_capture", status: "skipped", message: `Couldn't start a throwaway tmux server to check capture-pane: ${capture.detail}` });
+    }
     if (platform === "darwin") {
       const mouseMode = readTmuxMouseMode(deps);
       if (mouseMode === "on") {
@@ -384,6 +395,12 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
   };
 }
 
+/** The standalone doctor's command runner. A command with `timeoutMs` is bounded (the tmux capture probe passes one); others
+ *  run to completion, as before. */
+export function doctorExec(c: string, opts?: { timeoutMs?: number }): string {
+  return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
+}
+
 function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {
   try {
     const mode = deps.exec("tmux show-options -gqv mouse").trim().toLowerCase();
@@ -427,7 +444,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         exists: existsSync,
         baseDir: import.meta.dirname,
         readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
-        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }),
+        exec: doctorExec,
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),

@@ -278,6 +278,58 @@ describe("rig export + import", () => {
     expect(output).not.toContain("optional-start.md");
   });
 
+  it("export: checks required pod startup files in the output folder without duplicate warnings", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-pod-files-"));
+    const source = path.join(root, "source"), out = path.join(root, "out");
+    fs.mkdirSync(source);
+    fs.mkdirSync(out);
+    for (const file of ["shared.md", "pod.md", "present.md"]) fs.writeFileSync(path.join(source, file), file);
+    fs.copyFileSync(path.join(source, "present.md"), path.join(out, "present.md"));
+    const yaml = `version: '0.2'
+name: pod-files
+startup:
+  files:
+    - path: shared.md
+pods:
+  - id: dev
+    label: Dev
+    startup:
+      files:
+        - path: shared.md
+        - path: pod.md
+        - path: present.md
+        - path: optional.md
+          required: false
+    members: []
+    edges: []
+  - id: quiet
+    label: Quiet
+    members: []
+    edges: []
+edges: []
+`;
+    srv.exports.set("pod-startup", { root: source, yaml });
+    try {
+      const output = path.join(out, "rig.yaml");
+      const deps = exportDeps({ writeFile: (p, text) => fs.writeFileSync(p, text) });
+      const run = () => new Command().addCommand(exportCommand(deps))
+        .parseAsync(["node", "rig", "export", "pod-startup", "-o", output]).then(() => {});
+      const logs = await captureLogs(run);
+      expect(fs.readFileSync(output, "utf-8")).toBe(yaml);
+      expect(logs.filter((line) => line.includes("Referenced file 'shared.md'"))).toHaveLength(1);
+      expect(logs.filter((line) => line.includes("Referenced file 'pod.md'"))).toHaveLength(1);
+      expect(logs.join("\n")).toContain(`does not exist relative to '${out}'`);
+      expect(logs.join("\n")).not.toContain("Referenced file 'present.md'");
+      expect(logs.join("\n")).not.toContain("optional.md");
+
+      for (const file of ["shared.md", "pod.md"]) fs.copyFileSync(path.join(source, file), path.join(out, file));
+      expect((await captureLogs(run)).join("\n")).not.toContain("Referenced file");
+    } finally {
+      srv.exports.delete("pod-startup");
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["copy", "existing", "symlink", "missing", "remote", "relative"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-share-"));
     const source = path.join(root, "source"), out = path.join(root, "out"), outside = path.join(root, "outside");

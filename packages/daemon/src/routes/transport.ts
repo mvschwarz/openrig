@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
+import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
@@ -240,11 +240,18 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       pod?: string;
       lines?: number;
       inputBox?: boolean;
+      readable?: { width?: unknown; height?: unknown };
     }>();
     // Read an agent seat's input box only when the request asks: `rig capture` and the MCP tool do; send --verify and
     // walk read only the pane text. The same readers learn when a pane is too small to show a prompt.
     const inputBox = body.inputBox === true;
     const promptPane = inputBox;
+    // `rig capture --readable` / `--size WxH`: read a small seat at that size, then give its window back.
+    const dimension = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 1000;
+    if (body.readable !== undefined && !(dimension(body.readable?.width) && dimension(body.readable?.height))) {
+      return c.json({ ok: false, error: "readable needs a width and height, whole numbers from 1 to 1000" }, 400);
+    }
+    const readable = body.readable ? { width: body.readable.width as number, height: body.readable.height as number } : undefined;
 
     // Multi-target: rig or pod
     if (body.rig || body.pod) {
@@ -259,9 +266,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
       // One budget for the whole fan-out's input-box reads, so slow tmux adds at most that to the request.
       const inputBoxBudget = { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS };
+      // And one for readable reads, so a fan-out of small seats returns inside the CLI's wait.
+      const readableBudget = { remainingMs: CAPTURE_READABLE_BUDGET_MS };
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget, promptPane });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget, promptPane,
+          ...(readable ? { readable, readableBudget } : {}) });
         results.push(result);
       }
       return c.json({ results });
@@ -272,7 +282,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Provide session, rig, or pod to capture" }, 400);
     }
 
-    const result = await transport.capture(body.session, { lines: body.lines, inputBox, promptPane });
+    const result = await transport.capture(body.session, { lines: body.lines, inputBox, promptPane, ...(readable ? { readable } : {}) });
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         session_missing: 404,

@@ -9,7 +9,7 @@ import { shellQuote } from "./shell-quote.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { verifyClaudePaneProcess, verifyPaneIdleShell, witnessedClaudeVersionLabel, type ClaudeLaunchedProcess, type NativeProcessLister, type VersionLabelWitnessWait } from "../domain/native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -139,7 +139,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!, !managed).catch((error): ResumeResult => ({
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -147,29 +147,20 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
   }
 
-  /** #86: as the launch adapter's probe, an unmanaged native install's version label reads as `claude` once its OS
-   *  executable is witnessed. The witness runs only when the label would change the result. */
-  private async assessProbe(target: string, paneCommand: string | null, paneContent: string, unmanaged: boolean, witnessWait: VersionLabelWitnessWait) {
-    const input = { runtime: "claude-code", paneCommand, paneContent };
-    const probe = assessNativeResumeProbe(input);
-    const asClaude = assessNativeResumeProbe({ ...input, paneCommand: "claude" });
-    if (unmanaged && probe.status !== "resumed" && asClaude.status === "resumed"
-      && await witnessedClaudeVersionLabel(paneCommand, { target, tmux: this.tmux, listProcesses: this.options.listProcesses }, witnessWait)) return asClaude;
-    return probe;
-  }
-
-  private async verifyResume(tmuxSessionName: string, resumeToken: string, unmanaged: boolean): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
     const attempts = Math.max(1, Math.floor(maxWaitMs / Math.max(pollMs, 1)) + 1);
-    // #86: one record per wait; after an actual path-read timeout the rest of this wait skips the witness.
-    const witnessWait: VersionLabelWitnessWait = { pathReadTimedOut: false };
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSessionName);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-      const probe = await this.assessProbe(tmuxSessionName, paneCommand, paneContent, unmanaged, witnessWait);
+      const probe = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand,
+        paneContent,
+      });
 
       if (probe.code === "no_conversation_found") {
         return {
@@ -204,7 +195,11 @@ export class ClaudeResumeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSessionName);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSessionName, 40)) ?? "";
-    const finalProbe = await this.assessProbe(tmuxSessionName, finalCommand, finalContent, unmanaged, witnessWait);
+    const finalProbe = assessNativeResumeProbe({
+      runtime: "claude-code",
+      paneCommand: finalCommand,
+      paneContent: finalContent,
+    });
 
     if (finalProbe.code === "no_conversation_found") {
       return { ok: false, code: "retry_fresh", message: "Claude resume failed: no conversation found for the requested session" };

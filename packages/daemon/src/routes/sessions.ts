@@ -753,19 +753,27 @@ sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), a
     }
     try {
       const pid = await tmuxAdapter?.getPanePid?.(binding.tmuxPane);
-      if (!pid || pid !== identity.evidence.observedPid) {
+      // A shell or launcher can be the pane root; legacy verdicts only recorded one PID.
+      const verifiedPanePid = identity.evidence.observedPanePid ?? identity.evidence.observedPid;
+      if (!pid || pid !== verifiedPanePid) {
         return c.json({ error: "record_identity_unverified", message: `The bound pane for '${sessionName}' no longer matches its verified occupant.` }, 409);
       }
+      let verifiedNativeThreadId: string | undefined;
       const live = await resolveLiveCodexThreadId(binding.tmuxPane, {
         getPanePid: async () => pid,
         listProcesses: () => generationCensus.list(),
-        readThreadIdByPid: (nativePid, startedAt) => startedAt
-          ? generationThreadIds.resolve(nativePid, startedAt) : undefined,
+        readThreadIdByPid: async (nativePid, startedAt) => {
+          const threadId = startedAt ? await generationThreadIds.resolve(nativePid, startedAt) : undefined;
+          if (nativePid === identity.evidence.observedPid) verifiedNativeThreadId = threadId;
+          return threadId;
+        },
       });
       if (!live.ok) return c.json({ error: "record_identity_unverified", message: live.reason }, 409);
       sessionId = live.id;
       transcriptPath = store.readCodexTranscriptPath(sessionId);
-      if (registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
+      // Dual-PID verdicts must name the process whose thread was selected; legacy verdicts only identify the root.
+      if ((identity.evidence.observedPanePid != null && verifiedNativeThreadId !== sessionId)
+        || registry.currentOccupantTenure(context!.nodeId)?.generationUuid !== occupant.generationUuid
         || registry.getBindingForNode(context!.nodeId)?.tmuxPane !== binding.tmuxPane
         || await tmuxAdapter.getPanePid?.(binding.tmuxPane) !== pid) {
         return c.json({ error: "record_identity_unverified", message: `The occupant binding changed while resolving '${sessionName}'.` }, 409);

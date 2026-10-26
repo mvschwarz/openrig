@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 71b9c2c072ac5d27a23fb9fb404faa7033cb7e42
-last-updated: 2026-10-24
+last-verified-against-source: 34fdcb80543903b054a982cc48bb302ae6871682
+last-updated: 2026-10-26
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `71b9c2c072ac5d27a23fb9fb404faa7033cb7e42`.
+Verified against source commit `34fdcb80543903b054a982cc48bb302ae6871682`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **90 top-level registrations**, **401 registered command objects**
+There are **90 top-level registrations**, **410 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,274 explicitly registered option objects**, including the root version
+**1,304 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are counts for that source snapshot, not a claim about a deployed release.
@@ -478,6 +478,7 @@ the sections that were not read are `null`.
 | `rig slack channel-map remove <match>` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack enable` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack disable` | — | `--reason <reason>` **required**<br>`--actor <actor>` |
+| `rig slack post-open-asks` | — | `--reason <reason>`<br>`--wait <seconds>`<br>`--actor <actor>`<br>`--json` |
 | `rig slack outbound` | — | `--json` |
 | `rig slack inbound` | — | — |
 
@@ -568,7 +569,7 @@ Herdr session per request, including session-bound previews and window reuse.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--history-plus-pane`<br>`--host <id>`<br>`--json` |
+| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--history-plus-pane`<br>`--readable`<br>`--size <WxH>`<br>`--host <id>`<br>`--json` |
 
 ### broadcast
 
@@ -776,8 +777,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
-| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
-| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--json` |
+| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--json` |
 | `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
 | `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
@@ -963,7 +964,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat switch-client <seat>` | — | `--to-window <n>`<br>`--client <id>`<br>`--json` |
 | `rig seat clear-attention <session>` | — | `--reason <text>`<br>`--json` |
 | `rig seat set-terminal-policy <seat>` | — | `--preset <preset>` **required**<br>`--helper <addresses...>`<br>`--rig-default`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json`<br>`--peer-compaction <decision>`<br>`--peer-model <decision>`<br>`--self-compaction <decision>`<br>`--self-model <decision>`<br>`--openrig-compaction <decision>`<br>`--openrig-model <decision>` |
-| `rig seat set-permissions <seat>` | — | `--mode <mode>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
+| `rig seat set-permissions <seat>` | — | `--mode <mode>`<br>`--rules <file>`<br>`--codex-permissions <file>`<br>`--codex-profile <name>`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |

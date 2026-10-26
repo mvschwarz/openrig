@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
@@ -25,6 +25,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { seatCommand } from "../../cli/src/commands/seat.js";
 
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
@@ -227,6 +228,45 @@ describe("the community harness adapter", () => {
     expect(await app.project(plan, binding)).toEqual({ projected: [], skipped: ["skill-a"], failed: [],
       warnings: [`Community harness "synth" places no resources; 1 not placed: skill-a`] });
   });
+
+  it("community contract: requested approval resources install no hook or relay", async () => {
+    const dir = presets({ "synth.yaml": GOOD, "settings.json": '{"approval":"ask"}\n' });
+    const { app, tmux } = adapter(dir);
+    const before = readdirSync(dir, { recursive: true });
+    expect(await app.project({ entries: [{ effectiveId: "approval-hook", category: "hook" },
+      { effectiveId: "approval-relay", category: "mcp" }] } as never, { ...binding, cwd: dir }))
+      .toMatchObject({ projected: [], skipped: ["approval-hook", "approval-relay"], failed: [] });
+    expect(await app.listInstalled(binding)).toEqual([]);
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    expect(await app.launchHarness({ ...binding, cwd: dir }, { name: "w@r" })).toEqual({ ok: true });
+    expect(tmux.sendShellCommand).toHaveBeenCalledExactlyOnceWith("w@r", "synth-harness --serve", undefined,
+      { stageIfLong: true, execInScript: true });
+    expect(readdirSync(dir, { recursive: true })).toEqual(before);
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe('{"approval":"ask"}\n');
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(app)).filter(name => /approval|relay|hook/i.test(name))).toEqual([]);
+    expect(COMMUNITY_HARNESS_RUNG_INVENTORY.rungs.some(r => r.rung === "lifecycle-hooks")).toBe(false);
+  });
+
+  it("community contract: the adapter exposes no turn-cancel operation", () => {
+    const { app } = adapter(presets({ "synth.yaml": GOOD }));
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(app)).filter(name => /cancel|interrupt/i.test(name))).toEqual([]);
+    const commands = seatCommand().commands.map(command => command.name());
+    expect(commands).toContain("stop");
+    expect(commands.filter(name => /cancel|interrupt/i.test(name))).toEqual([]);
+  });
+
+  it("community contract: a configured seat model neither changes the preset command nor writes harness settings", async () => {
+    const dir = presets({ "synth.yaml": GOOD.replace("--serve", "--serve --model harness-owned"),
+      "settings.json": '{"model":"harness-owned"}\n' });
+    const { app, tmux } = adapter(dir);
+    const before = readdirSync(dir, { recursive: true });
+    expect(await app.launchHarness({ ...binding, cwd: dir, model: "seat-model-must-not-leak", effort: "high" }, { name: "w@r" }))
+      .toEqual({ ok: true });
+    expect(tmux.sendShellCommand).toHaveBeenCalledWith("w@r", "synth-harness --serve --model harness-owned", undefined,
+      { stageIfLong: true, execInScript: true });
+    expect(readFileSync(join(dir, "settings.json"), "utf8")).toBe('{"model":"harness-owned"}\n');
+    expect(readdirSync(dir, { recursive: true })).toEqual(before);
+  });
 });
 
 describe("relaunching a seat", () => {
@@ -366,6 +406,10 @@ describe("activity for a community harness", () => {
 });
 
 describe("the pane reader for a community harness", () => {
+  it("community contract: an unfamiliar question stays unknown rather than becoming a native approval", () => {
+    const observed = communityHarnessPaneActivity(classifyPaneActivity("Which constellation should this project use?\nalpha / beta / custom"), "synth");
+    expect(observed.state).toBe("unknown");
+  });
   it("turns an idle-looking screen into unknown for a community harness, and keeps work, attention and built-ins as they were", () => {
     const idle = classifyPaneActivity("some output\n❯ ");
     expect(idle.state).toBe("agent_idle");

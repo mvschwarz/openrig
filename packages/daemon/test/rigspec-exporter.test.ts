@@ -383,6 +383,40 @@ describe("RigSpecExporter (pod-aware)", () => {
     expect(devPod.edges[0]!.to).toBe("qa");
   });
 
+  it("exports saved pod startup files by namespace, preserving their declared options", () => {
+    const { rig } = seedPodRig();
+    const plainPod = podRepo.createPod(rig.id, "hasOwnProperty", "No startup");
+    rigRepo.addNode(rig.id, "hasOwnProperty.reader", {
+      runtime: "codex", podId: plainPod.id, agentRef: "local:agents/reader", profile: "default", cwd: ".",
+    });
+    const files: import("../src/domain/types.js").StartupFile[] = [
+      {
+        kind: "file", path: "guidance/dev.md", orientation: "role", deliveryHint: "guidance_merge",
+        required: true, appliesOn: ["fresh_start"],
+      },
+      {
+        kind: "file", path: "guidance/optional.md", deliveryHint: "send_text",
+        required: false, appliesOn: ["restore"],
+      },
+    ];
+    rigRepo.setRigStartupLayers(rig.id, {
+      root: "/fixtures/rig-root",
+      podStartupFiles: { dev: files, arch: [], removed: files },
+    });
+
+    const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(spec.pods.find((pod) => pod.id === "dev")?.startup).toEqual({ files, actions: [] });
+    expect(spec.pods.find((pod) => pod.id === "arch")?.startup).toBeUndefined();
+    expect(spec.pods.find((pod) => pod.id === "hasOwnProperty")?.startup).toBeUndefined();
+    expect(spec.pods.some((pod) => pod.id === "removed")).toBe(false);
+    expect(spec.startup).toBeUndefined();
+
+    const parsed = PodRigSpecCodec.parse(PodRigSpecCodec.serialize(spec));
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    const normalized = PodRigSpecSchema.normalize(parsed as Record<string, unknown>);
+    expect(normalized.pods.find((pod) => pod.id === "dev")?.startup).toEqual({ files, actions: [] });
+  });
+
   it("cross-pod edges use qualified podId.memberId", () => {
     const { rig } = seedPodRig();
     const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;

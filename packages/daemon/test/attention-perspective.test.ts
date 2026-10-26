@@ -13,7 +13,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
-import { setDefaultPerson } from "../src/domain/gateway/participants.js";
+import { setDefaultPerson, setSharedChannel } from "../src/domain/gateway/participants.js";
 import { attentionRoutes } from "../src/routes/attention.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import type { AttentionRead } from "../src/attention-surface.js";
@@ -147,5 +147,19 @@ describe("the Feed shows one person's queue, or everyone's, and acts with the pr
     const r = await read("?view=default");
     expect(r.perspective).toBeUndefined();
     expect(asked(r)).toEqual(["A seat's ask"]);
+  });
+
+  it("with only a shared channel registered, the Feed serves the person at the terminal as the actor, never the channel", async () => {
+    const CHANNEL = "acme-customers@external";
+    expect(setSharedChannel("acme-customers", { displayName: "Acme customers", policy: "Customers of Acme.",
+      channel: { connector: "slack", connectorRef: "primary", secretsRef: "vault://slack/bot", channelId: "CACME" } }, {}, home).ok).toBe(true);
+    const ask = await askTo(CHANNEL, "The channel's ask");
+    const work = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "designer@r", body: "Plan", summary: "Parked on the channel", evidenceRef: "/fixture/plan", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@r", state: "blocked", blockedOn: CHANNEL } as never);
+    const r = await read();
+    expect(r.perspective).toBeUndefined();
+    const item = (qitemId: string) => r.items.find((i) => i.id === `queue:${qitemId}`);
+    expect(item(ask.qitemId)).toMatchObject({ recipient: CHANNEL, answer: { verb: "approve", actorSession: "human@host" } });
+    expect(item(work.qitemId)).toMatchObject({ recipient: CHANNEL, answer: { verb: "resolve", actorSession: "human@host" } });
   });
 });

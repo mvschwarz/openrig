@@ -707,7 +707,7 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       text: z.string().describe("Message text to send"),
       verify: z.boolean().optional().describe("Verify delivery by checking pane content"),
       force: z.boolean().optional().describe("Send even if target appears mid-task"),
-      waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending"),
+      waitForIdleSeconds: z.number().positive().optional().describe("Wait until explicit idle evidence before sending. If the seat is still busy or its activity is unknown when the wait ends, nothing is sent and nothing is kept; separate work belongs in a queue row"),
     },
     DESTRUCTIVE,
     async ({ session, text, verify, force, waitForIdleSeconds }) => {

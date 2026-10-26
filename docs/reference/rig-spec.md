@@ -798,6 +798,20 @@ the modified topology, run `rig snapshot <rig-id>` and use its returned ID with
 
 Startup blocks can appear at three levels: rig, pod, and member. They are merged additively via the startup layering model (see [the layering model](agent-startup-guide.md#the-layering-model)). The rig's `culture_file` joins as a required file with the `auto` hint in the culture layer, on both fresh start and restore.
 
+`rig export` includes the rig's saved culture file and startup block, and now also
+writes each pod's saved startup files under that pod. The file order, delivery
+hints, required flags, orientation and `applies_on` selections are retained.
+Previously the saved pod file lists were omitted. Pods without a recorded file
+list, including older rigs, keep their existing export behavior; the exporter
+does not reconstruct declarations from a member's combined startup context.
+
+File paths remain relative to the exported spec's folder. When exporting to a
+different folder, supply the referenced startup files there or import with the
+original `--rig-root`. The CLI warns once per missing required rig or pod file;
+missing optional files do not trigger that warning. Pod startup actions and
+member startup blocks remain outside this export; keep the source spec when you
+need those declarations.
+
 ### Files
 
 | Field | Type | Required | Default | Description |
@@ -806,7 +820,7 @@ Startup blocks can appear at three levels: rig, pod, and member. They are merged
 | `orientation` | string | no | — | Set to `role` to identify a per-seat role file for `rig queue whoami --json` and refocus. Does not change delivery or replay startup. |
 | `delivery_hint` | string | no | `auto` | How the file is delivered. One of: `auto`, `guidance_merge`, `skill_install`, `send_text`. |
 | `required` | boolean | no | `true` | Whether startup fails if this file cannot be delivered. |
-| `applies_on` | string[] | no | `[fresh_start, restore]` | When this file is delivered. Subset of: `fresh_start`, `restore`. |
+| `applies_on` | string[] | no | `[fresh_start, restore]` | When this file is delivered. Subset of: `fresh_start`, `restore`. An exact resume of the saved conversation delivers none, apart from putting back a missing managed guidance block. |
 
 #### Delivery Hints
 
@@ -824,8 +838,8 @@ Startup blocks can appear at three levels: rig, pod, and member. They are merged
 | `type` | string | yes | — | Action type. One of: `slash_command`, `send_text`, `startup_proof`. Note: `shell` is explicitly NOT supported in v1. |
 | `value` | string | yes | — | Command/text to send, or `authenticated` / `none` for `startup_proof`. |
 | `phase` | string | no | `after_files` | When to execute text/commands. One of: `after_files` (after startup files are delivered), `after_ready` (after harness readiness check passes). Proof selection is resolved before projection regardless of phase. |
-| `idempotent` | boolean | yes | — | Whether this action is safe to replay on restore. **Required field.** Non-idempotent actions must NOT include `restore` in `applies_on`. |
-| `applies_on` | string[] | no | `[fresh_start, restore]` | When this action runs. Subset of: `fresh_start`, `restore`. |
+| `idempotent` | boolean | yes | — | Whether this action is safe to run again on a restore without the earlier conversation or a retried start. **Required field.** Non-idempotent actions must NOT include `restore` in `applies_on`. |
+| `applies_on` | string[] | no | `[fresh_start, restore]` | When this action runs. Subset of: `fresh_start`, `restore`. An exact resume of the saved conversation runs none (see the startup guide). |
 
 ### Startup proof selection
 

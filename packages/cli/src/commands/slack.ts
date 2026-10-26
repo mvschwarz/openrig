@@ -112,10 +112,53 @@ const RETIRED_TEACHING =
 const MANIFEST_FIRST_STEP =
   "`rig slack manifest --url` prints a link that creates your own Slack app from OpenRig's manifest (see `rig slack manifest --help`)";
 
-// #192: a saved config change reaches the running connector when it next rewires.
+// #192: a saved map change reaches the running connector at a daemon restart. Disable then enable rewires too, but
+// enabling marks alerts still waiting to be posted as already seen, so it isn't the advice.
 const CHANNEL_MAP_APPLY =
   "Invite the app to every mapped channel, then `rig slack verify`. A running connector picks up the change " +
-  "when it next rewires (`rig slack disable` then `rig slack enable`, or a daemon restart).";
+  "at a daemon restart (`rig daemon stop`, then `rig daemon start`). Don't use `rig slack disable` then " +
+  "`rig slack enable` for it: enabling marks alerts still waiting to be posted as already seen.";
+
+const POST_OPEN_ASKS = "`rig slack post-open-asks`";
+
+type OpenAskOutcome = "posted" | "already-posted" | "queued" | "held" | "below-floor" | "no-longer-active" | "superseded"
+  | "recipient-changed" | "state-unavailable" | "transport-failed" | "uncertain";
+interface OpenAsk { qitemId: string; recipient: string; summary: string | null; outcome: OpenAskOutcome; detail?: string }
+interface PostOpenAsksResponse { ok: boolean; asks: OpenAsk[] }
+
+const OUTCOME_LABEL: Record<OpenAskOutcome, string> = {
+  posted: "posted",
+  "already-posted": "already posted",
+  queued: "queued, awaiting receipt",
+  held: "held",
+  "below-floor": "below the posting floor",
+  "no-longer-active": "no longer active",
+  superseded: "superseded",
+  "recipient-changed": "recipient changed",
+  "state-unavailable": "state unavailable",
+  "transport-failed": "transport failed",
+  uncertain: "uncertain",
+};
+
+/** #1679: one count line, one line per ask, then what to do about the outcomes that need it. */
+export function describeOpenAsks(asks: OpenAsk[]): string[] {
+  if (asks.length === 0) return ["No open asks to show."];
+  const counts = new Map<OpenAskOutcome, number>();
+  for (const ask of asks) counts.set(ask.outcome, (counts.get(ask.outcome) ?? 0) + 1);
+  const lines = [`${asks.length} open ask(s): ${[...counts].map(([outcome, n]) => `${n} ${OUTCOME_LABEL[outcome]}`).join(", ")}`];
+  for (const ask of asks) {
+    const detail = ask.detail ? ` (${ask.detail})` : "";
+    lines.push(`  ${OUTCOME_LABEL[ask.outcome]}: ${ask.qitemId} for ${ask.recipient}: ${ask.summary ?? "(no summary)"}${detail}`);
+  }
+  if (counts.has("queued") || counts.has("uncertain")) {
+    lines.push(`Queued or uncertain asks have no Slack receipt yet. Run ${POST_OPEN_ASKS} again later to see where they landed; it reuses each ask's decision rather than offering it again.`);
+  }
+  if (counts.has("state-unavailable")) {
+    lines.push(`No new offer was made for an ask whose state couldn't be read; its detail says what couldn't be read and what is known. Run ${POST_OPEN_ASKS} again once that reads, and the same ask continues.`);
+  }
+  if (counts.has("transport-failed")) lines.push("A transport failure is on the ask's row, and `rig queue undelivered` lists it for the seat that asked.");
+  return lines;
+}
 
 function resolveSecrets(surface: SlackSurface, cfg: SlackConnectorConfig): { bot: string | null; app: string | null } {
   const envFile = cfg.secretsEnvFile ?? undefined;
@@ -471,8 +514,34 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         const res = await clientFactory().post<{ ok: boolean; seeded: number; onlineStatus: string }>("/api/gateway/slack/enable", { reason: opts.reason, actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK });
         if (res.status !== 200 || res.data.ok !== true) throw new Error(`daemon refused enable (HTTP ${res.status}): ${JSON.stringify(res.data)}`);
         log(res.data.onlineStatus);
+        if (res.data.seeded > 0) log(`To show the asks still open in Slack, run ${POST_OPEN_ASKS}.`);
       } catch (e) {
         log(`✗ enable failed: ${(e as Error).message}`);
+        process.exitCode = 1;
+      }
+    });
+
+  cmd
+    .command("post-open-asks")
+    .description("Show in Slack the asks still open that enable marked as seen, through ordinary delivery, and say what became of each")
+    .option("--reason <reason>", "Reason recorded with the action")
+    .option("--wait <seconds>", "How long to wait for Slack receipts before reporting the rest as queued (0-60)", "10")
+    .option("--actor <actor>", "Named operator when outside a managed seat")
+    .option("--json", "Print the daemon's result as JSON")
+    .action(async (opts) => {
+      try {
+        const waitSeconds = Number(opts.wait);
+        if (!Number.isFinite(waitSeconds) || waitSeconds < 0 || waitSeconds > 60) throw new Error(`--wait takes 0 to 60 seconds, not ${opts.wait}`);
+        const res = await clientFactory().post<PostOpenAsksResponse>("/api/gateway/slack/post-open-asks",
+          { reason: opts.reason, waitSeconds, actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK },
+          { timeoutMs: (waitSeconds + 30) * 1000 });
+        if (res.status !== 200 || res.data.ok !== true) {
+          throw new Error((res.data as { message?: string }).message ?? `daemon refused (HTTP ${res.status}): ${JSON.stringify(res.data)}`);
+        }
+        if (opts.json) { log(JSON.stringify(res.data, null, 2)); return; }
+        for (const line of describeOpenAsks(res.data.asks)) log(line);
+      } catch (e) {
+        log(`✗ post-open-asks failed: ${(e as Error).message}`);
         process.exitCode = 1;
       }
     });

@@ -20,7 +20,7 @@ export interface ChannelActor {
 export interface ChannelOperation extends ChannelActor {
   id: string;
   at: string;
-  action: "enable" | "disable" | "configure" | "binding";
+  action: "enable" | "disable" | "configure" | "binding" | "post-open-asks";
   subject: string;
   before: ChannelState;
   after: ChannelState | null;

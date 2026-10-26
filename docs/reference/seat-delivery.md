@@ -22,7 +22,16 @@ apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
 and uses the existing-input check below. Direct human input remains available.
 
 A message sent to a busy Codex seat joins its running turn and may redirect it.
-For separate work, use `rig send <seat> "<message>" --wait-for-idle <seconds>`.
+For separate work, create a queue row instead:
+`rig queue create --destination <seat> --summary "<one line>" --body-file <file>`.
+A row that's saved keeps the work apart from its wake, the short pointer typed
+into the seat. The wake is still typed input, and it isn't proof that the seat
+claimed or finished the work: the row's state says that.
+
+`rig send <seat> "<message>" --wait-for-idle <seconds>` suits a sender who
+watches the result. If the seat is still busy, or its activity is unknown, when
+the wait ends, nothing is sent (exit 1, "No text was sent.") and OpenRig keeps
+nothing to send later.
 
 ## Configure and inspect
 

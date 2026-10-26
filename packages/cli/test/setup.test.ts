@@ -396,6 +396,20 @@ describe("rig setup", () => {
     expect(result.ready).toBe(false);
   });
 
+  it("#980: the tmux step fails with the fix when tmux's server exits on capture-pane -p", async () => {
+    const base = makeDeps();
+    const result = await runSetup(makeDeps({ exec: (cmd: string) => {
+      if (cmd.includes("capture-pane -p")) throw new Error("server exited unexpectedly");
+      if (cmd === "tmux -V") return "tmux next-3.4\n";
+      return base.exec(cmd);
+    } }), {});
+    const tmux = result.steps.find((s) => s.id === "tmux_install");
+    expect(tmux).toMatchObject({ status: "fail", message: expect.stringContaining("can't capture a pane") });
+    expect(tmux?.reason).toContain("#980");
+    expect(tmux?.fixHint).toMatch(/first on your PATH/);
+    expect(result.ready).toBe(false);
+  });
+
   it("full profile extends core with jq_install and gh_install", async () => {
     const deps = makeDeps();
     const result = await runSetup(deps, { full: true });

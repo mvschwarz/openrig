@@ -77,7 +77,7 @@ function setup(activityAssets: { relayPath?: string; manifestPath?: string }, ex
   const eventBus = new EventBus(db);
   const tmux = mockTmux();
   const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-  const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
   const files: Record<string, string> = { [`${RIG_ROOT}/agents/impl/agent.yaml`]: AGENT_YAML, ...extraFiles };
   const inst = new PodRigInstantiator({
     db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator: startupOrch,

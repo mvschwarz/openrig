@@ -12,6 +12,7 @@ import { readMissionReadiness } from "../domain/proof/judgments.js";
 import { WorkflowInstanceStore } from "../domain/workflow-instance-store.js";
 import { WorkflowStepTrailLog } from "../domain/workflow-step-trail-log.js";
 import { feedPerspective } from "../domain/feed-perspective.js";
+import { UNNAMED_PRIMARY_USER } from "../domain/mission-control/mission-control-write-contract.js";
 
 export function attentionRoutes(): Hono {
   const app = new Hono();
@@ -61,6 +62,8 @@ export function attentionRoutes(): Hono {
         const deps = queue.db.prepare("SELECT summary, qitem_id FROM queue_items WHERE blocked_on = ? AND state IN ('pending','in-progress','blocked') ORDER BY ts_created DESC LIMIT 101").all(q.qitemId) as Array<{ summary: string | null; qitem_id: string }>;
         const unblocks = isHumanSeatSessionRef(q.blockedOn ?? "") ? q.summary || "The blocked task (inspect the request)" : deps.length ? deps.slice(0, 100).map(d => d.summary || "An unnamed dependent task").join("; ") + (deps.length > 100 ? "; more dependents omitted" : "") : "No dependent task recorded; inspect the request for its intended outcome.";
         const toPerson = isHumanSeatSessionRef(q.destinationSession) || asked.has(q.qitemId);
+        // A shared channel never acts: on its ask or park the person at the terminal does, as the daemon records it.
+        const actorFor = (address: string) => queue.isSharedChannel(address) ? UNNAMED_PRIMARY_USER : address;
         const questions = q.humanQuestions?.length ? q.humanQuestions : null;
         const unanswered = questions ? unansweredQuestions(questions, q.humanAnswers ?? {}).length : 0;
         const item: AttentionItem = { id: `queue:${q.qitemId}`, kind: "action", recipient: toPerson ? q.destinationSession : q.blockedOn,
@@ -68,8 +71,8 @@ export function attentionRoutes(): Hono {
           // mission control's answer (a choice, their own words, or sending a complete set's recorded answers back), which
           // Approve would close without returning. They can also open the asker's terminal (Chat). A row parked on them is
           // resolved with their decision in words, which unparks it for its owner.
-          ...(toPerson && q.state === "pending" ? { answer: { verb: questions ? "answer" as const : "approve" as const, actorSession: q.destinationSession } } : {}),
-          ...(!toPerson && q.state === "blocked" && q.blockedOn && isHumanSeatSessionRef(q.blockedOn) ? { answer: { verb: "resolve" as const, actorSession: q.blockedOn } } : {}),
+          ...(toPerson && q.state === "pending" ? { answer: { verb: questions ? "answer" as const : "approve" as const, actorSession: actorFor(q.destinationSession) } } : {}),
+          ...(!toPerson && q.state === "blocked" && q.blockedOn && isHumanSeatSessionRef(q.blockedOn) ? { answer: { verb: "resolve" as const, actorSession: actorFor(q.blockedOn) } } : {}),
           ...(toPerson ? { asker: q.sourceSession } : {}),
           ...(questions ? { humanQuestions: questions, humanAnswers: q.humanAnswers ?? {} } : {}),
           summary: q.summary || q.body.trim().split(/\r?\n/).find(Boolean) || "Request summary unavailable", urgency: q.priority, unblocks, at: q.tsUpdated, scope: p ? `project ${p.id}` : "instance · project unknown", project: p ? { id: p.id, root: p.root } : null, source: `/api/queue/${encodeURIComponent(q.qitemId)}` };

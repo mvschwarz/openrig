@@ -119,6 +119,37 @@ them imports Hono: **0**
 - `startup-resolver.ts` — additive startup layering.
 - `projection-planner.ts` — runtime resource projection planning.
 
+### Profile resolution during launch
+
+Preflight already resolves profiles in `profile-resolution-worker.ts`. Previously,
+the pod-aware apply path, materialized-member launch and first-start retry called
+the synchronous resolver again on the daemon's request thread. A fallback skill
+scan or managed-catalog inspection could therefore delay every other request even
+after preflight had finished ([#1653](https://github.com/mvschwarz/openrig/issues/1653)).
+Those three launch paths now await the same resolver in a worker before projecting
+resources or starting the member. Configuration precedence and launch order still
+come from the existing resolver and instantiator.
+
+An apply operation reuses one lazy worker across its members and terminates it on
+success or failure. Unlike preflight, launch supplies no `scanScope`: each member
+reads current files, including changes made by an earlier member's startup.
+Standalone member launches and first-start retries use a short-lived worker for
+their resolution. This adds worker startup and context-copy costs; it does not
+reuse the preflight result or cache configuration between requests. The helper's
+existing synchronous fallback for a deleted process working directory remains.
+
+Worker errors become configuration-failure results. Apply can then follow the
+existing all-members-failed cleanup, including service rollback and restoration
+of replaced generations. Materialized launches report a failed member, and
+first-start retries refuse before writing retained state.
+
+`profile-resolution-worker.test.ts` holds a real fallback scan open with a FIFO,
+requires an HTTP health response while that FIFO is still blocked, then checks
+that the selected skill reaches projection. It covers all three launch paths and
+a skill edit between members. These fixtures use SQLite and the real instantiator
+with a simulated runtime; they do not establish native provider behavior or
+responsiveness during other synchronous parts of startup.
+
 ## 4. Startup orchestration (the spec-startup contract)
 
 `StartupOrchestrator.startNode` (`startup-orchestrator.ts:172`, a thin wrapper

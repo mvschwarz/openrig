@@ -29,7 +29,7 @@ else if (call.args[0] !== 'up') process.exitCode = 2;
 ${record}
 console.log(JSON.stringify({ source: call.cwd }));`);
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_)/.test(key)) delete env[key];
+  for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_|CMUX_)/.test(key)) delete env[key];
   Object.assign(env, { HOME: home, OPENRIG_HOME: home, OPENRIG_TUI_CLI_ENTRY: cli, OPENRIG_TUI_SOCKET: join(root, "t.sock") });
   return { root, home, cwd, cli, env, calls: async () => (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line)) };
 }

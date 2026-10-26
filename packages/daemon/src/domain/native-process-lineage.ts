@@ -485,28 +485,22 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
-export async function listNativeProcesses(opts: NativeProcessListOptions = {}): Promise<NativeProcessRow[]> {
+export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean } = {}): Promise<NativeProcessRow[]> {
   try {
     // Copies: the table is shared with concurrent readers, and executable paths are added below.
     const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
     // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
     // foreground path-named Claude too. Every other listing skips that read (on macOS it starts a helper process).
-    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (opts.claudeLaunchPaths === true && mayBeClaudeAfterScript(row)));
+    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (options.claudeLaunchPaths === true && mayBeClaudeAfterScript(row)));
     if (candidates.length > 0) {
-      const pids = candidates.map(row => row.pid);
-      const onTimeout = opts?.onPathReadTimeout;
-      const paths = await (onTimeout ? readNativeExecutablePaths(pids, { onTimeout }) : readNativeExecutablePaths(pids));
+      const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
       for (const row of candidates) row.executablePath = paths.get(row.pid);
     }
     return rows;
   } catch { return []; }
 }
 
-/** `claudeLaunchPaths`: also read the OS path of a foreground path-named Claude (a `#!` script launch).
- *  `onPathReadTimeout` (#86): told when the OS path read actually timed out. */
-export interface NativeProcessListOptions { claudeLaunchPaths?: boolean; onPathReadTimeout?: () => void }
-
-export type NativeProcessLister = (opts?: NativeProcessListOptions) => NativeProcessRow[] | Promise<NativeProcessRow[]>;
+export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;
 
 /** One OS process, by pid and `ps` start time: a reused pid has another start time. */
 export interface ClaudeLaunchedProcess { pid: number; startedAt: string }
@@ -777,30 +771,6 @@ export async function verifyClaudePaneRuntime(input: Parameters<typeof observeCl
   if (!first) return null;
   const second = await observeClaudePaneRuntime(input);
   return second?.fingerprint === first.fingerprint ? second : null;
-}
-
-const NATIVE_VERSION_LABEL = /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/;
-
-/** One wait's record that the optional path witness timed out, so the rest of that wait skips it. */
-export interface VersionLabelWitnessWait { pathReadTimedOut: boolean }
-
-/** #86: the native installer names Claude's process, and so the pane label, after its versioned file. Whether that
- * label may stand for `claude`: only when the pane's one stable foreground Claude is the version-named process
- * itself, witnessed by its OS executable path (`claudeProcess`: argv0 claude, the installer's versions layout, a
- * basename equal to the OS name), and the pane's pid is unchanged. The label alone is never identity, and a path
- * read that fails or times out is no witness. Like a `claude` label, this says nothing about the conversation.
- * Within one `wait`, once a path read actually times out, the witness isn't tried again; a new wait starts fresh. */
-export async function witnessedClaudeVersionLabel(paneCommand: string | null,
-  input: Omit<Parameters<typeof observeClaudePaneRuntime>[0], "selectedExecutable">, wait?: VersionLabelWitnessWait): Promise<boolean> {
-  const label = paneCommand?.trim() ?? "";
-  if (!NATIVE_VERSION_LABEL.test(label) || wait?.pathReadTimedOut) return false;
-  const lister = input.listProcesses ?? listNativeProcesses;
-  const onPathReadTimeout = () => { if (wait) wait.pathReadTimedOut = true; };
-  const native = await verifyClaudePaneRuntime({ ...input, listProcesses: () => lister({ onPathReadTimeout }) });
-  // argv0 `claude` keeps the OS path the deciding evidence: a versioned argv0 matches the OS name without it.
-  if (!native || executableName(tokens(native.process.command)[0] ?? "") !== "claude"
-    || native.process.executableName !== label || !native.process.executablePath) return false;
-  return await input.tmux.getPanePid(input.target).catch(() => null) === native.panePid;
 }
 
 /** The `ps` start time (lstart, local time) of the one stable Claude foreground

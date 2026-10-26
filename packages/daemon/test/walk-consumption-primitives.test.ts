@@ -384,25 +384,27 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   let app: Hono;
   let db: Database.Database;
   let registry: SessionRegistry;
+  let livePanePid: number | null;
   const threadId = "11111111-1111-4111-8111-111111111111";
 
   beforeEach(() => {
     stateDir = mkdtempSync(join(tmpdir(), "walk-genrec-"));
     db = createFullTestDb();
     registry = new SessionRegistry(db);
+    livePanePid = 10;
     const store = new ContextUsageStore(db, { stateDir, codexHomeDir: stateDir });
     app = new Hono();
     app.use("*", async (c, next) => {
       c.set("contextUsageStore" as never, store as never);
       c.set("sessionRegistry" as never, registry as never);
-      c.set("tmuxAdapter" as never, { getPanePid: async () => 10 } as never);
+      c.set("tmuxAdapter" as never, { getPanePid: async () => livePanePid } as never);
       await next();
     });
     app.route("/api/sessions", sessionAdminRoutes);
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); rmSync(stateDir, { recursive: true, force: true }); });
 
-  function seedCodex(metaId = threadId) {
+  function seedCodex(metaId = threadId, observedPid = 10, observedPanePid?: number) {
     const repo = new RigRepository(db);
     const rig = repo.createRig("codex-rig");
     const node = repo.addNode(rig.id, "dev.codex", { runtime: "codex" });
@@ -411,7 +413,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     registry.updateStatus(session.id, "running");
     registry.updateBinding(node.id, { tmuxSession: seat, tmuxPane: "%42" });
     new SeatIdentityStore(db).upsert({ nodeId: node.id, verdict: "verified", evidenceSource: "env", reason: null,
-      evidence: { registeredPane: "%42", observedPid: 10, observedCommand: "codex", matchedLayer: 1 },
+      evidence: { registeredPane: "%42", observedPid, observedPanePid, observedCommand: "codex", matchedLayer: 1 },
       sessionName: seat, observedAt: new Date().toISOString() } as never);
     vi.spyOn(ProcessCensus.prototype, "list").mockResolvedValue([
       { pid: 10, ppid: 1, command: "zsh" }, { pid: 20, ppid: 10, command: "codex", startedAt: "start" },
@@ -434,8 +436,71 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
     expect(await response.json()).toMatchObject({ runtime: "codex", sessionId: threadId });
   });
 
+  it.each(["shell", "launcher"])("Codex %s wrapper serves the verified thread's metadata and suffix", async (launch) => {
+    const { url, record } = seedCodex(threadId, 20, 10);
+    vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
+      { pid: 10, ppid: 1, command: "zsh" },
+      ...(launch === "launcher" ? [{ pid: 15, ppid: 10, command: "node /opt/codex/bin/codex.js" }] : []),
+      { pid: 20, ppid: launch === "launcher" ? 15 : 10, command: "codex", startedAt: "start" },
+    ]);
+    const response = await app.request(url);
+    expect(response.status).toBe(200);
+    const metadata = await response.json();
+    expect(metadata).toMatchObject({ runtime: "codex", sessionId: threadId, totalBytes: Buffer.byteLength(readFileSync(record)) });
+    expect(metadata.suffix).toBeUndefined();
+    expect(CodexThreadIdResolver.prototype.resolve).toHaveBeenCalledWith(20, "start");
+
+    const suffix = JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "fixture-turn" } }) + "\n";
+    appendFileSync(record, suffix);
+    const appended = await app.request(`${url}?sinceBytes=${metadata.totalBytes}`);
+    expect(appended.status).toBe(200);
+    expect(await appended.json()).toMatchObject({ generationId: metadata.generationId, sessionId: threadId, suffix, truncated: false });
+  });
+
+  it.each([null, 20, 99])("Codex refuses a changed or missing pane root (%s), even if it equals the native PID", async (pid) => {
+    const { url } = seedCodex(threadId, 20, 10);
+    livePanePid = pid;
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("no longer matches") });
+    expect(ProcessCensus.prototype.list).not.toHaveBeenCalled();
+  });
+
+  it("Codex keeps the legacy PID check when a verdict has no recorded pane PID", async () => {
+    const { url } = seedCodex(threadId, 20);
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified" });
+  });
+
+  it.each(["replaced", "unresolved"])("Codex refuses another process's thread when the verified native PID is %s", async (native) => {
+    const { url } = seedCodex(threadId, 20, 10);
+    vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
+      { pid: 10, ppid: 1, command: "zsh" },
+      ...(native === "unresolved" ? [{ pid: 20, ppid: 10, command: "codex", startedAt: "verified" }] : []),
+      { pid: 30, ppid: 10, command: "codex", startedAt: "replacement" },
+    ]);
+    vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async pid => pid === 30 ? threadId : undefined);
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified" });
+  });
+
+  it.each(["pane", "binding", "occupant"])("Codex still refuses a %s change during wrapped-thread resolution", async (changed) => {
+    const { url, node } = seedCodex(threadId, 20, 10);
+    vi.mocked(CodexThreadIdResolver.prototype.resolve).mockImplementation(async () => {
+      if (changed === "pane") livePanePid = 99;
+      else if (changed === "binding") registry.updateBinding(node.id, { tmuxPane: "%43" });
+      else registry.mintOccupantTenure(node.id, "handover", "successor-native-id");
+      return threadId;
+    });
+    const response = await app.request(url);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "record_identity_unverified", message: expect.stringContaining("changed while resolving") });
+  });
+
   it("Codex refuses a wrong rollout identity instead of accepting the thread table pointer", async () => {
-    const { url } = seedCodex("old-thread");
+    const { url } = seedCodex("old-thread", 20, 10);
     const response = await app.request(url);
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: "record_identity_mismatch" });
@@ -462,7 +527,7 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   });
 
   it("Codex refuses ambiguous native threads under one pane", async () => {
-    const { url } = seedCodex();
+    const { url } = seedCodex(threadId, 20, 10);
     vi.mocked(ProcessCensus.prototype.list).mockResolvedValue([
       { pid: 10, ppid: 1, command: "zsh" },
       { pid: 20, ppid: 10, command: "codex", startedAt: "a" },

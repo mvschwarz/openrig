@@ -12,6 +12,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
+import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigExpansionService } from "../src/domain/rig-expansion-service.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
@@ -278,6 +280,47 @@ describe("a seat added to an existing pod also gets that pod's startup files, an
     const { f } = await podRig();
     expect(f.rigFile("dev.impl", "DEV-NOTES.md")?.absolutePath).toBe(nodePath.join(f.rigRoot, "DEV-NOTES.md"));
     f.db.close();
+  });
+
+  it("exported pod startup files resolve from the exported spec's folder on re-import", async () => {
+    const { f, rigId } = await podRig();
+    try {
+      const exporter = new RigSpecExporter({
+        rigRepo: f.rigRepo, podRepo: new PodRepository(f.db), sessionRegistry: new SessionRegistry(f.db),
+      });
+      const spec = exporter.exportRig(rigId) as import("../src/domain/types.js").RigSpec;
+      spec.name = "exported-culture-rig";
+      for (const pod of spec.pods) {
+        for (const member of pod.members) member.cwd = f.cwd(`exported-${pod.id}-${member.id}`);
+      }
+      for (const file of ["CULTURE.md", "RIG-NOTES.md", "DEV-NOTES.md", "OPS-NOTES.md"]) {
+        fs.copyFileSync(nodePath.join(f.rigRoot, file), nodePath.join(f.otherRoot, file));
+      }
+      const output = nodePath.join(f.otherRoot, "rig.yaml");
+      fs.writeFileSync(output, RigSpecCodec.serialize(spec));
+      const imported = await f.inst.instantiate(fs.readFileSync(output, "utf-8"), nodePath.dirname(output));
+      expect(imported.ok, JSON.stringify(imported)).toBe(true);
+      if (!imported.ok) return;
+      const recreated = f.rigRepo.getRig(imported.result.rigId)!;
+
+      for (const [logicalId, file, expected, other] of [
+        ["dev.impl", "DEV-NOTES.md", DEV_POD_TEXT, OPS_POD_TEXT],
+        ["ops.runner", "OPS-NOTES.md", OPS_POD_TEXT, DEV_POD_TEXT],
+      ] as const) {
+        const node = recreated.nodes.find((node) => node.logicalId === logicalId)!;
+        const row = f.db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id = ?")
+          .get(node.id) as { resolved_files_json: string };
+        const files = JSON.parse(row.resolved_files_json) as Array<{ path: string; absolutePath: string }>;
+        const delivered = files.find((entry) => entry.path === file);
+        expect(delivered?.absolutePath).toBe(nodePath.join(nodePath.dirname(output), file));
+        expect(fs.readFileSync(delivered!.absolutePath, "utf-8")).toContain(expected);
+        const guidance = f.claudeMd(node.cwd!);
+        expect(guidance).toContain(expected);
+        expect(guidance).not.toContain(other);
+      }
+    } finally {
+      f.db.close();
+    }
   });
 
   it("add-member into the pod: the added seat gets the pod's file, resolved against the rig's root, after the rig layers", async () => {

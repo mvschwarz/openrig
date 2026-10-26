@@ -90,6 +90,7 @@ interface TeardownResult {
   keptGuidance?: string[];
   /** Seats joined with `rig attach` as an external CLI, which OpenRig doesn't stop. */
   leftRunning?: string[];
+  paneOnly?: string[];
 }
 
 interface DownAgentEntry {
@@ -297,6 +298,9 @@ the command warns and exits without stopping; re-run with --yes to confirm expli
 
       if (result.leftRunning && result.leftRunning.length > 0) {
         console.log(`Not stopped: ${result.leftRunning.join(", ")}. Joined with rig attach as an external CLI, which OpenRig doesn't stop or check.`);
+      }
+      if (result.paneOnly && result.paneOnly.length > 0) {
+        console.log(`Pane stopped: ${result.paneOnly.join(", ")}. A community harness's own processes may keep running after its pane; see its preset's limits.`);
       }
 
       // Exit code: errors first, then deleted, then alreadyStopped

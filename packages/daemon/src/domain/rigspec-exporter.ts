@@ -132,6 +132,7 @@ export class RigSpecExporter {
   private exportPodAware(rigId: string, rig: import("./types.js").RigWithRelations): RigSpec {
     const pods = this.podRepo!.getPodsForRig(rigId);
     const sessions = this.sessionRegistry.getSessionsForRig(rigId);
+    const startupLayers = this.rigRepo.getRigStartupLayers(rigId);
 
     // Build maps for lookups
     // logicalId is "podSpecId.memberLocalId" — extract both parts
@@ -215,6 +216,10 @@ export class RigSpecExporter {
         edges: podEdges,
       };
       if (pod.summary) podSpec.summary = pod.summary;
+      const podFiles = startupLayers?.podStartupFiles?.[pod.namespace];
+      if (Array.isArray(podFiles) && podFiles.length > 0) {
+        podSpec.startup = { files: podFiles, actions: [] };
+      }
       if (pod.continuityPolicyJson) {
         try {
           podSpec.continuityPolicy = JSON.parse(pod.continuityPolicyJson);
@@ -245,7 +250,6 @@ export class RigSpecExporter {
     // #25: the selected Claude managed-block file is also a rig-row field.
     const claudeManagedBlockFile = this.rigRepo.getRigClaudeManagedBlockFile(rigId);
     // #1631: culture_file and rig-level startup block round-trip through export.
-    const startupLayers = this.rigRepo.getRigStartupLayers(rigId);
     const cultureFile = startupLayers?.cultureFile;
     const startup = startupLayers?.startup;
 

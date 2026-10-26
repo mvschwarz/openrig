@@ -22,6 +22,7 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -576,6 +577,41 @@ describe("SessionTransport", () => {
     sessionRegistry.updateBinding(node.id, { tmuxSession: "r00-legacy-worker-a" });
     return { rig, node, session };
   }
+
+  it("community contract: a successful queue wake passes through the transport once", async () => {
+    const { session } = seedCanonicalRig("synth");
+    sessionRegistry.recordCommunityHarnessSelection(session.id, "synth");
+    let screen = "custom harness screen";
+    const sendText = vi.fn(async (_target: string, text: string) => { screen = text; return { ok: true as const }; });
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => "node", capturePaneContent: async () => screen, sendText, sendKeys }),
+      { sleep: async () => {} });
+    const queue = new QueueRepository(db, new EventBus(db), { transport, validateRig: () => true });
+    const item = await queue.create({ sourceSession: "sender@my-rig", destinationSession: "dev-impl@my-rig", body: "assigned task", nudge: false });
+    await queue.maybeNudge(item.qitemId, item.destinationSession, true, item.sourceSession);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText.mock.calls[0]![1]).toContain(item.qitemId);
+    expect(sendKeys).toHaveBeenCalledTimes(1);
+    expect(sendKeys.mock.calls[0]).toEqual(["dev-impl@my-rig", ["Enter"]]);
+    expect(queue.getById(item.qitemId)?.lastNudgeResult).toBe("verified");
+  });
+
+  it.each([
+    ["a shell", "bash", "shell prompt", "target_runtime_unverified"],
+    ["a numbered choice", "node", "› 1. Yes, continue\n  2. No, cancel\n\nPress enter to continue", "target_needs_input"],
+  ])("community contract: refuses %s without pasting text or pressing Enter", async (_label, command, screen, reason) => {
+    const { session } = seedCanonicalRig("synth");
+    sessionRegistry.recordCommunityHarnessSelection(session.id, "synth");
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ getPaneCommand: async () => command,
+      capturePaneContent: async () => screen, sendText, sendKeys }));
+    const result = await transport.send("dev-impl@my-rig", "ordinary work");
+    expect(result).toMatchObject({ ok: false, reason });
+    expect(result.sent).not.toBe(true);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
 
   function seedExternalCliRig() {
     const rig = rigRepo.createRig("rigged-buildout");

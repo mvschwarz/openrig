@@ -13,6 +13,10 @@ export interface ExportDeps extends StatusDeps {
   exists?: (path: string) => boolean;
 }
 
+interface ExportedStartupBlock {
+  files?: Array<{ path?: string; required?: boolean }>;
+}
+
 /** Copy only the declared local culture, preserving any recipient file. */
 function copyCulture(file: string, root: string, outDir: string): void {
   if (nodePath.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error("culture path must stay inside the rig folder");
@@ -87,7 +91,11 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
             if (parsed["name"] === "starter") {
               console.warn("Warning: this export still installs as 'starter'. Before sharing, rename the team's name in rig.yaml; changing the bundle name alone does not rename the installed rig.");
             }
-            const pods = parsed["pods"] as Array<{ id?: string; members?: Array<{ id?: string; agent_ref?: string }> }> | undefined;
+            const pods = parsed["pods"] as Array<{
+              id?: string;
+              startup?: ExportedStartupBlock;
+              members?: Array<{ id?: string; agent_ref?: string }>;
+            }> | undefined;
             for (const pod of Array.isArray(pods) ? pods : []) {
               for (const member of Array.isArray(pod.members) ? pod.members : []) {
                 const local = typeof member.agent_ref === "string" && member.agent_ref.startsWith("local:") ? nodePath.normalize(member.agent_ref.slice(6)) : null;
@@ -113,11 +121,16 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
               filesToCheck.push(parsed["culture_file"]);
             }
 
-            const startup = parsed["startup"] as { files?: Array<{ path?: string; required?: boolean }> } | undefined;
-            if (startup && Array.isArray(startup.files)) {
-              for (const f of startup.files) {
-                if (typeof f?.path === "string" && f.required !== false && !filesToCheck.includes(f.path)) {
-                  filesToCheck.push(f.path);
+            const startupBlocks = [
+              parsed["startup"] as ExportedStartupBlock | undefined,
+              ...(Array.isArray(pods) ? pods.map((pod) => pod.startup) : []),
+            ];
+            for (const startup of startupBlocks) {
+              if (startup && Array.isArray(startup.files)) {
+                for (const f of startup.files) {
+                  if (typeof f?.path === "string" && f.required !== false && !filesToCheck.includes(f.path)) {
+                    filesToCheck.push(f.path);
+                  }
                 }
               }
             }

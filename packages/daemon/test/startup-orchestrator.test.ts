@@ -28,6 +28,7 @@ import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 import { Hono } from "hono";
+import { execFileSync } from "node:child_process";
 import { nodesRoutes } from "../src/routes/sessions.js";
 import { compactNodeProjection } from "../../cli/src/commands/ps.js";
 
@@ -152,6 +153,65 @@ describe("StartupOrchestrator", () => {
       ...overrides,
     };
   }
+
+  it("community contract: launch surfaces undelivered startup files without placing or pasting them", async () => {
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-startup-files-"));
+    try {
+      nodeFs.writeFileSync(nodePath.join(root, "synth.yaml"), "format: 1\nname: synth\ncommand: synth-launch\nmaintainer: Example\nlimits: []\n");
+      const file = nodePath.join(root, "role.md");
+      nodeFs.writeFileSync(file, "private startup text must not be pasted");
+      const seed = seedSession();
+      const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => root,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand } });
+      const delivery = vi.spyOn(adapter, "deliverStartup");
+      const before = nodeFs.readdirSync(root);
+      const result = await createOrchestrator().startNode(makeInput(seed, { adapter,
+        binding: { ...makeBinding(), cwd: root },
+        resolvedStartupFiles: [{ path: "role.md", absolutePath: file, ownerRoot: root,
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }] }));
+      expect(result).toMatchObject({ ok: true, warnings: [expect.stringContaining('takes no startup files; 1 not delivered: role.md')] });
+      expect(delivery.mock.results.length).toBeGreaterThan(0);
+      expect(await delivery.mock.results[0]!.value).toMatchObject({ delivered: 0, failed: [] });
+      expect(nodeFs.readdirSync(root)).toEqual(before);
+      expect(nodeFs.readFileSync(file, "utf8")).toBe("private startup text must not be pasted");
+      expect(tmux.sendText).not.toHaveBeenCalled();
+      expect(sendShellCommand).toHaveBeenCalledTimes(1);
+    } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it.skipIf(process.platform === "win32")("community contract: a named resume whose launcher exits keeps its DB name and never starts fresh", async () => {
+    const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-named-missing-"));
+    try {
+      const trace = nodePath.join(root, "attempt.json");
+      const script = nodePath.join(root, "missing.mjs");
+      nodeFs.writeFileSync(script, `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(trace)}, JSON.stringify({resume:process.env.OPENRIG_RESUME_REF, fresh:process.env.OPENRIG_CONVERSATION ?? null})); process.exit(4);`);
+      nodeFs.writeFileSync(nodePath.join(root, "synth.yaml"), `format: 1\nname: synth\ncommand: ${process.execPath} ${script}\nmaintainer: Example\nlimits: []\nnames_conversation: true\nresume: true\n`);
+      const seed = seedSession();
+      db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
+      sessionRegistry.recordCommunityHarnessSelection(seed.sessionId, "synth");
+      sessionRegistry.recordLauncherReportedToken(seed.sessionId, "community:synth", "saved-name", "passed");
+      let foreground = "node";
+      const sendShellCommand = vi.fn(async (_session: string, command: string) => {
+        let status: number | null = 0;
+        try { execFileSync("/bin/sh", ["-c", command], { cwd: root, timeout: 3000, stdio: "ignore" }); }
+        catch (error) { status = (error as { status: number | null }).status; }
+        expect(status).toBe(4);
+        foreground = "bash";
+        return { ok: true as const };
+      });
+      const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => root,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => foreground, sendShellCommand } });
+      const result = await createOrchestrator().startNode(makeInput(seed, { adapter, isRestore: true,
+        resumeToken: "saved-name", resumeType: "community:synth", readinessTimeoutMs: 1 }));
+      expect(result).toMatchObject({ ok: false, startupStatus: "failed" });
+      expect(JSON.parse(nodeFs.readFileSync(trace, "utf8"))).toEqual({ resume: "saved-name", fresh: null });
+      expect(sendShellCommand).toHaveBeenCalledTimes(1);
+      expect(db.prepare("SELECT resume_token, resume_type FROM sessions WHERE id=?").get(seed.sessionId))
+        .toEqual({ resume_token: "saved-name", resume_type: "community:synth" });
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
+  });
 
   it.each(["codex-first-login.txt", "codex-first-login-0.162.1.txt"])("persists %s as attention and withholds startup context", async (fixture) => {
     const seed = seedSession();

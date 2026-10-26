@@ -436,12 +436,13 @@ export class DaemonClient {
     return await this.get("/api/terminal/views") as { saved: Array<{ id: string; name: string; members: Array<{ seat: string }> }>; rigs: string[] };
   }
   /** The preview behind "Open terminals". That action opens through `rig terminal open --window`, which composes with
-   *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), so preview with the provider it
-   *  will use: its planId is the window opener's expected plan. A provider-less preview may pick cmux, whose plan the
-   *  window opener never matches. */
-  async previewTerminal(view: string, provider: "herdr" | "rex" = "herdr"): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
-    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow.
-    const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
+   *  Rex's layout from inside Rex and otherwise Herdr's (falling back to plain tmux), or, from inside cmux, through
+   *  `rig terminal open --provider cmux`. Preview with the provider it will use: its planId is the open's expected plan.
+   *  A provider-less preview may pick cmux, whose plan the window opener never matches. */
+  async previewTerminal(view: string, provider: "herdr" | "rex" | "cmux" = "herdr"): Promise<import("./terminals/terminal-model.js").TerminalPreview> {
+    // The interactive TUI has a TTY; measure each preview again after a resize. Unknown stays narrow. The cmux open sends
+    // no width, and a wide one changes the kernel view's layout and so its plan, so a cmux preview sends none either.
+    const columns = provider !== "cmux" && process.stdout.isTTY ? process.stdout.columns : undefined;
     const viewport = Number.isSafeInteger(columns) && columns! > 0 ? `&viewportColumns=${columns}` : "";
     return await this.get(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${provider}${viewport}`) as import("./terminals/terminal-model.js").TerminalPreview;
   }

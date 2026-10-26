@@ -55,8 +55,17 @@ transitions before trying again. Do not silently send the task a second time.
 
 You need the peer's base URL and a row assigned to your seat. For a no-model peer, the official
 [Hello World sample](https://github.com/a2aproject/a2a-samples/tree/6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3/samples/python/agents/helloworld)
-returns an echo artifact. Its README explains startup; it does not implement the input-required and cancellation
-controls described later. Use a peer that supports those operations when testing them.
+returns an echo artifact. Fetch that revision:
+
+```sh
+git clone https://github.com/a2aproject/a2a-samples.git
+git -C a2a-samples checkout --detach 6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
+```
+
+Start the peer yourself in a separate terminal, following `a2a-samples/samples/python/agents/helloworld/README.md`.
+Its default URL is `http://127.0.0.1:9999`, used below; it is available only while you run the sample.
+The sample does not implement the input-required and cancellation controls described later. Use a peer that
+supports those operations when testing them.
 
 Save as `a2a_client.py`. This client also works without an OpenRig row, for the inbound recipe below.
 Streaming reads have no deadline so quiet worker waits keep their stream; connection, write and pool waits are bounded to 10 seconds.
@@ -128,7 +137,8 @@ async def main():
 asyncio.run(main())
 ```
 
-Run it from your seat, replacing the row and peer URL:
+When `A2A_TEXT` is unset, the row body becomes the peer's message verbatim. Write the body as the peer's input,
+or set `A2A_TEXT` to the exact text you want to send. Run it from your seat, replacing the row and peer URL:
 
 ```sh
 export A2A_URL=http://127.0.0.1:9999
@@ -260,7 +270,7 @@ export A2A_SEAT=<worker-session-from-rig-ps>
 # Client terminal, in the folder with the example scripts and venv:
 unset A2A_ROW A2A_TASK A2A_CONTEXT
 export A2A_URL=http://127.0.0.1:19092
-export A2A_TEXT='Return the words hello from the receiving seat.'
+export A2A_TEXT='Return exactly these words: "hello from the receiving seat".'
 .venv/bin/python a2a_client.py
 ```
 
@@ -277,6 +287,8 @@ rig queue update "$ROW" --state done --closure-reason no-follow-on --resolution 
 The client should receive that exact resolution as an artifact, followed by completed. Compare the artifact with
 `rig queue show "$ROW" --full --json`, including the task/context IDs in the row body. The sample uses `--no-nudge`:
 the worker must be watching its queue; merely starting the front does not start or wake an agent.
+To wake a model worker after the row appears, run `rig send <worker-session> 'Check your queue and process the new A2A task.'`
+from the custodian's environment, or remove `--no-nudge` from the front's queue-create call to request the normal queue wake.
 
 For input-required, the worker instead records `--note 'A2A question: <question>'` and leaves the row in progress.
 The client reruns with the same `A2A_TASK`, `A2A_CONTEXT` and its answer as `A2A_TEXT`. The worker reads the

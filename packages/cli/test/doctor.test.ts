@@ -53,6 +53,26 @@ describe("runDoctorChecks", () => {
     expect(daemonCheck?.status).toBe("pass");
   });
 
+  it("#980: a tmux whose server exits on capture-pane -p fails tmux_capture with the fix; a working one passes", () => {
+    const base = makeDeps();
+    const bounds: Array<number | undefined> = [];
+    const crashing = makeDeps({ exec: (cmd: string, opts?: { timeoutMs?: number }) => {
+      if (cmd.includes("openrig-check-")) bounds.push(opts?.timeoutMs);
+      if (cmd.includes("capture-pane -p")) throw new Error("server exited unexpectedly");
+      if (cmd === "tmux -V") return "tmux next-3.4\n";
+      return base.exec(cmd);
+    } });
+    const failed = runDoctorChecks(crashing).checks.find((c) => c.name === "tmux_capture");
+    // Every probe command reaches doctor's runner with its bound: create, capture and cleanup.
+    expect(bounds).toHaveLength(3);
+    expect(bounds.every((b) => typeof b === "number" && b > 0)).toBe(true);
+    expect(failed).toMatchObject({ status: "fail", message: expect.stringContaining("tmux next-3.4") });
+    expect(failed?.message).toContain("server exited unexpectedly");
+    expect(failed?.reason).toContain("#980");
+    expect(failed?.fix).toMatch(/first on your PATH/);
+    expect(runDoctorChecks(base).checks.find((c) => c.name === "tmux_capture")).toMatchObject({ status: "pass" });
+  });
+
   it("daemon dist missing -> fail with guidance", () => {
     const deps = makeDeps({ exists: () => false });
     const { checks } = runDoctorChecks(deps);

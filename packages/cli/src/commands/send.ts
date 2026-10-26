@@ -239,7 +239,7 @@ export function sendCommand(depsOverride?: SendDeps): Command {
     .option("--rig <name>", "Send to every seat in a rig (fan-out, per-recipient results)")
     .option("--verify", "Verify pane only delivery by checking content after send")
     .option("--force", "Back-compat no-op: a mid-task/busy pane already sends-with-advisory by default; --force never bypasses the interactive-prompt/permission guard")
-    .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending")
+    .option("--wait-for-idle <seconds>", "Wait until the target is explicitly idle before sending. If it's still busy, or its activity is unknown, when the wait ends, nothing is sent (exit 1) and nothing is kept to send later; put separate work in a queue row (rig queue create)")
     .option("--raw", "Send exact text/keystrokes without the From/To messaging envelope (still guarded against interactive prompts)")
     .option("--dangerously-interact", "DANGEROUS: type an answer as keystrokes into an interactive prompt (implies --raw; requires --reason). Letters can select menu shortcuts; CR/ESC act as keys. Enter is added only for the complete visibly staged answer.")
     .option("--type-without-checking", "With --dangerously-interact: type without reading or clearing existing input; may join or submit that text")

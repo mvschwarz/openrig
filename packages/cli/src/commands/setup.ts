@@ -9,7 +9,7 @@ import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
-import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
 
@@ -537,7 +537,14 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       fixHint: failure.fix,
     });
   } else {
-    steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
+    // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    if (capture.status === "fail") {
+      const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
+      steps.push({ id: "tmux_install", status: "fail", message: failure.message, reason: failure.reason, fixHint: failure.fix });
+    } else {
+      steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
+    }
   }
 
   // 3. Herdr is the default view provider. Leave optional cmux installations untouched.
