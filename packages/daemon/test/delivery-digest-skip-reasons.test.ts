@@ -12,6 +12,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
 import { HumanQuietStore } from "../src/domain/gateway/human-quiet-windows.js";
 import { makeDeliveryDigestFlushPolicy, runDeliveryDigestFlush } from "../src/domain/policies/delivery-digest-flush.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
@@ -83,6 +84,14 @@ describe("delivery digest skip reasons (#800)", () => {
   it("an unreadable registry says so", async () => {
     registryOk = false;
     expect(await evaluate()).toEqual({ action: "skip", reason: "the human registry can't be read" });
+  });
+
+  it("a fresh home with no registered people says no person is registered", async () => {
+    const freshRegistry = { loadHumanRegistry: (home: string) => loadHumanRegistry(home, { readOnly: true }) };
+    expect(freshRegistry.loadHumanRegistry(home)).toMatchObject({ ok: false, noHumans: true });
+    const policy = makeDeliveryDigestFlushPolicy({ queueRepo: repo, registry: freshRegistry, home, dispatch });
+    expect(await policy.evaluate(job)).toEqual({ action: "skip", reason: "no person is registered" });
+    expect(sent).toHaveLength(0);
   });
 
   it("an empty registry says no person is registered", async () => {

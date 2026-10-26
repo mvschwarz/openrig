@@ -27,6 +27,7 @@ export const DELIVERY_DIGEST_FLUSH_POLICY = "delivery-digest-flush";
 interface RegistrySurfaceLike {
   loadHumanRegistry: (home: string) => {
     ok: boolean;
+    noHumans?: true;
     entities?: Array<{ entityId: string; address: string }>;
   };
 }
@@ -50,6 +51,7 @@ export interface DeliveryDigestFlushResult {
 
 export async function runDeliveryDigestFlush(input: RunDeliveryDigestFlushInput): Promise<DeliveryDigestFlushResult> {
   const reg = input.registry.loadHumanRegistry(input.home);
+  if (!reg.ok && reg.noHumans) return { dispatched: 0, members: 0, idleReason: "no person is registered" };
   if (!reg.ok || !reg.entities) return { dispatched: 0, members: 0, idleReason: "the human registry can't be read" };
   if (reg.entities.length === 0) return { dispatched: 0, members: 0, idleReason: "no person is registered" };
   // Asks and updates below go to their own recipients; the digest of notices goes to the default person.
