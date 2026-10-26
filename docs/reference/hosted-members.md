@@ -31,11 +31,35 @@ address work to it like any seat. It reaches the team through OpenRig's MCP serv
 - **It can send work too:** `rig_queue_create` to its rig's seats.
 - **Its rows outlive the conversation.** A new conversation with the same grant reaches the same work.
 
+## Ring it when work lands
+
+If the tool has a trigger that starts it from outside, such as a webhook on a scheduled routine, add it to the member's roster
+entry. The entry holds secret names, never values:
+
+```json
+"wake": { "webhook": { "url_ref": "GROK_WAKE_URL", "authorization_ref": "GROK_WAKE_AUTH", "secrets_env_file": "/abs/path/grok-wake.env" } }
+```
+
+- **The secrets:**
+  - `url_ref` names the secret holding the webhook URL.
+  - `authorization_ref`, when the tool needs one, names the secret holding the `Authorization` header value.
+  - The daemon reads each from its environment (the name, or `OPENRIG_<NAME>`), else from `secrets_env_file`, an env file kept at mode 0600.
+- **The ring:** when a row lands for the member, the daemon POSTs
+  `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.
+  - It's a pointer, not the row's body: the member reads the row under its grant.
+  - It waits up to 10 seconds and doesn't follow redirects.
+- **What the trigger should do:** start a run that lists the member's rows (`rig_queue_list` with `owned`) and claims its work.
+
 ## What the record says, and doesn't
 
 These facts stay separate on the row:
-- **Wake:** a hosted member has no terminal, so nothing wakes it. The row's wake result says so (`unroutable`), and the row shows in
-  `rig queue undelivered` until it's claimed. The member sees new work when it checks: when its person asks it to, or on a schedule the tool runs.
+- **Wake:** with a trigger, the row's wake result is `wake-accepted:webhook (<url_ref>) answered <status>` when the trigger took the
+  ring, or `failed:webhook …`. Accepted means the tool's trigger answered, not that the member read the row.
+  - With no trigger, the result is `unroutable`, and OpenRig tells the person: the operator seat when it's a person, else whoever
+    created the row.
+  - It tells the person too when the member was rung but hasn't claimed the work by the stuck sweep's unclaimed age
+    (`queue.stuck_sweep_unclaimed_age_minutes`, 60 by default).
+  - The member sees new work when it checks: when it's rung, when its person asks it to, or on a schedule the tool runs.
 - **Pickup:** its claim, a transition by its seat. Listing or reading a row isn't pickup.
 - **Result:** the closing transition and its resolution, or the handoff.
 - **Notification:** where a person asked, Slack's posted receipt. A posted notice isn't the person's acknowledgment.
@@ -49,6 +73,7 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 
 ## Limits today
 
-- **No wake route:** OpenRig can't ring the member when work lands.
+- **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
+  isn't rung, and its person is told instead.
 - **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one.
 - **No last-call presence yet:** OpenRig doesn't track when the member last called.

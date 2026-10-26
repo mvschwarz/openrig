@@ -1,31 +1,15 @@
 import { modelObservation, unknownModelObservation, formatModelObservation } from "../lib/model-observation.js";
 import { Command } from "commander";
-import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { ConfigStore } from "../config-store.js";
+import { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
+
+// One roster parser, shared with the daemon (a hosted member's wake route reads the same files).
+export { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake };
 
 type Row = Record<string, unknown>;
-type Reference = { seat: string; host: string };
-export interface RosterMember extends Reference {
-  capabilities: string[];
-  engagement: string[];
-  use_when: string;
-  why: string;
-  caveat?: string;
-  /** A member outside any terminal (an assistant or bot reaching the team over MCP): it has no node or pane. */
-  hosted?: boolean;
-}
-export interface Roster {
-  version: 1;
-  id: string;
-  name: string;
-  purpose: string;
-  curator: Reference;
-  updated_at: string;
-  members: RosterMember[];
-}
 export interface RosterInventory {
   readAt: string;
   nodes: Row[];
@@ -33,47 +17,6 @@ export interface RosterInventory {
 }
 const object = (v: unknown): v is Row => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): string | null => typeof v === "string" && v.trim() ? v : null;
-const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => text(x) !== null);
-const reference = (v: unknown): v is Row & Reference => object(v) && text(v.seat) !== null && text(v.host) !== null;
-
-/** Select authored fields only: a file cannot supply runtime or observed-model facts. */
-export function parseRoster(value: unknown): Roster {
-  if (!object(value) || value.version !== 1 || !reference(value.curator) ||
-      ![value.id, value.name, value.purpose, value.updated_at].every(v => text(v) !== null) || !Array.isArray(value.members)) {
-    throw new Error("Expected a version 1 roster with id, name, purpose, curator, updated_at and members");
-  }
-  const members = value.members.map((m): RosterMember => {
-    if (!reference(m) || !object(m) || !strings(m.capabilities) || !strings(m.engagement) ||
-        text(m.use_when) === null || text(m.why) === null || (m.caveat !== undefined && typeof m.caveat !== "string")
-        || (m.hosted !== undefined && typeof m.hosted !== "boolean")) {
-      throw new Error("Each member needs seat, host, capabilities, engagement, use_when and why (optional caveat, and hosted: true or false)");
-    }
-    return { seat: m.seat, host: m.host, capabilities: m.capabilities, engagement: m.engagement,
-      use_when: m.use_when as string, why: m.why as string, ...(m.caveat === undefined ? {} : { caveat: m.caveat as string }),
-      ...(m.hosted === true ? { hosted: true } : {}) };
-  });
-  return { version: 1, id: value.id as string, name: value.name as string, purpose: value.purpose as string,
-    curator: { seat: value.curator.seat, host: value.curator.host }, updated_at: value.updated_at as string, members };
-}
-
-export function readRosters(folder: string): { rosters: Roster[]; warnings: string[] } {
-  const rosters: Roster[] = [], warnings: string[] = [];
-  let names: string[];
-  try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
-  catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
-  for (const name of names) {
-    let fd: number | undefined;
-    try {
-      // Inspect the opened target before reading; NONBLOCK also handles a FIFO
-      // without waiting for a writer. Regular-file symlinks remain readable.
-      fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NONBLOCK);
-      if (!fstatSync(fd).isFile()) throw new Error("Not a regular file; skipped");
-      rosters.push(parseRoster(JSON.parse(readFileSync(fd, "utf8"))));
-    } catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
-    finally { if (fd !== undefined) closeSync(fd); }
-  }
-  return { rosters, warnings };
-}
 
 // Reuse ps's local routing and observation-only HTTP fan-out, including its partial failures.
 // Explicit fields keep native transcripts, resume tokens and fresh pane captures out of this read.

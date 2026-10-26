@@ -11,6 +11,7 @@
       "@openrig/daemon/codex-auth": ["../daemon/dist/codex-auth-surface.d.ts"],
       "@openrig/daemon/crash-cart": ["../daemon/dist/crash-cart-surface.d.ts"],
       "@openrig/daemon/gateway-human-registry": ["../daemon/dist/gateway-human-registry-surface.d.ts"],
+      "@openrig/daemon/rosters": ["../daemon/dist/rosters-surface.d.ts"],
       "@openrig/daemon/spec-conformance": [
         "../daemon/dist/spec-conformance-surface.d.ts"
       ],

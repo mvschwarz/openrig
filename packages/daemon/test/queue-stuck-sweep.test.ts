@@ -413,12 +413,15 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
 
   // A hosted member (no terminal, not a person) can't be woken, so its finding addressed to it would reach nobody.
   // Real topology: rig r with one bound seat, lead@r, that hands grok@r (no node) its work.
-  async function mkUnroutableRow(): Promise<QueueItem> {
+  function seedLeadSeat(): void {
     db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-r', 'r')").run();
     db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-r', 'lead', 'claude-code', '/tmp')").run();
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-lead', 'node-lead', 'lead@r', 'running', '2026-07-02 12:00:00')").run();
     db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-lead', 'node-lead', 'tmux', 'lead@r', '%1')").run();
     expect(repo.classifyDestinationOf("lead@r").class).toBe("pane-bound");
+  }
+  async function mkUnroutableRow(): Promise<QueueItem> {
+    seedLeadSeat();
     const row = await repo.create({ sourceSession: "lead@r", destinationSession: "grok@r", body: "work" });
     const recorded = repo.classifyDestinationOf("grok@r");
     expect(recorded.class).toBe("unroutable");
@@ -458,6 +461,47 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("grok@r");
     expect(finding!.body).not.toContain("has no wake route");
+  });
+
+  // A hosted member with a trigger is rung (wake accepted is the trigger's receipt, not pickup). Work it hasn't claimed by
+  // the unclaimed age goes to the person, like a member with no trigger; a claimed-and-stalled row keeps its own finding.
+  const GROK_WAKE = { webhook: { url_ref: "GROK_WAKE_URL" } };
+  const ACCEPTED = "wake-accepted:webhook (GROK_WAKE_URL) answered 202; pickup is the member's claim on this row";
+  function rungRepo(): void {
+    repo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      hostedWake: (destination) => destination === "grok@r" ? GROK_WAKE : null });
+  }
+
+  it("a hosted member rung for work it hasn't claimed by the unclaimed age is told to the person, and says it was rung", async () => {
+    rungRepo();
+    seedLeadSeat();
+    expect(repo.classifyDestinationOf("grok@r").class).toBe("hosted");
+    const row = await repo.create({ sourceSession: "lead@r", destinationSession: "grok@r", body: "work" });
+    setNudgeResult(row.qitemId, ACCEPTED, new Date());
+    ageCreated(row.qitemId, 61);
+    await runSweep({ resolveOperatorSeat: () => "person@external" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("person@external");
+    expect(finding!.body).toContain(`grok@r is a hosted member. OpenRig rang its trigger (${ACCEPTED}), and it hasn't claimed this work. It sees work only when it checks, so ask it to. This finding goes to person@external`);
+
+    // Once it claims the work, the sweep closes the finding itself; the ring stays recorded beside the claim.
+    repo.claim({ qitemId: row.qitemId, destinationSession: "grok@r" });
+    await runSweep({ resolveOperatorSeat: () => "person@external" });
+    expect((await findingsFor(row.qitemId))[0]!.state).toBe("done");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).toBe(ACCEPTED);
+  });
+
+  it("a hosted member that claimed work and stalled keeps its own finding, which rings it", async () => {
+    rungRepo();
+    seedLeadSeat();
+    const row = await repo.create({ sourceSession: "lead@r", destinationSession: "grok@r", body: "work" });
+    setNudgeResult(row.qitemId, ACCEPTED, new Date());
+    repo.claim({ qitemId: row.qitemId, destinationSession: "grok@r" });
+    ageClaim(row.qitemId, 60);
+    await runSweep({ resolveOperatorSeat: () => "person@external" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("grok@r");
+    expect(finding!.body).not.toContain("OpenRig rang its trigger");
   });
 
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {

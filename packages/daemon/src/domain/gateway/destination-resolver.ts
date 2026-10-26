@@ -5,6 +5,8 @@
 //   gateway-routable  → the gateway subsystem owns delivery (the queue row is
 //                       its input; its ledger is the delivery record; tmux is
 //                       never consulted — it can never hold these addresses)
+//   hosted            → a hosted member (an outside tool on the team) whose
+//                       authored roster entry declares a trigger: the wake rings it
 //   unroutable        → an honest structured teaching refusal; tmux is never
 //                       consulted for an address it can never hold
 //
@@ -29,13 +31,17 @@
 //      (canonical-form aliases like human-founder@kernel — the live 4-row
 //      specimen class) is gateway-routable: a PANELLESS virtual identity whose
 //      delivery rides the gateway, exactly like its @external address.
-//   4. Anything else is unroutable, with teaching that names BOTH checks.
+//   4. A hosted member whose roster entry declares a trigger is hosted. One with no
+//      trigger stays unroutable, so its person is told.
+//   5. Anything else is unroutable, with teaching that names BOTH checks.
 import { parseSessionName } from "../session-name.js";
+import type { RosterWake } from "../rosters.js";
 import { resolveRegisteredHumanAddress, type HumanFragment } from "./human-registry.js";
 
 export type DestinationClass =
   | { class: "pane-bound" }
   | { class: "gateway-routable"; resolvedHuman: string | null; via: "external-address" | "registry-alias" }
+  | { class: "hosted"; wake: RosterWake }
   | { class: "unroutable"; teaching: string };
 
 export interface ClassifyDeps {
@@ -44,6 +50,8 @@ export interface ClassifyDeps {
   entities: readonly HumanFragment[] | null;
   /** Does this daemon have an explicit terminal transport for the destination? */
   hasTerminalTransport: (destination: string) => boolean;
+  /** The trigger a hosted member's roster entry declares, when it declares one. */
+  hostedWake?: (destination: string) => RosterWake | null;
 }
 
 export function classifyDestination(destination: string, deps: ClassifyDeps): DestinationClass {
@@ -59,6 +67,8 @@ export function classifyDestination(destination: string, deps: ClassifyDeps): De
   if (aliasResolved) {
     return { class: "gateway-routable", resolvedHuman: aliasResolved, via: "registry-alias" };
   }
+  const wake = deps.hostedWake?.(destination) ?? null;
+  if (wake) return { class: "hosted", wake };
   return {
     class: "unroutable",
     teaching:

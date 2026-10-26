@@ -20,6 +20,10 @@ import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
+import { join } from "node:path";
+import { SettingsStore } from "./user-settings/settings-store.js";
+import { hostedWakeFor, type RosterWake } from "./rosters.js";
+import { ringHostedWake } from "./hosted-wake.js";
 import { effectiveGateRoles } from "./gate-predicate.js";
 import {
   computeClosureRequiredAt,
@@ -545,6 +549,17 @@ export function defaultParkWakeMessage(qitemId: string): string {
   return `Wake timer fired for parked qitem ${qitemId}. Resume the recorded continuation and update the row.`;
 }
 
+/** A hosted member's trigger, from the authored rosters (`<workspace.root>/rosters`) on this host. Null when it declares
+ *  none, or when the rosters or this host's id can't be read: the member then stays unroutable, and its person is told. */
+function defaultHostedWake(destination: string): RosterWake | null {
+  try {
+    const root = new SettingsStore().resolveOne("workspace.root").value;
+    return typeof root === "string" && root ? hostedWakeFor(destination, join(root, "rosters"), getSelfHostId()) : null;
+  } catch {
+    return null;
+  }
+}
+
 export class QueueRepositoryError extends Error {
   readonly code: string;
   readonly meta: Record<string, unknown> | undefined;
@@ -915,6 +930,9 @@ export class QueueRepository {
   private readonly loadHumanRegistryFn: () => LoadResult;
   /** Registered shared channels (0.7.3): `<id>@external` participants whose rows post to their Slack channel. */
   private readonly sharedChannelsFn: () => ReadonlyArray<{ address: string }>;
+  /** A hosted member's trigger, from the authored rosters on this host. */
+  private readonly hostedWakeFn: (destination: string) => RosterWake | null;
+  private readonly hostedWakeFetch: typeof fetch | undefined;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
   private readonly workflowFrontierPredicate:
@@ -956,6 +974,8 @@ export class QueueRepository {
       resolveSessionAddresses?: (name: string) => string[];
       loadHumanRegistry?: () => LoadResult;
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
+      hostedWake?: (destination: string) => RosterWake | null;
+      hostedWakeFetch?: typeof fetch;
     }
   ) {
     this.db = db;
@@ -970,6 +990,8 @@ export class QueueRepository {
     this.resolveSessionAddresses = opts?.resolveSessionAddresses ?? ((name) => [name]);
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
+    this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
+    this.hostedWakeFetch = opts?.hostedWakeFetch;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
@@ -1662,6 +1684,12 @@ export class QueueRepository {
     }
     if (destClass.class === "unroutable") {
       return { classified: "failed", nudgeResult: destClass.teaching };
+    }
+    // A hosted member with a trigger: ring it. Accepted is indeterminate, never verified: pickup is its claim.
+    if (destClass.class === "hosted") {
+      const row = this.getById(qitemId);
+      return ringHostedWake({ qitemId, destination: destinationSession, summary: row?.summary ?? null, source: sourceSession ?? row?.sourceSession ?? null },
+        destClass.wake, { fetchImpl: this.hostedWakeFetch });
     }
     // A terminal seat runs a shell or a TUI, not an agent. Typed wake text would run there as a
     // command line (it carries the row's summary), and nothing there can claim the row. So nothing
@@ -4304,6 +4332,7 @@ export class QueueRepository {
         return loaded.ok ? loaded.entities : null;
       })(),
       hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
+      hostedWake: (dest) => this.hostedWakeFn(dest),
     });
   }
 

@@ -760,19 +760,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     }
 
     // A destination its own wake found unroutable, and still is (no terminal, not a person: a hosted member, or a
-    // mistyped address), can't hear its finding either; a seat launched since its wake keeps its own. Only a person
-    // can make a hosted member check its work, so the person goes first: the operator seat when it's a person's
-    // address, else the row's creator, else the operator agent, skipping any that is unset, this seat, confirmed
-    // missing or unroutable itself.
+    // mistyped address), can't hear its finding either; a seat launched since its wake keeps its own. A hosted member
+    // OpenRig rings, whose work is still unclaimed (its ring failed, or it didn't pick the work up by the unclaimed
+    // age), goes the same way; one that claimed and stalled keeps its own finding, which rings it. Only a person can
+    // make a hosted member check its work, so the person goes first: the operator seat when it's a person's address,
+    // else the row's creator, else the operator agent, skipping any that is unset, this seat, confirmed missing or
+    // unroutable itself.
     const classOf = (seat: string) => deps.queueRepo.classifyDestinationOf(seat).class;
     for (const c of candidates) {
-      if (c.route !== c.row.destinationSession || !c.row.lastNudgeResult?.startsWith("unroutable:")
-        || classOf(c.row.destinationSession) !== "unroutable") continue;
+      if (c.route !== c.row.destinationSession) continue;
+      const destination = classOf(c.row.destinationSession);
+      const noRoute = destination === "unroutable" && !!c.row.lastNudgeResult?.startsWith("unroutable:");
+      if (!noRoute && !(destination === "hosted" && !c.row.claimedAt)) continue;
       const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
       const person = operatorSeat && classOf(operatorSeat) === "gateway-routable" ? operatorSeat : null;
       const choices = [person, c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
       const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat) && classOf(seat) !== "unroutable");
-      c.why += `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`;
+      c.why += noRoute
+        ? `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`
+        : `; ${c.route} is a hosted member. OpenRig rang its trigger (${c.row.lastNudgeResult ?? "no ring recorded"}), and it hasn't claimed this work. It sees work only when it checks, so ask it to`;
       if (chosen < 0) {
         c.why += `. No person, creator or operator agent that can be reached is available, so this finding stays addressed to it`;
         continue;
