@@ -246,18 +246,23 @@ function fromLoopbackPeer(c: Context): boolean {
   return v4 === "::1" || /^127\.\d+\.\d+\.\d+$/.test(v4);
 }
 
+/** Headers a proxy or forwarder adds. A loopback peer that carries one is relaying someone else's request, so it isn't a
+ *  local client, whatever its address. A forwarder that adds none can't be told apart here. */
+const FORWARDING_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-real-ip", "via"];
+
 /**
  * What one of those four stores records for a request: `principal:v1` with the principal only when the request is DIRECT
  * and ATTRIBUTED (resolveRecordedProvenance says transport:v1: the header named the seat at this hop, not relayed, not
- * origin-unknown, not claimed), its peer is loopback, and its principal header is exactly the closed shape. Otherwise
- * exactly what resolveRecordedProvenance records today, and no principal. Nothing here can strengthen a relayed,
- * unknown-origin or claimed actor, and a remote peer can't supply the principal.
+ * origin-unknown, not claimed), its peer is loopback with no forwarding header, and its principal header is exactly the
+ * closed shape. Otherwise exactly what resolveRecordedProvenance records today, and no principal. Nothing here can
+ * strengthen a relayed, unknown-origin or claimed actor, and a remote or forwarded caller can't supply the principal.
  */
 export function resolveRecordedIdentity(
   c: Context,
   identity: { provenance: Exclude<IdentityProvenance, "relay:v1"> },
 ): { identityProvenance: RecordedProvenance; identityPrincipal: string | null } {
   const provenance = resolveRecordedProvenance(c, identity);
-  const principal = provenance === "transport:v1" && fromLoopbackPeer(c) ? parseIdentityPrincipal(c.req.header(IDENTITY_PRINCIPAL_HEADER)) : null;
+  const local = fromLoopbackPeer(c) && !FORWARDING_HEADERS.some((name) => c.req.header(name) !== undefined);
+  const principal = provenance === "transport:v1" && local ? parseIdentityPrincipal(c.req.header(IDENTITY_PRINCIPAL_HEADER)) : null;
   return principal ? { identityProvenance: "principal:v1", identityPrincipal: principal } : { identityProvenance: provenance, identityPrincipal: null };
 }

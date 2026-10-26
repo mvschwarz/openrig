@@ -189,23 +189,26 @@ export class DaemonClient {
   private readonly principal?: DaemonClientOptions["principal"];
 
   private async identityHeaders(): Promise<Record<string, string>> {
-    const headers = await this.senderHeaders();
-    // Only beside a seat this client was built for; the daemon records it only on a direct, attributed request.
-    return this.principal && this.sessionName !== undefined && !this.remoteTarget
+    const { headers, local } = await this.senderHeaders();
+    // Only beside a seat this client was built for, and only to this host's own daemon (the locality senderHeaders
+    // established); the daemon records it only on a direct, attributed request.
+    return this.principal && this.sessionName !== undefined && local
       ? { ...headers, "X-OpenRig-Principal": JSON.stringify(this.principal) } : headers;
   }
 
-  private async senderHeaders(): Promise<Record<string, string>> {
+  /** The sender headers, and whether the endpoint is this host's own daemon: no direct endpoint is configured, or the
+   *  endpoint answered with this host's own instance id. */
+  private async senderHeaders(): Promise<{ headers: Record<string, string>; local: boolean }> {
     const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
-    if (!session || session.split("@").length >= 3) return localHeaders;
+    if (!session || session.split("@").length >= 3) return { headers: localHeaders, local: false };
     const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
-    if (!this.remoteTarget && !directTarget) return localHeaders;
+    if (!this.remoteTarget && !directTarget) return { headers: localHeaders, local: true };
     // Imported here, not at the top: it loads better-sqlite3 and yaml, which only a seat on a direct endpoint needs.
     const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
     if (!origin) {
       this.originUnknown = true;
-      return { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" };
+      return { headers: { ...localHeaders, "X-OpenRig-Origin-Unknown": "true" }, local: false };
     }
     if (!this.remoteTarget) {
       // Loopback may be a forwarded endpoint. Only matching instance identity proves locality.
@@ -219,11 +222,11 @@ export class DaemonClient {
           })(),
           new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
         ]);
-        if (target === origin) return localHeaders;
+        if (target === origin) return { headers: localHeaders, local: true };
       } catch { /* Unproved locality: carry the known origin, never the endpoint's identity. */ }
       finally { clearTimeout(timer); controller.abort(); }
     }
-    return senderIdentityHeaders(origin, this.sessionName);
+    return { headers: senderIdentityHeaders(origin, this.sessionName), local: false };
   }
 
   /** The sender this client stamps on its requests (the X-OpenRig-Session value, absent without a seat), and whether it marked

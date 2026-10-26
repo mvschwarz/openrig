@@ -1667,6 +1667,8 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 export interface SendOpts {
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
+  /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
+  identityPrincipal?: string;
   /** Internal wake provenance, never accepted from the public transport route. */
   queueWake?: boolean;
   /** Internal: this send is OpenRig's own (a watchdog, a scheduler wake, a notice, the compaction enforcer). Never accepted
@@ -2452,7 +2454,7 @@ export class SessionTransport {
             if (opts?.committedOutboxIds && (!prior || prior.destinationSession !== sessionName)) throw new Error("Committed wake target/ID mismatch");
             outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
               outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
-              identityProvenance: opts?.identityProvenance, ...(opts?.urgent ? { urgency: "urgent" } : {}),
+              identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal, ...(opts?.urgent ? { urgency: "urgent" } : {}),
             }, target, !!opts?.committedOutboxIds);
           }
         })();

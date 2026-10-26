@@ -98,6 +98,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (body.typeWithoutChecking && (!body.dangerouslyInteract || !body.reason?.trim())) return c.json({ ok: false, reason: "invalid_dangerously_interact",
       error: "--type-without-checking requires --dangerously-interact and --reason. No text was sent." }, 400);
     const derivedActor = transportSenderSession(c) ?? null;
+    // The MCP adapter's caller, on a direct attributed send, for every outbox row this send writes (guarded, retained or the
+    // audit record below); otherwise the stamp this route has always recorded.
+    const attributed = derivedActor ? resolveRecordedIdentity(c, { provenance: "transport:v1" }) : null;
+    const sendIdentity = attributed?.identityPrincipal
+      ? { identityProvenance: "principal:v1", identityPrincipal: attributed.identityPrincipal }
+      : derivedActor ? { identityProvenance: "transport:v1" } : {};
     // Slice 16: a runtime switch's own predecessor or not-yet-committed successor doesn't send as the seat.
     const db = c.get("db" as never) as Database.Database;
     const switchHeld = runtimeSwitchCustodyRefusal(db, derivedActor, c.req.header(OCCUPANT_GENERATION_HEADER));
@@ -131,7 +137,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       typeWithoutChecking: body.typeWithoutChecking,
       reason: body.reason,
       actorSession: derivedActor, // transport-derived, never the body claim
-      ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
+      ...sendIdentity,
       // Anyone may mark a send urgent; who marked it is the transport-derived sender, never a body claim.
       ...(body.urgent === true ? { urgent: { by: derivedActor ?? "unknown" } } : {}),
       // Mechanics-gate fix (d9b3989a): the walk retry's bare-Enter mode, guarded in the
@@ -208,15 +214,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         try {
-          // The MCP adapter's caller, on a direct attributed send; otherwise the stamp this route has always recorded.
-          const attributed = resolveRecordedIdentity(c, { provenance: "transport:v1" });
           const entry = outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
             body: result.envelopeOmitted && exactText !== undefined ? exactText : body.text,
-            ...(attributed.identityPrincipal
-              ? { identityProvenance: "principal:v1", identityPrincipal: attributed.identityPrincipal }
-              : { identityProvenance: "transport:v1" }),
+            ...sendIdentity,
           });
           // The input was dispatched successfully; mark its audit row as broadcast does.
           outbox.markDelivered(entry.outboxId);

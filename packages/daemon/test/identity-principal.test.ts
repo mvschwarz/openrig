@@ -14,6 +14,14 @@ import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import { parseIdentityPrincipal, resolveRecordedIdentity } from "../src/routes/require-sender-identity.js";
 import { createTestApp } from "./helpers/test-app.js";
+import { vi } from "vitest";
+import Database from "better-sqlite3";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
+import { SeatDeliveryGuard, type GuardTarget } from "../src/domain/seat-delivery-guard.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
+import { identityPrincipalSchema } from "../src/db/migrations/140_identity_principal.js";
 
 const ALICE = JSON.stringify({ source: "file", id: "alice" });
 const CLOUD = JSON.stringify({ source: "cloud", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 });
@@ -52,6 +60,9 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
       ["an unknown origin", request({ ...direct, "X-OpenRig-Origin-Unknown": "true" }), { provenance: "origin-unknown:v1" }, "origin-unknown:v1"],
       ["a claimed actor", request({ "X-OpenRig-Principal": ALICE }), { provenance: "claimed:v1" }, "claimed:v1"],
       ["no principal header", request({ "X-OpenRig-Session": "alice@team" }), attributed, "transport:v1"],
+      // A same-host proxy or forwarder delivers a remote caller from loopback; its forwarding headers say so.
+      ...["X-Forwarded-For", "Forwarded", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Via"].map((name) =>
+        [`a forwarded request (${name})`, request({ ...direct, [name]: "203.0.113.7" }), attributed, "transport:v1"] as [string, Context, typeof attributed, string]),
     ];
     for (const [, c, identity, expected] of unchanged) {
       expect(resolveRecordedIdentity(c, identity)).toEqual({ identityProvenance: expected, identityPrincipal: null });
@@ -150,5 +161,41 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     expect(stamps(work.qitemId).map(({ p, who }) => [p, who])).toEqual([
       ["transport:v1", null], ["principal:v1", carol], ["principal:v1", carol], ["principal:v1", carol],
     ]);
+  });
+  it("a send the typing guard holds keeps the principal on the outbox row it retains", async () => {
+    const db = new Database(":memory:");
+    databases.push(db as never);
+    db.exec("CREATE TABLE nodes(id TEXT PRIMARY KEY); INSERT INTO nodes VALUES ('a');");
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
+    db.exec("ALTER TABLE outbox_entries ADD COLUMN identity_provenance TEXT;");
+    db.exec(identityPrincipalSchema.sql.split("\n").filter((line) => line.includes("outbox_entries")).join("\n"));
+    const target: GuardTarget = { nodeId: "a", session: "a", occupant: "g1", pane: "%1" };
+    const guard = new SeatDeliveryGuard(db, (name) => (name === "a" || name === "%1" ? target : null));
+    const tmux = new TmuxAdapter(async () => "", { writeFile: async () => {}, unlink: async () => {}, tmpName: () => "/inert/launch", bufferName: () => "inert-buffer" });
+    tmux.deliveryGuard = guard;
+    vi.spyOn(tmux, "listPanes").mockImplementation(async () => [{ id: "%1" } as never]);
+    const transport = new SessionTransport({ db, tmuxAdapter: tmux, rigRepo: {} as never, sessionRegistry: {} as never, sleep: async () => {} });
+    await guard.set("a", true, "person", "draft");
+    const held = await transport.send("a", "for alice", { actorSession: "alice@team", identityProvenance: "principal:v1", identityPrincipal: ALICE });
+    expect(held).toMatchObject({ ok: true, outcome: "retained", sent: false });
+    expect(db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM outbox_entries").all()).toEqual([{ p: "principal:v1", who: ALICE }]);
+  });
+
+  it("the send route hands the transport the principal it decided before sending, and none for a forwarded request", async () => {
+    const db = database();
+    const sent: Array<Record<string, unknown>> = [];
+    const transport = {
+      resolveSessions: async () => ({ ok: true, sessions: [{ sessionName: "impl@team" }] }),
+      send: async (_session: string, _text: string, opts: Record<string, unknown>) => { sent.push(opts); return { ok: true, sessionName: "impl@team", sent: true, outboxIds: ["held-1"] }; },
+    };
+    const { app } = createTestApp(db, { appDeps: { sessionTransport: transport as never } });
+    const server = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    servers.push(server);
+    const send = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/transport/send`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "alice@team", "X-OpenRig-Principal": ALICE, ...headers },
+      body: JSON.stringify({ session: "impl@team", text: "hello" }) });
+    expect((await send({})).status).toBe(200);
+    expect((await send({ "X-Forwarded-For": "203.0.113.7" })).status).toBe(200);
+    expect(sent.map((opts) => [opts.identityProvenance, opts.identityPrincipal ?? null])).toEqual([["principal:v1", ALICE], ["transport:v1", null]]);
   });
 });
