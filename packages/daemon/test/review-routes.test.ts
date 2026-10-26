@@ -417,6 +417,30 @@ describe("GET /api/review/rig (OPR.0.4.4.22)", () => {
     expect(body.settled[0]).toMatchObject({ fromSession: "driver@r", toSession: "qa@r" });
   });
 
+  it("counts only open rows as held, and in-progress work decides doing over a newer park (#2129)", async () => {
+    // The issue's repro: R1 blocked on another row, R2 claimed and in progress, R3 handed off to the next seat.
+    insert({ id: "q-r1", dest: "worker@r", state: "blocked", tags: ["slice:20-x"], summary: "R1 waiting on R0" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'q-r0' WHERE qitem_id = 'q-r1'").run();
+    insert({ id: "q-r2", dest: "worker@r", tags: ["slice:20-x"], summary: "R2 being built", tsUpdated: "2026-07-04T11:00:00.000Z" });
+    insert({ id: "q-r3", dest: "worker@r", state: "handed-off", tags: ["slice:20-x"], summary: "R3 now with the next seat" });
+
+    const body = await (await app.request("/api/review/rig")).json();
+    const row = body.agents.rows.find((r: { sessionName: string }) => r.sessionName === "worker@r");
+    expect(row).toMatchObject({ doing: "R2 being built", holdsCount: 2 });
+    expect(row.stateGlyph).not.toBe("parked");
+  });
+
+  it("a seat whose only slice row today was handed off holds nothing and isn't parked on that row (#2129)", async () => {
+    // A closed row can keep its old blocked_on; it is neither held work nor a park.
+    insert({ id: "q-gone", dest: "passer@r", state: "handed-off", tags: ["slice:20-x"], summary: "handed to qa" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'external:old-gate' WHERE qitem_id = 'q-gone'").run();
+
+    const body = await (await app.request("/api/review/rig")).json();
+    const row = body.agents.rows.find((r: { sessionName: string }) => r.sessionName === "passer@r");
+    expect(row).toMatchObject({ holdsCount: 0, doing: "no tracked work item" });
+    expect(row.stateGlyph).not.toBe("parked");
+  });
+
   it("keeps human-routed qitems in NEEDS YOU without turning the human seat into an AGENTS row", async () => {
     insert({ id: "q-human", dest: "human-review@kernel", tags: ["slice:20-x"], summary: "approve the demo", tier: "human-gate", state: "pending" });
 

@@ -79,6 +79,8 @@ interface QitemRow {
 }
 
 const ACTIVE_STATES = ["pending", "in-progress", "claimed", "blocked", "handed-off"];
+// What a seat still holds. A handed-off row is closed: the next seat holds that work (#2129).
+const HELD_STATES = ["pending", "in-progress", "claimed", "blocked"];
 
 const LEXICAL_PARTICIPANTS: ReviewParticipants = { isPerson: isHumanSeatSessionRef, isSharedChannel: () => false };
 
@@ -600,9 +602,9 @@ export class ReviewGatherer {
         `SELECT qitem_id, ts_created, ts_updated, destination_session, state, priority, tier, tags, ${summaryCol},
                 blocked_on, closure_required_at
          FROM queue_items
-         WHERE state IN (${ACTIVE_STATES.map(() => "?").join(",")})`,
+         WHERE state IN (${HELD_STATES.map(() => "?").join(",")})`,
       )
-      .all(...ACTIVE_STATES) as QitemRow[];
+      .all(...HELD_STATES) as QitemRow[];
     const bySession = new Map<string, { rows: QitemRow[]; slices: Set<string> }>();
     const view = this.participantView();
     for (const r of rows) {
@@ -629,10 +631,11 @@ export class ReviewGatherer {
     return [...bySession.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([session, e]) => {
-        const latest = e.rows.reduce((acc, r) => (r.ts_updated > acc.ts_updated ? r : acc), e.rows[0]!);
-        const parked = e.rows
-          .filter((r) => !!r.blocked_on)
-          .reduce<QitemRow | null>((acc, r) => (!acc || r.ts_updated > acc.ts_updated ? r : acc), null);
+        const newest = (rows: QitemRow[]) => rows.reduce<QitemRow | null>((acc, r) => (!acc || r.ts_updated > acc.ts_updated ? r : acc), null);
+        const latest = newest(e.rows)!;
+        // Live in-progress work is what the seat is doing; it is parked only when nothing is in progress (#2129).
+        const working = newest(e.rows.filter((r) => r.state === "in-progress"));
+        const parked = working ? null : newest(e.rows.filter((r) => r.state === "blocked" && !!r.blocked_on));
         return {
           agentName: sessionMemberLabel(session), // OPR.0.4.6.MH1 FR-8: shared contract
           sessionName: session,
@@ -640,7 +643,7 @@ export class ReviewGatherer {
           parkedOn: parked?.blocked_on ?? null,
           idle: null, // honest-unknown: queue rows alone cannot prove liveness
           idleSinceIso: null,
-          doing: parked?.summary ?? latest.summary,
+          doing: (working ?? parked ?? latest).summary,
           holdsCount: e.rows.length,
           lastTransitionIso: (parked ?? latest).ts_updated,
           slices: [...e.slices].sort(),
@@ -659,17 +662,17 @@ export class ReviewGatherer {
     if (!this.tableExists("queue_items")) return holders;
     const summaryCol = this.columnExists("queue_items", "summary") ? "summary" : "NULL AS summary";
     // Recently-holding: destination of a slice-tagged qitem whose latest
-    // update landed today but is no longer in an active state.
+    // update landed today but is no longer held (handed off, done or canceled).
     const rows = this.db
       .prepare(
         `SELECT qitem_id, ts_created, ts_updated, destination_session, state, priority, tier, tags, ${summaryCol},
                 blocked_on, closure_required_at
          FROM queue_items
          WHERE ts_updated >= ?
-           AND state NOT IN (${ACTIVE_STATES.map(() => "?").join(",")})
+           AND state NOT IN (${HELD_STATES.map(() => "?").join(",")})
            AND tags LIKE '%"slice:%'`,
       )
-      .all(todayStartIso, ...ACTIVE_STATES) as QitemRow[];
+      .all(todayStartIso, ...HELD_STATES) as QitemRow[];
     const known = new Set(holders.map((h) => h.sessionName));
     const recent = new Map<string, { latest: QitemRow; slices: Set<string> }>();
     const view = this.participantView();
