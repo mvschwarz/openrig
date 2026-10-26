@@ -59,7 +59,7 @@ describe("auto-mode startup content requires the launched Claude identity", () =
     });
     const binding: NodeBinding = { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
       cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture", permissionMode: "auto" };
-    const result = await new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).startNode({
+    const result = await new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} }).startNode({
       rigId: rig.id, nodeId: node.id, sessionId: session.id, binding, adapter,
       plan: { runtime: "claude-code", cwd: "/fixture", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [] } as never,
       resolvedStartupFiles: [{ path: "startup.txt", absolutePath: "/fixture/startup.txt", ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],

@@ -103,7 +103,7 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       const eventBus = new EventBus(db);
       const tmux = mockTmux();
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
 
       // Real ClaudeCodeAdapter. The fs seam is pre-loaded with the
       // registry-entry content (matching the path the resolver will hand

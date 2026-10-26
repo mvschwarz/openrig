@@ -157,7 +157,7 @@ describe("AgentSpec startup integration", () => {
     });
 
     // 8. Run startup orchestrator
-    const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const orchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const startupResult = await orchestrator.startNode({
       rigId: rig.id,
       nodeId: node.id,

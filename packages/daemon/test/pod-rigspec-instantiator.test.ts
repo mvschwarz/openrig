@@ -88,7 +88,7 @@ describe("PodRigInstantiator", () => {
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const adapter = mockAdapter();
     const codexAdapter = mockAdapter("codex");
     const files = fsFiles ?? { [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl") };
@@ -725,7 +725,7 @@ profiles:
     const eventBus = new EventBus(db);
     const tmux = mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const adapter = mockAdapter();
     const fsOps = mockFs({
       [`${RIG_ROOT}/agents/impl/agent.yaml`]: `
@@ -980,7 +980,7 @@ profiles:
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
 
     // Startup orchestrator that fails for qa
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const origStartNode = startupOrch.startNode.bind(startupOrch);
     let callCount = 0;
     startupOrch.startNode = async (input) => {
@@ -1821,7 +1821,7 @@ state: 2-named
       [`${RIG_ROOT}/agents/qa/agent.yaml`]: agentYaml("qa"),
     });
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+    const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
     const origStartNode = startupOrch.startNode.bind(startupOrch);
     let callCount = 0;
     startupOrch.startNode = async (input) => {

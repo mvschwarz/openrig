@@ -95,7 +95,7 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       const eventBus = new EventBus(db);
       const tmux = mockTmux();
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
-      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+      const startupOrch = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
 
       const codexFs = mockCodexFs({
         [registryEntryPath]: CODEX_STARTER,

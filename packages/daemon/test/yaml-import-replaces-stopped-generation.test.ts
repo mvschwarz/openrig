@@ -50,7 +50,7 @@ function setup(probe: Probe | undefined, opts: { launchOk?: boolean; attention?:
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     ...(probe ? { probeSession: vi.fn(probe) } : {}),
   } as unknown as TmuxAdapter;
-  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
   if (opts.attention) {
     startupOrchestrator.startNode = async (input) => {
       sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");

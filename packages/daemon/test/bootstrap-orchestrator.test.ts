@@ -316,7 +316,7 @@ describe("BootstrapOrchestrator", () => {
           : { ok: true }),
       });
       const podInstantiator = new PodRigInstantiator({ db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
-        nodeLauncher, startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+        nodeLauncher, startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} }),
         tmuxAdapter: tmux, fsOps: realFsOps(), adapters: { "claude-code": adapter("claude-code"), terminal: adapter("terminal") },
         exec: async () => "fixture runtime", onboardingEnabledResolver: () => false,
       });

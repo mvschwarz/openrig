@@ -246,7 +246,7 @@ profiles:
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, pluginsDir });
       const inst = new PodRigInstantiator({
         db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus, nodeLauncher,
-        startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+        startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} }),
         fsOps: mockFs(files),
         adapters: { "claude-code": mockAdapter("claude-code"), codex: mockAdapter("codex"), terminal: mockAdapter("terminal") },
         tmuxAdapter: tmux,
