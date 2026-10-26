@@ -13,7 +13,7 @@ const mcp = {
   missing: { isError: true, content: [{ type: 'text', text: '{"error":"qitem_not_found"}' }],
     structuredContent: { ok: false, code: 'qitem_not_found', message: 'qitem_not_found', status: 404 } },
   daemonError: { status: 404, body: { error: 'qitem_not_found' } },
-  instructions: 'OPENRIG_SESSION_NAME\nrig_queue_create\nnot idle\nreserved for a person',
+  instructions: 'OPENRIG_SESSION_NAME\nrig_queue_create\nnot idle\nreserved for a person\nrig_queue_claim',
 };
 
 // Pure result-admission fixture; not a pane/daemon execution claim.
