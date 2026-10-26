@@ -10,11 +10,14 @@
 // With --cloud-grants, grants come from OpenRig Cloud instead and the token file is never read: each request's key is
 // checked with Cloud (openrig.cloud.grant/v1) for this daemon's instance, every answer but active is refused, and a
 // customer reaches only what its grant names (customerScope in mcp-server.ts).
+//
+// The endpoint serves both protocol revisions: 2026-07-28 per request, and 2025's initialize and exchanges statelessly.
 import http from "node:http";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { DaemonClient } from "./client.js";
 import { createMcpServer, type McpAccess } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
@@ -144,6 +147,8 @@ export class McpHttpConfigError extends Error {}
 
 /** The caller whose grant this server checked, as the daemon records it beside the rows it writes (principal:v1). */
 export type McpPrincipal = { source: "file" | "cloud"; id: string; grant?: string; version?: number | string };
+/** One request's caller as this server decided it: no seat, access or principal for the loopback local owner. */
+type RequestCaller = { seat?: string; access?: McpAccess; principal?: McpPrincipal };
 
 /** OpenRig Cloud's customer grant contract. Core asks on every request with the customer's raw key and its own instance
  *  id; nothing is cached, and every answer but `active` is refused. */
@@ -294,6 +299,16 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     if (refusal.log) console.error(`rig mcp serve --http: ${refusal.log}`);
     reply(res, refusal.status, { error: refusal.error, message: refusal.message }, refusal.status === 401 ? { "WWW-Authenticate": 'Bearer realm="openrig"' } : {});
   };
+  // One handler for both protocol revisions: a request carrying 2026-07-28's per-request envelope is served as that
+  // revision, anything else (initialize and the rest of 2025) statelessly as before. Each request gets a fresh server for
+  // the caller decided below, handed over as the request's authInfo.
+  const mcpHandler = createMcpHandler(({ authInfo }) => {
+    const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
+    // Never a default seat: a request reaches the handler only with its caller decided.
+    if (!caller) throw new Error("a request reached the MCP handler without its caller");
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access });
+  });
+  const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
   const NO_BEARER = "This server needs a bearer credential: Authorization: Bearer <token>.";
 
@@ -368,16 +383,16 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
         return;
       }
     }
-    const mcp = createMcpServer(makeClient(opts.daemonUrl, seat, principal), { seat, access });
     // With no auth (loopback only), refuse a Host that isn't loopback, as a page reaching localhost through DNS rebinding
-    // or a forward from elsewhere would send. With auth, the credential is the check, so a tunnel's Host is fine.
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      ...(!authenticated ? { enableDnsRebindingProtection: true, allowedHosts: [`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`] } : {}),
-    });
-    res.on("close", () => { void transport.close(); void mcp.close(); });
-    await mcp.connect(transport);
-    await transport.handleRequest(req, res, body);
+    // or a forward from elsewhere would send. With auth, the credential is the check, so a tunnel's Host is fine. The SDK's
+    // handler checks no Host, so this is the refusal its 1.x transport gave.
+    if (!authenticated && ![`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`].includes(req.headers.host ?? "")) {
+      reply(res, 403, { jsonrpc: "2.0", error: { code: -32000, message: `Invalid Host header: ${req.headers.host}` }, id: null });
+      return;
+    }
+    const caller: RequestCaller = { seat, access, principal };
+    (req as http.IncomingMessage & { auth?: AuthInfo }).auth = { token: "", clientId: principal?.id ?? "local-owner", scopes: [], extra: { caller } };
+    await serveMcp(req, res, body);
   };
 
   const server = http.createServer((req, res) => {
@@ -394,6 +409,9 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   return {
     url: `http://${shownHost}:${boundPort}/mcp`,
     authenticated: configured,
-    close: () => new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }),
+    close: async () => {
+      await new Promise<void>((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); });
+      await mcpHandler.close();
+    },
   };
 }

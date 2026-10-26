@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer } from "../mcp-server.js";
@@ -26,6 +26,9 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--cloud-grants <url>", "With --http: check each request's key with OpenRig Cloud's grant endpoint instead of the token file")
     .option("--cloud-grant-header-file <path>", "With --cloud-grants: a file holding one 'Name: value' header to send with each grant request")
     .addHelpText("after", `
+Both MCP protocol revisions are served, over stdio and --http alike: clients on 2026-07-28 (which may start with
+server/discover) and clients that open with 2025's initialize handshake.
+
 With --http and no token file, the server stays on loopback and acts as OPENRIG_SESSION_NAME, declared and not
 authenticated, like stdio. Once a grant exists (rig mcp token add), every request needs its bearer credential, loopback
 included, and each caller acts as its grant's seat within its rigs and roots. Add a grant before reaching the port
@@ -69,24 +72,22 @@ already exist here, and reaches only what the grant names. If Cloud can't answer
         return;
       }
       const client = deps.clientFactory(daemonUrl);
-      const server = createMcpServer(client);
-      const transport = new StdioServerTransport();
       let finish!: () => void;
       const closed = new Promise<void>((resolve) => { finish = resolve; });
-      server.server.onclose = finish;
       process.stdin.once("end", finish);
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
+      // Serves the protocol revision the client opens with: 2026-07-28 per request, or 2025's initialize handshake.
+      const served = serveStdio(() => createMcpServer(client), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
       try {
         // EOF is a normal stdio disconnect, not an unresolved top-level await.
-        await server.connect(transport);
         if (process.stdin.readableEnded) finish();
         await closed;
       } finally {
         process.stdin.removeListener("end", finish);
         process.removeListener("SIGINT", finish);
         process.removeListener("SIGTERM", finish);
-        await server.close();
+        await served.close();
       }
     });
 
