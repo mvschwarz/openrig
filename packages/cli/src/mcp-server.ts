@@ -52,15 +52,19 @@ function structured(data: unknown): Record<string, unknown> {
 /** Where a handed-on item went. A cross-host handoff records the remote item as qitem-…@<host> in closureTarget (named, not
  *  fetched); a local successor is the item whose handedOffFrom is this one, the newest when there are several. null when
  *  none is found; { unknown: true, code } when the lookup failed or the daemon can't filter by handedOffFrom. */
-async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown): Promise<Record<string, unknown> | null> {
+async function successorOf(client: DaemonClient, qitemId: string, closureTarget: unknown,
+  /** For a customer: which successor rows it may see; a cross-host successor's parties are unknown here, so it can't. */
+  visible?: (row: unknown) => boolean): Promise<Record<string, unknown> | null> {
   const remote = typeof closureTarget === "string" ? /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget) : null;
-  if (remote) return { qitemId: remote[1], host: remote[2] };
+  if (remote) return visible ? { unknown: true, code: "out_of_scope" } : { qitemId: remote[1], host: remote[2] };
   try {
     const res = await client.get(`/api/queue/list?${new URLSearchParams({ handedOffFrom: qitemId, compact: "1", limit: "5" }).toString()}`);
     if (res.status >= 400) return { unknown: true, code: (mapResult(res).structuredContent as { code: string }).code };
     if (!Array.isArray(res.data)) return { unknown: true, code: "unexpected_response" };
     if (ignoredFilter(res.data, { handedOffFrom: qitemId })) return { unknown: true, code: "filter_unsupported" };
-    const [next, ...others] = res.data as Array<{ qitemId?: string; destinationSession?: string; state?: string }>;
+    const rows = res.data as Array<{ qitemId?: string; sourceSession?: string; destinationSession?: string; state?: string }>;
+    if (visible && rows.length > 0 && !visible(rows[0])) return { unknown: true, code: "out_of_scope" };
+    const [next, ...others] = visible ? rows.filter((row) => visible(row)) : rows;
     if (!next) return null;
     return { qitemId: next.qitemId, destinationSession: next.destinationSession, state: next.state, ...(others.length > 0 ? { otherSuccessors: others.map((o) => o.qitemId) } : {}) };
   } catch (err) {
@@ -145,7 +149,29 @@ type Scope = {
   paths: boolean;
   /** Whether every list is limited to the caller's own items. */
   ownListsOnly: boolean;
+  /** For a customer: whether a handoff's target may be shown. A target it may not see is redacted (redactHandoff), and
+   *  successors are checked whole (successorOf). Absent for every other caller, whose responses are as they were. */
+  handoff?: (target: unknown) => boolean;
 };
+
+const HANDED_ON = "handed on (out of scope)";
+
+/** A row or a transition with a handoff target the caller may not see: the fact that it was handed on stays, and the new
+ *  owner goes from handedOffTo, the closure target and the handoff's note (by default "handed off to <seat>"). */
+function redactHandoff<T>(row: T, shown: (target: unknown) => boolean): T {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const fields = { ...(row as Record<string, unknown>) };
+  if (typeof fields.handedOffTo === "string" && !shown(fields.handedOffTo)) fields.handedOffTo = null;
+  if (fields.closureReason === "handed_off_to" && fields.closureTarget != null && !shown(fields.closureTarget)) {
+    fields.closureTarget = null;
+    if ("transitionNote" in fields) fields.transitionNote = HANDED_ON;
+  }
+  if (fields.closingTransition) fields.closingTransition = redactHandoff(fields.closingTransition, shown);
+  // The daemon's custody advisory names the target in its target and its message.
+  const advisory = fields.handoffAdvisory as { target?: unknown } | null | undefined;
+  if (advisory && typeof advisory === "object" && !shown(advisory.target)) delete fields.handoffAdvisory;
+  return fields as T;
+}
 
 /** What an authenticated non-owner caller may reach: its own seat, its rigs' seats, the items they send or own (to read),
  *  the items they own (to change), and its shared roots. A person (<entityId>@external) is never in a non-owner's scope. */
@@ -213,6 +239,7 @@ function customerScope(access: McpAccess, seatOf: () => string | undefined): Sco
     artifact: (row) => caller(field(row, "sourceSession")),
     paths: false,
     ownListsOnly: true,
+    handoff: caller,
   };
 }
 
@@ -987,6 +1014,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           ...(alert ? { humanAlert: true } : {}),
           ...(lineage ? { chainOfRecord: lineage.chainOfRecord } : {}),
         });
+        // A customer reusing the id of an item it can't see learns only that the id is taken, never that item's parties.
+        const conflict = (res.data ?? {}) as { error?: unknown; existingSource?: unknown; existingDestination?: unknown };
+        if (scope?.handoff && res.status === 409 && conflict.error === "qitem_id_reuse"
+          && !scope.item({ sourceSession: conflict.existingSource, destinationSession: conflict.existingDestination })) {
+          const message = `qitemId ${id} is already taken. Retry with a new one.`;
+          return errorResult(JSON.stringify({ ok: false, error: "qitem_id_reuse", message }), "qitem_id_reuse", message);
+        }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
         const failure = caught(err);
@@ -1014,9 +1048,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
         if (transitions.status >= 400) return mapResult(transitions);
         const row = (item.data ?? {}) as { state?: unknown; closureReason?: unknown; closureTarget?: unknown };
         const handedOn = row.state === "handed-off" || row.closureReason === "handed_off_to";
-        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget) : undefined;
-        if (scope && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
-        return mapResult({ status: 200, data: { item: item.data, transitions: transitions.data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
+        const shown = scope?.handoff;
+        let successor = handedOn ? await successorOf(client, qitemId, row.closureTarget, shown ? scope!.item : undefined) : undefined;
+        if (scope && !shown && successor && "destinationSession" in successor && !scope.successor(successor.destinationSession)) successor = { unknown: true, code: "out_of_scope" };
+        const data = shown
+          ? { item: redactHandoff(item.data, shown), transitions: Array.isArray(transitions.data) ? transitions.data.map((t) => redactHandoff(t, shown)) : transitions.data }
+          : { item: item.data, transitions: transitions.data };
+        return mapResult({ status: 200, data: { ...data, ...(handedOn ? { successor } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1074,7 +1112,11 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           return errorResult(JSON.stringify({ ok: false, error: message }), "filter_unsupported", message);
         }
         // An authenticated caller sees only the rows in its scope, whatever the filters matched.
-        if (scope && res.status < 400 && Array.isArray(res.data)) return mapResult({ ...res, data: res.data.filter((row) => scope.item(row)) }, undefined, { structured: true });
+        if (scope && res.status < 400 && Array.isArray(res.data)) {
+          const shown = scope.handoff;
+          const rows = res.data.filter((row) => scope.item(row));
+          return mapResult({ ...res, data: shown ? rows.map((row) => redactHandoff(row, shown)) : rows }, undefined, { structured: true });
+        }
         return mapResult(res, undefined, { structured: true });
       } catch (err) {
         return caught(err);

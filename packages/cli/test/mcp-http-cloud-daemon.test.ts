@@ -241,6 +241,63 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     expect((await asCustomer("rig_artifact_read", { root: "proof", path: "result.md" })).structured).toMatchObject({ code: "out_of_scope" });
   });
 
+  it("never names a handed-on item's out-of-scope owner: not in show, list, a cross-host successor or a sibling successor", async () => {
+    const served = await listen();
+    const asCustomer = await connect(served.url);
+    const row = (id: string, source: string, destination: string, extra: Record<string, string | null> = {}) => {
+      const fields = { qitem_id: id, ts_created: "2026-10-26T00:00:00.000Z", ts_updated: "2026-10-26T00:00:00.000Z", source_session: source,
+        destination_session: destination, state: "pending", priority: "routine", body: "x", handed_off_from: null, ...extra };
+      db.prepare(`INSERT INTO queue_items (${Object.keys(fields).join(", ")}) VALUES (${Object.keys(fields).map(() => "?").join(", ")})`).run(...Object.values(fields));
+    };
+    const handOn = (id: string, to: string) => fetch(`${daemonUrl}/api/queue/${id}/handoff`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "lead@team-a" }, body: JSON.stringify({ toSession: to, nudge: false }) });
+
+    // Handed on inside the team: the fact stays, the new owner appears nowhere in show or list.
+    const own = (await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "my task" })).structured.qitemId as string;
+    expect((await handOn(own, "impl@team-a")).status).toBe(201);
+    const shown = await asCustomer("rig_queue_show", { qitemId: own });
+    expect(shown.text).not.toContain("impl@team-a");
+    expect(shown.structured.item).toMatchObject({ state: "handed-off", closureReason: "handed_off_to", handedOffTo: null, closureTarget: null,
+      closingTransition: { closureReason: "handed_off_to", closureTarget: null, transitionNote: "handed on (out of scope)" } });
+    expect(shown.structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    expect(JSON.stringify((await asCustomer("rig_queue_list", { all: true })).structured)).not.toContain("impl@team-a");
+
+    // A cross-host successor's parties can't be checked here: its id and host stay hidden.
+    const remote = (await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "goes far" })).structured.qitemId as string;
+    db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = 'qitem-far01@other-host', handed_off_to = 'impl@team-a@other-host' WHERE qitem_id = ?").run(remote);
+    const far = await asCustomer("rig_queue_show", { qitemId: remote });
+    expect(far.structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    expect(far.text).not.toContain("other-host");
+
+    // A successor addressed to the caller but sent by another caller-shaped seat isn't the team's; nor is a sibling the
+    // caller can't see named among otherSuccessors.
+    const forged = (await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "x" })).structured.qitemId as string;
+    db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = ?, handed_off_to = ? WHERE qitem_id = ?").run(CALLER, CALLER, forged);
+    row("qitem-forged-next", "cus-otherone01-caller@team-a", CALLER, { handed_off_from: forged });
+    expect((await asCustomer("rig_queue_show", { qitemId: forged })).structured.successor).toEqual({ unknown: true, code: "out_of_scope" });
+    const split = (await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "x" })).structured.qitemId as string;
+    db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', closure_target = ?, handed_off_to = ? WHERE qitem_id = ?").run(CALLER, CALLER, split);
+    row("qitem-split-hidden", "lead@team-a", "impl@team-a", { handed_off_from: split, ts_created: "2026-10-26T00:00:01.000Z" });
+    row("qitem-split-back", "lead@team-a", CALLER, { handed_off_from: split, ts_created: "2026-10-26T00:00:02.000Z" });
+    const back = await asCustomer("rig_queue_show", { qitemId: split });
+    expect(back.structured.successor).toMatchObject({ qitemId: "qitem-split-back", destinationSession: CALLER });
+    expect(back.text).not.toContain("qitem-split-hidden");
+  });
+
+  it("an id-reuse conflict never names another item's parties, and still names the customer's own", async () => {
+    const served = await listen();
+    const asCustomer = await connect(served.url);
+    const own = (await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "my task" })).structured.qitemId as string;
+    // Reusing the id of an item it can't see: taken, nothing more. Its own item's conflict still names its own parties.
+    const internal = await create("lead@team-a", "impl@team-a", "SECRET team work");
+    const reused = await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "x", qitemId: internal.qitemId });
+    expect(reused.structured).toMatchObject({ ok: false, code: "qitem_id_reuse" });
+    expect(reused.text).not.toContain("impl@team-a");
+    const mine = await asCustomer("rig_queue_create", { destination: "qa@team-a", body: "x", qitemId: own });
+    expect(mine.structured).toMatchObject({ code: "qitem_id_reuse" });
+    expect(mine.text).toContain(CALLER);
+  });
+
   it("reads the grant request's header from a one-line secret file, and refuses one that would replace the request's own", () => {
     const file = path.join(home, "header");
     fs.writeFileSync(file, "x-vercel-protection-bypass: preview-secret\n");
