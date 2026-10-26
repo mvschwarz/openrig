@@ -29,7 +29,8 @@ import { OutboxHandler } from "./outbox-handler.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
-import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { claudeResumeRotation, sessionCommunityHarnessSelect, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { tmuxResizeWindowCommand, tmuxRestoreWindowSizingCommand } from "../adapters/tmux-server.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
@@ -560,8 +561,11 @@ const OPENCLAW_TURN_NOT_RECOVERED = "OpenClaw turn not recovered; inspect the pa
  * Multiple native branches emit the same refusal; observe it without touching native session state. */
 function currentOpenClawTurnRefusal(paneContent: string): string | null {
   const lines = trimPaneLines(styledTextLines(paneContent).map(line => line.text).join("\n"));
-  if (!/^─{3,}$/.test(lines.at(-1) ?? "")) return null;
-  for (let at = lines.length - 1; at >= 0; at--) {
+  const editorRules = lines.flatMap((line, at) => /^─{3,}$/.test(line) ? [at] : []);
+  // The pinned TUI puts its status/footer above the editor. Extra rules make that boundary ambiguous;
+  // leave those layouts unclassified rather than selecting a quoted frame inside the composer.
+  if (editorRules.length !== 2 || editorRules[1] !== lines.length - 1) return null;
+  for (let at = editorRules[0]! - 1; at >= 0; at--) {
     if (!/^(?:local|gateway)\s+.*\|/.test(lines[at]!)) continue;
     if (lines[at]!.replace(/\s+/g, " ") !== "local ready | error"
       || !lines[at + 1]?.startsWith("agent main | session ")) return null;
@@ -787,6 +791,8 @@ export async function probeSessionActivity(input: {
   composerSnapshot?: () => Promise<ComposerSnapshot | null>;
   /** The seat's community harness (`communityHarnessOf`): its idle-looking screen reads unknown. */
   communityHarness?: string | null;
+  /** Ordinary sends keep existing community idle readings; an OpenClaw turn error is advisory, not a picker. */
+  communityHarnessSendProbe?: boolean;
   /** See ClassifyPaneOptions.postCompactTurnBoundary. */
   postCompactTurnBoundary?: boolean;
 }): Promise<AgentActivity> {
@@ -911,8 +917,13 @@ export async function probeSessionActivity(input: {
       currentClaudeDialogueOnly: input.currentClaudeDialogueOnly === true,
       postCompactTurnBoundary: input.postCompactTurnBoundary === true,
     };
-    let classification = communityHarnessPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
-      composerSnapshot: snapshot ?? undefined, runtime }), input.communityHarness, paneContent ?? "");
+    const paneClassification = classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
+      composerSnapshot: snapshot ?? undefined, runtime });
+    let classification = communityHarnessPaneActivity(paneClassification, input.communityHarness, paneContent ?? "");
+    if (input.communityHarnessSendProbe) {
+      if (classification.reason === "community_harness_no_idle_signal") classification = paneClassification;
+      else if (classification.reason === OPENCLAW_TURN_NOT_RECOVERED) classification = { ...classification, state: "unknown" };
+    }
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
@@ -1944,7 +1955,7 @@ interface SessionTransportDeps {
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
+interface SessionMetaRow { community_harness: string | null; runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null;
   resume_provenance: string | null; resume_rotated_from: string | null; resume_rotated_process: string | null; resume_launch_process: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
@@ -2060,6 +2071,7 @@ export class SessionTransport {
   private getSessionMeta(sessionName: string): {
     runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null; resumeToken: string | null;
     rotation: ClaudeResumeRotation | null;
+    communityHarness: string | null;
   } {
     sessionName = physicalSessionName(this.db, sessionName);
     // One existing statement; P2 reads the binding columns it already joins plus the
@@ -2067,6 +2079,7 @@ export class SessionTransport {
     const row = this.db.prepare(`
       SELECT
         n.runtime AS runtime,
+        ${sessionCommunityHarnessSelect(this.db)} AS community_harness,
         b.attachment_type AS attachment_type,
         n.id AS node_id,
         b.tmux_session AS binding_session,
@@ -2087,6 +2100,7 @@ export class SessionTransport {
 
     return {
       runtime: row?.runtime ?? null,
+      communityHarness: communityHarnessOf(row?.community_harness, row?.runtime),
       attachmentType: row?.attachment_type ?? null,
       nodeId: row?.node_id ?? null,
       // The row may be a historical session of a node now bound elsewhere: only a
@@ -3086,9 +3100,7 @@ export class SessionTransport {
             sessionName,
             reason: "target_needs_input",
             activity: readiness,
-            error: readiness.reason === OPENCLAW_TURN_NOT_RECOVERED
-              ? `Refused: OpenClaw refused the turn and OpenRig has not recovered or retried it. Inspect its native conversation with rig capture ${sessionName} before deliberately retrying. No text was sent.`
-              : `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
+            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
@@ -3098,8 +3110,12 @@ export class SessionTransport {
         // or not --dangerously-interact was passed (B1 code-review fix) — so the honest telemetry is
         // surfaced without ever blocking communication. Hooks are advisory telemetry, not authority
         // over whether agents can talk.
-        const linkDiagnosis = await this.diagnoseProducerLink(sessionName);
-        sendAdvisory = [sendAdvisory, `producer-link: ${linkDiagnosis} — activity could not be determined (${readiness.reason}); sent anyway (telemetry is advisory).`].filter(Boolean).join(" ");
+        if (readiness.reason === OPENCLAW_TURN_NOT_RECOVERED) {
+          sendAdvisory = [sendAdvisory, `OpenClaw refused its last local turn and OpenRig hasn't recovered it; this message submits a new turn. Inspect it with rig capture ${sessionName}.`].filter(Boolean).join(" ");
+        } else {
+          const linkDiagnosis = await this.diagnoseProducerLink(sessionName);
+          sendAdvisory = [sendAdvisory, `producer-link: ${linkDiagnosis} — activity could not be determined (${readiness.reason}); sent anyway (telemetry is advisory).`].filter(Boolean).join(" ");
+        }
         // fall through to the send below.
       } else if (readiness.state === "running") {
         // OPR.0.4.3.28 fast-follow (advisor audit-catch, pm-ruled a founder-principle residual):
@@ -3549,8 +3565,10 @@ export class SessionTransport {
   }, privateInput = false): Promise<AgentActivity> {
     const now = this.now();
     let binding = input.binding;
+    let communityHarness: string | null = null;
     try {
       const stored = this.getSessionMeta(input.sessionName);
+      communityHarness = stored.communityHarness;
       binding = {
         sessionName: input.sessionName,
         nodeId: binding?.nodeId ?? stored.nodeId,
@@ -3595,6 +3613,7 @@ export class SessionTransport {
       if (this.hookFreshForSend(hookActivity, now)) {
         if (hookActivity.state === "running" && input.runtime === "claude-code") {
           const paneVeto = await probeSessionActivity({
+            communityHarness, communityHarnessSendProbe: true,
             composerSnapshot,
             currentClaudeDialogueOnly: true,
             sessionName: input.sessionName,
@@ -3624,6 +3643,7 @@ export class SessionTransport {
         // vetoes (→ refuse); an unknown pane (the flaky-Codex case this trust
         // exists for) or a clean idle pane does NOT veto → trust the stale hook.
         const paneVeto = await probeSessionActivity({
+          communityHarness, communityHarnessSendProbe: true,
           composerSnapshot,
           sessionName: input.sessionName,
           runtime: input.runtime,
@@ -3641,6 +3661,7 @@ export class SessionTransport {
     }
 
     const probe = await probeSessionActivity({
+      communityHarness, communityHarnessSendProbe: true,
       composerSnapshot,
       sessionName: input.sessionName,
       runtime: input.runtime,
