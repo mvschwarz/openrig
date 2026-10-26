@@ -421,6 +421,7 @@ process.exit(result.status ?? 1);
         execFileSync("tmux", ["-S", tmuxSocketPath, "kill-server"], {
           env: { ...env, PATH: originalPath } as NodeJS.ProcessEnv,
           stdio: "ignore",
+          timeout: 2_000,
         });
         const deadline = Date.now() + 2_000;
         const pause = new Int32Array(new SharedArrayBuffer(4));
@@ -439,6 +440,7 @@ process.exit(result.status ?? 1);
     rmSync(root, { recursive: true, force: true });
   };
 
+  let cleanupFailure: { cause: unknown } | undefined;
   return {
     root,
     home,
@@ -447,6 +449,11 @@ process.exit(result.status ?? 1);
     tmuxTmpDir,
     tmuxSocketPath,
     env,
-    cleanup,
+    cleanup() {
+      // A later call cannot bypass failed process settlement just because the socket is gone.
+      if (cleanupFailure) throw cleanupFailure.cause;
+      try { cleanup(); }
+      catch (cause) { cleanupFailure = { cause }; throw cause; }
+    },
   };
 }

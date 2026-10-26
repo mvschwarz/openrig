@@ -148,6 +148,49 @@ setInterval(() => {}, 1000);
     }
   });
 
+  it("keeps failed cleanup failed on a second call while its captured child lives", async () => {
+    const { execFile } = await import("node:child_process");
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const evidence = mkdtempSync(join(tmpdir(), "cleanup-timeout-"));
+    dirs.push(evidence);
+    const ready = join(evidence, "ready"), stopped = join(evidence, "stopped");
+    const s = prepareHermeticEnv({ baseEnv: cleanBase() });
+    const writer = join(evidence, "writer.cjs");
+    writeFileSync(writer, `
+const { writeFileSync } = require("node:fs");
+if (process.argv[2] === "child") {
+  process.once("SIGHUP", () => writeFileSync(${JSON.stringify(stopped)}, "still alive"));
+  writeFileSync(${JSON.stringify(ready)}, String(process.pid));
+} else {
+  const child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: "ignore" });
+  process.once("SIGHUP", () => { child.kill("SIGHUP"); process.exit(0); });
+}
+setInterval(() => {}, 1000);
+`);
+    await run("tmux", ["-S", s.tmuxSocketPath, "new-session", "-d", "-s", "writer",
+      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(writer)}`], {
+      env: s.env as NodeJS.ProcessEnv,
+    });
+    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 2_000, interval: 10 });
+    const childPid = Number(readFileSync(ready, "utf8"));
+    try {
+      expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
+      expect(existsSync(stopped)).toBe(true);
+      expect(process.kill(childPid, 0)).toBe(true);
+      expect(existsSync(s.root)).toBe(true);
+      expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
+      expect(existsSync(s.home)).toBe(true);
+    } finally {
+      try { process.kill(childPid, "SIGTERM"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      await vi.waitFor(() => expect(() => process.kill(childPid, 0)).toThrow(), { timeout: 2_000, interval: 10 });
+      // This fixture deliberately makes cleanup fail; remove only after its child exits.
+      rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
   it("cleanup terminates repeated scaffold-owned tmux servers without touching an unrelated server", async () => {
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
