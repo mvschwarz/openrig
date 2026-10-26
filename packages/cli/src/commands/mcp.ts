@@ -38,7 +38,8 @@ proxy, not from this server.
 
 With --cloud-grants, every request needs an OpenRig Cloud customer key, checked with Cloud on each request for this
 daemon's instance (its self id); the token file isn't read. A customer acts as the seat its grant names, which must
-already exist here, and reaches only what the grant names. If Cloud can't answer, the request is refused.`)
+already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If Cloud
+can't answer, the request is refused.`)
     .action(async (opts: { port?: string; http?: boolean; bind?: string; cloudGrants?: string; cloudGrantHeaderFile?: string }) => {
       const deps = getDepsF();
 

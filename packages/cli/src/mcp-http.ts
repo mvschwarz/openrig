@@ -22,6 +22,7 @@ import { DaemonClient } from "./client.js";
 import { createMcpServer, type McpAccess } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
 import { MCP_PRESENCE_FILE, presenceRecorder } from "./mcp-presence.js";
+import { resolveRigHandle } from "./rig-handle.js";
 
 /** One caller's grant. Only the token's sha256 is stored. */
 export type McpGrant = {
@@ -239,6 +240,34 @@ async function cloudCaller(cloud: CloudGrantOptions, url: URL, key: string, inst
     principal: { source: "cloud", id: principal.id, grant: grant.id, ...(Number.isFinite(grant.version) ? { version: grant.version } : {}) } };
 }
 
+/** A node's seat name as the daemon derives it (deriveCanonicalFromEntry): {pod}-{member}@{rig}, the logical id split at
+ *  its first dot. */
+function canonicalSeat(logicalId: string, rigName: string): string | null {
+  const dot = logicalId.indexOf(".");
+  return dot > 0 && dot < logicalId.length - 1 ? `${logicalId.slice(0, dot)}-${logicalId.slice(dot + 1)}@${rigName}` : null;
+}
+
+/** Whether a seat whoami doesn't know is one of this daemon's nodes: a seat created without a launch (rig import
+ *  --materialize-only) has no session yet. The rig resolves by name as rig commands resolve one (resolveRigHandle: only
+ *  active rigs, and two active rigs of that name are ambiguous), and the seat must be exactly one of its nodes' names.
+ *  Read only: nothing is created, launched or bound. A rig list or node list that can't be read, or reads malformed, and
+ *  a name two nodes share, never count as the seat. */
+async function nodeSeat(client: DaemonClient, seat: string): Promise<"found" | "absent" | Refusal> {
+  const rig = await resolveRigHandle(client, seat.slice(seat.indexOf("@") + 1));
+  if (rig.kind === "not_found") return "absent";
+  if (rig.kind === "passthrough") return unavailable(`the rig list couldn't be read to look for seat ${seat}`);
+  if (rig.kind === "ambiguous") return unavailable(`seat ${seat}'s rig name matches ${rig.ids.length} rigs (${rig.ids.join(", ")})`);
+  const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
+  if (nodes.status !== 200 || !Array.isArray(nodes.data)) return unavailable(`the node list for seat ${seat} answered HTTP ${nodes.status}`);
+  let matches = 0;
+  for (const node of nodes.data as unknown[]) {
+    const { logicalId, rigName } = (node ?? {}) as Record<string, unknown>;
+    if (typeof logicalId !== "string" || typeof rigName !== "string") return unavailable(`the node list for seat ${seat} has a malformed entry`);
+    if (canonicalSeat(logicalId, rigName) === seat) matches += 1;
+  }
+  return matches === 1 ? "found" : matches === 0 ? "absent" : unavailable(`${matches} nodes are named ${seat}`);
+}
+
 export type McpHttpOptions = {
   daemonUrl: string;
   host: string;
@@ -331,8 +360,13 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     try {
       const res = await fetch(`${opts.daemonUrl.replace(/\/+$/, "")}/api/whoami?${new URLSearchParams({ sessionName: caller.seat, compact: "1" }).toString()}`,
         { signal: AbortSignal.timeout(5_000) });
-      if (res.status === 404) return { status: 503, error: "seat_unavailable", message: "This connection's seat isn't on this instance yet.", log: `Cloud named seat ${caller.seat}, which this daemon doesn't have` };
-      if (!res.ok) return unavailable(`the seat check for ${caller.seat} answered HTTP ${res.status}`);
+      if (res.status === 404) {
+        // whoami knows a seat by its sessions, and a seat created without a launch has none yet: it's then this daemon's
+        // node of exactly that name, or it isn't here.
+        const node = await nodeSeat(makeClient(opts.daemonUrl), caller.seat);
+        if (node === "absent") return { status: 503, error: "seat_unavailable", message: "This connection's seat isn't on this instance yet.", log: `Cloud named seat ${caller.seat}, which this daemon doesn't have` };
+        if (node !== "found") return node;
+      } else if (!res.ok) return unavailable(`the seat check for ${caller.seat} answered HTTP ${res.status}`);
     } catch (err) {
       return unavailable(`the seat check for ${caller.seat} failed: ${(err as Error).message}`);
     }
