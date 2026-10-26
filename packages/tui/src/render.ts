@@ -1763,6 +1763,13 @@ function crashCartShell(
   };
 }
 
+/** The size to draw at, or null when the terminal reports 0 rows or columns (a detached, headless or just-resizing pane):
+ *  nothing fits yet, so the caller skips the frame and draws on the next resize. An unreported size keeps the defaults. */
+export function drawableSize(columns: number | undefined, rows: number | undefined): { cols: number; rows: number } | null {
+  const size = { cols: columns ?? 120, rows: rows ?? 32 };
+  return size.cols > 0 && size.rows > 0 ? size : null;
+}
+
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const screen = state.palette
     ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)

@@ -13,7 +13,7 @@ import { parseCommand } from "./grammar.js";
 import { filterPalette, paletteExecuteLine } from "./commands/palette.js";
 import { COMMAND_REGISTRY, currentCommandContext } from "./commands/registry.js";
 import { createInputDecoder, resolveEscapeAction, resolveKeyAction, resolveMouseAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF, PASTE_ENABLE, PASTE_DISABLE } from "./input.js";
-import { renderScreen } from "./render.js";
+import { drawableSize, renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
 import { createControlSocket, defaultSocketPath } from "./socket-server.js";
@@ -190,8 +190,11 @@ async function run(): Promise<void> {
 
   function draw(): void {
     if (nativeAttached) return;
-    const cols = process.stdout.columns ?? 120;
-    const rows = process.stdout.rows ?? 32;
+    // A terminal reporting 0 rows or columns has nothing to draw into: skip the frame (the view keeps its state) and
+    // let the next resize draw.
+    const size = drawableSize(process.stdout.columns, process.stdout.rows);
+    if (!size) return;
+    const { cols, rows } = size;
     const nowMs = Date.now();
     if (live) {
       const next = live.snapshot();

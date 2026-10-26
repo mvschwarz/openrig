@@ -148,7 +148,9 @@ Agent's CLI.
   flags and then reopens it, refusing any creation flag (model, provider, `--max-turns`) that differs. So the preset's
   command carries none, and each seat's `config.yaml`, in its Hermes home, sets them before the seat's first start:
   the model and provider, and `agent.max_turns` if you want a cap (nothing else sets it once the flag is gone).
-- **Let Hermes run `rig` as the seat:** Hermes runs every tool command in one gateway per machine, with that gateway's
+- **Let Hermes run `rig` as the seat:** Hermes runs every tool command in its gateway, one per Hermes home, so with
+  this launcher one per seat (a two-seat run showed separate gateways, homes and sockets, and stopping one seat left
+  the other's running). It runs them with that gateway's
   environment, and swaps in a session's own values only for its toolchain names and the names its profile lists in
   `terminal.client_env_passthrough`. So put the seat's OpenRig variables in that list, in each seat's `config.yaml`
   ([`config.yaml.example`](community-harness-examples/hermes/config.yaml.example)). Without it, `rig` inside Hermes
@@ -171,7 +173,8 @@ OpenClaw's CLI.
 - **The conversation:** both examples use only agent `main`, mapping OpenRig's name to the full native key `agent:main:<OpenRig name>`. Each seat has its own client state folder.
 - **Its resume check:** local mode checks `sessions --agent main --json --limit all`; Gateway mode calls the selected Gateway's `sessions.describe`. Both require the exact canonical key. An unavailable lookup stops the launch; a confirmed missing key is never recreated. A client's local cache cannot authorize Gateway resume.
 - **Stopping:** a Gateway client's pane closing detaches it. The Gateway and an accepted turn can keep running; stopping that service is separate. Local mode runs its embedded agent in the pane.
-- **Local interruption:** Finish the current local turn before stopping; an interrupted local turn may retain native recovery work and refuse the next request. This launcher does not repair or retry it.
+- **Unattended seats:** prefer Gateway mode within the capabilities qualified for your installed version. Local interrupted-turn recovery is not supported by these launchers.
+- **Local interruption:** Finish the current local turn before stopping; an interrupted local turn may retain native recovery work and refuse the next request. This launcher does not repair or retry it. OpenRig recognizes the recorded local “changed while starting work” error frame as needing attention: “OpenClaw turn not recovered; inspect the pane before retrying”. Use `rig capture <session>` to inspect the native conversation. An ordinary send still submits a new turn, with an advisory that the last local turn was not recovered; it is not an automatic replay of that turn. It does not clear native recovery records, repeat the request or start a fresh conversation; a successful process launch is not proof that the turn recovered.
 - **Local startup after resume:** OpenClaw may run its database integrity check during startup. A reported resumed process does not confirm readiness for the next request; check that the TUI has finished starting before sending work.
 - **Resets must stay off:** automatic session resets can create a new conversation under the same key. Typing `/new` also moves to a fresh key while the seat keeps the name OpenRig gave it.
 - **The presets:** both declare `names_conversation`, `resume` and `first_input`. The launcher passes the generated first startup text through OpenClaw's `--message` option. OpenRig labels the saved name as passed, not observed by its adapter.
