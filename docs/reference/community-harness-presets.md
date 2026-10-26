@@ -25,9 +25,11 @@ it never reads an unsupported capability as idle, working, ready or verified.
 configuration.
 
 **Check that the harness answers on its own first.** Before writing a preset, start the harness in a terminal outside OpenRig, with the
-same configuration and credentials your launcher will give it, and send it one prompt. If no answer comes back, the problem is in the
-harness's own setup, such as its model, provider or login, and relaunching an OpenRig seat won't fix it. Fix it in the harness, then
-connect it.
+same configuration and credentials your launcher will give it, and send it one prompt. Use the folder your launcher gives the seat, not
+the harness's default one: the example launchers keep one per seat under `$OPENRIG_HOME/state/<harness>/` (`HERMES_HOME`,
+`OPENCLAW_STATE_DIR` or `CURSOR_CONFIG_DIR`), so a check with your own defaults can pass while the seat's setup fails. If no answer comes
+back, the problem is in the harness's own setup, such as its model, provider or login, and relaunching an OpenRig seat won't fix it. Fix
+it in the harness, then connect it.
 
 ## The preset
 
