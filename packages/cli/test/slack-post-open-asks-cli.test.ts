@@ -73,7 +73,7 @@ describe("rig slack post-open-asks", () => {
       { qitemId: "q-6", recipient: "alex@external", summary: "T", outcome: "transport-failed", detail: "transport" },
     ]);
     expect(lines[0]).toBe("3 open ask(s): 1 state unavailable, 1 below the posting floor, 1 transport failed");
-    expect(lines.join("\n")).toMatch(/its detail says what couldn't be read/);
+    expect(lines.join("\n")).toMatch(/No new offer was made .* its detail says what couldn't be read and what is known/);
     expect(lines.join("\n")).toMatch(/rig queue undelivered/);
   });
 });

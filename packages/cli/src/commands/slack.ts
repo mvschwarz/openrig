@@ -154,7 +154,7 @@ export function describeOpenAsks(asks: OpenAsk[]): string[] {
     lines.push(`Queued or uncertain asks have no Slack receipt yet. Run ${POST_OPEN_ASKS} again later to see where they landed; it reuses each ask's decision rather than offering it again.`);
   }
   if (counts.has("state-unavailable")) {
-    lines.push(`An ask whose state couldn't be read wasn't posted; its detail says what couldn't be read. Run ${POST_OPEN_ASKS} again once that reads, and the same ask continues.`);
+    lines.push(`No new offer was made for an ask whose state couldn't be read; its detail says what couldn't be read and what is known. Run ${POST_OPEN_ASKS} again once that reads, and the same ask continues.`);
   }
   if (counts.has("transport-failed")) lines.push("A transport failure is on the ask's row, and `rig queue undelivered` lists it for the seat that asked.");
   return lines;

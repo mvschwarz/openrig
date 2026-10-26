@@ -817,6 +817,15 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         releaseRef(key);
         return { ok: true as const };
       }
+      // Whether an earlier attempt can be in Slack is read from the attempt log, which the landing check below reads
+      // leniently. A log that exists but can't be read is unknown, not "never attempted": the decision stays in the buffer,
+      // with no post (delivery's reconcile reads the same log) and no not-posted record, until it reads.
+      try {
+        attempted.statuses();
+      } catch (error) {
+        log(`re-shown ${decision.decisionId} retained: the attempt log couldn't be read (${(error as Error).message})`);
+        return { ok: false as const, class: "re-present-attempt-log-unreadable", detail: (error as Error).message };
+      }
       // An earlier attempt of this decision found in Slack goes to delivery, which records it.
       const landing = "landing" in deliver ? await (deliver as { landing: (d: typeof decision) => Promise<string> }).landing(decision) : "unattempted";
       if (landing === "found" || landing === "partial") return deliver(decision);

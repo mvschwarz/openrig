@@ -289,6 +289,28 @@ describe("rig slack post-open-asks through the gateway", () => {
     expect(resultFor(result, row)).toMatchObject({ outcome: "uncertain", reshown: false });
   });
 
+  it("X-F3: on replay, an attempt log that can't be read stays unknown: nothing posts, the decision is kept, no not-posted record", async () => {
+    const row = await park();
+    await enable();
+    const [open] = await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listOpenAsks({ minimumLevel: "NOTICE" });
+    const decisionId = rePresentDecisionId(keyOf(row));
+    new DispatchBuffer(home).enqueue({ kind: "outbound_decision", decisionId, op: OUTBOUND_OP, entityBindingRef: `${HUMAN}@external`, payload: toPayload(open!.item) });
+    mkdirSync(join(home, "state", "slack-attempted-decisions.jsonl"), { recursive: true }); // the attempt log exists, can't be read
+    const readable = registry;
+    registry = { ok: false, error: "the human registry couldn't be read" } as never; // and the current state can't be read
+    const w = wire();
+    w.startServices?.(); // replays the kept decision
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(posts).toHaveLength(0);
+    expect(new DispatchBuffer(home).pending().map((d) => d.decisionId), "kept for its next replay").toEqual([decisionId]);
+    expect(notes(row).some((n) => n.startsWith("slack-re-present-state-unavailable ") || n.startsWith("slack-re-present-disposition ")),
+      "no not-posted record while whether it was attempted is unknown").toBe(false);
+
+    registry = readable;
+    const result = await run(w, 0);
+    expect(resultFor(result, row)).toMatchObject({ outcome: "uncertain", reshown: false, detail: expect.stringMatching(/whether it reached Slack can't be read/) });
+  });
+
   it("at post time, a re-shown ask that's no longer current posts nothing and its row says why", async () => {
     const superseded = await park();
     const closed = await park();
