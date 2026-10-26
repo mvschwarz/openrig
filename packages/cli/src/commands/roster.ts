@@ -15,6 +15,8 @@ export interface RosterInventory {
   readAt: string;
   nodes: Row[];
   sources: Row[];
+  /** This host's id, from the local daemon's own nodes; null when it has none to read it from. */
+  localHostId?: string | null;
 }
 const object = (v: unknown): v is Row => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): string | null => typeof v === "string" && v.trim() ? v : null;
@@ -24,6 +26,7 @@ const text = (v: unknown): string | null => typeof v === "string" && v.trim() ? 
 const fields = "rigId,logicalId,canonicalSessionName,hostSelfId,runtime,model,modelObservation,sessionStatus,agentActivity";
 export async function readRosterInventory(): Promise<RosterInventory> {
   const nodes: Row[] = [], sources: Row[] = [];
+  let localHostId: string | null = null;
   for (const remote of [false, true]) {
     const argv = [fileURLToPath(new URL("../index.js", import.meta.url)), "ps", "--no-cleanup", "--nodes", "-A", "--json", "--fields", fields,
       ...(remote ? ["--all-hosts"] : [])];
@@ -37,6 +40,7 @@ export async function readRosterInventory(): Promise<RosterInventory> {
       const entries = Array.isArray(data) ? data : object(data) ? data.entries ?? data.items : null;
       if (!Array.isArray(entries)) throw new Error("ps returned no node array");
       nodes.push(...entries.filter(object));
+      if (!remote) localHostId = entries.filter(object).map((n) => text(n.hostSelfId)).find((id) => id !== null) ?? null;
       sources.push({ scope, status: result.error || result.stderr.trim() ? "partial" : "ok",
         ...(object(data) && Array.isArray(data.hosts) ? { hosts: data.hosts } : {}),
         ...(result.stderr.trim() ? { warning: result.stderr.trim() } : {}),
@@ -45,7 +49,7 @@ export async function readRosterInventory(): Promise<RosterInventory> {
       sources.push({ scope, status: "unavailable", error: result.stderr.trim() || (error as Error).message });
     }
   }
-  return { readAt: new Date().toISOString(), nodes, sources };
+  return { readAt: new Date().toISOString(), nodes, sources, localHostId };
 }
 
 export function enrichRosterMember(member: RosterMember, inventory: RosterInventory) {
@@ -72,8 +76,11 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     modelObservation: observation,
     sessionStatus,
     agentActivity: { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) },
-    // A hosted member's last call to this host's MCP server (null: unknown, never idle). Its last ring is in rig_team.
-    ...(member.hosted ? { lastCallAt: readPresence(mcpPresenceFilePath())[member.seat]?.lastCallAt ?? null } : {}),
+    // A hosted member's last call to this host's MCP server, for a roster row on this host only: another host's member,
+    // or one whose host can't be told, is unknown (null), never this host's record for a same-named seat. Its last ring
+    // is in rig_team.
+    ...(member.hosted ? { lastCallAt: inventory.localHostId && member.host === inventory.localHostId
+      ? readPresence(mcpPresenceFilePath())[member.seat]?.lastCallAt ?? null : null } : {}),
   } };
 }
 
