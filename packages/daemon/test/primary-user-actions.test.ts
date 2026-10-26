@@ -253,6 +253,16 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
       expect(audit(dropped.qitemId)).toMatchObject({ verb: "drop", actor: "human@host" });
     });
 
+    it("annotate follows the same rule: refused as the channel without the authority, the person at the terminal with it", async () => {
+      addChannel();
+      const row = await ask(CHANNEL);
+      expect(await act({ verb: "annotate", qitemId: row.qitemId, actorSession: CHANNEL, annotation: "The customer called" }))
+        .toMatchObject({ status: 400, body: { error: "answer_not_recorded", channel: CHANNEL } });
+      expect(db.prepare("SELECT count(*) AS n FROM mission_control_actions WHERE qitem_id = ?").get(row.qitemId)).toEqual({ n: 0 });
+      expect((await act({ verb: "annotate", qitemId: row.qitemId, actorSession: CHANNEL, authority: "primary-user", annotation: "The customer called" })).status).toBe(200);
+      expect(audit(row.qitemId)).toEqual({ verb: "annotate", actor: "human@host", notes: { authority: "primary-user", asked: null } });
+    });
+
     it("leaves the legacy human seat as it was when a channel is registered", async () => {
       addChannel();
       const legacy = await ask("human@host");

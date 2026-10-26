@@ -77,8 +77,8 @@ person at the terminal unnamed. Whatever the TUI shows, its acts are theirs.
   channel.
 - **A shared channel never acts.** Its messages are correspondence, so nothing it says answers, approves, denies or
   resolves an ask, and a customer's earlier message in an ask's thread is never taken as its answer. A request without
-  the primary user's authority that acts as a channel, with any Mission Control verb (including drop, route, hold and
-  hand off), is refused (`answer_not_recorded`) and nothing changes.
+  the primary user's authority that acts as a channel, with any Mission Control verb (including drop, route, hold, hand
+  off and annotate), is refused (`answer_not_recorded`) and nothing changes.
 - **Where the authority applies:** only on a request that carries no seat identity header, which is how the TUI calls
   the daemon. Seats and the CLI send that header, so their acts stay theirs. This is the existing trusted-network
   distinction, not an authentication check: a request that leaves the header out is taken as the terminal's, as any
@@ -138,8 +138,8 @@ the thread.
 For a one-person install, nothing to do: it keeps working as before, that person stays the default, pending rows keep
 their addresses, and no new file is written until you use one of the commands above.
 
-A TUI older than the daemon still works: it sends the actor the daemon serves, the person asked, which is still their own
-act. On a shared channel's ask the daemon serves `human@host`. An older TUI's approve or resolve there is recorded as
+A TUI older than the daemon still works: it sends the actor the daemon serves, the person asked, which is still their
+own act. On a shared channel's ask the daemon serves `human@host`. An older TUI's approve there is recorded as
 `human@host`, and its answer is refused (`answer_not_recorded`), because answering someone else's ask takes the primary
 user's authority, which only a current TUI sends.
 

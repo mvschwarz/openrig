@@ -324,6 +324,9 @@ export class MissionControlWriteContract {
       );
     }
     const source = this.requireMutableQitem(input.qitemId);
+    // The same actor rule as every other verb: a channel never annotates, and the terminal's authority names the primary
+    // user. An annotation settles no ask.
+    input = this.asActor(input, null).input;
     const snapshot = snapshotQitem(source);
     const evaluatedAt = this.now().toISOString();
     let actionEntry: ReturnType<MissionControlActionLog["record"]> | null = null;
