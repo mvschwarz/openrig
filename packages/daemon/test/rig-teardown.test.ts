@@ -676,6 +676,21 @@ describe("RigTeardownOrchestrator", () => {
     expect(result).toMatchObject({ sessionsKilled: 1, errors: [], deleted: del, leftRunning: ["desktop@test-rig"] });
   });
 
+  it("names the community-harness seats whose pane it stopped, since the harness's own processes may outlive it", async () => {
+    const { rigId } = seedRigWithNode({ runtime: "claude-code", cwd: "/tmp" });
+    const hermes = rigRepo.addNode(rigId, "hermes", { runtime: "synth-harness" });
+    const launched = sessionRegistry.registerSession(hermes.id, "hermes@test-rig");
+    sessionRegistry.updateStatus(launched.id, "running");
+    sessionRegistry.recordCommunityHarnessSelection(launched.id, "synth-harness");
+    // A free-text runtime with a preset's name, never launched for that preset, isn't one.
+    const namesake = rigRepo.addNode(rigId, "namesake", { runtime: "synth-harness" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(namesake.id, "namesake@test-rig").id, "running");
+
+    const result = await buildTeardown().teardown(rigId);
+
+    expect(result).toMatchObject({ sessionsKilled: 3, errors: [], paneOnly: ["hermes@test-rig"] });
+  });
+
   // T13: Stale session (tmux gone) -> benign
   it("stale session (tmux already gone) treated as success", async () => {
     const { rigId } = seedRig();

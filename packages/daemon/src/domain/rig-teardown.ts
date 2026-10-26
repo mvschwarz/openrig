@@ -11,6 +11,7 @@ import nodePath from "node:path";
 import { removeManagedBlocksFromFile, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "./managed-blocks.js";
 import { stopTranscriptRotation } from "./transcript-rotation.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, SEAT_SKILLS_BOOTSTRAP_LINE, cleanSeatSkills, seatSkillPaths } from "./seat-skill-storage.js";
 import { settleAutomaticRestore } from "./existing-rig-restore.js";
 
@@ -31,6 +32,9 @@ export interface TeardownResult {
   /** Sessions of seats joined with `rig attach` as an external CLI, which down doesn't stop or check. Without --delete
    *  each keeps its claim as it was, whether or not the app still runs. Present only when there was one. */
   leftRunning?: string[];
+  /** Sessions of community-harness seats whose pane was stopped. OpenRig stops only the pane; the harness's own
+   *  processes (a gateway, say) may keep running, as its preset's limits say. Present only when there was one. */
+  paneOnly?: string[];
 }
 
 interface TeardownOptions {
@@ -61,6 +65,7 @@ interface LatestNodeSession {
   resumeType: string | null;
   resumeToken: string | null;
   cwd: string | null;
+  communityHarness?: string | null;
 }
 
 /** Only a reported missing server permits a bootstrap; other unreadable/permission results do not. */
@@ -215,6 +220,7 @@ export class RigTeardownOrchestrator {
         this.atomicNodeCleanup(session);
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd, currentLiveGuidanceTargets(), result);
         if (killResult.ok) result.sessionsKilled++;
+        if (killResult.ok && communityHarnessOf(session.communityHarness, session.runtime)) (result.paneOnly ??= []).push(session.sessionName);
       } else {
         // Real kill failure — don't update this node
         result.errors.push(`Kill failed for session '${session.sessionName}': ${(killResult as { message?: string }).message ?? "unknown"}`);

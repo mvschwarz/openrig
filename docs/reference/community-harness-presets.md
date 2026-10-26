@@ -158,6 +158,9 @@ OpenClaw's CLI.
 
 Copy the launcher and the preset for your mode, and maintain them as your own.
 
+**Stopping a community seat stops its pane.** `rig down` names those seats ("Pane stopped: …"), since a harness's own
+processes, a gateway say, may keep running after it. OpenRig doesn't stop them; each preset's limits say what to expect.
+
 **Not supported for community harnesses:** restarting a seat in place (`rig seat restart` is for Codex seats) and
 switching harness on a running seat. Each says so before anything changes.
 
