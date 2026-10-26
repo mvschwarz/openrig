@@ -81,8 +81,11 @@ regardless of arrival order. The event expires after five minutes in any case.
 
 A helper Claude started from a seat's shell inherits that seat's environment,
 so its rate-limit hook is attributed to that seat too. This is appropriate when
-the helper uses the same login, since the quota belongs to the account. This
-attribution does not bind the hook to Claude's own native session.
+the helper uses the same login, since the quota belongs to the account. A
+helper on a different login is attributed the same way, so its rate limit can
+hold pending handoffs to every seat in that seat's Claude pool for one retry
+interval, even when the seat's own login still has room. This attribution does
+not bind the hook to Claude's own native session.
 
 The event carries no usage percentage, account identity or reset timestamp.
 It marks the Claude provider pool as limited and preserves a current
