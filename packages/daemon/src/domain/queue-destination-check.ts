@@ -4,6 +4,7 @@
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { LoadResult } from "./gateway/human-registry.js";
+import { sharedChannelAddresses } from "./gateway/participants.js";
 
 // PL-004 Phase A revision (R1): topology-backed validateRig.
 // Reject `<member>@<unknown-rig>` shapes against the rig registry.
@@ -16,6 +17,8 @@ import type { LoadResult } from "./gateway/human-registry.js";
 export function makeTopologyDestinationCheck(deps: {
   findRigsByName: (name: string) => unknown[];
   loadHumanRegistry: () => LoadResult;
+  /** Registered shared channels, which are `<id>@external` participants too (0.7.3). Default: the participant file. */
+  sharedChannels?: () => ReadonlyArray<{ entityId: string; address: string }>;
 }): (sessionRef: string) => boolean {
   return (sessionRef: string): boolean => {
     const parsed = parseSessionName(sessionRef);
@@ -27,7 +30,10 @@ export function makeTopologyDestinationCheck(deps: {
     // job, never the classifier's (arch 8cd30094).
     if (parsed.kind === "external") {
       const reg = deps.loadHumanRegistry();
-      const entities = reg.ok ? reg.entities.map((e) => ({ entityId: e.entityId, address: e.address })) : [];
+      const entities = [
+        ...(reg.ok ? reg.entities.map((e) => ({ entityId: e.entityId, address: e.address })) : []),
+        ...(deps.sharedChannels ?? sharedChannelAddresses)(),
+      ];
       return resolveExternal(parsed.local, entities).kind !== "unregistered";
     }
     if (isHumanSeatSessionRef(sessionRef)) return true;

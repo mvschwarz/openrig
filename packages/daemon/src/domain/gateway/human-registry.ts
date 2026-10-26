@@ -868,6 +868,12 @@ export type LoadResult =
   /** `noHumans`: refused because nobody is registered yet (no fragments, nothing projected), not a broken registry. */
   | { ok: false; error: string; noHumans?: true };
 
+/** The people a load names, for paths that don't need a person: none when nobody is registered yet, so a registered
+ *  shared channel still converses in a channel-only setup (0.7.3); null when the registry is broken (fail-closed). */
+export function registeredPeople(loaded: LoadResult): HumanFragment[] | null {
+  return loaded.ok ? loaded.entities : loaded.noHumans ? [] : null;
+}
+
 /** Recognize only projection bytes an adopted generator could have emitted. The
  * parsed snapshot is validation evidence, never identity input; current fragments
  * remain the registry truth and are re-projected after a compatible old format. */
