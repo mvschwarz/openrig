@@ -103,6 +103,51 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
     expect(Buffer.byteLength(s.tmuxSocketPath)).toBeLessThan(104);
   });
 
+  it("waits for a pane's delayed child writer before removing scratch HOME", async () => {
+    const { execFile } = await import("node:child_process");
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const evidence = mkdtempSync(join(tmpdir(), "late-writer-"));
+    dirs.push(evidence);
+    const ready = join(evidence, "ready"), done = join(evidence, "done");
+    const s = prepareHermeticEnv({ baseEnv: cleanBase() });
+    scaffolds.push(s);
+    const writer = join(evidence, "writer.cjs");
+    writeFileSync(writer, `
+const { writeFileSync, mkdirSync } = require("node:fs");
+if (process.argv[2] === "child") {
+  process.once("SIGHUP", () => setTimeout(() => {
+    mkdirSync(${JSON.stringify(s.home)}, { recursive: true });
+    writeFileSync(${JSON.stringify(join(s.home, "late-write"))}, "last write");
+    writeFileSync(${JSON.stringify(done)}, "exiting");
+    process.exit(0);
+  }, 150));
+  writeFileSync(${JSON.stringify(ready)}, String(process.pid));
+} else {
+  const child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: "ignore" });
+  process.once("SIGHUP", () => { child.kill("SIGHUP"); process.exit(0); });
+}
+setInterval(() => {}, 1000);
+`);
+    await run("tmux", ["-S", s.tmuxSocketPath, "new-session", "-d", "-s", "writer",
+      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(writer)}`], {
+      env: s.env as NodeJS.ProcessEnv,
+    });
+    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 2_000, interval: 10 });
+    const childPid = Number(readFileSync(ready, "utf8"));
+    try {
+      s.cleanup();
+      // The parent pane exits immediately; the child has a controlled final write.
+      // Teardown must wait for that child, rather than racing recursive removal.
+      await vi.waitFor(() => expect(existsSync(done)).toBe(true), { timeout: 2_000, interval: 10 });
+      expect(existsSync(s.root)).toBe(false);
+    } finally {
+      try { process.kill(childPid, "SIGTERM"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+    }
+  });
+
   it("cleanup terminates repeated scaffold-owned tmux servers without touching an unrelated server", async () => {
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
