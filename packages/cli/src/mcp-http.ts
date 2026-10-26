@@ -250,12 +250,12 @@ function canonicalSeat(logicalId: string, rigName: string): string | null {
 /** Whether a seat whoami doesn't know is one of this daemon's nodes: a seat created without a launch (rig import
  *  --materialize-only) has no session yet. The rig resolves by name as rig commands resolve one (resolveRigHandle: only
  *  active rigs, and two active rigs of that name are ambiguous), and the seat must be exactly one of its nodes' names.
- *  Read only: nothing is created, launched or bound. A rig list or node list that can't be read, or reads malformed, and
- *  a name two nodes share, never count as the seat. */
+ *  Read only: nothing is created, launched or bound. A rig list or node list that can't be read, or has a malformed
+ *  entry, and a name two nodes share, never count as the seat. */
 async function nodeSeat(client: DaemonClient, seat: string): Promise<"found" | "absent" | Refusal> {
-  const rig = await resolveRigHandle(client, seat.slice(seat.indexOf("@") + 1));
+  const rig = await resolveRigHandle(client, seat.slice(seat.indexOf("@") + 1), { strict: true });
   if (rig.kind === "not_found") return "absent";
-  if (rig.kind === "passthrough") return unavailable(`the rig list couldn't be read to look for seat ${seat}`);
+  if (rig.kind === "passthrough") return unavailable(`the rig list couldn't be read, or has a malformed entry, to look for seat ${seat}`);
   if (rig.kind === "ambiguous") return unavailable(`seat ${seat}'s rig name matches ${rig.ids.length} rigs (${rig.ids.join(", ")})`);
   const nodes = await client.get(`/api/rigs/${encodeURIComponent(rig.id)}/nodes`);
   if (nodes.status !== 200 || !Array.isArray(nodes.data)) return unavailable(`the node list for seat ${seat} answered HTTP ${nodes.status}`);

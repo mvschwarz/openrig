@@ -273,7 +273,7 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
       };
       const before = { sessions: count("sessions"), rows: rows() };
       // No such node in the rig, no rig of that name, or only an archived rig's node: not here.
-      sessionless("rig-one", "cus-one.caller");
+      const rigOne = sessionless("rig-one", "cus-one.caller");
       expect(await outcome("cus-one-other@rig-one")).toEqual([503, "seat_unavailable"]);
       expect(await outcome("cus-one-caller@rig-none")).toEqual([503, "seat_unavailable"]);
       setup.rigRepo.archiveRig(sessionless("rig-old", "cus-old.caller"));
@@ -291,6 +291,11 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
       const failures: Array<[RegExp, () => Response]> = [
         [/^\/api\/rigs\/summary$/, () => Response.json({ error: "down" }, { status: 500 })],
         [/^\/api\/rigs\/summary$/, () => Response.json({ rigs: [] })],
+        // The real rig beside a malformed one, or the matching rig with no id or an archive mark of another kind: the list
+        // isn't whole, so it can't show the seat is there or unique.
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ id: rigOne, name: "rig-one", archivedAt: null }, {}])],
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ name: "rig-one", archivedAt: null }])],
+        [/^\/api\/rigs\/summary$/, () => Response.json([{ id: rigOne, name: "rig-one", archivedAt: 0 }])],
         [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json({ error: "down" }, { status: 500 })],
         [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json({ nodes: [] })],
         [/^\/api\/rigs\/[^/]+\/nodes$/, () => Response.json([{ rigName: "rig-one" }])],
