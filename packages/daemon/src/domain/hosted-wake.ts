@@ -3,7 +3,7 @@
 // means the trigger accepted the ring, not that the member picked the work up: pickup is its claim on the row.
 import type { RosterWake } from "./rosters.js";
 import { resolveSecret } from "./gateway/slack/secrets.js";
-import { validateOutboundUrl } from "./mission-control/outbound-url-validator.js";
+import { safeDecodeURIComponent, validateOutboundUrl } from "./mission-control/outbound-url-validator.js";
 
 /** How long a trigger may take to answer before the ring counts as failed. */
 export const HOSTED_WAKE_TIMEOUT_MS = 10_000;
@@ -37,10 +37,18 @@ export async function ringHostedWake(
   if (authorizationRef && !authorization) return failed(urlRef, `not rung: its Authorization value (${authorizationRef}) isn't set`);
   const checked = validateOutboundUrl(url);
   if (!checked.valid) return failed(urlRef, `not rung: the URL is invalid (${checked.reason})`);
+  // Credentials in the URL go in the Authorization header (the validator's contract), so the request URL carries none.
+  const target = new URL(checked.parsedUrl!.toString());
+  let auth = authorization;
+  if (target.username || target.password) {
+    auth ??= `Basic ${Buffer.from(`${safeDecodeURIComponent(target.username)}:${safeDecodeURIComponent(target.password)}`).toString("base64")}`;
+    target.username = "";
+    target.password = "";
+  }
   try {
-    const res = await (opts.fetchImpl ?? fetch)(url, {
+    const res = await (opts.fetchImpl ?? fetch)(target.toString(), {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(authorization ? { Authorization: authorization } : {}) },
+      headers: { "Content-Type": "application/json", ...(auth ? { Authorization: auth } : {}) },
       body: JSON.stringify({
         source: "openrig.queue", schema_version: 1, event: "work-waiting",
         qitem_id: ring.qitemId, destination: ring.destination, summary: ring.summary, from: ring.source,
@@ -56,7 +64,10 @@ export async function ringHostedWake(
     if (res.status >= 300 && res.status < 400) return failed(urlRef, `answered ${res.status}, a redirect, which isn't followed`);
     return failed(urlRef, `answered ${res.status}`);
   } catch (err) {
+    // An error's text can carry the URL, so only a fixed classification is recorded: the timeout, or the error code.
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    return failed(urlRef, timedOut ? `didn't answer within ${opts.timeoutMs ?? HOSTED_WAKE_TIMEOUT_MS} ms` : `couldn't be reached (${err instanceof Error ? err.message : String(err)})`);
+    if (timedOut) return failed(urlRef, `didn't answer within ${opts.timeoutMs ?? HOSTED_WAKE_TIMEOUT_MS} ms`);
+    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+    return failed(urlRef, `couldn't be reached (${typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : "network error"})`);
   }
 }

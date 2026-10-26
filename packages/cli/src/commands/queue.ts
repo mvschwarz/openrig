@@ -144,7 +144,7 @@ function terminalWakeOutcome(wakeResult: string | null): TerminalDeliveryResult[
 /** Only these known states mean "not delivered yet, nothing went wrong". An unknown value never gets that label. */
 function isKnownUnconfirmed(wakeResult: string | null, outcome: TerminalDeliveryResult["outcome"]): boolean {
   if (outcome === "not-requested" || wakeResult === null || wakeResult === "delivered-ack-pending") return true;
-  return wakeResult.startsWith("indeterminate:") || wakeResult.startsWith("retained:");
+  return wakeResult.startsWith("indeterminate:") || wakeResult.startsWith("retained:") || wakeResult.startsWith("wake-accepted:");
 }
 
 function terminalDeliveryResult(
@@ -165,7 +165,9 @@ function terminalDeliveryResult(
     "claimed": "Terminal receipt unconfirmed, but the seat has claimed the item (claimed).",
     "retained": `The wake is held (${wakeResult}): nothing was typed into the pane. A held create wake is not retried automatically; inspect it with rig seat held-messages ${seat}.`,
     "failed": `The wake failed (${wakeResult}).`,
-    "indeterminate": `Terminal receipt unconfirmed (${wakeResult}).`,
+    "indeterminate": wakeResult?.startsWith("wake-accepted:")
+      ? `The member's trigger accepted the ring (${wakeResult}). That isn't pickup: its claim is.`
+      : `Terminal receipt unconfirmed (${wakeResult}).`,
     "still-pending": waitedMs === null ? "No terminal receipt was recorded before the claim." : `No terminal receipt was recorded within ${waitedMs}ms.`,
     "not-requested": "No terminal wake was requested (--no-nudge).",
   };

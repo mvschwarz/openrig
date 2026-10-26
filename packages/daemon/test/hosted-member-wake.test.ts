@@ -2,7 +2,7 @@
 // a pointer to the row (never its body), the Authorization header from a secret, a timeout, and no redirect followed.
 // A 2xx is "wake accepted", never delivered: pickup is the member's claim. Real SQLite, the real queue, a real local
 // HTTP receiver. Native: no real tool was rung.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,6 +14,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { hostedWakeFor, parseRoster, type RosterWake } from "../src/domain/rosters.js";
 import { ringHostedWake } from "../src/domain/hosted-wake.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
 
 type Received = { path: string; headers: IncomingMessage["headers"]; body: Record<string, unknown> };
 type Reply = { status: number; headers?: Record<string, string> } | "hang";
@@ -112,6 +114,65 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     trigger = null;
     expect(repo.classifyDestinationOf("grok@lab").class).toBe("unroutable");
     db.close();
+  });
+
+  // Real topology and a repository whose trigger comes from a secrets file, as on a running daemon.
+  function hostedRepo(db: Database.Database, envLines: string, declared: RosterWake["webhook"] = wake.webhook) {
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-lab', 'lab')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-lab', 'lead', 'claude-code', '/tmp')").run();
+    const secrets = join(dir, "grok.env");
+    writeFileSync(secrets, envLines, { mode: 0o600 });
+    return new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async () => ({ ok: true, verified: true }) },
+      hostedWake: (destination) => destination === "grok@lab" ? { webhook: { ...declared, secrets_env_file: secrets } } : null,
+    });
+  }
+
+  it("never records a credential: one in the URL goes in the header, and a failed ring's text, the row and the person's finding carry neither it nor the Authorization value", async () => {
+    // Credentials in the URL become Basic auth, and the request URL carries none.
+    const withCredentials = url.replace("http://", "http://member:pa55word@");
+    const accepted = await ringHostedWake(ring, { webhook: { url_ref: "GROK_WAKE_URL" } }, { env: { GROK_WAKE_URL: withCredentials } });
+    expect(accepted.classified).toBe("indeterminate");
+    expect(received[0]!.headers.authorization).toBe(`Basic ${Buffer.from("member:pa55word").toString("base64")}`);
+
+    // A trigger that can't be reached, through the queue and the stuck sweep to the person.
+    const unreachable = withCredentials.replace(/:\d+\//, ":9/");
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = hostedRepo(db, `GROK_WAKE_URL=${unreachable}\nGROK_WAKE_AUTH=Bearer secret-auth-value\n`);
+    const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    const recorded = repo.getById(row.qitemId)!.lastNudgeWireResult ?? "";
+    expect(recorded).toMatch(/^failed:webhook \(GROK_WAKE_URL\) couldn't be reached \(/);
+    await runStuckSweep({ db, queueRepo: repo, status: createStuckSweepStatus(), resolveOrchestrator: () => null, unclaimedAgeMinutes: 60,
+      log: () => {}, isRegisteredHost: () => false, resolveOperatorSeat: () => "person@external", resolveRecoveryAgentSeat: () => null });
+    const finding = repo.list({ limit: 50 }).find((item) => (item.tags ?? []).includes(STUCK_SWEEP_FINDING_TAG))!;
+    expect(finding.destinationSession).toBe("person@external");
+    for (const text of [accepted.nudgeResult, recorded, finding.body, finding.summary ?? ""]) {
+      for (const secret of ["pa55word", "member:", "secret-auth-value", unreachable, withCredentials]) expect(text).not.toContain(secret);
+    }
+    db.close();
+  });
+
+  it("a ring the trigger accepted isn't rung again by startup recovery; a failed one is", async () => {
+    for (const first of [202, 500]) {
+      received.length = 0;
+      reply = { status: first };
+      const db = new Database(":memory:");
+      migrate(db, ALL_MIGRATIONS);
+      const repo = hostedRepo(db, `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`);
+      repo.attachOutbox(new OutboxHandler(db));
+      const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      await vi.waitFor(() => expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(first === 202 ? /^wake-accepted:/ : /^failed:webhook/));
+      reply = { status: 202 };
+      // The daemon's startup recovery pass over current wake intents.
+      await repo.drainPendingWakeIntents();
+      expect(received).toHaveLength(first === 202 ? 1 : 2);
+      expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(/^wake-accepted:webhook \(GROK_WAKE_URL\) answered 202/);
+      db.close();
+    }
   });
 
   it("reads the trigger from the authored roster for a hosted member on this host only", () => {

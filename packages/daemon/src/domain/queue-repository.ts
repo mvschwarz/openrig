@@ -1688,6 +1688,10 @@ export class QueueRepository {
     // A hosted member with a trigger: ring it. Accepted is indeterminate, never verified: pickup is its claim.
     if (destClass.class === "hosted") {
       const row = this.getById(qitemId);
+      // An accepted ring is the trigger's receipt: startup recovery or a later attempt doesn't ring it again (each ring
+      // can start a run). A failed ring stays retryable.
+      const prior = row?.lastNudgeWireResult ?? null;
+      if (prior?.startsWith("wake-accepted:")) return { classified: "indeterminate", nudgeResult: prior };
       return ringHostedWake({ qitemId, destination: destinationSession, summary: row?.summary ?? null, source: sourceSession ?? row?.sourceSession ?? null },
         destClass.wake, { fetchImpl: this.hostedWakeFetch });
     }
