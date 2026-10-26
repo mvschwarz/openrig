@@ -441,11 +441,20 @@ describe("MCP Server", () => {
         { logicalId: "dev.impl", canonicalSessionName: "dev-impl@my-rig", hostSelfId, agentActivity: { state: "idle" }, activityState: null },
         { logicalId: "dev.qa", canonicalSessionName: null, hostSelfId, activityState: null },
       ] };
+      if (p.startsWith("/api/queue/list?") && new URLSearchParams(p.split("?")[1]).get("destinationSession") === "grok@my-rig") return { status: 200, data: [
+        { qitemId: "q-old", destinationSession: "grok@my-rig", lastNudgeAttempt: "2026-10-26T10:00:00.000Z", lastNudgeWireResult: "failed:webhook (GROK_WAKE_URL) answered 500" },
+        { qitemId: "q-new", destinationSession: "grok@my-rig", lastNudgeAttempt: "2026-10-26T11:00:00.000Z", lastNudgeWireResult: "wake-accepted:webhook (GROK_WAKE_URL) answered 202" },
+        { qitemId: "q-unrung", destinationSession: "grok@my-rig", lastNudgeAttempt: null, lastNudgeWireResult: null },
+        // A daemon that ignored the filter: another seat's ring doesn't count.
+        { qitemId: "q-other", destinationSession: "lead@my-rig", lastNudgeAttempt: "2026-10-26T12:00:00.000Z", lastNudgeWireResult: "verified" },
+      ] };
       return { status: 404, data: {} };
     });
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const presence = path.join(folder, "presence.json");
+    fs.writeFileSync(presence, JSON.stringify({ version: 1, seats: { "grok@my-rig": { grant: "grok", lastCallAt: "2026-10-26T11:05:00.000Z" } } }));
     const connectTo = async (rostersFolder: string) => {
-      const server = createMcpServer(mockClient({ get: getFn }), { rostersFolder: () => rostersFolder });
+      const server = createMcpServer(mockClient({ get: getFn }), { rostersFolder: () => rostersFolder, presenceFile: () => presence });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "test-client", version: "1.0.0" });
       await server.connect(serverTransport);
@@ -459,7 +468,9 @@ describe("MCP Server", () => {
     try {
       const found = await here.team();
       expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
-        caveat: "Text only", pane: null, activity: "unknown" }]);
+        caveat: "Text only", pane: null, activity: "unknown",
+        presence: { lastCallAt: "2026-10-26T11:05:00.000Z", lastWakeScope: "the latest ring among its 50 most recent rows",
+          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" } } }]);
       // A scoped caller gets a generic note; the file names and errors go to this server's log.
       expect(found.hostedMembersNote).toBe("Some rosters couldn't be read, so hosted members may be missing.");
       expect(log.mock.calls.flat().join(" ")).toContain("b.json");

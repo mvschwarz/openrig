@@ -49,6 +49,8 @@ entry. The entry holds secret names, never values:
 - **The ring:** when a row lands for the member, the daemon POSTs
   `{"source":"openrig.queue","schema_version":1,"event":"work-waiting","qitem_id":…,"destination":…,"summary":…,"from":…}`.
   - It's a pointer, not the row's body: the member reads the row under its grant.
+  - A receiver should tolerate a repeated `qitem_id`. A ring accepted just before the daemon stops, before it's recorded,
+    is rung again on recovery, the same at-least-once window a terminal wake has.
   - It waits up to 10 seconds and doesn't follow redirects.
 - **What the trigger should do:** start a run that lists the member's rows (`rig_queue_list` with `owned`) and claims its work.
 
@@ -68,6 +70,11 @@ These facts stay separate on the row:
 
 **On the team:** `rig_team` lists the rig's hosted members (roster entries marked hosted that aren't one of its nodes), with their capabilities and caveat, no pane, and activity `unknown`.
 OpenRig doesn't observe a hosted member between its calls, so it never reads idle. `rig roster find` shows it the same way.
+- **Presence:** each entry carries `presence`, which says what OpenRig last saw of the member. It isn't pickup, and `null` means unknown:
+  - `lastCallAt`: its last authenticated call to this host's `rig mcp serve --http`, recorded at most once a minute in
+    `<OPENRIG_HOME>/mcp-http-presence.json`, beside the token file;
+  - `lastWake`: its latest ring and the result, among its 50 most recent rows.
+- `rig roster show` and `find` show the last call; the last ring is in `rig_team`.
 
 ## Revoke
 
@@ -78,4 +85,3 @@ OpenRig doesn't observe a hosted member between its calls, so it never reads idl
 - **Webhook triggers only:** OpenRig rings a webhook. Email and other triggers aren't supported yet. A member without a trigger
   isn't rung, and its person is told instead.
 - **It can't act as a person:** it works rows addressed to its seat, a person's request to it included. It can't settle an ask addressed to a person, or hand work to one.
-- **No last-call presence yet:** OpenRig doesn't track when the member last called.

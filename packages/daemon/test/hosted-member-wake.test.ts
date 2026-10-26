@@ -224,7 +224,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     await restarted.drainPendingWakeIntents();
     expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
     // Recovery of that accepted unblock doesn't ring a third time.
-    await hostedRepo(db, env).drainPendingWakeIntents();
+    await restarted.drainPendingWakeIntents();
     expect(received.filter((r) => r.body.qitem_id === row.qitemId)).toHaveLength(2);
     db.close();
   });
@@ -249,6 +249,18 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     await restarted.drainPendingWakeIntents();
     // The first ring (202), the failed one (500), and only that one again on recovery (202).
     expect(received.filter((r) => r.body.qitem_id === row.qitemId).map((r) => r.status)).toEqual([202, 500, 202]);
+    db.close();
+  });
+
+  it("the boot sweep's re-nudge of a row whose first ring was accepted rings again: it's a new wake, not a recovery", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = hostedRepo(db, `GROK_WAKE_URL=${url}\nGROK_WAKE_AUTH=Bearer test-only-value\n`);
+    const row = await repo.create({ sourceSession: "lead@lab", destinationSession: "grok@lab", body: "work", summary: "Work" });
+    expect(received).toHaveLength(1);
+    expect(repo.getById(row.qitemId)!.lastNudgeWireResult).toMatch(/^wake-accepted:/);
+    await repo.recoverLostNudge(row.qitemId, "grok@lab", "lead@lab");
+    expect(received).toHaveLength(2);
     db.close();
   });
 

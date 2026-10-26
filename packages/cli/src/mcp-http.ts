@@ -21,6 +21,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { DaemonClient } from "./client.js";
 import { createMcpServer, type McpAccess } from "./mcp-server.js";
 import { getOpenRigHome } from "./openrig-compat.js";
+import { MCP_PRESENCE_FILE, presenceRecorder } from "./mcp-presence.js";
 
 /** One caller's grant. Only the token's sha256 is stored. */
 export type McpGrant = {
@@ -248,6 +249,8 @@ export type McpHttpOptions = {
   clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
   /** Grants come from OpenRig Cloud instead of the token file, which is then never read. */
   cloudGrants?: CloudGrantOptions;
+  /** How often one seat's call is recorded (default 60 s). */
+  presenceIntervalMs?: number;
 };
 
 function reply(res: http.ServerResponse, status: number, body: Record<string, unknown>, headers: Record<string, string> = {}): void {
@@ -279,6 +282,9 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal) =>
     new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}) }));
   let boundPort = opts.port;
+  // A token-file grant's last call, for rig_team's presence. A Cloud customer isn't a team member, so none is kept.
+  const presenceFile = nodePath.join(nodePath.dirname(opts.tokenFile), MCP_PRESENCE_FILE);
+  const recordCall = presenceRecorder(presenceFile, opts.presenceIntervalMs);
   // Once auth has been configured here, a missing token file is a broken configuration, not a return to local-owner
   // mode: that takes a restart with no file. A beyond-loopback listener always starts with auth.
   let authSeen = configured;
@@ -306,7 +312,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
-    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access });
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, presenceFile: () => presenceFile });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
@@ -371,6 +377,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
         // A token-file grant has a name and nothing more: no grant id or version is invented for it.
         principal = { source: "file", id: grant.name };
         authenticated = true;
+        recordCall(grant.seat, grant.name);
       }
     }
     let body: unknown;

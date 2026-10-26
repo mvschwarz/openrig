@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { ConfigStore } from "../config-store.js";
+import { mcpPresenceFilePath, readPresence } from "../mcp-presence.js";
 import { parseRoster, readRosters, type Roster, type RosterMember, type RosterWake } from "@openrig/daemon/rosters";
 
 // One roster parser, shared with the daemon (a hosted member's wake route reads the same files).
@@ -71,6 +72,8 @@ export function enrichRosterMember(member: RosterMember, inventory: RosterInvent
     modelObservation: observation,
     sessionStatus,
     agentActivity: { state: text(activity?.state) ?? "unknown", reason: text(activity?.reason), sampledAt: text(activity?.sampledAt) },
+    // A hosted member's last call to this host's MCP server (null: unknown, never idle). Its last ring is in rig_team.
+    ...(member.hosted ? { lastCallAt: readPresence(mcpPresenceFilePath())[member.seat]?.lastCallAt ?? null } : {}),
   } };
 }
 
@@ -112,7 +115,7 @@ export function rosterCommand(deps: Deps = {}): Command {
         else {
           const members = (verb === "show" ? (result.roster as Row).members : result.matches) as Array<ReturnType<typeof enrichRosterMember> & { roster?: { id: string } }>;
           if (verb === "show") { const r = result.roster as Roster; console.log(`${r.name} — ${r.purpose}\nCurator: ${r.curator.seat} (${r.curator.host})`); }
-          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}\n  ${m.live.reason}`);
+          for (const m of members) console.log(`${m.seat} (${m.host})${m.roster ? ` [${m.roster.id}]` : ""}\n  ${m.engagement.join(", ")}: ${m.capabilities.join(", ")}\n  When: ${m.use_when}\n  Why: ${m.why}${m.caveat ? `\n  Caveat: ${m.caveat}` : ""}\n  ${m.live.status}: runtime ${m.live.runtime ?? "unknown"}; configured model ${m.live.configuredModel ?? "unknown"}; last observed model ${formatModelObservation(m.live.modelObservation)}\n  Activity: ${m.live.agentActivity.state}; sampled ${m.live.agentActivity.sampledAt ?? "unknown"}${m.hosted ? `\n  Last call: ${m.live.lastCallAt ?? "unknown"}` : ""}\n  ${m.live.reason}`);
           if (!members.length) console.log("No matching members.");
           const obs = result.observations as { sources: Row[] };
           for (const source of obs.sources) if (source.status !== "ok") console.error(`Observation gap (${source.scope}): ${source.warning ?? source.error ?? source.status}`);

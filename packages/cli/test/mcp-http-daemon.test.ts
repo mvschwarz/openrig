@@ -243,6 +243,10 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       }));
       const token = await addGrant(tokenFile, { name: "grok", seat: "grok@team", rigs: ["team"], roots: [], workspace: false, owner: false });
       const served = await listen();
+      // Presence is recorded only for an authenticated call, beside the token file and never in it.
+      const presenceFile = path.join(path.dirname(tokenFile), "mcp-http-presence.json");
+      expect((await post(served.url, {})).status).toBe(401);
+      expect(fs.existsSync(presenceFile)).toBe(false);
       const asGrok = await connect(served.url, token);
 
       const task = await repo.create({ sourceSession: "lead@team", destinationSession: "grok@team", summary: "When did 0.7.2 ship?", body: "Find the publish date, with a source.", nudge: false } as never);
@@ -266,7 +270,12 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       const team = await again("rig_team", { rigId: "team" });
       expect(team.structured.seats.map((s: { session: string }) => s.session)).toEqual(["lead@team"]);
       expect(team.structured.hostedMembers).toEqual([{ session: "grok@team", roster: "team", capabilities: ["web research"],
-        useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown" }]);
+        useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown",
+        // Its last call is recorded; no ring was rung (nudge: false), so its last wake is unknown, never idle.
+        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows" } }]);
+      expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
+      expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");
 
       // Revoked: its next request is refused, and the work and its answer stay.
       expect(await revokeGrant(tokenFile, "grok")).toBe(true);

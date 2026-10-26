@@ -11,6 +11,7 @@ import { formatSeatActivity, type SeatActivityFields } from "./lib/seat-activity
 import { CLI_VERSION } from "./version.js";
 import { ConfigStore } from "./config-store.js";
 import { readRosters } from "./commands/roster.js";
+import { mcpPresenceFilePath, readPresence } from "./mcp-presence.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
@@ -133,7 +134,27 @@ function teamView(detail: RigDetail, inventory: unknown): Record<string, unknown
 /** A rig's hosted member: a tool that lives outside a terminal (an assistant, a bot) and reaches the team over this server
  *  under a grant. Its roster entry authors what it's good at and its limits; it has no node or pane, and OpenRig doesn't
  *  observe it between calls, so its activity is unknown, never idle. */
-type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown" };
+type HostedMember = { session: string; roster: string; capabilities: string[]; useWhen: string; caveat: string | null; pane: null; activity: "unknown";
+  presence: HostedPresence };
+
+/** What OpenRig last saw of a hosted member: its last call to this host's MCP server, and the latest ring among its recent
+ *  rows. Presence isn't pickup (a claim on a row), and null is unknown, never idle. */
+type HostedPresence = { lastCallAt: string | null; lastWake: { at: string; result: string; qitemId: string } | null; lastWakeScope: string };
+
+/** The rows a hosted member's latest ring is read from. */
+const PRESENCE_ROWS = 50;
+
+/** The newest ring among a seat's rows, by its attempt time. Rows for another seat (a daemon that ignored the filter) don't count. */
+function newestWake(rows: unknown, seat: string): HostedPresence["lastWake"] {
+  let newest: HostedPresence["lastWake"] = null;
+  for (const row of Array.isArray(rows) ? rows as Array<Record<string, unknown>> : []) {
+    if (row.destinationSession !== seat) continue;
+    const at = row.lastNudgeAttempt, result = row.lastNudgeWireResult ?? row.lastNudgeResult, qitemId = row.qitemId;
+    if (typeof at !== "string" || typeof result !== "string" || typeof qitemId !== "string") continue;
+    if (!newest || at > newest.at) newest = { at, result, qitemId };
+  }
+  return newest;
+}
 
 const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may be missing.";
 
@@ -142,7 +163,7 @@ const ROSTERS_INCOMPLETE = "Some rosters couldn't be read, so hosted members may
  *  none. The note stays generic (a scoped caller doesn't see other rosters' names or errors); the detail goes to this
  *  server's log. */
 async function hostedMembersOf(folder: string, rigName: string, nodeSeats: ReadonlySet<string>,
-  selfHostId: () => Promise<string | null>): Promise<{ members: HostedMember[]; note?: string }> {
+  selfHostId: () => Promise<string | null>, presenceOf: (seat: string) => Promise<HostedPresence>): Promise<{ members: HostedMember[]; note?: string }> {
   try {
     statSync(folder);
   } catch (error) {
@@ -164,7 +185,7 @@ async function hostedMembersOf(folder: string, rigName: string, nodeSeats: Reado
   for (const { roster, member } of candidates) {
     if (member.host !== host || members.has(member.seat)) continue;
     members.set(member.seat, { session: member.seat, roster, capabilities: member.capabilities, useWhen: member.use_when,
-      caveat: member.caveat ?? null, pane: null, activity: "unknown" });
+      caveat: member.caveat ?? null, pane: null, activity: "unknown", presence: await presenceOf(member.seat) });
   }
   return { members: [...members.values()], ...unread };
 }
@@ -553,13 +574,14 @@ function mapResult(
  * @param client - DaemonClient connected to the daemon
  * @returns McpServer instance (not yet connected to a transport)
  */
-export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; rostersFolder?: () => string } = {}): McpServer {
+export function createMcpServer(client: DaemonClient, options: { seat?: string; access?: McpAccess; rostersFolder?: () => string; presenceFile?: () => string } = {}): McpServer {
   const server = new McpServer({
     name: "openrig",
     version: CLI_VERSION,
   }, { instructions: INSTRUCTIONS });
   const { access } = options;
   const rostersFolder = options.rostersFolder ?? (() => nodePath.join(new ConfigStore().get("workspace.root") as string, "rosters"));
+  const presenceFile = options.presenceFile ?? (() => mcpPresenceFilePath());
   // The seat this server acts as: the authenticated caller's, else OPENRIG_SESSION_NAME where it was configured.
   const seatOf = (): string | undefined => options.seat ?? readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   const accessClass = new Map(MCP_OPERATIONS.map((op) => [op.tool, op.access]));
@@ -1414,7 +1436,13 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           typeof seat.logicalId === "string" ? `${seat.logicalId.replace(".", "-")}@${rigName}` : null]).filter((name): name is string => typeof name === "string"));
         const hosted = await hostedMembersOf(rostersFolder(), rigName, nodeSeats,
           async () => inventory.find((seat) => typeof seat.hostSelfId === "string")?.hostSelfId
-            ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null));
+            ?? await client.get("/healthz").then((res) => (res.status < 400 ? ((res.data ?? {}) as { selfHostId?: string }).selfHostId ?? null : null), () => null),
+          async (seat) => {
+            const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
+              .then((res) => (res.status < 400 ? res.data : null), () => null);
+            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(rows, seat),
+              lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows` };
+          });
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });
       } catch (err) {
         return caught(err);
