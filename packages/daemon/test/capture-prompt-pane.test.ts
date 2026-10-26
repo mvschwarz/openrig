@@ -43,7 +43,7 @@ describe("rig capture says when a pane is too small to show the prompt the seat 
     const result = await transport.capture("review@rig", { promptPane: true });
     expect(result).toMatchObject({ ok: true, content: NARROW_APPROVAL, promptPane: { width: 18, height: 12 } });
     expect(result.promptPane?.hint).toBe(
-      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig: -x 120 -y 40), capture again, then let its clients size it again (tmux set-option -wu -t =review@rig: window-size)");
+      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig: -x 120 -y 40), capture again, then unset its own window-size so its clients size it again (tmux set-option -wu -t =review@rig: window-size); a window-size set on that window before isn't kept");
   });
 
   // Real private tmux server: a window in another session that has the seat's name must not be the one resized.

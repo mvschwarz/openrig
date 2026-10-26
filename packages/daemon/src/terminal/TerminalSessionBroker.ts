@@ -45,6 +45,12 @@ const MAX_HISTORY_BYTES = 64 * 1024;
 export const CANONICAL_COLS = 90;
 export const CANONICAL_ROWS = 27;
 
+/** A window user option holding the window's own `window-size` from before a broker pinned it. It lives on the window,
+ *  so a pin a broker never gave back (a daemon restart or crash) is given back by the next broker for that window. */
+export const WINDOW_SIZE_PRIOR_OPTION = "@openrig-window-size-prior";
+/** The record's value when the window set no `window-size` of its own and inherited it. */
+const INHERITED_WINDOW_SIZE = "inherit";
+
 /** A connected viewer of one broker. The route adapts a WebSocket to this. */
 export interface TerminalSubscriber {
   send(data: string): void;
@@ -61,6 +67,8 @@ export interface BrokerTmux {
   setWindowOption(name: string, option: string, value: string): Promise<TmuxResult>;
   /** The window's own value (null: none set, so it inherits; undefined: unreadable). */
   getWindowLocalOption?(name: string, option: string): Promise<string | null | undefined>;
+  /** The session's current window: its immutable id and one of its user options ("" when unset); null: unreadable. */
+  readCurrentWindow?(name: string, userOption: string): Promise<{ id: string; userOption: string } | null>;
   restoreWindowOption?(name: string, option: string, value: string | null): Promise<TmuxResult>;
   resizeWindow(name: string, cols: number, rows: number): Promise<TmuxResult>;
   startPipePane(name: string, outputPath: string): Promise<TmuxResult>;
@@ -192,9 +200,9 @@ export class TerminalSessionBroker {
   // async open/seed) to find the broker already torn down. Set on every
   // teardown path so a late/racing attach never goes silently live.
   private lastClose: { code: number; reason: string } | null = null;
-  // The window's own `window-size` before the broker pinned it (null: it set none and inherited), given back when
-  // the broker lets go, so native clients (Herdr, attach) size the window again. Undefined: nothing to restore.
-  private priorWindowSize: string | null | undefined;
+  // The window the broker pinned, by its immutable id, and its own `window-size` from before (null: it set none and
+  // inherited), given back when the broker lets go so native clients (Herdr, attach) size it again. Null: nothing to give back.
+  private pinned: { window: string; prior: string | null } | null = null;
 
   constructor(sessionName: string, tmux: BrokerTmux, opts: BrokerOptions = {}) {
     this.sessionName = sessionName;
@@ -376,8 +384,8 @@ export class TerminalSessionBroker {
     }
   }
 
-  /** Force teardown (used by the registry/route on shutdown and by tests). */
-  dispose(): void {
+  /** Force teardown (used by the registry/route on shutdown and by tests). Resolves once the sizing is given back. */
+  async dispose(): Promise<void> {
     if (this.torndown) return;
     this.lastClose = { code: 1011, reason: "terminal broker unavailable" };
     this.torndown = true;
@@ -387,8 +395,9 @@ export class TerminalSessionBroker {
       this.pipeActive = false;
       void this.tmux.stopPipePane(this.sessionName).catch(() => {});
     }
-    void this.restoreWindowSize();
     this.teardownResources();
+    // Before onEmpty, as in teardown: a broker created next then reads the given-back value, not this one's pin.
+    await this.restoreWindowSize();
     this.onEmpty?.(this.sessionName);
   }
 
@@ -402,10 +411,23 @@ export class TerminalSessionBroker {
     // FR-7 fixed geometry: window-size manual so tmux will NOT auto-shrink the
     // window to the smallest attached client; then the canonical width/height
     // ONCE. Deliberately NOT aggressive-resize, which does the opposite. The
-    // window's own value is read first, and restored when the broker lets go.
-    this.priorWindowSize = await this.tmux.getWindowLocalOption?.(this.sessionName, "window-size").catch(() => undefined);
-    await this.tmux.setWindowOption(this.sessionName, "window-size", "manual").catch(() => {});
-    await this.tmux.resizeWindow(this.sessionName, this.cols, this.rows).catch(() => {});
+    // window's own value is read first, recorded on the window, and given back
+    // when the broker lets go. The window is named by its id, so the pin and the
+    // give-back reach the same window even after a client switches windows.
+    const sizing = await this.readWindowSizing();
+    if (this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // disposed: pin nothing
+    if (sizing) {
+      await this.tmux.setWindowOption(sizing.window, WINDOW_SIZE_PRIOR_OPTION, sizing.prior ?? INHERITED_WINDOW_SIZE).catch(() => {});
+      this.pinned = sizing;
+    }
+    const window = sizing?.window ?? this.sessionName;
+    await this.tmux.setWindowOption(window, "window-size", "manual").catch(() => {});
+    await this.tmux.resizeWindow(window, this.cols, this.rows).catch(() => {});
+    if (this.torndown) {
+      // Disposed while pinning: its give-back may have landed before the pin, so give it back again.
+      if (sizing) await this.giveBackWindowSize(sizing);
+      return { ok: false, code: 1011, reason: "terminal broker unavailable" };
+    }
 
     const outputPath = path.join(
       os.tmpdir(),
@@ -428,6 +450,20 @@ export class TerminalSessionBroker {
     // (parity with the prior single-connection behavior; FR-9 no regression).
     await this.tmux.sendKeys(this.sessionName, ["", ""]).catch(() => {});
     return { ok: true };
+  }
+
+  /** The session's current window and its own `window-size` from before any broker pinned it: the live value, or, when
+   *  the live value is a pin a broker never gave back (`manual` with a record), the recorded one. Null without a window
+   *  id or a readable value: the broker then pins the session's window as before and has nothing to give back. */
+  private async readWindowSizing(): Promise<{ window: string; prior: string | null } | null> {
+    const current = await this.tmux.readCurrentWindow?.(this.sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null);
+    if (!current) return null;
+    const live = await this.tmux.getWindowLocalOption?.(current.id, "window-size").catch(() => undefined);
+    if (live === undefined) return null;
+    if (live === "manual" && current.userOption !== "") {
+      return { window: current.id, prior: current.userOption === INHERITED_WINDOW_SIZE ? null : current.userOption };
+    }
+    return { window: current.id, prior: live };
   }
 
   private async seed(sub: TerminalSubscriber): Promise<void> {
@@ -532,20 +568,19 @@ export class TerminalSessionBroker {
       this.tmux
         .hasSession(this.sessionName)
         .then((alive) => {
-          if (!alive) this.handleSessionDeath();
+          if (!alive) void this.handleSessionDeath();
         })
         .catch(() => {
-          this.handleSessionDeath();
+          void this.handleSessionDeath();
         });
     }, this.livenessMs);
   }
 
   /** FR-5: a dead session closes ALL subscribers honestly - never silent stale-live. */
-  private handleSessionDeath(): void {
+  private async handleSessionDeath(): Promise<void> {
     if (this.torndown) return;
     this.lastClose = { code: 1001, reason: "tmux session terminated" };
     this.torndown = true;
-    this.priorWindowSize = undefined; // its window went with the session
     const subs = [...this.subscribers];
     this.subscribers.clear();
     if (this.pipeActive) {
@@ -560,6 +595,9 @@ export class TerminalSessionBroker {
         // already-closed subscriber is fine
       }
     }
+    // A probe that couldn't reach tmux isn't proof the window is gone, so give the sizing back anyway. It targets the
+    // window's id, so it fails harmlessly when the window went with the session and never reaches another window.
+    await this.restoreWindowSize();
     this.onEmpty?.(this.sessionName);
   }
 
@@ -577,12 +615,18 @@ export class TerminalSessionBroker {
     this.onEmpty?.(this.sessionName);
   }
 
-  /** Give the window back the `window-size` it had before openPipe pinned it. Once. */
+  /** Give the pinned window back the `window-size` it had before openPipe pinned it. Once. */
   private async restoreWindowSize(): Promise<void> {
-    const prior = this.priorWindowSize;
-    this.priorWindowSize = undefined;
-    if (prior === undefined) return;
-    await this.tmux.restoreWindowOption?.(this.sessionName, "window-size", prior).catch(() => {});
+    const pinned = this.pinned;
+    this.pinned = null;
+    if (pinned) await this.giveBackWindowSize(pinned);
+  }
+
+  private async giveBackWindowSize({ window, prior }: { window: string; prior: string | null }): Promise<void> {
+    if (!this.tmux.restoreWindowOption) return;
+    const restored = await this.tmux.restoreWindowOption(window, "window-size", prior).catch(() => null);
+    // Kept when the give-back failed, so the next broker for this window gives it back instead.
+    if (restored?.ok) await this.tmux.restoreWindowOption(window, WINDOW_SIZE_PRIOR_OPTION, null).catch(() => {});
   }
 
   private teardownResources(): void {
@@ -652,7 +696,7 @@ export class TerminalBrokerRegistry {
     } catch (error) {
       // A rejected open never registers the subscriber, so detach cannot evict
       // this broker or remove a partially created output file.
-      broker.dispose();
+      await broker.dispose();
       throw error;
     }
     return broker;

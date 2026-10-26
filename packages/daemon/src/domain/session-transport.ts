@@ -3905,7 +3905,7 @@ export class SessionTransport {
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
     return { width: pane.width, height: pane.height,
-      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}), capture again, then let its clients size it again (${tmuxRestoreWindowSizingCommand(sessionName)})` };
+      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}), capture again, then unset its own window-size so its clients size it again (${tmuxRestoreWindowSizingCommand(sessionName)}); a window-size set on that window before isn't kept` };
   }
 
   /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the

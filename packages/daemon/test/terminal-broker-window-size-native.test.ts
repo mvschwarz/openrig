@@ -16,7 +16,8 @@ const exec = async (cmd: string): Promise<string> =>
 const tmux = async (...args: string[]): Promise<string> => (await pexec("tmux", ["-L", SOCK, ...args], { env })).stdout.trim();
 const available = (() => { try { execFileSync("sh", ["-c", "command -v tmux"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const size = (session: string) => tmux("display-message", "-p", "-t", session, "#{window_width}x#{window_height}");
-const ownSizing = (session: string) => tmux("show-options", "-w", "-v", "-t", session, "window-size");
+const ownSizing = (target: string) => tmux("show-options", "-w", "-v", "-t", target, "window-size");
+const record = (target: string) => tmux("show-options", "-q", "-w", "-v", "-t", target, "@openrig-window-size-prior");
 const until = async (check: () => Promise<boolean>) => {
   for (let i = 0; i < 100; i++) { if (await check()) return; await new Promise((r) => setTimeout(r, 50)); }
   throw new Error("timed out");
@@ -41,9 +42,9 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
   }
 
   /** One browser viewer comes and goes through the broker. */
-  async function browserVisit(name: string): Promise<void> {
+  async function browserVisit(name: string, adapter = new TmuxAdapter(exec)): Promise<void> {
     let empty = false;
-    const broker = new TerminalSessionBroker(name, new TmuxAdapter(exec), { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
+    const broker = new TerminalSessionBroker(name, adapter, { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
     const browser = viewer();
     await broker.attach(browser);
     expect(await size(name)).toBe("90x27"); // the fixed geometry while a browser watches
@@ -63,5 +64,59 @@ describe.skipIf(!available)("web terminal window sizing with a native client (re
     await browserVisit("own");
     expect(await ownSizing("own")).toBe("largest");
     await until(async () => (await size("own")) === "150x45");
+  });
+
+  it("a native client switching windows meanwhile: the pinned window gets its sizing back, and the other keeps its own", async () => {
+    await nativeSession("switch");
+    const pinned = await tmux("display-message", "-p", "-t", "=switch:", "#{window_id}");
+    let empty = false;
+    const broker = new TerminalSessionBroker("switch", new TmuxAdapter(exec), { pollMs: 20, livenessMs: 1000, onEmpty: () => { empty = true; } });
+    const browser = viewer();
+    await broker.attach(browser);
+    const other = await tmux("new-window", "-d", "-P", "-F", "#{window_id}", "-t", "=switch:");
+    await tmux("set-option", "-w", "-t", other, "window-size", "largest");
+    await tmux("select-window", "-t", other); // the native client now shows the other window
+    broker.detach(browser);
+    await until(async () => empty);
+    expect(await ownSizing(pinned)).toBe("");
+    expect(await record(pinned)).toBe("");
+    expect(await ownSizing(other)).toBe("largest");
+  });
+
+  it.each([
+    ["inherits", undefined],
+    ["own", "largest"],
+  ])("a pin left by a daemon that stopped while a browser watched is given back by the next visit (%s)", async (kind, own) => {
+    const name = `restart-${kind}`;
+    await nativeSession(name, own);
+    // The first daemon's process ends before its broker gives anything back.
+    class EndsBeforeGiveBack extends TmuxAdapter {
+      override async restoreWindowOption() { return { ok: true as const }; }
+    }
+    await browserVisit(name, new EndsBeforeGiveBack(exec));
+    expect(await ownSizing(name)).toBe("manual");
+    expect(await size(name)).toBe("90x27");
+    await browserVisit(name);
+    expect(await ownSizing(name)).toBe(own ?? "");
+    expect(await record(name)).toBe("");
+    await until(async () => (await size(name)) === "150x45");
+  });
+
+  it("a probe that couldn't reach tmux doesn't leave the window pinned", async () => {
+    await nativeSession("probe");
+    let reachable = true;
+    class Unreachable extends TmuxAdapter {
+      override async hasSession(name: string) { return reachable ? super.hasSession(name) : false; }
+    }
+    let empty = false;
+    const closed: number[] = [];
+    const broker = new TerminalSessionBroker("probe", new Unreachable(exec), { pollMs: 20, livenessMs: 50, onEmpty: () => { empty = true; } });
+    await broker.attach({ send: () => {}, close: (code) => { closed.push(code); } });
+    expect(await size("probe")).toBe("90x27");
+    reachable = false;
+    await until(async () => empty);
+    expect(closed).toEqual([1001]);
+    expect(await ownSizing("probe")).toBe("");
+    await until(async () => (await size("probe")) === "150x45");
   });
 });

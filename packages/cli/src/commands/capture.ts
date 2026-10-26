@@ -152,8 +152,8 @@ Supported notes:
   - When the captured screen is at a prompt and the seat's pane is smaller than 80x24, a
     "[rig capture: ...: pane WxH is smaller than 80x24, ...]" note on stderr says the prompt may be
     cut off and gives the tmux resize-window command that makes it readable, then the command
-    that lets the window's clients size it again. --json has it as promptPane: width, height
-    and hint.
+    that unsets the window's own window-size so its clients size it again (a window-size set on
+    that window before isn't kept). --json has it as promptPane: width, height and hint.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace

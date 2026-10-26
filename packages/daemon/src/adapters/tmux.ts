@@ -1064,6 +1064,24 @@ export class TmuxAdapter {
     }
   }
 
+  /** A session's current window, read in one call: its immutable id (`@N`), which later commands can target after a
+   *  client switches windows, and the value of one of its user options (`@name`; "" when unset). Null when tmux can't
+   *  say, including when the session is gone. */
+  async readCurrentWindow(session: string, userOption: string): Promise<{ id: string; userOption: string } | null> {
+    if (!/^@[A-Za-z0-9_-]+$/.test(userOption)) return null;
+    const window = exactTarget(session, "window");
+    const format = `#{window_id}|#{${userOption}}`;
+    try {
+      const output = (await this.run(["tmux", "display-message", "-p", "-t", window, format],
+        `tmux display-message -p -t ${shellQuote(window)} ${shellQuote(format)}`)).replace(/\r?\n$/, "");
+      const bar = output.indexOf("|");
+      const id = output.slice(0, Math.max(bar, 0));
+      return /^@\d+$/.test(id) ? { id, userOption: output.slice(bar + 1) } : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Put back what getWindowLocalOption read: set the value, or unset the window's own value when it had none. */
   async restoreWindowOption(target: string, option: string, value: string | null): Promise<TmuxResult> {
     const window = exactTarget(target, "window");
