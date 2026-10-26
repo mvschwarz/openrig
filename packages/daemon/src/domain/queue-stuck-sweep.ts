@@ -762,16 +762,17 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // A destination its own wake found unroutable (no terminal, not a person: a hosted member, or a mistyped
     // address) can't hear its finding either. Only a person can make a hosted member check its work, so the
     // person goes first: the operator seat when it's a person's address, else the row's creator, else the
-    // operator agent.
+    // operator agent, skipping any that is unset, this seat, confirmed missing or unroutable itself.
+    const classOf = (seat: string) => deps.queueRepo.classifyDestinationOf(seat).class;
     for (const c of candidates) {
       if (c.route !== c.row.destinationSession || !c.row.lastNudgeResult?.startsWith("unroutable:")) continue;
       const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
-      const person = operatorSeat && deps.queueRepo.classifyDestinationOf(operatorSeat).class === "gateway-routable" ? operatorSeat : null;
+      const person = operatorSeat && classOf(operatorSeat) === "gateway-routable" ? operatorSeat : null;
       const choices = [person, c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
-      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat));
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat) && classOf(seat) !== "unroutable");
       c.why += `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`;
       if (chosen < 0) {
-        c.why += `. No person, creator or operator agent is available, so this finding stays addressed to it`;
+        c.why += `. No person, creator or operator agent that can be reached is available, so this finding stays addressed to it`;
         continue;
       }
       c.why += `. This finding goes to ${choices[chosen]}, ${NO_WAKE_ROUTE_RULES[chosen]}`;

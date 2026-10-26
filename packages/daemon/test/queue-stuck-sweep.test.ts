@@ -93,6 +93,8 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       isRegisteredHost: () => false,
       // Hermetic default: no operator agent configured, whatever this machine's settings say.
       resolveRecoveryAgentSeat: () => null,
+      // Hermetic default: no operator seat either.
+      resolveOperatorSeat: () => null,
       ...overrides,
     });
     return { mod, status, result };
@@ -410,8 +412,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
   });
 
   // A hosted member (no terminal, not a person) can't be woken, so its finding addressed to it would reach nobody.
+  // Real topology: rig r with one bound seat, lead@r, that hands grok@r (no node) its work.
   async function mkUnroutableRow(): Promise<QueueItem> {
-    const row = await mkRow("grok@r");
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-r', 'r')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-r', 'lead', 'claude-code', '/tmp')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-lead', 'node-lead', 'lead@r', 'running', '2026-07-02 12:00:00')").run();
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-lead', 'node-lead', 'tmux', 'lead@r', '%1')").run();
+    expect(repo.classifyDestinationOf("lead@r").class).toBe("pane-bound");
+    const row = await repo.create({ sourceSession: "lead@r", destinationSession: "grok@r", body: "work" });
     const recorded = repo.classifyDestinationOf("grok@r");
     expect(recorded.class).toBe("unroutable");
     if (recorded.class === "unroutable") setNudgeResult(row.qitemId, recorded.teaching, new Date());
@@ -435,8 +443,8 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const row = await mkUnroutableRow();
     await runSweep({ resolveOperatorSeat: () => "approver@r", resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
     const [finding] = await findingsFor(row.qitemId);
-    expect(finding!.destinationSession).toBe("sender@r");
-    expect(finding!.body).toContain("This finding goes to sender@r, the row's creator");
+    expect(finding!.destinationSession).toBe("lead@r");
+    expect(finding!.body).toContain("This finding goes to lead@r, the row's creator");
   });
 
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {
@@ -520,6 +528,8 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(finding.evidenceRef).toBe(`rig queue show ${row.qitemId}`);
     expect(repo.getById(finding.evidenceRef!.slice("rig queue show ".length))?.body).toBe(row.body);
     expect(finding.destinationSession).toBe(destinationSession);
+    // Its creator can't be reached either, so the finding stays, and says so.
+    expect(finding.body).toContain("No person, creator or operator agent that can be reached is available");
     expect(finding.lastNudgeResult).toMatch(/^unroutable:/);
     expect(sent).toEqual([]);
 

@@ -514,6 +514,9 @@ describe("an ask to a person is on Steering and the TUI; Slack gets it by their 
 
   it("work for a hosted member, which nothing can wake, reaches the person: the sweep's finding is on Steering and posts to Slack", async () => {
     registry = registryWith(); // the default subscription: every ask posts
+    // Real topology (rig r with a node), so an address with no binding classifies as it does on a running daemon.
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-r', 'r')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-lead', 'rig-r', 'lead', 'claude-code', '/tmp')").run();
     const work = await repo.create({ sourceSession: "orch-lead@r", destinationSession: "grok@r", body: "hosted member work", nudge: false });
     const wake = repo.classifyDestinationOf("grok@r");
     expect(wake.class).toBe("unroutable");
