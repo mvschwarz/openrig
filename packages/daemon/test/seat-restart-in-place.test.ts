@@ -1,6 +1,8 @@
 // OPR.0.7.0.5 — in-place restart of one Codex seat: every gate and every outcome, driven through the
 // public SeatLifecycleService surface against a fake tmux, process table, Codex launcher and OS reads.
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -14,7 +16,7 @@ import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { HarnessLaunchResult, NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import type { InPlaceRestartIo, ProcessFacts } from "../src/domain/seat-restart-in-place.js";
-import { accountLineNames, accountTextMark, linesAfterAnchor, parseEffectiveSettings, shellWords } from "../src/domain/seat-restart-in-place.js";
+import { accountLineNames, accountTextMark, defaultInPlaceRestartIo, linesAfterAnchor, parseEffectiveSettings, procCmdlineArgv, shellWords } from "../src/domain/seat-restart-in-place.js";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import { CodexThreadIdResolver, type CodexThreadEvidence } from "../src/domain/codex-thread-id.js";
 
@@ -866,6 +868,35 @@ describe("#1196 round 1: launch choices come from the running Codex (LOW-1); ver
     const w = world({ runningArgs: `--no-daemon -m gpt-5.5 -s workspace-write -c sandbox_workspace_write.network_access=true resume --add-dir /shared/state ${TOKEN}` });
     await w.service.restartInPlace({ seatRef: SEAT, plan: true });
     expect(w.builds).toEqual([{ running: { networkOverride: true, daemonOptOut: true, addDirs: ["/shared/state"] } }]);
+  });
+
+  it("an --add-dir holding a space survives whole: the relaunch reads the exact argv, not ps's whitespace split", async () => {
+    // ps shows this Codex's argv joined by spaces, so its cwd's .git ("/home/u/my repo/.git") reads as "/home/u/my" + "repo/.git".
+    const argv = ["/usr/local/bin/codex", "-m", "gpt-5.5", "-s", "workspace-write", "resume", TOKEN, "--add-dir", "/home/u/my repo/.git"];
+    const w = world({ runningArgs: argv.slice(1).join(" "), facts: { 200: facts({ argv }) } });
+    await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(w.builds).toEqual([{ running: { networkOverride: false, daemonOptOut: false, addDirs: ["/home/u/my repo/.git"] } }]);
+  });
+
+  it("a /proc cmdline read keeps every argv word exactly: spaces and empty words included", () => {
+    expect(procCmdlineArgv(Buffer.from("/usr/local/bin/codex\0resume\0tok\0--add-dir\0/home/u/my repo/.git\0"))).toEqual(
+      ["/usr/local/bin/codex", "resume", "tok", "--add-dir", "/home/u/my repo/.git"]);
+    expect(procCmdlineArgv("codex\0-c\0\0")).toEqual(["codex", "-c", ""]);
+    expect(procCmdlineArgv("")).toBeNull();
+  });
+
+  it.skipIf(!fs.existsSync("/proc/self/cmdline"))("the default reader takes a process's exact argv from /proc, a word with a space included", async () => {
+    const args = ["-e", "setTimeout(() => {}, 30000)", "my repo/.git"];
+    const child = spawn(process.execPath, args, { stdio: "ignore" });
+    try {
+      // Until exec completes, /proc shows the parent's argv; wait for the child's own.
+      for (let tries = 0; tries < 200 && !fs.readFileSync(`/proc/${child.pid}/cmdline`, "utf8").includes("my repo"); tries++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect((await defaultInPlaceRestartIo().readProcess(child.pid!))?.argv).toEqual([process.execPath, ...args]);
+    } finally {
+      child.kill();
+    }
   });
 
   it("the production adapter builds from the running choices without starting any probe", async () => {

@@ -677,6 +677,19 @@ describe("RestoreOrchestrator", () => {
     );
   });
 
+  it("attemptResume passes a Codex seat's envelope to the legacy resume, in place of kernel and team defaults", async () => {
+    const codexResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({ codex: { canResume: vi.fn(() => true), resume: codexResume } as unknown as CodexResumeAdapter });
+    const rig = rigRepo.createRig("codex-envelope-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "codex", cwd: "/work" });
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    db.prepare("UPDATE nodes SET codex_permissions_json = ? WHERE id = ?").run(JSON.stringify(envelope), node.id);
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    await (orch as any).attemptResume(node.id, "codex-session", "codex_id", "token-codex", "/work", null, "o3", "full_bypass", "medium");
+    expect(codexResume).toHaveBeenCalledWith("codex-session", "codex_id", "token-codex", "/work", null, "full_bypass", "o3",
+      "medium", undefined, undefined, undefined, undefined, envelope);
+  });
+
   it("attemptResume forwards the resolved effort to the Pi resume adapter", async () => {
     const piResume = vi.fn(async () => ({ ok: true as const }));
     const orch = createOrchestrator({ pi: { canResume: vi.fn(() => true), resume: piResume } as never });

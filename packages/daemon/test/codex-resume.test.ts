@@ -158,6 +158,43 @@ describe("CodexResumeAdapter", () => {
       expect(sendText.mock.calls[0]![1]).toBe("codex -p 'my-profile' '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
     });
 
+    // A restored seat keeps its own topology folder (its LEARNED.md and recap) writable on the plain floor. A named
+    // profile isn't checked for read-only here, and Codex refuses a writable root under one, so it gets none.
+    it("a restore on the plain floor adds the seat's own folder after the conversation id; a named profile adds none", async () => {
+      const prepareSeatFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      await new CodexResumeAdapter(mockTmux({ sendText }), { prepareSeatFolder })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+      expect(prepareSeatFolder).toHaveBeenCalledWith("r99-demo1-impl");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123' --add-dir '/topology/rigs/demo/seats/r99-demo1-impl'");
+
+      const profileText = vi.fn(async () => ({ ok: true as const }));
+      const profileFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
+      await new CodexResumeAdapter(mockTmux({ sendText: profileText }), { prepareSeatFolder: profileFolder, exec: vi.fn(async () => "[my-profile]\n") })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", "my-profile");
+      expect(profileText.mock.calls[0]![1]).not.toContain("--add-dir");
+      expect(profileFolder).not.toHaveBeenCalled();
+    });
+
+    // #2000 gave fresh, resume and fork launches the git metadata dirs; a seat without a pod restores through this adapter,
+    // so it needs them too, or it can't commit. Same floor as the seat folder, and the git dirs come first.
+    it("a restore on the plain floor adds the git dirs, then the seat folder, after the conversation id; a named profile adds none", async () => {
+      const resolveGitAddDirs = vi.fn(async () => ["/repo/.git"]);
+      const prepareSeatFolder = vi.fn(() => "/topology/rigs/demo/seats/r99-demo1-impl");
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      await new CodexResumeAdapter(mockTmux({ sendText }), { resolveGitAddDirs, prepareSeatFolder })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+      expect(resolveGitAddDirs).toHaveBeenCalledWith("/repo");
+      expect(sendText.mock.calls[0]![1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123' --add-dir '/repo/.git' --add-dir '/topology/rigs/demo/seats/r99-demo1-impl'");
+
+      const profileText = vi.fn(async () => ({ ok: true as const }));
+      const profileDirs = vi.fn(async () => ["/repo/.git"]);
+      await new CodexResumeAdapter(mockTmux({ sendText: profileText }), { resolveGitAddDirs: profileDirs, exec: vi.fn(async () => "[my-profile]\n") })
+        .resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo", "my-profile");
+      expect(profileText.mock.calls[0]![1]).not.toContain("--add-dir");
+      expect(profileDirs).not.toHaveBeenCalled();
+    });
+
     it("profile preflight failure blocks resume before sendText", async () => {
       const sendText = vi.fn(async () => ({ ok: true as const }));
       const sendKeys = vi.fn(async () => ({ ok: true as const }));
@@ -394,5 +431,31 @@ describe("CodexResumeAdapter", () => {
       // A ready prompt is still present; the auth-refusal pattern requires both anchors.
       expect(result.ok).toBe(true);
     });
+  });
+});
+
+describe("a seat's own permission envelope on the legacy resume (argv only)", () => {
+  it("replaces the posture decision with its flags and adds no network or team grants", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const readNetworkDefault = vi.fn(async () => ({ apply: true, elapsedMs: 0 }));
+    const prepareTeamWorkspace = vi.fn(() => ["/workspace"]);
+    const adapter = new CodexResumeAdapter(mockTmux({ sendText }), { readNetworkDefault, prepareTeamWorkspace });
+    await adapter.resume("dev-a@rig", "codex_id", "uuid-1", "/repo", null, "full_bypass", null, undefined, true, false, false, undefined,
+      { sandbox: "workspace-write", approval: "never", network_access: false, writable_roots: ["/lease"], exclude_tmpdir_env_var: false, exclude_slash_tmp: false });
+    const command = (sendText.mock.calls[0] as unknown as [string, string])[1];
+    expect(command).toContain(" -s workspace-write -a never");
+    expect(command).toContain("sandbox_workspace_write.network_access=false");
+    expect(command).toContain(" resume ");
+    expect(command).not.toContain("danger-full-access");
+    expect(command).not.toContain("hide_full_access_warning");
+    expect(command).not.toContain("/workspace");
+    expect(readNetworkDefault).not.toHaveBeenCalled();
+    expect(prepareTeamWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("keeps the call unchanged without an envelope", async () => {
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    await new CodexResumeAdapter(mockTmux({ sendText })).resume("r99-demo1-impl", "codex_id", "uuid-123", "/repo");
+    expect((sendText.mock.calls[0] as unknown as [string, string])[1]).toBe("codex -s workspace-write '-c' 'check_for_update_on_startup=false' resume 'uuid-123'");
   });
 });

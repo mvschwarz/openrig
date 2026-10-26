@@ -180,7 +180,7 @@ export async function loadAuthorities(root) {
   if (!entries.length) throw new Error(`empty builtin rig library: ${RIGS}`);
   const skills = new Map();
   for (const dir of SKILL_ROOTS) {
-    for (const file of walk(path.join(root, dir)).filter((p) => p.endsWith("/SKILL.md"))) {
+    for (const file of walk(path.join(root, dir)).filter((p) => path.basename(p) === "SKILL.md")) {
       skills.set(path.basename(path.dirname(file)), path.relative(root, file));
     }
   }

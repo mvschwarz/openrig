@@ -14,7 +14,9 @@ import {
   SettingsStore,
   parseFeedHostSubscriptionKey as daemonParse,
 } from "../src/domain/user-settings/settings-store.js";
-import { parseFeedHostSubscriptionKey as cliParse } from "../../cli/src/config-store.js";
+import { ConfigStore, parseFeedHostSubscriptionKey as cliParse } from "../../cli/src/config-store.js";
+
+import { aggregateAttention } from "../src/domain/feed/attention-aggregator.js";
 
 let dir: string;
 let configPath: string;
@@ -51,14 +53,40 @@ describe("dynamic feed-host subscription keys — daemon store", () => {
     expect(fc).toEqual({ feed: { subscriptions: { mac_mini2: { enabled: false } } } });
   });
 
-  it("write side rejects loudly: non-boolean values, reserved segments, dotted host ids, and every non-matching unknown key (existing behavior byte-preserved)", () => {
+  it.each(["cli", "daemon"])("%s writes a dotted host as one literal node and attention includes it until reset", async (writer) => {
+    const cli = new ConfigStore(configPath);
+    const daemon = store();
+    const key = "feed.subscriptions.mac.local.enabled";
+    const selected = writer === "cli" ? cli : daemon;
+    selected.set(key, "true");
+    expect(JSON.parse(readFileSync(configPath, "utf-8"))).toEqual({ feed: { subscriptions: { "mac.local": { enabled: true } } } });
+    expect(cli.get(key)).toBe(true);
+    expect(daemon.resolveFeedHostSubscription(key)?.value).toBe(true);
+    expect(daemon.listFeedHostSubscriptions()).toEqual([{ hostId: "mac.local", enabled: true }]);
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ qitemId: "remote-ask" }]), { status: 200 }));
+    const deps = {
+      listLocalAttention: () => [],
+      listSubscriptions: () => daemon.listFeedHostSubscriptions(),
+      loadRegistry: () => ({ ok: true as const, registry: { hosts: [{ id: "mac.local", transport: "http" as const, url: "http://mac.local:7433", bearer_env: "TEST_TOKEN" }] } }),
+      env: { TEST_TOKEN: "fixture-only" },
+      fetchImpl,
+    };
+    expect(await aggregateAttention(deps)).toMatchObject({ items: [{ qitemId: "remote-ask", hostId: "mac.local" }], hosts: [{ hostId: "local", status: "ok" }, { hostId: "mac.local", status: "ok" }] });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    selected.set(key, "false");
+    expect((await aggregateAttention(deps)).hosts).toEqual([{ hostId: "local", status: "ok" }]);
+    selected.reset(key);
+    expect(daemon.listFeedHostSubscriptions()).toEqual([]);
+    expect(cli.get(key)).toBe(false);
+  });
+
+  it("write side rejects loudly: non-boolean values, reserved segments, invalid host ids, and every non-matching unknown key (existing behavior byte-preserved)", () => {
     const s = store();
     expect(() => s.set("feed.subscriptions.vps-b.enabled", "yes")).toThrow(/expected "true" or "false"/);
     // Reserved segments never parse as host ids → the flat-key/unknown path owns them.
     expect(() => s.set("feed.subscriptions.approvals.enabled", "true")).toThrow(/Unknown config key/);
     expect(() => s.set("feed.subscriptions.auditLog.enabled", "true")).toThrow(/Unknown config key/);
-    // Dotted host ids are inexpressible in dotted keys (delimiter case).
-    expect(() => s.set("feed.subscriptions.vps.b.enabled", "true")).toThrow(/Unknown config key/);
+    expect(() => s.set("feed.subscriptions.bad host.enabled", "true")).toThrow(/Unknown config key/);
     // Per-host key set is CLOSED to {enabled} in v1.
     expect(() => s.set("feed.subscriptions.vps-b.altitude", "high")).toThrow(/Unknown config key/);
     // The pre-existing unknown-key negative, untouched.
@@ -99,7 +127,10 @@ describe("dynamic feed-host subscription keys — CLI/daemon twin parity", () =>
     { key: "feed.subscriptions.approvals.enabled", hostId: null }, // reserved (key-level)
     { key: "feed.subscriptions.auditLog.enabled", hostId: null }, // reserved (file-level)
     { key: "feed.subscriptions.enabled.enabled", hostId: null }, // reserved
-    { key: "feed.subscriptions.vps.b.enabled", hostId: null }, // delimiter
+    { key: "feed.subscriptions.vps.b.enabled", hostId: "vps.b" }, // literal host id
+    { key: "feed.subscriptions.mac.local.enabled", hostId: "mac.local" },
+    { key: "feed.subscriptions.mac.local.enabled.enabled", hostId: "mac.local.enabled" },
+    { key: "feed.subscriptions.bad host.enabled", hostId: null },
     { key: "feed.subscriptions.vps-b.altitude", hostId: null }, // closed per-host set
     { key: "feed.subscriptions..enabled", hostId: null }, // empty segment
     { key: "workspace.root", hostId: null }, // unrelated key

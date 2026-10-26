@@ -1,3 +1,5 @@
+import { readClaudePermissionRules } from "./claude-permission-rules.js";
+import { readCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import type { NodeBinding } from "./runtime-adapter.js";
 import { permissionBindingOverride, type NativePermissionSelection } from "./native-permission-selection.js";
@@ -45,17 +47,30 @@ export class NativePermissionStore {
 
   /** One decision shared by fresh/continue, legacy restore and same-seat handover. Slice 16's runtime switch passes
    *  `target`: the target runtime's explicit selection (or none, to inherit policy) and its Codex profile, since the
-   *  stored ones belong to the runtime being left. */
-  launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
+   *  stored ones belong to the runtime being left. A Codex envelope, like Claude rules, stays with the seat and applies
+   *  whenever it runs Codex, until an explicit mode replaces it. */
+  launchOverride(nodeId: string, runtime: string, target?: { selection: NativePermissionSelection | null; codexProfile: string | null }): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault" | "claudePermissions" | "codexPermissions"> {
+    const rules = runtime === "claude-code" ? readClaudePermissionRules(this.db, nodeId) : undefined;
+    const ruleBinding = rules === undefined ? {} : { claudePermissions: rules };
     const selection = target ? target.selection : this.read(nodeId);
+    // A runtime switch's explicit target mode is a new choice that replaces the envelope: its successor launches with
+    // the mode, and its commit clears the envelope. So that launch doesn't read the envelope at all.
+    const codexPermissions = runtime === "codex" && !(target && selection) ? readCodexMemberPermissions(this.db, nodeId) : undefined;
     if (selection && selection.runtime !== runtime) {
       throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
     }
+    // The envelope is this seat's explicit choice, like a mode: no kernel or team default, and the posture decision is
+    // replaced by its flags. The setter keeps one of the two; both stored means another writer, so refuse this seat
+    // rather than guess which one the person meant.
+    if (codexPermissions !== undefined) {
+      if (selection) throw new Error(`Seat ${nodeId} records both a Codex permission envelope and the ${selection.mode} mode; launch refused. Choose one with rig seat set-permissions <seat> --codex-permissions <file> or --mode <mode> --reason <reason>.`);
+      return { codexPermissions, kernelAuthority: false, teamPermissionDefault: false };
+    }
     const launchDefault = selection ? undefined : this.launchDefault(nodeId, runtime, target?.codexProfile);
     if (launchDefault === "kernel") {
-      return { kernelAuthority: true, teamPermissionDefault: false, launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
+      return { ...ruleBinding, kernelAuthority: true, teamPermissionDefault: false, launchPosture: runtime === "codex" ? "full_bypass" : "floor" };
     }
-    return { kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
+    return { ...ruleBinding, kernelAuthority: false, teamPermissionDefault: launchDefault === "team", ...permissionBindingOverride(selection) };
   }
 
   read(nodeId: string): StoredNativePermissionSelection | null {

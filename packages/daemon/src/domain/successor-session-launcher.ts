@@ -52,6 +52,8 @@ export interface SuccessorNode {
   nonInterruptive?: boolean;
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
+  claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   permissionMode?: string;
   /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
    *  edge of the same seat, so its launch must READ THE SPEC — a launch path that drops it makes the
@@ -411,6 +413,8 @@ export class SuccessorSessionLauncher {
       nonInterruptive: node.nonInterruptive,
       kernelAuthority: node.kernelAuthority,
       teamPermissionDefault: node.teamPermissionDefault,
+      claudePermissions: node.claudePermissions,
+      codexPermissions: node.codexPermissions,
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
       ...(node.permissionMode ? { permissionMode: node.permissionMode } : {}),

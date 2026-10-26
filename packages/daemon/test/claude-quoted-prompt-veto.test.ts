@@ -75,6 +75,32 @@ describe("quoted approval text above Claude's current input box", () => {
   });
 });
 
+// Claude Code draws inline: the input box follows the content, and the rows under its footer stay blank (dev50-qa's
+// native 2.1.309 frames show it in a 24-row pane). In a tall pane a short screen leaves the box far above the bottom,
+// and the capture keeps those blank rows. The same boundary must hold there: quoted text is history beside a running
+// turn, and a real dialogue is attention.
+const tall = (pane: string) => `${pane}\n${Array<string>(25).fill("").join("\n")}`;
+
+describe("in a tall pane, with Claude's input box drawn high above blank rows", () => {
+  it("quoted approval text is still history while Claude's timer row shows the turn running", () => {
+    for (const pane of [working, workingInHook].map(tall)) {
+      for (const options of [{ runtime: "claude-code" }, { runtime: "claude-code", currentClaudeDialogueOnly: true }]) {
+        expect(classifyPaneActivity(pane, options), JSON.stringify(options)).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+      }
+    }
+  });
+
+  it.each(Object.entries({ ...dialogs, promptAboveInput }))("a real dialogue drawn the same way still reads as attention: %s", (_name, pane) => {
+    for (const options of [{ runtime: "claude-code" }, { runtime: "claude-code", currentClaudeDialogueOnly: true }, {}]) {
+      expect(classifyPaneActivity(tall(pane), options).state, JSON.stringify(options)).toBe("attention");
+    }
+  });
+
+  it("an idle seat quoting prompt text, with no timer row, is still refused", () => {
+    expect(classifyPaneActivity(tall(idle), { runtime: "claude-code" }).state).toBe("attention");
+  });
+});
+
 describe("a send to a working Claude seat with quoted approval text", () => {
   async function send(pane: string, hookEvent: "UserPromptSubmit" | null) {
     const db = createFullTestDb();
@@ -114,8 +140,15 @@ describe("a send to a working Claude seat with quoted approval text", () => {
     });
 
   it.each([["the ordinary pane probe", null], ["the fresh running-hook path (#1864)", "UserPromptSubmit"]] as const)(
+    "is delivered in a tall pane, with its input box drawn high, through %s", async (_path, hook) => {
+      const { result, pasted } = await send(tall(working), hook);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(pasted).toBe(1);
+    });
+
+  it.each([["the ordinary pane probe", null], ["the fresh running-hook path (#1864)", "UserPromptSubmit"]] as const)(
     "is still refused at a real permission dialogue through %s", async (_path, hook) => {
-      for (const pane of [dialogs.permissionBash!, dialogs.mcpMenu!]) {
+      for (const pane of [dialogs.permissionBash!, dialogs.mcpMenu!, tall(dialogs.permissionBash!), tall(dialogs.mcpMenu!)]) {
         const { result, pasted } = await send(pane, hook);
         expect(result).toMatchObject({ ok: false, reason: "target_needs_input" });
         expect(pasted).toBe(0);

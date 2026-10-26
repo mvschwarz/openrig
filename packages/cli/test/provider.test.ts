@@ -227,7 +227,7 @@ describe("rig provider switch --seat tells the person what follows", () => {
     let timeoutMs: number | undefined;
     const deps = switchDeps(async (_path, _body, opts) => {
       timeoutMs = opts?.timeoutMs;
-      return { status: 200, data: { outcome: "rebind_in_progress", seat: { home: "/h", account: "work", loginChanged: true, undo: null, peers: [
+      return { status: 200, data: { outcome: "rebind_in_progress", seat: { home: "/h", account: "work", loginChanged: true, undo: "rig auth switch --codex-home /h before-switch-123", peers: [
         { logicalId: "dev.qa", sessionName: "dev-qa@rig", home: "same", effect: "Not restarted.", step: "rig seat restart dev-qa@rig --keep-conversation" },
         { logicalId: "dev.guard", sessionName: "dev-guard@rig", home: "different", effect: "Not restarted; uses a different Codex home." },
         { logicalId: "dev.pi", sessionName: null, home: "unknown", effect: "Not restarted; its Codex home could not be observed." },
@@ -235,6 +235,10 @@ describe("rig provider switch --seat tells the person what follows", () => {
     });
     const { logs } = await run(["switch", "--seat", "s1", "--to-account", "work"], deps);
     expect(timeoutMs).toBe(120_000);
+    expect(logs).toContain("to restore the home's saved credential bytes: rig auth switch --codex-home /h before-switch-123");
+    expect(logs.join("\n")).toContain("undo restores saved credential bytes only; sign-in is unverified.");
+    expect(logs.join("\n")).toContain("may expire, be revoked, or be superseded by refresh elsewhere");
+    expect(logs.join("\n")).toContain("Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
     expect(logs).toContain("peer on this home: dev-qa@rig: Not restarted.");
     expect(logs).toContain("  then: rig seat restart dev-qa@rig --keep-conversation");
     expect(logs).toContain("seat on another home: dev-guard@rig: Not restarted; uses a different Codex home.");
@@ -249,7 +253,23 @@ describe("rig provider switch --seat tells the person what follows", () => {
     expect(logs.join("\n")).toContain("rig seat restart s1 --keep-conversation --plan");
     // A switch still queued behind another on the home hasn't restarted anything, so an eligible plan isn't the end of it.
     expect(logs.join("\n")).toContain("queued behind another switch on the same Codex home");
-    expect(logs.join("\n")).toMatch(/lastRestart that started after \d{4}-\d{2}-\d{2}T/);
+    expect(logs.join("\n")).toMatch(/lastRestart that finished after \d{4}-\d{2}-\d{2}T/);
     expect(logs.join("\n")).toContain("don't run the switch again");
+  });
+
+  it("a Claude seat's switch prints a token that didn't take effect, the launch's warnings, and what to do after an unknown relaunch", async () => {
+    const warning = "dev-a@rig: This seat's Claude subscription token (work) wasn't applied: the seat's pane shell can't run the token step.";
+    const notApplied = switchDeps(async () => ({ status: 200, data: { outcome: "rebind_in_progress", message: "Relaunched dev-a@rig in its own pane.",
+      seat: { account: "work", tokenFile: "/tokens/work", conversation: "conv-1", loginChanged: true, tokenApplied: false, warnings: [warning], undo: null, peers: [] } } }));
+    const shown = (await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], notApplied)).logs;
+    expect(shown).toContain(`Claude token: "work", read from /tokens/work (reference saved; the token didn't take effect)`);
+    expect(shown).toContain(`warning: ${warning}`);
+    const unknown = switchDeps(async () => ({ status: 200, data: { outcome: "unknown", reasons: ["relaunch_failed"], message: "Its process may have been ended.",
+      seat: { account: "work", tokenFile: "/tokens/work", loginChanged: true, undo: null, peers: [],
+        restart: { recoveryCommand: "rig launch rig dev.a --snapshot-id snap-1", remainingStep: "If the pane shows no running Claude, stop the seat first." } } } }));
+    const after = await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], unknown);
+    expect(after.exitCode).toBe(1);
+    expect(after.logs).toContain("recovery: rig launch rig dev.a --snapshot-id snap-1");
+    expect(after.logs).toContain("If the pane shows no running Claude, stop the seat first.");
   });
 });

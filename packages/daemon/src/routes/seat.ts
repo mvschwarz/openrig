@@ -122,6 +122,19 @@ seatRoutes.get("/status/:seatRef", (c) => {
   return c.json(result, 404);
 });
 
+seatRoutes.get("/status/node/:nodeId", (c) => {
+  const rigRepo = c.get("rigRepo" as never) as RigRepository;
+  const nodeId = c.req.param("nodeId")!.trim();
+  const result = new SeatStatusService({ rigRepo, compactionEnforcer: c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined }).getStatusByNodeId(nodeId);
+  if (!result.ok) return c.json(result, result.code === "seat_ref_required" ? 400 : 404);
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+  const runtimeSwitch = runtimeSwitchSummary(rigRepo.db, { nodeId });
+  return c.json({ ...result.status, node_id: nodeId, contract: "seat-node.v1",
+    supported_actions: ["set-permissions", "set-policy", "set-model", "set-effort"],
+    ...(runtimeSwitch ? { runtimeSwitch } : {}),
+    ...(guard ? { typingGuard: { ...guard.preference(nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(nodeId, 1).total } } : {}) });
+});
+
 /** The handover's dependencies, which a runtime switch's successor launch shares. */
 function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverService>[0] {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
@@ -368,41 +381,59 @@ seatRoutes.post("/set-terminal-policy/:seatRef", async c => {
   return c.json(result, result.ok ? 200 : result.code === "invalid_terminal_policy" || result.code === "actor_required" ? 400 : seatLifecycleStatus(result.code));
 });
 
-seatRoutes.post("/set-permissions/:seatRef", async (c) => {
+function settingTarget(c: Context) {
+  const nodeId = c.req.param("nodeId");
+  return nodeId !== undefined ? { nodeId } : { seatRef: c.req.param("seatRef")! };
+}
+
+const setPermissionsHandler = async (c: Context) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
-  if (!body || Array.isArray(body) || typeof body.mode !== "string") return c.json({ error: "mode is required" }, 400);
+  if (!body || Array.isArray(body)) return c.json({ error: "mode is required" }, 400);
+  const given = [body.mode, body.rules, body.codexPermissions, body.codexProfile].filter(value => value !== undefined).length;
+  if (given === 0) return c.json({ error: "mode is required" }, 400);
+  if (given > 1) return c.json({ error: "Choose exactly one of mode, rules, codexPermissions or codexProfile" }, 400);
+  if (body.mode !== undefined && typeof body.mode !== "string") return c.json({ error: "mode must be a string" }, 400);
+  if (body.codexProfile !== undefined && typeof body.codexProfile !== "string") return c.json({ error: "codexProfile must be a string" }, 400);
   if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
+  const choice = typeof body.mode === "string" ? { mode: body.mode } : body.rules !== undefined ? { rules: body.rules }
+    : body.codexPermissions !== undefined ? { codexPermissions: body.codexPermissions } : { codexProfile: body.codexProfile as string };
   const result = await seatLifecycleService(c).setPermissions({
-    seatRef: c.req.param("seatRef"), mode: body.mode, reason: body.reason, actor,
+    ...settingTarget(c), ...choice, reason: body.reason, actor,
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
-});
+};
+seatRoutes.post("/set-permissions/:seatRef", setPermissionsHandler);
+seatRoutes.post("/set-permissions/node/:nodeId", setPermissionsHandler);
 
 // `rig policy apply <name> --seat`: re-point an existing seat's stored permission_policy; the running process is unchanged.
-seatRoutes.post("/set-policy/:seatRef", async (c) => {
+const setPolicyHandler = async (c: Context) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
   const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   if (!body || Array.isArray(body) || typeof body.ref !== "string") return c.json({ error: "ref is required" }, 400);
   const result = await seatLifecycleService(c).setPolicy({
-    seatRef: c.req.param("seatRef"), ref: body.ref, reason: typeof body.reason === "string" ? body.reason : "", actor,
+    ...settingTarget(c), ref: body.ref, reason: typeof body.reason === "string" ? body.reason : "", actor,
   });
   return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
-});
+};
+seatRoutes.post("/set-policy/:seatRef", setPolicyHandler);
+seatRoutes.post("/set-policy/node/:nodeId", setPolicyHandler);
 
-seatRoutes.post("/set-model/:seatRef", async (c) => {
+const setModelHandler = async (c: Context) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const result = await seatLifecycleService(c).setModel({
-    seatRef: c.req.param("seatRef")!,
+    ...settingTarget(c),
     model: typeof body["model"] === "string" ? body["model"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
-});
+};
+seatRoutes.post("/set-model/:seatRef", setModelHandler);
+seatRoutes.post("/set-model/node/:nodeId", setModelHandler);
 
 seatRoutes.post("/set-cwd/:seatRef", async (c) => {
   const value: unknown = await c.req.json().catch(() => null);
@@ -418,19 +449,21 @@ seatRoutes.post("/set-cwd/:seatRef", async (c) => {
 
 // OPR.0.7.0.7 — save (or, with clear: true, remove) one seat's effort choice for its next
 // managed continuation. A distinct route fails closed against daemons without it.
-seatRoutes.post("/set-effort/:seatRef", async (c) => {
+const setEffortHandler = async (c: Context) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const clear = body["clear"] === true;
   if (clear && body["effort"] !== undefined) return c.json({ ok: false, code: "invalid_effort", message: "Pass an effort level or clear, not both." }, 400);
   const result = await seatLifecycleService(c).setEffort({
-    seatRef: c.req.param("seatRef")!,
+    ...settingTarget(c),
     effort: clear ? null : typeof body["effort"] === "string" ? body["effort"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"] : null),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
-});
+};
+seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
+seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
 
 // OPR.0.7.0.7 — read one seat's effort four ways: requested, saved, emitted at launch, observed natively.
 seatRoutes.get("/effort/:seatRef", async (c) => {

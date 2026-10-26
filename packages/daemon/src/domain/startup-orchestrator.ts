@@ -19,7 +19,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -30,16 +30,6 @@ import { join } from "node:path";
 import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
-
-// Expanded startup text can put the current input marker above 50 scrollback lines.
-const STARTUP_SUBMIT_CAPTURE_LINES = 200;
-// Claude Code 2.1.289 has taken Enter on a large startup paste after the first look, while the composer
-// still showed that paste collapsed. Only that transient is looked at again, 200 ms apart, up to this many
-// times: about 5 s of waiting per send, plus capture time. Nothing is typed meanwhile.
-const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
-// A prompt still staged after a guarded retry is retried again, up to this many retries in all, each after
-// the 200 ms look. Every retry is guarded: Enter goes in only while the composer holds exactly the text we typed.
-const STARTUP_SUBMIT_RETRIES = 2;
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -169,6 +159,8 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
 }
 
 export interface StartupInput {
+  /** Internal attempt state: a launch input may already have reached the harness, so it cannot be replayed. */
+  firstInputPassed?: boolean;
   rigId: string;
   nodeId: string;
   sessionId: string;
@@ -552,6 +544,10 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
     }
 
+    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    let launchPrompt: { prompt: string; remainingFiles: ResolvedStartupFile[] } | undefined;
+    let launchChallenge: ReturnType<typeof issueStartupChallenge> | null = null;
+
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
     // later reads (identity, activity, labels, restore), not launch success or identity proof.
@@ -572,12 +568,27 @@ export class StartupOrchestrator {
               this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
           }
+          if (input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.firstInput()
+            && !launchResumeToken && continuityOutcome === "fresh" && identityAction) {
+            launchChallenge = startupProof.mode === "authenticated" ? issueStartupChallenge(this.eventBus, {
+              rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
+            }) : null;
+            launchPrompt = this.composeInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles,
+              launchChallenge?.promptBlock ?? null, input.includeDurableObligations);
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
+            ...(launchPrompt ? { firstInputText: launchPrompt.prompt } : {}),
             resumeToken: launchResumeToken,
             ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
+          if (launchResult.firstInput) {
+            input.firstInputPassed = deliveryInput.firstInputPassed = true;
+            this.eventBus.emit({ type: "node.startup_first_input_passed", rigId: input.rigId, nodeId: input.nodeId,
+              sessionId: input.sessionId, ...launchResult.firstInput });
+            warnings.push("First startup input passed at launch; submission is not confirmed.");
+          }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
@@ -617,7 +628,7 @@ export class StartupOrchestrator {
           }
 
           const shouldRetryFresh =
-            !!launchResumeToken
+            !!launchResumeToken && !input.firstInputPassed
             && input.allowFreshFallback !== false
             && launchResult.recovery === "retry_fresh"
             && !attemptedFreshFallback;
@@ -764,23 +775,24 @@ export class StartupOrchestrator {
       this.appliedLaunchStore.recordGeneration(launchGeneration, appliedLaunch);
     }
 
-    // Issue selected proof only once the runtime can receive its prompt.
-    // Persist ground truth BEFORE delivering any proof prompt.
-    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
-    const challenge = shouldChallenge
+    // Normally issue proof after readiness; an opted-in launcher already received its challenge in the first input.
+    // Ground truth is persisted before either delivery path.
+    const challenge = launchChallenge ?? (shouldChallenge
       ? issueStartupChallenge(this.eventBus, {
           rigId: input.rigId,
           nodeId: input.nodeId,
           contractSource: JSON.stringify(input.resolvedStartupFiles),
         })
-      : null;
+      : null);
 
     // A selected proof still works without a session_identity action: deliver
     // its standalone prompt after the post-launch contract files below.
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = input.firstInputPassed && launchPrompt
+        ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
+        : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
@@ -919,9 +931,9 @@ export class StartupOrchestrator {
 
     // Keep the running conversation, but don't call an explicitly assisted startup ready.
     // The paste and Enter were attempted; continuing startup must not paste that context a second time.
-    if (deliveryInput.sendOrder > 0 && startupAssisted) {
+    if ((deliveryInput.sendOrder > 0 || input.firstInputPassed) && startupAssisted) {
       return this.fail(deliveryInput, "attention_required", [
-        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: text and Enter were sent, but submission isn't confirmed. `
+        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: ${input.firstInputPassed ? "first input was passed at launch" : "text and Enter were sent"}, but submission isn't confirmed. `
           + `Check the pane and submit any staged startup text; don't resend it. Once the seat has responded, acknowledge it with `
           + `rig seat clear-attention ${shellQuote(input.binding.tmuxSession!)} --reason ${shellQuote("Startup submission checked; seat responded")}.`,
       ], undefined, false, undefined, false, "assisted_startup", false);
@@ -999,6 +1011,10 @@ export class StartupOrchestrator {
     hasPendingWork?: boolean,
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
   ): StartupResult {
+    if (input.firstInputPassed) {
+      pendingContext = false;
+      errors.push("First startup input was passed at launch; submission is unconfirmed. Inspect the pane before sending anything again.");
+    }
     if (status === "attention_required" && typeof pendingContext === "object") {
       // The reasons above stay visible; this only says what the status means for the fork.
       errors.push("The fork's startup context is waiting to be sent: this attention status doesn't mean the forked conversation is healthy");
@@ -1079,18 +1095,14 @@ export class StartupOrchestrator {
     return actions.find((action) => isSessionIdentityAction(action) && action.appliesOn.includes(context)) ?? null;
   }
 
-  private async deliverInitialSessionPrompt(
+  private composeInitialSessionPrompt(
     input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): { prompt: string; remainingFiles: ResolvedStartupFile[] } {
     const { binding } = input;
-    if (!binding.tmuxSession) {
-      return { ok: false, error: "No tmux session for the initial session identity prompt" };
-    }
-
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
     let prompt = identityContext;
@@ -1122,6 +1134,22 @@ export class StartupOrchestrator {
       prompt = `${prompt}\n\n${challengeBlock}`;
     }
 
+    return { prompt, remainingFiles };
+  }
+
+  private async deliverInitialSessionPrompt(
+    input: StartupDeliveryInput,
+    identityAction: StartupAction,
+    postLaunchFiles: ResolvedStartupFile[],
+    challengeBlock: string | null,
+    includeDurableObligations = false,
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    const { binding } = input;
+    if (!binding.tmuxSession) {
+      return { ok: false, error: "No tmux session for the initial session identity prompt" };
+    }
+
+    const { prompt, remainingFiles } = this.composeInitialSessionPrompt(input, identityAction, postLaunchFiles, challengeBlock, includeDurableObligations);
     const sendError = await this.sendInteractiveText(input, prompt, "initial_identity");
     if (sendError) {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };
@@ -1244,7 +1272,10 @@ export class StartupOrchestrator {
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
     input.lastSubmissionUnconfirmedReason = undefined;
-    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore) await this.awaitClaudeInputBox(input.binding.tmuxPane);
+    const firstPane = input.binding.tmuxPane;
+    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore && firstPane) {
+      await waitForClaudeInputBox(() => this.tmuxAdapter.capturePaneScreen(firstPane), this.sleep);
+    }
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -1284,7 +1315,8 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter.", UNCONFIRMED_UNOBSERVABLE); }
-      const { pane, state: before, looks } = await this.settleOwnPaste(tmuxSession, first, text, input.adapter.runtime);
+      const { pane, state: before, looks } = await settleOwnStartupPaste(
+        () => this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES), first, text, input.adapter.runtime, this.sleep);
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         if (looks) record(first, 0);
@@ -1341,46 +1373,6 @@ export class StartupOrchestrator {
     } finally {
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
     }
-  }
-
-  /**
-   * A fresh launch can read ready before Claude has drawn its input box: on Linux the pane names `claude` the moment
-   * Claude starts, and startup text pasted then sat unsent. Before a fresh start's first send, look at the visible
-   * screen until the input box the startup check reads is drawn, at most STARTUP_SUBMIT_SETTLE_LOOKS looks 200 ms
-   * apart. A screen that never shows one within that, or can't be read, is sent to as before. Observation only.
-   */
-  private async awaitClaudeInputBox(pane: string | null | undefined): Promise<void> {
-    if (!pane) return;
-    for (let look = 0; look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
-      let screen: string | null;
-      try { screen = await this.tmuxAdapter.capturePaneScreen(pane); } catch { return; }
-      if (screen === null || claudeInputBoxDrawn(screen)) return;
-      await this.sleep(200);
-    }
-  }
-
-  /**
-   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed, and a
-   * fresh Claude can still be drawing its screen, with no input line at all, when the first look comes. Only those
-   * two transients are looked at again, until the composer reads clear or staged, shows anything else, or the looks
-   * run out. A draft, ghost text, a dialog or any other mismatch keeps its verdict. Observation only.
-   * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
-   * as submitted.
-   */
-  private async settleOwnPaste(tmuxSession: string, pane: string, text: string, runtime: string | null): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
-    let state = inspectStartupStagedText(pane, text, runtime);
-    let looks = 0;
-    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS
-      && (startupOwnCollapsedPaste(pane, text, runtime) || startupNoInputLine(pane, runtime))) {
-      await this.sleep(200);
-      // A failed re-look adds nothing; the last usable observation stands.
-      const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);
-      if (!next?.trim()) break;
-      pane = next;
-      state = inspectStartupStagedText(pane, text, runtime);
-      looks++;
-    }
-    return { pane, state, looks };
   }
 }
 

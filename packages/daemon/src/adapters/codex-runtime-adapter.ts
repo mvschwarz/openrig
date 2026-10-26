@@ -1,4 +1,5 @@
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -36,7 +37,7 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE, codexNetworkDefaultArg, type CodexNetwo
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
-import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
@@ -68,6 +69,7 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal } from "../domain/seat-skill-storage.js";
 import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -103,7 +105,10 @@ interface PreparedCodexLaunch {
   appliedLaunch: AppliedLaunchObservation;
   postureArg: string;
   queueStateDirArg: string;
-  suppressAutoAddDirs: boolean;
+  /** The git metadata `--add-dir`s, the same for fresh, resume and fork; empty for a rebuild or a provably read-only profile. */
+  gitDirArg: string;
+  /** The seat's own topology folder (its LEARNED.md and recap) as an `--add-dir`, under the same rules as the git dirs. */
+  seatFolderArg: string;
   daemonOptOut: boolean;
   daemonArg: string;
   networkArg: string;
@@ -161,15 +166,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
   private verifyProfilePreflight: (profile: string, cwd: string, home?: string) => Promise<CodexProfileProbeResult>;
+  private profileFingerprint: (path: string) => Promise<ProfileFingerprint>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
   // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
   // real reader; absent keeps every invocation unchanged.
   private readNetworkDefault?: CodexNetworkDefaultReader;
-  // Issue #121: git metadata dirs for the fresh-launch `--add-dir`s (a linked worktree's `.git` is a file).
+  // Issue #121: git metadata dirs for the `--add-dir`s of fresh, resume and fork (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
+  // The seat's own topology folder for the `--add-dir`s of fresh, resume and fork. Absent: none is added.
+  private prepareSeatFolder?: PrepareCodexSeatFolder;
   private prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   private resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
   private resolveHooksEnabled?: () => Promise<boolean>;
@@ -211,9 +219,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
+    /** The setter's optional profile hash; defaults to a bounded, non-blocking read. */
+    profileFingerprint?: (path: string) => Promise<ProfileFingerprint>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
     readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
+    /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+    prepareSeatFolder?: PrepareCodexSeatFolder;
     prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
     /** Resolves the hooks setting and Codex version that ensureManagedConfig applies. Absent: no managed config write. */
     resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
@@ -235,10 +247,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.resolveManagedConfigSettings = deps.resolveManagedConfigSettings;
     this.resolveHooksEnabled = deps.resolveHooksEnabled;
     this.prepareTeamWorkspace = deps.prepareTeamWorkspace;
+    this.prepareSeatFolder = deps.prepareSeatFolder;
     this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
     this.seatHome = deps.seatHome;
+    this.profileFingerprint = deps.profileFingerprint ?? readProfileFingerprint;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
     this.readNetworkDefault = deps.readNetworkDefault;
@@ -578,6 +592,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return;
     }
     const withHooks = upsertCodexActivityHooks(existing, relay);
+    if (!changesOnlyOpenRigActivityHooks(existing, withHooks, `node "${relay}"`)) {
+      console.error(`[openrig] codex activity hooks skipped: ${configPath} can't be read as TOML, or writing OpenRig's hooks would change anything else; left untouched`);
+      return;
+    }
     if (withHooks !== existing) {
       this.fs.mkdirp(nodePath.dirname(configPath));
       this.fs.writeFile(configPath, withHooks);
@@ -613,7 +631,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const command = `node "${relay}"`;
     const keySource = canonicalCodexHookSource(hooksPath);
-    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing));
+    const stripped = upsertCodexFeaturesHooksEnabled(stripCodexActivityHooks(existing, command));
     let before: unknown = null;
     let expected: { hooks?: { state?: CodexHookState } } | null = null;
     try { before = parseToml(existing); expected = parseToml(stripped) as { hooks?: { state?: CodexHookState } }; }
@@ -675,9 +693,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
     }
     const command = `node "${relay}"`;
+    // upsertCodexActivityHooks has just written our marked block. Codex keys by the
+    // group's position among this event's groups, not its position inside our block.
+    // Count only the groups before the marker: a person's groups after it do not
+    // move ours, and their trust/disable records must not be written as ours.
+    // Without a marker (Codex's save left our groups where they sit), each group's own position.
+    const begin = content.indexOf(OPENRIG_ACTIVITY_HOOKS_BEGIN);
+    const parsed = parseToml(begin >= 0 ? content.slice(0, begin) : content) as {
+      hooks?: Partial<Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], unknown[]>>;
+    };
     let next = content;
     for (const event of OPENRIG_ACTIVITY_HOOK_EVENTS) {
-      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5 });
+      const groupIndex = begin >= 0 ? parsed.hooks?.[event]?.length ?? 0 : openRigInlineGroupIndex(parsed, event);
+      if (groupIndex < 0) continue;
+      const { key, hash } = computeCodexHookTrust(event, { keySource, command, timeoutSec: 5, groupIndex });
       next = upsertCodexHookTrust(next, key, hash);
     }
     return next;
@@ -694,7 +723,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const configPath = this.resolveCodexConfigPath(home);
     const hooksPath = nodePath.join(nodePath.dirname(configPath), "hooks.json");
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : null;
-    let updated = existing === null ? null : stripCodexActivityHooks(existing);
+    const current = this.activityRelayPath ? `node "${this.activityRelayPath}"` : undefined;
+    let updated = existing === null ? null : stripCodexActivityHooks(existing, current);
+    if (existing !== null && updated !== existing && !changesOnlyOpenRigActivityHooks(existing, updated!, current)) {
+      console.error(`[openrig] codex activity hook removal skipped for ${configPath}: it can't be read as TOML, or removing OpenRig's hooks would change anything else; left untouched`);
+      updated = existing;
+    }
     if (this.fs.exists(hooksPath)) {
       // Only OpenRig's groups leave. Codex keys trust and disables by position, so each later group's state moves with it.
       try {
@@ -838,7 +872,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Only a launch that starts a conversation may install the core plugin; a resume never does.
     const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
-    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg, suppressAutoAddDirs } = prepared;
+    const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonArg, networkArg } = prepared;
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -858,7 +892,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
+      // id would be read as the id when the fork is verified.
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -891,15 +927,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2: one posture decision (codexPostureArg) for the fresh launch too — YOLO forces
     // -s danger-full-access (overrides even a named profile); otherwise the named profile, or
     // OpenRig's explicit -s workspace-write floor flag.
-    // Issue #121: only the fresh launch adds git metadata dirs; resume and fork never did.
-    const gitDirArg = opts.resumeToken || binding.codexRebuildPermissions
-      ? ""
-      : suppressAutoAddDirs ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? this.resumeCore(prepared, opts.resumeToken, binding)
-      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
     if (!textResult.ok) {
@@ -958,6 +990,31 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return this.verifyResumeLaunch(tmuxSession, updatePrompt, { resumeToken, ...(home ? { home } : this.ownHomeOpt({ nodeId })) });
   }
 
+  /** The setter's check of a profile, in the config home this seat's launches use: its own CODEX_HOME, else the
+   *  daemon's, resolved as launch resolves it. An absent file is reported, not refused: Codex loads a missing profile as
+   *  an empty layer. A real load failure fails here as it does at launch. */
+  async observeProfile(profile: string, cwd: string, nodeId: string): Promise<CodexProfileObservation> {
+    const observedAt = new Date().toISOString();
+    const home = this.homeFor({ nodeId });
+    const own = this.ownHome({ nodeId });
+    if (!home) {
+      return { vantage: "unestablished", home: null, file: "unverified", load: "not_run", observedAt,
+        detail: "Neither this seat's env: nor the daemon sets CODEX_HOME, so this seat's pane keeps its own; OpenRig didn't check the profile there. Each launch still runs the native profile check." };
+    }
+    const path = nodePath.join(home, `${profile}.config.toml`);
+    // The hash is optional evidence, read without blocking; the native loader check below decides.
+    const print = await this.profileFingerprint(path).catch((error: unknown): ProfileFingerprint => ({ state: "unreadable", reason: (error as Error).message }));
+    const base = { vantage: "configured_codex_home" as const, home, file: print.state,
+      ...(print.state === "present" ? { sha256: print.sha256 } : {}), observedAt };
+    let probe: CodexProfileProbeResult;
+    // Only a confirmed native load failure is refused; a check that couldn't run is reported, not refused.
+    try { probe = await (own ? this.verifyProfilePreflight(profile, cwd, own) : this.verifyProfilePreflight(profile, cwd)); }
+    catch (error) { return { ...base, load: "not_run", detail: `The native profile check couldn't run (${(error as Error).message}); each launch runs it again.` }; }
+    if (!probe.ok) return { ...base, load: "failed", detail: `${probe.error}${probe.migrationHint ? `\n  Fix: ${probe.migrationHint}` : ""}` };
+    const unread = print.state === "unreadable" ? ` Its bytes weren't read for a hash (${print.reason}).` : "";
+    return { ...base, load: "ok", detail: print.state === "absent" ? `${path} is absent; Codex loads it as an empty layer, so base config applies.` : `${path} loads.${unread}` };
+  }
+
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
   private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
@@ -980,20 +1037,24 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const posture = binding.codexRebuildPermissions
-      ? profileArg + codexEnvelopeArgs(binding.codexRebuildPermissions)
+    // A handover rebuild's observed predecessor envelope, else the seat's own envelope, replaces the posture decision.
+    const memberEnvelope = binding.codexRebuildPermissions || !binding.codexPermissions ? undefined : codexMemberEnvelope(binding.codexPermissions);
+    const envelope = binding.codexRebuildPermissions ?? memberEnvelope;
+    const posture = envelope
+      ? profileArg + codexEnvelopeArgs(envelope)
       : codexPostureArg(profileArg, process.env, binding.launchPosture);
-    const appliedLaunch: AppliedLaunchObservation = binding.codexRebuildPermissions
-      ? { runtime: "codex", axis: "sandbox", state: "observed", value: binding.codexRebuildPermissions.sandboxPolicy.type,
-          reason: "emitted_launch_arguments", ...(binding.codexRebuildPermissions.approvalPolicy === "never" ? { approvalPolicy: "never" } : {}) }
-      : observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
+    const appliedLaunch: AppliedLaunchObservation = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    // The seat's envelope is not full access, so a policy's full_bypass extras don't follow it.
+    const postureArg = posture + operationalLaunchArg(this.runtime, memberEnvelope ? { ...binding, kernelAuthority: false, launchPosture: undefined } : binding);
 
     if (running) {
       // The running Codex already loaded its profile; drift in -p is the caller's to compare.
+      // Its own --add-dirs, git dirs included, carry over as they ran; none are resolved again. They follow the
+      // conversation id, as on every resume, so the resume proof reads the id even when a dir has a space.
       return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch, postureArg,
-        queueStateDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
-        suppressAutoAddDirs: false,
+        queueStateDirArg: "",
+        gitDirArg: running.addDirs.map((dir) => ` --add-dir ${shellQuote(dir)}`).join(""),
+        seatFolderArg: "",
         daemonOptOut: running.daemonOptOut, daemonArg: running.daemonOptOut ? " --no-daemon" : "",
         networkArg: running.networkOverride ? ` -c ${shellQuote(CODEX_NETWORK_DEFAULT_OVERRIDE)}` : "" };
     }
@@ -1013,9 +1074,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     // Codex rejects writable --add-dir roots under a read-only sandbox. Only
     // suppress OpenRig's generated roots when later project layers cannot make it writable.
-    const suppressAutoAddDirs = Boolean(!binding.codexRebuildPermissions && profile
-      && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
-    const teamWorkspaceArg = !binding.codexRebuildPermissions && binding.teamPermissionDefault && !profile
+    // A seat envelope states its sandbox: read-only gets no generated roots; workspace-write keeps them.
+    const suppressAutoAddDirs = memberEnvelope ? memberEnvelope.sandboxPolicy.type === "read-only"
+      : Boolean(!binding.codexRebuildPermissions && profile && posture === profileArg && this.profileRemainsReadOnly(profile, binding.cwd, home));
+    // Issue #121: fresh, resume and fork get the same git metadata dirs, so a restored or forked seat can still commit.
+    // A rebuild keeps the writable roots its observed envelope names instead.
+    const gitDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
+      ? "" : (await this.resolveGitAddDirs(binding.cwd)).map((dir) => ` --add-dir ${shellQuote(dir)}`).join("");
+    // The seat's own topology folder, so it can keep its LEARNED.md and recap: the same launches and the same suppression.
+    const seatFolder = binding.codexRebuildPermissions || suppressAutoAddDirs ? undefined : this.prepareSeatFolder?.(name);
+    const seatFolderArg = seatFolder ? ` --add-dir ${shellQuote(seatFolder)}` : "";
+    const teamWorkspaceArg = !envelope && binding.teamPermissionDefault && !profile
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.prepareTeamWorkspace, name) : "";
     const queueStateDirArg = binding.codexRebuildPermissions || suppressAutoAddDirs
@@ -1028,18 +1097,21 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
-    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
-    const networkArg = binding.codexRebuildPermissions ? ""
+    // #275: on the plain floor, network access unless Codex reports an opt-out or policy. An envelope states its own.
+    const networkArg = envelope ? ""
       : await codexNetworkDefaultArg(own && this.readNetworkDefault ? ((cwd: string) => this.readNetworkDefault!(cwd, own)) : this.readNetworkDefault, appliedLaunch, binding.cwd, name);
 
     // The launch facts keep the probed daemon choice, so a printed recovery command can repeat it; no probe, no fact.
     const launchFacts = daemonSupport ? { ...appliedLaunch, daemonOptOut } : appliedLaunch;
-    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, suppressAutoAddDirs, daemonOptOut, daemonArg, networkArg };
+    return { ok: true, model, modelArg, effort, effortArg, profile, appliedLaunch: launchFacts, postureArg, queueStateDirArg, gitDirArg, seatFolderArg, daemonOptOut, daemonArg, networkArg };
   }
 
   private resumeCore(prepared: PreparedCodexLaunch, resumeToken: string, binding: NodeBinding): string {
-    const { profile, queueStateDirArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
-    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort);
+    const { profile, queueStateDirArg, gitDirArg, seatFolderArg, model, postureArg, networkArg, daemonOptOut, effort } = prepared;
+    // The git dirs and the seat folder follow the conversation id, as on a fork, so the resume proof reads the id even
+    // from a path with a space.
+    return buildCodexResumeCore(resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+      + gitDirArg + seatFolderArg;
   }
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
@@ -1403,6 +1475,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     assertFragmentOpensWithTable(fragment, entry.absolutePath, entry.effectiveId);
     const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
     assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
+    if (!changesOnlyFragmentTables(existing, rendered, entry.effectiveId, fragment)) {
+      throw new Error(`Codex config projection '${entry.effectiveId}' would change more than its own tables in ${configPath}; left unchanged.`);
+    }
     this.fs.writeFile(configPath, rendered);
     return true;
   }
@@ -1838,11 +1913,13 @@ function hashContent(content: string): string {
 }
 
 function upsertCodexProjectTrust(content: string, projectPath: string): string {
+  const path = ["projects", projectPath];
   const header = `[projects.${JSON.stringify(projectPath)}]`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTable(lines, path);
 
   if (headerIndex === -1) {
+    if (tomlDefines(content, path)) return content;
     const trimmed = content.trimEnd();
     const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : "";
     return `${prefix}${header}\ntrust_level = "trusted"\n`;
@@ -1959,17 +2036,19 @@ export function computeCodexHookTrust(
 /**
  * OPR.0.4.3.33 — idempotent, non-clobbering, section-scoped writer for a single
  * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
- * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
+ * find the table by its key in any spelling (or create it), splice ONLY its `trusted_hash` line, leave every other
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
  * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
 export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
+  const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const trustLine = `${field} = ${JSON.stringify(hash)}`;
   const lines = content.length > 0 ? content.split("\n") : [];
-  const headerIndex = lines.findIndex((line) => line.trim() === header);
+  const headerIndex = findTomlTable(lines, path);
 
   if (headerIndex === -1) {
+    if (tomlDefines(content, path)) return content;
     const trimmed = content.trimEnd();
     const prefix = trimmed.length > 0 ? `${trimmed}\n\n` : "";
     return `${prefix}${header}\n${trustLine}\n`;
@@ -2086,14 +2165,91 @@ function upsertCodexActivityHooks(content: string, relayPath: string): string {
   let next = upsertCodexFeaturesHooksEnabled(content);
 
   const pattern = new RegExp(
-    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
+    `${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}\\n?`,
     "m"
   );
   if (pattern.test(next)) {
-    return next.replace(pattern, () => block); // literal: a string would expand `$` patterns in the path
+    // literal: a string would expand `$` patterns in the path
+    return next.replace(pattern, (_span, inner: string) => {
+      const kept = keptInActivityBlock(inner, `node "${relayPath}"`);
+      return kept ? `${block}\n${kept}\n` : block;
+    });
   }
+  // Codex's own saves can leave our markers apart from our groups. Groups that already run OpenRig's relay are ours
+  // where they sit: point them at this relay rather than append a second set, which Codex would run twice.
+  const relayGroups = retargetOpenRigRelayGroups(next, command, `node "${relayPath}"`);
+  if (relayGroups !== null) return relayGroups;
   const prefix = next.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/**
+ * What else sits between OpenRig's activity-hook markers. When Codex saves config.toml (its "Trust all", say), a
+ * table it rewrites loses its file position and is printed after the last hook group, which can be inside our
+ * block: Codex 0.164.0 rewrites all of `[hooks.state]` this way. Every section but OpenRig's own activity groups is
+ * kept whole, with the comments just above it.
+ */
+function keptInActivityBlock(inner: string, current?: string): string {
+  const lines = inner.split("\n");
+  return tomlSections(inner, current).filter((section) => !section.openRig)
+    .map(({ start, end }) => lines.slice(start, end).join("\n")).join("\n").trim();
+}
+
+/** Point every inline group that runs OpenRig's relay (from any install) at `command` (TOML text), in place; null when
+ *  there's none, or the file can't be read as TOML. Only those groups' own `command` lines change: a person's groups,
+ *  their other text and every position stay as they are. */
+function retargetOpenRigRelayGroups(content: string, command: string, current: string): string | null {
+  let document: unknown;
+  try { document = parseToml(content); } catch { return null; }
+  if (!OPENRIG_ACTIVITY_HOOK_EVENTS.some((event) => openRigInlineGroupIndex(document, event) >= 0)) return null;
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  for (const { header, end, path, openRig } of tomlSections(content, current)) {
+    if (!openRig || path.length !== 3) continue;
+    for (let at = header + 1; at < end; at++) if (topLevel[at] && /^\s*command\s*=/.test(lines[at]!)) lines[at] = `command = ${command}`;
+  }
+  return lines.join("\n");
+}
+
+/** One table section of a config: its header line's index, the lines it spans with the comments and blank lines just
+ *  above it, and its decoded key path. `openRig` marks OpenRig's own activity groups: a `[[hooks.<event>]]` for one of
+ *  OpenRig's events and the sections under it, when, read on their own, they run nothing but OpenRig's relay. */
+type TomlSection = { start: number; header: number; end: number; path: string[]; openRig: boolean };
+
+/** `text` split at its real table headers, never at text inside a string or an array. Lines before the first header
+ *  belong to no section. */
+function tomlSections(text: string, current?: string): TomlSection[] {
+  const lines = text.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(text);
+  const sections: TomlSection[] = [];
+  for (const [at, line] of lines.entries()) {
+    if (!topLevel[at] || !line.trim().startsWith("[")) continue;
+    const path = tomlArrayTableHeaderPath(line) ?? tomlTableHeaderPath(line);
+    if (!path) continue;
+    let start = at;
+    while (start > 0 && topLevel[start - 1] && /^\s*(?:#.*)?$/.test(lines[start - 1]!)) start--;
+    const previous = sections.at(-1);
+    if (previous) previous.end = start;
+    sections.push({ start, header: at, end: lines.length, path, openRig: false });
+  }
+  const events: readonly string[] = OPENRIG_ACTIVITY_HOOK_EVENTS;
+  const under = (section: TomlSection, event: string) => section.path[0] === "hooks" && section.path[1] === event;
+  for (let first = 0; first < sections.length; first++) {
+    const { path } = sections[first]!;
+    const event = path[1]!;
+    if (path[0] !== "hooks" || !events.includes(event) || path.length > 3 || (path.length === 3 && path[2] !== "hooks")) continue;
+    let last = first;
+    while (path.length === 2 && last + 1 < sections.length && sections[last + 1]!.path.length > 2 && under(sections[last + 1]!, event)) last++;
+    let group: unknown;
+    try {
+      const hooks = (parseToml(lines.slice(sections[first]!.start, sections[last]!.end).join("\n")) as { hooks?: Record<string, unknown> }).hooks?.[event];
+      // A group's own header gives a list holding it; a handler stanza on its own reads as the group it adds to.
+      group = path.length === 2 ? (Array.isArray(hooks) && hooks.length === 1 ? hooks[0] : null) : hooks;
+    } catch { group = null; }
+    if (runsOnlyOpenRigRelay(group, current)) for (let at = first; at <= last; at++) sections[at]!.openRig = true;
+    first = last;
+  }
+  return sections;
 }
 
 function canonicalCodexHookSource(path: string): string {
@@ -2169,12 +2325,40 @@ function openRigInlineGroupIndex(document: unknown, event: string): number {
   });
 }
 
+/** An inline group that runs nothing but OpenRig's relay: every command on it or its handlers is OpenRig's shipped relay,
+ *  from any install, or `current`. A person's group with a command of their own is theirs. */
+function runsOnlyOpenRigRelay(group: unknown, current?: string): boolean {
+  if (group === null || typeof group !== "object") return false;
+  const { command, hooks } = group as { command?: unknown; hooks?: unknown };
+  const commands = [...(command === undefined ? [] : [command]),
+    ...(Array.isArray(hooks) ? hooks.map((handler) => (handler as { command?: unknown } | null)?.command) : [])];
+  return commands.length > 0 && commands.every((value) => isOpenRigRelayCommand(value) || (current !== undefined && value === current));
+}
+
+/** Whether `next` changes nothing in `content` but OpenRig's inline activity groups and the `[features].hooks` flag
+ *  OpenRig sets, and still parses. A config that doesn't parse is left as it is. */
+function changesOnlyOpenRigActivityHooks(content: string, next: string, current?: string): boolean {
+  const rest = (text: string) => {
+    const { hooks, features, ...other } = parseToml(text) as { hooks?: Record<string, unknown>; features?: Record<string, unknown> };
+    const { hooks: _flag, ...otherFeatures } = features ?? {};
+    const otherHooks = Object.fromEntries(Object.entries(hooks ?? {}).flatMap(([event, value]) => {
+      const groups = (OPENRIG_ACTIVITY_HOOK_EVENTS as readonly string[]).includes(event) && Array.isArray(value)
+        ? value.filter((group) => !runsOnlyOpenRigRelay(group, current)) : value;
+      return Array.isArray(groups) && groups.length === 0 ? [] : [[event, groups]];
+    }));
+    return { ...other, ...(Object.keys(otherFeatures).length > 0 ? { features: otherFeatures } : {}),
+      ...(Object.keys(otherHooks).length > 0 ? { hooks: otherHooks } : {}) };
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
 /** Write `enabled = false` into one `[hooks.state."<key>"]` table (the trust write creates it first). */
 function upsertCodexHookDisabled(content: string, key: string): string {
+  const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;
   const lines = content.split("\n");
-  const at = lines.findIndex((line) => line.trim() === header);
-  if (at < 0) return `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
+  const at = findTomlTable(lines, path);
+  if (at < 0) return tomlDefines(content, path) ? content : `${content.replace(/\n*$/, "")}\n\n${header}\nenabled = false\n`;
   let end = lines.length;
   for (let i = at + 1; i < lines.length; i++) if (lines[i]!.trim().startsWith("[")) { end = i; break; }
   const enabledAt = lines.findIndex((line, i) => i > at && i < end && /^\s*enabled\s*=/.test(line));
@@ -2195,18 +2379,19 @@ function rekeyCodexHookState(state: CodexHookState, prefix: string, newIndexOf: 
   return next;
 }
 
-/** The same move on config.toml's text: rename each moved group's `[hooks.state."<key>"]` header, and drop a removed
- *  group's table. Other spellings aren't touched; the caller compares the parsed result before writing. */
+/** The same move on config.toml's text: rename each moved group's `[hooks.state.<key>]` header (any key spelling), and
+ *  drop a removed group's table. An inline or dotted entry isn't touched; the caller compares the parsed result before writing. */
 function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (index: number) => number | null): string {
   const out: string[] = [];
   let dropping = false;
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n");
+  const root = parseTomlRoot(lines);
+  for (const [at, line] of lines.entries()) {
     const trimmed = line.trim();
     if (trimmed.startsWith("[")) {
       dropping = false;
-      const quoted = /^\[hooks\.state\.(".*")\]$/.exec(trimmed)?.[1];
-      let key: string | undefined;
-      try { key = quoted ? JSON.parse(quoted) as string : undefined; } catch { key = undefined; }
+      const path = tomlTableHeaderPath(trimmed);
+      const key = path?.length === 3 && path[0] === "hooks" && path[1] === "state" && opensTomlTable(lines, at, root) ? path[2] : undefined;
       const tail = key?.startsWith(prefix) ? /^(\d+):(\d+)$/.exec(key.slice(prefix.length)) : null;
       if (tail) {
         const index = newIndexOf(Number(tail[1]));
@@ -2226,13 +2411,17 @@ function rekeyCodexHookStateText(content: string, prefix: string, newIndexOf: (i
  * leaves all other content — user-owned hooks, [features], project trust — untouched. Returns the
  * input unchanged when the block is absent.
  */
-function stripCodexActivityHooks(content: string): string {
+function stripCodexActivityHooks(content: string, current?: string): string {
   const pattern = new RegExp(
-    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}[\\s\\S]*?${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
+    `\\n*${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_BEGIN)}([\\s\\S]*?)${escapeRegExp(OPENRIG_ACTIVITY_HOOKS_END)}[ \\t]*\\n?`,
     "m"
   );
   if (!pattern.test(content)) return content;
-  return content.replace(pattern, "\n");
+  // Tables Codex printed inside the block (its rewritten `[hooks.state]`) aren't ours to remove.
+  return content.replace(pattern, (_span, inner: string) => {
+    const kept = keptInActivityBlock(inner, current);
+    return kept ? `\n\n${kept}\n` : "\n";
+  });
 }
 
 /** Ensure `[features].hooks = true` (canonical key; not the deprecated codex_hooks alias). */
@@ -2448,25 +2637,144 @@ function dropCollidingFragmentTables(
   };
 }
 
-function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
+/** `content`'s lines and this fragment's marker pair: the first document-level BEGIN and the first END after it. */
+function fragmentMarkerPair(content: string, id: string) {
   const start = `# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
   const end = `# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
-  const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+  const lines = content.split("\n");
+  const topLevel = lineStartsAtDocumentLevel(content);
+  const isMarker = (at: number) => topLevel[at] === true && (lines[at]!.trim() === start || lines[at]!.trim() === end);
+  const begin = lines.findIndex((line, at) => isMarker(at) && line.trim() === start);
+  const close = begin < 0 ? -1 : lines.findIndex((line, at) => at > begin && isMarker(at) && line.trim() === end);
+  return { start, end, lines, isMarker, begin, close };
+}
 
-  // Everything outside THIS block is what the fragment must not collide with.
-  // Our own previous block is excluded because re-projection replaces it
-  // wholesale — counting it would make the second projection drop everything
-  // the first one legitimately landed.
-  const userOwned = content.replace(pattern, "");
-  const { kept } = dropCollidingFragmentTables(fragment, userOwned);
-  const block = `${start}\n${kept}\n${end}\n`;
+function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
+  const { start, end, lines, isMarker, begin, close } = fragmentMarkerPair(content, id);
+  const inBlock = (at: number) => close >= 0 && at > begin && at < close;
 
-  if (pattern.test(content)) {
-    return content.replace(pattern, () => block); // literal: a string would expand `$` patterns in the fragment
+  // Codex 0.164.0 prints every table it rewrites (all of `[mcp_servers]` on `codex mcp add`) after the others, and the
+  // comment above the first goes with it, so a save can leave our markers apart from our tables. Outside the block, a
+  // fragment table still holding exactly the fragment's values is ours where Codex left it, and our stray markers go.
+  const ours = fragmentTableValues(fragment);
+  const drop = new Set<number>();
+  for (const section of tomlSections(content)) {
+    const value = ours.get(JSON.stringify(section.path));
+    if (inBlock(section.header) || value === undefined) continue;
+    let stop = section.end;
+    while (stop - 1 > section.header && /^\s*(?:#.*)?$/.test(lines[stop - 1]!)) stop--;
+    if (!isDeepStrictEqual(tomlTableValue(lines.slice(section.header, stop).join("\n"), section.path), value)) continue;
+    for (let at = section.start; at < stop; at++) if (at >= section.header || !/\S/.test(lines[at]!)) drop.add(at);
+  }
+  lines.forEach((_, at) => { if (isMarker(at) && !(close >= 0 && (at === begin || at === close))) drop.add(at); });
+  const outside = (from: number, to: number) => lines.slice(from, to).filter((_, offset) => !drop.has(from + offset));
+
+  if (close >= 0) {
+    // Codex can print a table of its own between our markers (a new `[features]`, say): that's the person's, and it's
+    // kept after the block. Our tables and array-of-tables entries inside are replaced whole.
+    const inner = lines.slice(begin + 1, close);
+    const roots = fragmentArrayRoots(fragment);
+    const theirs = tomlSections(inner.join("\n"))
+      .filter((section) => !ours.has(JSON.stringify(section.path)) && !underTomlRoot(section.path, roots))
+      .map(({ start: from, end: to }) => inner.slice(from, to).join("\n")).join("\n").trim();
+    const before = outside(0, begin);
+    const after = outside(close + 1, lines.length);
+    const { kept } = dropCollidingFragmentTables(fragment, [...before, theirs, ...after].join("\n"));
+    const block = `${start}\n${kept}\n${end}${theirs ? `\n\n${theirs}` : ""}`;
+    return [...before, block, ...(after.length > 0 ? after : [""])].join("\n");
   }
 
-  const prefix = content.replace(/\n*$/, "");
+  const rest = outside(0, lines.length).join("\n");
+  const { kept } = dropCollidingFragmentTables(fragment, rest);
+  const block = `${start}\n${kept}\n${end}\n`;
+  const prefix = rest.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/** The fragment's tables by key path (JSON), each with the values it sets. A table under one of its array-of-tables
+ *  roots is part of that entry, not a table of its own. */
+function fragmentTableValues(fragment: string): Map<string, unknown> {
+  const roots = fragmentArrayRoots(fragment);
+  const values = new Map<string, unknown>();
+  for (const block of splitAtTableHeaders(fragment)) {
+    const path = block.header === null ? null : tomlTableHeaderPath(block.header);
+    if (path && !underTomlRoot(path, roots)) values.set(JSON.stringify(path), tomlTableValue(block.text, path));
+  }
+  return values;
+}
+
+/** The fragment's array-of-tables roots: each `[[path]]` that isn't under another (`[[hooks.Stop]]`, whose
+ *  `[[hooks.Stop.hooks]]` belong to its entry). An entry has no single path, so it's only ever recognized between our
+ *  markers. */
+function fragmentArrayRoots(fragment: string): string[][] {
+  const roots: string[][] = [];
+  for (const { header } of splitAtTableHeaders(fragment)) {
+    const path = header === null ? null : tomlArrayTableHeaderPath(header);
+    if (path && !underTomlRoot(path, roots)) roots.push(path);
+  }
+  return roots;
+}
+
+function underTomlRoot(path: string[], roots: string[][]): boolean {
+  return roots.some((root) => root.length <= path.length && root.every((key, at) => path[at] === key));
+}
+
+/** The array-of-tables entries between this fragment's markers in `content`, by root (JSON): OpenRig's, whatever they
+ *  now hold. */
+function blockArrayEntries(content: string, id: string, roots: string[][]): Map<string, unknown[]> {
+  const entries = new Map<string, unknown[]>();
+  const { lines, begin, close } = fragmentMarkerPair(content, id);
+  if (close < 0 || roots.length === 0) return entries;
+  const inner = lines.slice(begin + 1, close);
+  const text = tomlSections(inner.join("\n")).filter((section) => underTomlRoot(section.path, roots))
+    .map(({ start: from, end: to }) => inner.slice(from, to).join("\n")).join("\n");
+  for (const root of roots) {
+    const value = tomlTableValue(text, root);
+    if (Array.isArray(value)) entries.set(JSON.stringify(root), value);
+  }
+  return entries;
+}
+
+/** The value one table's text sets at `path`, or undefined when it doesn't parse. */
+function tomlTableValue(text: string, path: string[]): unknown {
+  let node: unknown;
+  try { node = parseToml(text); } catch { return undefined; }
+  for (const key of path) node = node !== null && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined;
+  return node;
+}
+
+/** Whether `next` changes nothing in `content` but the fragment's own tables and the array-of-tables entries between
+ *  its markers: the person's settings, and every table and entry Codex wrote, read the same. Both must parse. */
+function changesOnlyFragmentTables(content: string, next: string, id: string, fragment: string): boolean {
+  const paths = [...fragmentTableValues(fragment).keys()].map((key) => JSON.parse(key) as string[]);
+  const roots = fragmentArrayRoots(fragment);
+  const rest = (text: string) => {
+    const root = parseToml(text) as Record<string, unknown>;
+    for (const path of paths) withoutTomlPath(root, path);
+    for (const [key, entries] of blockArrayEntries(text, id, roots)) withoutTomlPath(root, JSON.parse(key) as string[], entries);
+    return root;
+  };
+  try { return isDeepStrictEqual(rest(content), rest(next)); } catch { return false; }
+}
+
+/** Delete `path` from a parsed document in place, or with `entries`, one equal entry for each from the array there; and
+ *  any table that leaves empty. */
+function withoutTomlPath(node: Record<string, unknown>, path: string[], entries?: unknown[]): void {
+  const [key, ...more] = path;
+  if (key === undefined || !Object.hasOwn(node, key)) return;
+  const child = node[key];
+  if (more.length === 0) {
+    if (entries === undefined) { delete node[key]; return; }
+    if (!Array.isArray(child)) return;
+    for (const entry of entries) {
+      for (let at = child.length - 1; at >= 0; at--) if (isDeepStrictEqual(child[at], entry)) { child.splice(at, 1); break; }
+    }
+    if (child.length === 0) delete node[key];
+    return;
+  }
+  if (child === null || typeof child !== "object" || Array.isArray(child)) return;
+  withoutTomlPath(child as Record<string, unknown>, more, entries);
+  if (Object.keys(child).length === 0) delete node[key];
 }
 
 /**

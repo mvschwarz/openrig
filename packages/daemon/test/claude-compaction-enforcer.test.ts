@@ -1228,7 +1228,8 @@ describe("ClaudeCompactionEnforcer", () => {
       it("after the sequence completes (audit-sent) OR fails (skipped-or-failed), a fresh re-trigger is allowed", async () => {
         const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
         const { transport, send } = makeSessionTransport();
-        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME });
+        // This checks sequence/re-trigger behavior, not elapsed preparation time; CI work must not consume its 50ms budget.
+        const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: HOME, now: () => 1_700_000_000_000 });
 
         // Drive one full sequence to audit-sent (the back-half clears the pending maps).
         await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/c.jsonl" });
@@ -1244,8 +1245,8 @@ describe("ClaudeCompactionEnforcer", () => {
 
         // And after a FAILED trigger (prep send fails → skipped-or-failed), a retry is allowed too.
         const { transport: t2, send: send2 } = makeSessionTransport();
-        send2.mockImplementationOnce(async () => ({ ok: false, reason: "send_failed" }));
-        const enf2 = new ClaudeCompactionEnforcer(settings, t2, { openrigHome: HOME });
+        send2.mockImplementationOnce(async () => ({ ok: false, reason: "send_failed", inputPhase: "not_reached" }));
+        const enf2 = new ClaudeCompactionEnforcer(settings, t2, { openrigHome: HOME, now: () => 1_700_000_000_000 });
         expect((await enf2.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 })).triggered).toBe(false);
         expect(enf2.getManualCompactionState(SEAT)?.stage).toBe("skipped-or-failed");
         // Retry proceeds (not blocked by the guard).

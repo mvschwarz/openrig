@@ -113,6 +113,17 @@ describe("the primary user acts on anyone's ask, recorded as themselves on that 
       transition_note: "Wide; by mike@external, the primary user at the terminal, on sarah@external's ask" });
   });
 
+  it("resolves a typed gate as the primary user with the gate's own note: no person was asked", async () => {
+    register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
+    const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "QA", summary: "QA", evidenceRef: "/fixture/qa", nudge: false });
+    await repo.update({ qitemId: work.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "external:qa-pass" } as never);
+    expect((await act({ verb: "resolve", qitemId: work.qitemId, actorSession: "sarah@external", authority: "primary-user", decision: "QA passed" })).status).toBe(200);
+    const transition = repo.transitionLog.listForQitem(work.qitemId).find((t) => t.transitionNote?.includes("QA passed"));
+    expect(transition).toMatchObject({ state: "in-progress", actorSession: "mike@external", transitionNote: "Blocker external:qa-pass resolved: QA passed" });
+    expect(transition!.ownerNotificationKind).not.toBe("human-decision-resolved");
+    expect(audit(work.qitemId)).toEqual({ verb: "resolve", actor: "mike@external", notes: { authority: "primary-user", asked: null } });
+  });
+
   it("approves a row parked on Sarah as the primary user, recorded on her ask", async () => {
     register("mike", "sarah"); expect(setDefaultPerson("mike", home).ok).toBe(true);
     const work = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Layout", summary: "Layout", evidenceRef: "/fixture/layout", nudge: false });

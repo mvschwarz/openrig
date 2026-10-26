@@ -113,13 +113,8 @@ interface PreviewWire {
   missingFiles: Array<{ path: string; role: string }>;
 }
 
-const SAFE_REF_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-
-function assertSafeTopologySegment(kind: "rig" | "seat", value: string): void {
-  if (value === "." || value === ".." || !SAFE_REF_SEGMENT.test(value)) {
-    throw new Error(`unsafe ${kind} segment '${value}' — topology addresses require one bounded path segment`);
-  }
-}
+/** A write the OS refused for this process: a sandboxed seat's writable roots don't include the topology tree. */
+const WRITE_REFUSED_CODES = new Set(["EPERM", "EACCES", "EROFS"]);
 
 function assertLocalGitClient(client: DaemonClient): void {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(client.baseUrl).hostname)) {
@@ -783,7 +778,8 @@ Examples:
   // trace: the seat dir resolves from topology.root CONFIG; the write flows
   // through the ONE store (supersession + addressability gate); advisory
   // contract findings ride stderr while the write still lands — the boundary
-  // is never blocked on prose shape.
+  // is never blocked on prose shape. A process that may not write the topology
+  // tree (a sandboxed seat) hands the same recap to the daemon, which owns it.
   cmd.command("recap-write")
     .description("Write this seat's authored RECAP (decisions-with-rationale) at the handover boundary; supersedes the previous recap into the seat's chain")
     .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
@@ -791,29 +787,33 @@ Examples:
     .requiredOption("--file <path>", "Markdown file containing the recap content")
     .action(async (opts: { rig: string; seat: string; file: string }) => {
       try {
-        const { writeSeatRecap, validateRecapContract, listRecapChain } = await import("@openrig/daemon/seat-recap-store");
+        const { writeSeatRecapAt, validateRecapContract } = await import("@openrig/daemon/seat-recap-store");
         const content = readFileSync(opts.file, "utf-8");
-        const store = new ConfigStore();
-        const topologyRoot = String(store.resolveWithSource("topology.root").value);
-        assertSafeTopologySegment("rig", opts.rig);
-        assertSafeTopologySegment("seat", opts.seat);
-        const rigDir = join(topologyRoot, "rigs", opts.rig);
-        if (!existsSync(rigDir)) {
-          throw new Error(`rig directory ${rigDir} does not exist — check --rig against the topology tree (topology.root=${topologyRoot}).`);
-        }
-        const seatDir = join(topologyRoot, "rigs", opts.rig, "seats", opts.seat);
-        assertDestinationNamespaceContained(join(topologyRoot, "rigs"), `${opts.rig}/seats/${opts.seat}/RECAP.md`);
-        mkdirSync(seatDir, { recursive: true });
+        const topologyRoot = String(new ConfigStore().resolveWithSource("topology.root").value);
         for (const f of validateRecapContract(content)) {
           console.error(f.kind === "no-decisions-section"
             ? "ADVISORY no-decisions-section: the authoring contract asks for decisions WITH rationale — conclusions alone are the lossy handoff shape."
             : `ADVISORY nonstandard-unverified-marker (line ${f.line}): use the canonical 'UNVERIFIED:' form so uncertain facts stay findable.`);
         }
-        writeSeatRecap({ seatDir, content });
-        const chain = listRecapChain(seatDir);
-        console.log(`Recap written: ${join(seatDir, "RECAP.md")}${chain.length > 0 ? ` (${chain.length} superseded predecessor${chain.length === 1 ? "" : "s"} retained)` : ""}`);
+        let written: { path: string; superseded: number; daemonUrl?: string };
+        try {
+          written = writeSeatRecapAt({ topologyRoot, rig: opts.rig, seat: opts.seat, content });
+        } catch (err) {
+          if (!WRITE_REFUSED_CODES.has((err as NodeJS.ErrnoException).code ?? "")) throw err;
+          // The daemon owns the topology tree (it primes RECAP.md at the next rebuild): it writes the same recap through
+          // the same store, so a sandboxed seat saves its recap without a wider writable root. Said first, so a daemon
+          // that can't be reached is reported with its reason.
+          console.error(`Note: this process can't write the topology tree (${(err as Error).message}), so the daemon writes the recap instead.`);
+          const client = await getClient();
+          const res = await client.post<{ path?: string; superseded?: number; message?: string }>("/api/context-packs/seat-recap", { rig: opts.rig, seat: opts.seat, content });
+          if (res.status !== 200 || typeof res.data.path !== "string") throw new Error(res.data.message ?? `Daemon returned HTTP ${res.status}`);
+          written = { path: res.data.path, superseded: res.data.superseded ?? 0, daemonUrl: client.baseUrl };
+        }
+        console.log(`Recap written: ${written.path}${written.superseded > 0 ? ` (${written.superseded} superseded predecessor${written.superseded === 1 ? "" : "s"} retained)` : ""}`
+          + (written.daemonUrl ? `, by the daemon at ${written.daemonUrl}` : ""));
       } catch (err) {
-        console.error((err as Error).message);
+        // A daemon write that timed out says its outcome is unknown, so it's checked before a retry supersedes it again.
+        if (!renderCaughtTransportError(err)) console.error((err as Error).message);
         process.exitCode = 1;
       }
     });

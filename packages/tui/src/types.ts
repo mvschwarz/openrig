@@ -83,6 +83,8 @@ export interface RigNode {
   graph?: import("./topology/graph-types.js").RigGraph;
   /** served rig lifecycleState verbatim (summary read); non-"running" states surface */
   lifecycleState?: string;
+  /** A rig on another registered host, read through this daemon: its name and state only, not its seats. */
+  remoteHost?: string;
 }
 
 export interface HostNode {

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { sendCommand, type SendDeps } from "../src/commands/send.js";
-import { DaemonClient } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
@@ -81,6 +81,7 @@ function runningDeps(port: number, clientFactory?: StatusDeps["clientFactory"]):
 describe("Send CLI", () => {
   let server: http.Server;
   let port: number;
+  let refusedUrl: string;
   let lastSendBody: Record<string, unknown> | null = null;
   let lastBroadcastBody: Record<string, unknown> | null = null;
   // S3 (OPR.0.5.4.6): every /send body in order, so the no-double-delivery
@@ -157,6 +158,11 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
+          if (parsed.session === "lost-response-session") {
+            // The message was accepted, but no response headers reach the caller.
+            res.destroy();
+            return;
+          }
           if (parsed.session === "staged-session" || parsed.session === "consumed-session" || parsed.session === "stale-scroll-session" || parsed.session === "unrelated-paste-session" || parsed.session === "codex153-session") {
             // S3 RED fixture: the TRANSPORT believes it delivered (its verify
             // is measured-unreliable in exactly this direction) — the staged
@@ -201,6 +207,12 @@ describe("Send CLI", () => {
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
     port = (server.address() as { port: number }).port;
+    // Use an actual connection refusal: fetch blocks port1 before connecting,
+    // without a cause code, so it cannot exercise the coded no-connect branch.
+    const closed = http.createServer();
+    await new Promise<void>((resolve) => { closed.listen(0, "127.0.0.1", resolve); });
+    refusedUrl = `http://127.0.0.1:${(closed.address() as { port: number }).port}`;
+    await new Promise<void>((resolve, reject) => { closed.close((err) => err ? reject(err) : resolve()); });
   });
 
   afterAll(() => { server.close(); });
@@ -283,6 +295,7 @@ describe("Send CLI", () => {
     expect(output).toMatch(/empty or whitespace-only/i);
     expect(output).toMatch(/backtick|\$\(\)/i);
     expect(output).toMatch(/--body-file|stdin/i);
+    expect(output).not.toContain("UNCONFIRMED");
   });
 
   it("refuses an empty resolved context before send transport", async () => {
@@ -416,7 +429,49 @@ describe("Send CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "send", "busy-session", "hello"]);
     });
     expect(logs.join("\n")).toContain("mid-task");
+    expect(logs.join("\n")).not.toContain("UNCONFIRMED");
     expect(exitCode).toBe(1);
+  });
+
+  it.each([false, true])("losing the response after acceptance is unconfirmed (json=%s), with no resend", async (json) => {
+    const { stdout, stderr, exitCode } = await captureChannels(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "lost-response-session", "hello", ...(json ? ["--json"] : [])]);
+    });
+    expect(exitCode).toBe(1);
+    expect(sendBodies).toHaveLength(1);
+    expect(sendBodies[0]).toMatchObject({ session: "lost-response-session", exactText: "hello" });
+    const output = json ? JSON.parse(stdout[0]).error : { consequence: stderr[1], action: stderr[2] };
+    expect(output.consequence).toContain("Delivery UNCONFIRMED");
+    expect(output.action).toContain("duplicate");
+    expect([...stdout, ...stderr].join("\n")).not.toMatch(/was not sent|Sent to/);
+    if (json) { expect(stdout).toHaveLength(1); expect(stderr).toEqual([]); }
+    else expect(stdout).toEqual([]);
+  });
+
+  describe.each([false, true])("uncertain local connection errors (fan-out=%s)", (fanOut) => {
+    it.each([
+      ["timeout", () => new DaemonTimeoutError("Request timed out after 5000ms")],
+      ["reset", () => new DaemonConnectionError("fetch failed", "ECONNRESET")],
+      ["unknown cause", () => new DaemonConnectionError("fetch failed")],
+    ] as const)("%s reports uncertainty in human and JSON output without retry", async (_name, failure) => {
+      for (const json of [false, true]) {
+        const post = vi.fn().mockRejectedValue(failure());
+        const deps = runningDeps(port, () => ({ post } as unknown as DaemonClient));
+        const args = fanOut ? ["--to", "dev-impl@my-rig", "hello"] : ["dev-impl@my-rig", "hello"];
+        const { stdout, stderr, exitCode } = await captureChannels(async () => {
+          await makeCmd(deps).parseAsync(["node", "rig", "send", ...args, ...(json ? ["--json"] : [])]);
+        });
+        expect(exitCode).toBe(1);
+        expect(post).toHaveBeenCalledTimes(1);
+        expect(post.mock.calls[0]?.[0]).toBe(fanOut ? "/api/transport/broadcast" : "/api/transport/send");
+        const output = json ? JSON.parse(stdout[0]).error : { consequence: stderr[1], action: stderr[2] };
+        expect(output.consequence).toContain("Delivery UNCONFIRMED");
+        expect(output.action).toContain("duplicate");
+        expect([...stdout, ...stderr].join("\n")).not.toMatch(/was not sent|Sent to/);
+        if (json) { expect(stdout).toHaveLength(1); expect(stderr).toEqual([]); }
+        else expect(stdout).toEqual([]);
+      }
+    });
   });
 
   // OPR.0.4.3.28 correction — an unknown-telemetry send PROCEEDS and PRINTS the advisory on
@@ -529,6 +584,51 @@ describe("Send CLI", () => {
     expect(sentText?.text).toContain("To: dev-impl@my-rig");
     expect(sentText?.text).toContain("---\nhello\n---");
     expect(sentText?.text).toContain('↩ Reply: rig send');
+  });
+
+  // Node's fetch gives up on a response that hasn't started within 300 s, and a waiting send answers only when its wait
+  // ends. A longer wait is still one request, so the daemon keeps one deadline and one binding to the seat's occupant.
+  it("send --wait-for-idle over 300 s whose answer is cut off after the headers never reads as not sent", async () => {
+    let sends = 0;
+    const cut = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        if (req.method !== "POST" || req.url !== "/api/transport/send") { res.writeHead(404).end(); return; }
+        // The daemon delivered and answered, then the connection dropped partway through the body.
+        sends += 1;
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "64" });
+        res.write('{"ok":true,"sent":tr');
+        setTimeout(() => res.socket?.destroy(), 20);
+      });
+    });
+    await new Promise<void>((resolve) => { cut.listen(0, resolve); });
+    try {
+      let thrown: unknown;
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(runningDeps((cut.address() as { port: number }).port))
+          .parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"]).catch((err: unknown) => { thrown = err; });
+      });
+      expect(sends).toBe(1);
+      expect(thrown).toBeInstanceOf(DaemonResponseError);
+      expect((thrown as DaemonResponseError).status).toBe(200);
+      expect(logs.join("\n")).not.toContain("The message was not sent.");
+    } finally {
+      cut.closeAllConnections();
+      cut.close();
+    }
+  });
+
+  it("send --wait-for-idle longer than 300 s is one request carrying the whole wait, and the daemon's answer as it came", async () => {
+    const postFn = vi.fn().mockResolvedValueOnce({ status: 409, data: { ok: false, sessionName: "dev-impl@my-rig", reason: "wait_for_idle_timeout",
+      sent: false, waitedMs: 600000, error: "Target was still busy (running) when the 600000ms wait ended (8 checks). No text was sent." } });
+    const deps = runningDeps(port, () => ({ post: postFn } as unknown as DaemonClient));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600"]);
+    });
+    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([[600000, { timeoutMs: 605000 }]]);
+    expect(logs.join("\n")).toContain("when the 600000ms wait ended (8 checks). No text was sent.");
+    expect(logs.join("\n")).not.toMatch(/did not respond|consecutive/i);
+    expect(exitCode).toBe(1);
   });
 
   it("send without wait-for-idle uses default client timeout path", async () => {
@@ -1336,7 +1436,7 @@ describe("Send CLI", () => {
     });
 
     it("R7 RED: REAL down fails honestly — actual connection error names the target; the bare preflight restart line never appears", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { logs, exitCode } = await captureLogs(async () => {
@@ -1349,7 +1449,7 @@ describe("Send CLI", () => {
       // preflight-derived guess. (Also covers 1b45cf21's explicit/custom
       // target-preservation pin: the resolved target survives verbatim into
       // the fact line rather than being flattened into a generic message.)
-      expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(out).toContain(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`);
       expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
       // 1b45cf21 — a real transport failure must also carry the repo's
       // fact/consequence/action remediation. The fact line above is the
@@ -1376,7 +1476,7 @@ describe("Send CLI", () => {
     // "characterization" while it is an intentional RED is exactly the kind of
     // stale label this slice keeps finding elsewhere.
     it("R7b RED: fan-out REAL down fails honestly too — target-specific connection error, exit 1, no restart line, and the same remediation as single-seat", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { logs, exitCode } = await captureLogs(async () => {
@@ -1387,7 +1487,7 @@ describe("Send CLI", () => {
       });
       const out = logs.join("\n");
       expect(exitCode).toBe(1);
-      expect(out).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(out).toContain(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`);
       expect(out).not.toContain("Daemon not running. Start it with: rig daemon start");
       // 1b45cf21 — SYMMETRY PIN. Fan-out must carry byte-identical
       // remediation to single-seat; divergence between the two paths is the
@@ -1407,7 +1507,7 @@ describe("Send CLI", () => {
     // discriminator is unambiguous: stdout carries exactly one JSON record and
     // stderr is empty (and the human path is the mirror image).
     it("R7c RED: single-seat --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { stdout, stderr, exitCode } = await captureChannels(async () => {
@@ -1419,7 +1519,7 @@ describe("Send CLI", () => {
       expect(stdout).toHaveLength(1);
       expect(JSON.parse(stdout[0])).toEqual({
         error: {
-          fact: expect.stringContaining("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:"),
+          fact: expect.stringContaining(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`),
           consequence: "The message was not sent.",
           action: expect.stringContaining("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped."),
         },
@@ -1429,7 +1529,7 @@ describe("Send CLI", () => {
     });
 
     it("R7d RED: fan-out --json transport failure emits exactly one parseable stdout JSON envelope, empty stderr, exit 1", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { stdout, stderr, exitCode } = await captureChannels(async () => {
@@ -1440,7 +1540,7 @@ describe("Send CLI", () => {
       expect(stdout).toHaveLength(1);
       expect(JSON.parse(stdout[0])).toEqual({
         error: {
-          fact: expect.stringContaining("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:"),
+          fact: expect.stringContaining(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`),
           consequence: "The message was not sent.",
           action: expect.stringContaining("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped."),
         },
@@ -1449,7 +1549,7 @@ describe("Send CLI", () => {
     });
 
     it("R7e: single-seat HUMAN transport failure keeps stdout empty (mirror of R7c) — the 3 remediation lines are stderr-only, exit 1", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { stdout, stderr, exitCode } = await captureChannels(async () => {
@@ -1458,13 +1558,13 @@ describe("Send CLI", () => {
       expect(exitCode).toBe(1);
       expect(stdout).toEqual([]); // human path must never write to stdout
       const err = stderr.join("\n");
-      expect(err).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(err).toContain(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`);
       expect(err).toContain("The message was not sent.");
       expect(err).toContain("Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped.");
     });
 
     it("R7f: fan-out HUMAN transport failure keeps stdout empty (mirror of R7d) — stderr-only remediation, exit 1", async () => {
-      vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+      vi.stubEnv("OPENRIG_URL", refusedUrl);
       vi.stubEnv("RIGGED_URL", "");
       const rc = recordingRealClient();
       const { stdout, stderr, exitCode } = await captureChannels(async () => {
@@ -1473,7 +1573,7 @@ describe("Send CLI", () => {
       expect(exitCode).toBe(1);
       expect(stdout).toEqual([]);
       const err = stderr.join("\n");
-      expect(err).toContain("Cannot connect to the OpenRig daemon at http://127.0.0.1:1:");
+      expect(err).toContain(`Cannot connect to the OpenRig daemon at ${refusedUrl}:`);
       expect(err).toContain("The message was not sent.");
     });
 

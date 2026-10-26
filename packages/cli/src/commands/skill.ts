@@ -175,7 +175,7 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
     const client = deps.clientFactory(getDaemonUrl(status));
     const wait = opts.waitForIdle !== undefined ? Number(opts.waitForIdle) : undefined;
     const res = opts.apply
-      ? await client.post<SeatApplyResponse>("/api/skills/seat/apply", { session, ...(wait && wait > 0 ? { waitForIdleMs: wait } : {}), ...(opts.resend ? { resend: true } : {}) })
+      ? await client.post<SeatApplyResponse>("/api/skills/seat/apply", { session, ...(wait && wait > 0 ? { waitForIdleMs: wait } : {}), ...(opts.resend ? { resend: true } : {}) }, wait && wait > 0 ? { timeoutMs: wait + 5_000 } : undefined)
       : await client.get<SeatInspection>(`/api/skills/seat?session=${encodeURIComponent(session)}`);
     const data = res.data as SeatApplyResponse & SeatInspection;
     const failure = (res.data as { error?: string }).error;

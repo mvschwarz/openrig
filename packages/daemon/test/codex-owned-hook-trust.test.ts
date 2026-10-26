@@ -156,6 +156,24 @@ it("an already-installed owned upgrade renews all six content approvals without 
   });
 });
 
+// #2029: Codex re-saves its own trust tables with literal-quoted keys and values; the renewal still finds them.
+it("an owned upgrade renews content approval on tables Codex saved single-quoted, in place", async () => {
+  const f = await legacyUpgrade();
+  fs.writeFileSync(f.file, fs.readFileSync(f.file, "utf8")
+    .replace(/^\[hooks\.state\."(openrig-core@openrig:[^"]*)"\]$/gm, "[hooks.state.'$1']")
+    .replace(/^trusted_hash = "([^"]*)"$/gm, "trusted_hash = '$1'"));
+  expect(fs.readFileSync(f.file, "utf8")).toContain("[hooks.state.'openrig-core@openrig:");
+  await f.adapter().ensureCodexCorePlugin();
+  const text = fs.readFileSync(f.file, "utf8");
+  const states = Object.entries(f.read().hooks.state).filter(([key]) => key.startsWith("openrig-core@openrig:"));
+  expect(states).toHaveLength(6);
+  for (const [key, state] of states as Array<[string, any]>) {
+    expect(state.trusted_content_hash).toBe(codexPluginContentHash(shipped));
+    expect(text.split("\n").filter(line => line.includes(key) && line.trim().startsWith("[hooks.state."))).toHaveLength(1);
+  }
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(true);
+});
+
 it.each(["disabled", "refused", "unknown baseline", "changed script", "changed skill", "extra file", ...(process.platform === "win32" ? [] : ["symlink"]), "unknown layer", "profile refusal", "profile plugin disable", "invalid provenance"])(
   "an owned upgrade preserves native review for %s", async condition => {
     const f = await legacyUpgrade();
@@ -245,7 +263,11 @@ it("R2 keeps an unrelated multiline instruction containing table examples exact"
   const before = f.read().developer_instructions;
   await f.adapter().ensureCodexCorePlugin();
   expect(f.read().developer_instructions).toBe(before);
-  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
+  // The examples aren't tables (#2034 r1), so the real tables renew rather than the whole renewal declining.
+  for (const [key, state] of Object.entries(f.read().hooks.state) as Array<[string, any]>) {
+    if (key.startsWith("openrig-core@openrig:")) expect(state.trusted_content_hash).toBe(codexPluginContentHash(shipped));
+  }
+  expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(true);
 });
 it("an unshipped vendored file permits the upgrade but leaves content approval under native review", async () => {
   const f = await legacyUpgrade(), before = fs.readFileSync(f.file, "utf8"), calls = f.calls.length;

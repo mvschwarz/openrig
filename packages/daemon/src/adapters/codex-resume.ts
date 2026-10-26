@@ -1,4 +1,5 @@
-import { codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import { codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
+import type { CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
@@ -10,6 +11,8 @@ import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
+import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
+import { codexMemberEnvelope, observeCodexEnvelope, type CodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
@@ -20,6 +23,10 @@ export { type ResumeResult };
 
 interface CodexResumeOptions {
   prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
+  /** The seat's own topology folder, ready to write (its LEARNED.md and recap). Absent: no seat folder is added. */
+  prepareSeatFolder?: PrepareCodexSeatFolder;
+  /** The git metadata dirs a resumed seat may write (#2000's rule). Absent: none are added. */
+  resolveGitAddDirs?: CodexGitAddDirResolver;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   codexHome?: string;
@@ -72,6 +79,8 @@ export class CodexResumeAdapter {
     teamPermissionDefault?: boolean,
     // The seat's own CODEX_HOME (member or rig `env:`). TRAILING; absent keeps the daemon's.
     seatCodexHome?: string,
+    // The seat's own permission envelope, read live; it replaces the posture decision, as on the pod-aware path.
+    codexPermissions?: CodexMemberPermissions,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -103,15 +112,24 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const posture = codexPostureArg(profileArg, process.env, resolvedPosture);
-    const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
+    const envelope = codexPermissions ? codexMemberEnvelope(codexPermissions) : undefined;
+    const posture = envelope ? profileArg + codexEnvelopeArgs(envelope) : codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = envelope ? observeCodexEnvelope(envelope) : observeCodexSandbox(posture);
+    const postureArg = posture + operationalLaunchArg("codex", envelope ? { nonInterruptive }
+      : { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const readNetworkDefault = this.options.readNetworkDefault;
-    const networkArg = await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
+    const networkArg = envelope ? "" : await codexNetworkDefaultArg(seatCodexHome && readNetworkDefault ? ((dir: string) => readNetworkDefault(dir, seatCodexHome)) : readNetworkDefault,
       appliedLaunch, cwd, tmuxSessionName);
-    const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
+    const workspaceArg = !envelope && teamPermissionDefault && !codexConfigProfile?.trim()
       && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
       ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
+    // The seat's own writable roots, as a launch gets them: its git metadata dirs (so it can still commit) and its topology
+    // folder (its LEARNED.md and recap). Only on the plain workspace-write floor: a named profile here isn't checked for
+    // read-only, and Codex refuses a writable root under one, so it gets none. After the conversation id, so the resume
+    // proof reads the id even from a path with a space.
+    const plainFloor = !codexConfigProfile?.trim() && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write";
+    const ownRoots = plainFloor
+      ? [...(await this.options.resolveGitAddDirs?.(cwd) ?? []), this.options.prepareSeatFolder?.(tmuxSessionName)] : [];
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -122,7 +140,7 @@ export class CodexResumeAdapter {
       `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
-    );
+    ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment

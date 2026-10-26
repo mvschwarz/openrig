@@ -114,9 +114,21 @@ system-clipboard copy works immediately (it's server-wide).
 - **Inner tmux status bar** is hidden by default (herdr provides the chrome); one config key
   (`terminal.status_bar`) flips it back on for raw-tmux / no-provider surfaces, and the flip applies
   to **future launches only**.
+- **Coming back to a view:** each `rig terminal open <view> --provider herdr` adds a new workspace,
+  numbered when the name is taken (`<view> (2)`). To come back, focus the view's open space in Herdr.
+  From inside Herdr, `rig terminal open <view> --window` focuses a matching space with live tiles
+  instead of adding one.
 - **After a Herdr server restart or update** (without `--handoff`), Herdr restores the layout and
-  labels but not the processes, so OpenRig's tiles come back as empty shells while the seats keep
-  running. Reopen the view: `rig terminal open <view> --provider herdr`.
+  labels. A tile reattaches when Herdr took its restart command at open (Herdr 0.9.2 or later). The
+  open result names a tile whose command Herdr didn't take; a tile over SSH, or for a runtime Herdr
+  doesn't recognise, has none. Those come back as empty shells while the seats keep running: reopen
+  the view, then close the old space.
+- **Herdr's status for a tile is Herdr's own reading** of its screen. It can show a seat as idle or
+  unknown while OpenRig shows it waiting (`needs-input`). Two cases are known: a narrow tile that
+  wraps Claude's footer, and a tile that shows the inner tmux status line. That line shows when
+  `terminal.status_bar` is on, or for a seat session OpenRig adopted rather than created, which keeps
+  its own tmux `status`. To find waiting seats, use OpenRig's own view (`rig ps --nodes` or the TUI)
+  or the Feed.
 
 ## Saved views — the library (`terminal-views.yaml`)
 

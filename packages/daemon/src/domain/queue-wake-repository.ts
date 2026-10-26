@@ -56,6 +56,9 @@ interface WakeRow {
 /** Persistence + live-state projection for transition-bound park wakes. */
 export class QueueWakeRepository {
   private readonly available: boolean;
+  /** One lookup statement for this connection, prepared on first use: history reads call it once per transition, and
+   *  compiling it each time dominated their cost. It holds no result; every call reads afresh. */
+  private lookup: Database.Statement | undefined;
 
   constructor(private readonly db: Database.Database) {
     this.available = this.db.prepare(
@@ -81,9 +84,8 @@ export class QueueWakeRepository {
 
   getForTransition(transitionId: number): QueueWakeRecord | null {
     if (!this.available) return null;
-    const row = this.db.prepare(
-      "SELECT * FROM queue_transition_wakes WHERE transition_id = ?",
-    ).get(transitionId) as WakeRow | undefined;
+    this.lookup ??= this.db.prepare("SELECT * FROM queue_transition_wakes WHERE transition_id = ?");
+    const row = this.lookup.get(transitionId) as WakeRow | undefined;
     return row ? this.row(row) : null;
   }
 

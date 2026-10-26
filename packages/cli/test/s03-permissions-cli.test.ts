@@ -38,7 +38,24 @@ describe("S03 policy permissions compatibility", () => {
     expect(policy.commands.some(c => c.name() === "work")).toBe(false);
     const select = seatCommand().commands.find(c => c.name() === "set-permissions")!;
     expect(select.description()).toContain("future managed launches");
-    expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--operator", "--json"]);
+    expect(select.options.map(o => o.long)).toEqual(["--mode", "--rules", "--codex-permissions", "--codex-profile", "--reason", "--operator", "--json"]);
+  });
+  it("posts a Codex envelope from its JSON file, or a profile with time for its native check, one choice at a time", async () => {
+    const posts: unknown[][] = [];
+    const deps = { lifecycleDeps: {
+      readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: 123, port: 7433, db: "inert.sqlite", startedAt: "2026-09-27T00:00:00Z" }) : null,
+      exists: (p: string) => p === STATE_FILE, isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+    }, clientFactory: () => ({ post: async (...a: unknown[]) => { posts.push(a); return { status: 200, data: { ok: true, changed: true, to: null, effect: "Future launches." } }; } }) };
+    const file = join(mkdtempSync(join(tmpdir(), "codex-envelope-")), "envelope.json");
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    writeFileSync(file, JSON.stringify(envelope));
+    await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--codex-permissions", file, "--reason", "narrow"]);
+    await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--codex-profile", "lease", "--reason", "profile"]);
+    expect(posts[0]).toEqual(["/api/seat/set-permissions/impl%40inert", { codexPermissions: envelope, reason: "narrow" }, { timeoutMs: 10_000 }]);
+    expect(posts[1]).toEqual(["/api/seat/set-permissions/impl%40inert", { codexProfile: "lease", reason: "profile" }, { timeoutMs: 30_000 }]);
+    const both = await capture(seatCommand(deps as never), ["seat", "set-permissions", "impl@inert", "--codex-profile", "lease", "--mode", "floor", "--reason", "x"]);
+    expect(both.exit).toBe(1); expect(both.errors.join(" ")).toContain("Choose exactly one of");
+    expect(posts).toHaveLength(2);
   });
   it("seat command posts one explicit selection and preserves refusal JSON/exit", async () => {
     const posts: unknown[] = []; const response = { ok: false, code: "permission_selection_refused", message: "native options unavailable" };

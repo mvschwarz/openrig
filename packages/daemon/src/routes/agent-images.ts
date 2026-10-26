@@ -1,3 +1,5 @@
+import { readClaudePermissionRules } from "../domain/claude-permission-rules.js";
+import { readCodexMemberPermissions } from "../domain/codex-member-permissions.js";
 import { physicalSessionName } from "../domain/session-registry.js";
 // Fork Primitive + Starter Agent Images v0 (PL-016) — daemon HTTP
 // routes.
@@ -215,6 +217,13 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       }, 404);
     }
 
+    let sourceRules: ReturnType<typeof readClaudePermissionRules>;
+    try { sourceRules = source.runtime === "claude-code" ? readClaudePermissionRules(db, source.nodeId) : undefined; }
+    catch (error) { return c.json({ error: "permission_rules_unavailable", message: (error as Error).message }, 409); }
+    let sourceEnvelope: ReturnType<typeof readCodexMemberPermissions>;
+    try { sourceEnvelope = source.runtime === "codex" ? readCodexMemberPermissions(db, source.nodeId) : undefined; }
+    catch (error) { return c.json({ error: "permission_envelope_unavailable", message: (error as Error).message }, 409); }
+
     let sessionSource: Record<string, unknown>;
     let keptImage: { id: string; name: string; version: string; pinned: true } | undefined;
 
@@ -274,6 +283,9 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
       ...(source.cwd ? { cwd: source.cwd } : {}),
       ...(source.codexConfigProfile ? { codex_config_profile: source.codexConfigProfile } : {}),
       ...(source.permissionPolicy ? { permission_policy: source.permissionPolicy } : {}),
+      ...(sourceRules === undefined ? {} : { claude_permissions: sourceRules }),
+      // The source's current envelope, as an independent copy on the new member.
+      ...(sourceEnvelope === undefined ? {} : { codex_permissions: sourceEnvelope }),
       // OPR.0.5.6.23 member (b): every node-carried optional rides the fork.
       ...(source.model ? { model: source.model } : {}),
       ...(source.role ? { role: source.role } : {}),

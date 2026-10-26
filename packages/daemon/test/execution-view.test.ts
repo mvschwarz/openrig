@@ -1107,6 +1107,155 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((doc.q1_lanes as unknown[]).length).toBe(2);
   });
 
+  describe("the candidate history count is read only for rows whose pickup can use it", () => {
+    // The pre-guard statement, rebuilt from the guarded one: the same document must come from either.
+    const unguarded = (sql: string) => sql.replace(
+      /CASE WHEN queue_items\.state IN \('pending','in-progress'\) THEN (\(SELECT COUNT\(\*\) FROM queue_transitions t[\s\S]*?IS NOT 'claimed'\)) ELSE 0 END/, "$1");
+    let tid = 34000;
+    const note = (id: string, at: string, actor: string, opts: { firedWake?: boolean } = {}) => {
+      const transitionId = tid++;
+      db.prepare(
+        `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, transition_note, actor_session)
+         VALUES (?, ?, ?, (SELECT state FROM queue_items WHERE qitem_id = ?), 'progress', ?)`,
+      ).run(transitionId, id, at, id, actor);
+      if (opts.firedWake) {
+        db.prepare(`INSERT INTO queue_transition_wakes (transition_id, qitem_id, phase, wake_kind, wake_ref) VALUES (?, ?, 'fired', 'timer', ?)`)
+          .run(transitionId, id, `wake-${transitionId}`);
+      }
+    };
+    const row = (id: string, state: string, tags: string[], body: string, blockedOn: string | null = null) => {
+      const t = "2026-08-29T21:01:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES (?, ?, ?, 'lead@exec-fixture', ?, ?, 'normal', 'light', ?, ?, ?, ?)`,
+      ).run(id, t, t, SEAT_B, state, JSON.stringify(tags), body, t, blockedOn);
+    };
+    async function viaRoute(rewrite?: (sql: string) => string): Promise<{ doc: Record<string, unknown>; candidateSql: string[] }> {
+      const candidateSql: string[] = [];
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((sql: string) => {
+        if (sql.includes("AS post_claim_motion")) candidateSql.push(sql);
+        return prepare(rewrite ? rewrite(sql) : sql);
+      }) as typeof db.prepare;
+      try {
+        const app = new Hono();
+        app.use("*", async (c, next) => {
+          c.set("viewProjector" as never, projector);
+          c.set("eventBus" as never, new EventBus(db));
+          await next();
+        });
+        app.route("/api/views", viewsRoutes());
+        const res = await app.request(`/api/views/execution?mission=${MISSION}`);
+        expect(res.status).toBe(200);
+        return { doc: ((await res.json()) as { rows: Record<string, unknown>[] }).rows[0]!, candidateSql };
+      } finally {
+        db.prepare = prepare;
+      }
+    }
+
+    it("returns the same document as the unguarded count across live, parked, closed and other-mission history", async () => {
+      // Live lane whose only post-claim history is bookkeeping (fired wakes): pickup falls back to the count.
+      arbitratedBySession.set(SEAT_A, { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks", changedAt: "2026-08-29T21:59:00.000Z" });
+      note("qitem-lane-31", "2026-08-29T21:10:00.000Z", "daemon@system", { firedWake: true });
+      note("qitem-lane-31", "2026-08-29T21:11:00.000Z", "daemon@system", { firedWake: true });
+      // External park with post-claim history, a closed-only EC-3 row with history, and history on the parked/wave-map rows.
+      row("qitem-pr-32", "blocked", [`mission:${MISSION}`, "slice:OPR.9.9.32"], "In review upstream.", "external:pr-1293");
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      note("qitem-pr-32", "2026-08-29T21:12:00.000Z", SEAT_B);
+      row("qitem-closed-33", "done", [`mission:${MISSION}`, "slice:OPR.9.9.33"], `Closed 33.\nworktree_path=${laneWorktree}\n`);
+      note("qitem-closed-33", "2026-08-29T21:13:00.000Z", SEAT_B);
+      note("qitem-parked-33", "2026-08-29T21:14:00.000Z", SEAT_B);
+      note("qitem-wave-map", "2026-08-29T21:15:00.000Z", "lead@exec-fixture");
+      // Another mission's row with history: neither statement may let it in.
+      row("qitem-other-mission", "in-progress", ["mission:release-0.1", "slice:OPR.0.1.1"], "Elsewhere.");
+      note("qitem-other-mission", "2026-08-29T21:16:00.000Z", SEAT_B);
+
+      const guarded = await viaRoute();
+      const reference = await viaRoute(unguarded);
+      expect(guarded.candidateSql.length).toBeGreaterThan(0);
+      expect(guarded.candidateSql.every((sql) => sql.includes("CASE WHEN queue_items.state IN ('pending','in-progress')"))).toBe(true);
+      expect(unguarded(guarded.candidateSql[0]!)).not.toBe(guarded.candidateSql[0]);
+      // The free-disk reading is taken live at read time (fs.statfsSync), so two builds can differ there; nothing else may.
+      const withoutLiveDisk = (doc: Record<string, unknown>) => {
+        const copy = structuredClone(doc) as { q6_parallelism?: { df_margin?: { available_kib?: unknown } } };
+        if (copy.q6_parallelism?.df_margin) delete copy.q6_parallelism.df_margin.available_kib;
+        return copy;
+      };
+      expect(withoutLiveDisk(guarded.doc)).toEqual(withoutLiveDisk(reference.doc));
+
+      const lanes = guarded.doc.q1_lanes as Record<string, unknown>[];
+      expect(lanes.find((l) => l.qitem_id === "qitem-lane-31")).toMatchObject({ pickup: { state: "working" } });
+      expect(lanes.find((l) => l.qitem_id === "qitem-pr-32")).toMatchObject({ waiting: { on: "external:pr-1293" }, pickup: { state: "parked" } });
+      expect(lanes.some((l) => l.qitem_id === "qitem-other-mission")).toBe(false);
+      expect(guarded.doc.mission).toBe(MISSION);
+    });
+
+    it("keeps the live count that decides pickup when no meaningful transition follows the claim", async () => {
+      arbitratedBySession.set(SEAT_A, { activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks", changedAt: "2026-08-29T21:59:00.000Z" });
+      const pickupOf31 = async () => ((await show()).q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-lane-31")?.pickup;
+      // No post-claim motion: an hour-old claim with an idle seat is stalled.
+      expect(await pickupOf31()).toMatchObject({ state: "stalled-after-claim" });
+      // Bookkeeping-only motion is not a meaningful transition, so only the count can show it.
+      note("qitem-lane-31", "2026-08-29T21:10:00.000Z", "daemon@system", { firedWake: true });
+      expect(await pickupOf31()).toMatchObject({ state: "working" });
+    });
+  });
+
+  describe("a blocked row's pickup history is not read", () => {
+    // Records whose meaningful-history query ran (by qitem), and can make that query fail.
+    function watchHistory(opts: { fail?: boolean } = {}) {
+      const readFor: string[] = [];
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((sql: string) => {
+        const stmt = prepare(sql);
+        if (!sql.includes("LAG(state) OVER")) return stmt;
+        const get = stmt.get.bind(stmt);
+        return Object.assign(stmt, { get: (...binds: unknown[]) => {
+          readFor.push(String(binds[0]));
+          if (opts.fail) throw new Error("history unavailable");
+          return get(...binds);
+        } });
+      }) as typeof db.prepare;
+      return { readFor, restore: () => { db.prepare = prepare; } };
+    }
+    const externalPark = () => {
+      const t = "2026-08-29T21:30:00.000Z";
+      db.prepare(
+        `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body, claimed_at, blocked_on)
+         VALUES ('qitem-pr-34', ?, ?, 'lead@exec-fixture', ?, 'blocked', 'normal', 'light', ?, 'In review upstream.', ?, 'external:pr-77')`,
+      ).run(t, t, SEAT_B, JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.32"]), t);
+      db.prepare("INSERT INTO queue_transitions (qitem_id, ts, state, transition_note, actor_session) VALUES ('qitem-pr-34', ?, 'blocked', 'parked', ?)").run(t, SEAT_B);
+    };
+
+    it("reads history only for live rows, while blocked lanes and parks keep their pickup and armed-wake output", async () => {
+      externalPark();
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
+      const history = watchHistory();
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { history.restore(); }
+      // One live lane (Q1) and its claimed row (Q5); never the external park or the parked row.
+      expect(history.readFor.sort()).toEqual(["qitem-lane-31", "qitem-lane-31"]);
+      const lane = (doc.q1_lanes as Record<string, unknown>[]).find((l) => l.qitem_id === "qitem-pr-34");
+      expect(lane).toMatchObject({ waiting: { on: "external:pr-77" }, pickup: { state: "parked" } });
+      const parks = doc.q5_park as Record<string, unknown>[];
+      expect(parks.find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked", park_kind: "deliberate-with-wake", wake_target: "wake-timer-33" });
+      expect(parks.find((p) => p.qitem_id === "qitem-pr-34")).toMatchObject({ pickup_state: "parked" });
+    });
+
+    it("keeps a failure of a live row's history read, and no longer depends on a blocked row's", async () => {
+      db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id IN ('qitem-lane-31', 'qitem-lane-32')").run();
+      const quiet = watchHistory({ fail: true });
+      let doc: Record<string, unknown>;
+      try { doc = await show(); } finally { quiet.restore(); }
+      expect(quiet.readFor).toEqual([]); // only blocked rows remain: nothing reads history, so its failure cannot surface
+      expect((doc.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")).toMatchObject({ pickup_state: "parked" });
+      db.prepare("UPDATE queue_items SET state = 'in-progress' WHERE qitem_id = 'qitem-lane-31'").run();
+      const loud = watchHistory({ fail: true });
+      try { await expect(projector.show("execution", { mission: MISSION })).rejects.toThrow("history unavailable"); } finally { loud.restore(); }
+      expect(loud.readFor).toContain("qitem-lane-31");
+    });
+  });
+
   it("park honesty: armed wake => deliberate-with-wake; removing the wake flips park_kind to INDETERMINATE, never idle/dead", async () => {
     const before = await show();
     const parkedBefore = (before.q5_park as Record<string, unknown>[]).find((p) => p.qitem_id === "qitem-parked-33")!;

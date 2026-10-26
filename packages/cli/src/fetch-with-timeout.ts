@@ -40,7 +40,9 @@ export async function fetchWithTimeout(
     return response;
   } catch (err) {
     if (err instanceof FetchTimeoutError) throw err;
-    if (err instanceof Error && err.name === "AbortError") {
+    // Once the request is aborted, its reason is why it failed, whatever error the abort surfaced as: Node's response
+    // stream, cut by the abort while a body is being read, ends with a plain "aborted" error.
+    if ((err instanceof Error && err.name === "AbortError") || requestSignal.aborted) {
       if (requestSignal.reason instanceof Error) throw requestSignal.reason;
       if (externalSignal?.aborted) throw externalAbortError(requestSignal.reason);
       throw new FetchTimeoutError(options.timeoutMessage);

@@ -15,7 +15,7 @@ import { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime } from "./built-in-runtime
 export { BUILT_IN_RUNTIMES, isCommunityHarnessRuntime };
 
 export const COMMUNITY_HARNESS_PRESET_FORMAT = 1;
-const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted"] as const;
+const FIELDS = ["format", "name", "command", "maintainer", "limits", "launch_result", "names_conversation", "resume", "startup_assisted", "first_input"] as const;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export interface CommunityHarnessPreset {
@@ -31,6 +31,8 @@ export interface CommunityHarnessPreset {
   resume: boolean;
   /** Startup text is attempted, but the person must check its submission before the seat is marked ready. */
   startupAssisted: boolean;
+  /** The launcher takes OPENRIG_FIRST_INPUT, a private file containing the composed first turn. */
+  firstInput: boolean;
   path: string;
 }
 
@@ -69,6 +71,7 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   if (raw.launch_result !== undefined && typeof raw.launch_result !== "boolean") return bad("launch_result must be true or false");
   if (raw.resume !== undefined && typeof raw.resume !== "boolean") return bad("resume must be true or false");
   if (raw.startup_assisted !== undefined && typeof raw.startup_assisted !== "boolean") return bad("startup_assisted must be true or false");
+  if (raw.first_input !== undefined && typeof raw.first_input !== "boolean") return bad("first_input must be true or false");
   if (raw.names_conversation !== undefined && typeof raw.names_conversation !== "boolean") return bad("names_conversation must be true or false");
   if (raw.launch_result === true && raw.names_conversation === true) {
     return bad("launch_result and names_conversation can't both be true: either the launcher reports the conversation, or OpenRig names it");
@@ -78,7 +81,7 @@ function parsePreset(name: string, path: string, text: string): CommunityHarness
   }
   return { ok: true, preset: { name, command: raw.command as string, maintainer: raw.maintainer as string, limits: limits as string[],
     launchResult: raw.launch_result === true, namesConversation: raw.names_conversation === true, resume: raw.resume === true,
-    startupAssisted: raw.startup_assisted === true, path } };
+    startupAssisted: raw.startup_assisted === true, firstInput: raw.first_input === true, path } };
 }
 
 /** The first shell construct in a preset command, or null when it's one program with its arguments. The command is

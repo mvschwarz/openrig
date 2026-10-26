@@ -44,6 +44,7 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   const client = new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async input => {
     const u = new URL(String(input)); calls.push(u.pathname + u.search);
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "fixture" });
+    if (u.pathname === "/api/hosts") return Response.json({ ownName: "fixture", selected: "local", hosts: [] });
     if (u.pathname === "/api/rigs/summary") return Response.json(rigs);
     if (u.pathname === "/api/rigs/r17/nodes" || u.pathname === "/api/queue/recent-transitions" || u.pathname === "/api/queue/list") return Response.json([]);
     if (u.pathname === "/api/health") return Response.json({ schema: "openrig.health-list/v0alpha1", evaluatedAt: "2026-09-05T12:00:00.000Z", total: 0, limit: 200, truncated: false, records: [] });
@@ -52,7 +53,8 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   let snap = emptySnapshot();
   const view = createViewState({ instanceId: "request-shape", getSnapshot: () => snap });
   snap = await hydrateSnapshot(client, undefined, null, null, null, view.get());
-  expect(calls.sort()).toEqual(["/api/rigs/summary", "/healthz"]);
+  // Names only: the rigs, and the host registry so the tree lists every registered host.
+  expect(calls.sort()).toEqual(["/api/hosts", "/api/rigs/summary", "/healthz"]);
   expect(snap.hosts[0]?.rigs).toHaveLength(24);
   expect(renderScreen(view.get(), snap).lines.join("\n")).toContain("Choose a rig");
   view.dispatch({ type: "drill", resource: "rig", name: "rig17", target: { host: "fixture" } }); calls.length = 0;
@@ -64,7 +66,7 @@ it("a 24-rig landing fetches names only; a selected rig never reads unrelated in
   ]);
   // The rig Table reads health once without fetching other rigs' node inventories.
   expect(calls.filter(c => c.startsWith("/api/health"))).toEqual(["/api/health?limit=200"]);
-  expect(calls).toHaveLength(9);
+  expect(calls).toHaveLength(10);
   expect(snap.health).toMatchObject({ availability: "loaded", total: 0, records: [] });
   expect(renderScreen(view.get(), snap, { cols: 220, rows: 60 }).lines.join("\n")).toContain("no findings served; not a healthy verdict");
 });

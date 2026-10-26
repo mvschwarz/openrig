@@ -14,6 +14,7 @@ const VIM_MODE_PREFIX = /^-- INSERT --\s*/;
 const MODE_BAR_START = /^(?:⏵⏵|⏸)(?:\s|$)/;
 // The suffix is a circle glyph and an effort level, e.g. `◐ medium` or `● high`; arbitrary text is not one.
 const PASTE_HINT = /^paste again to expand(?:\s{2,}[◐●○◑◒◓] (?:low|medium|high|xhigh|max) · \/effort)?$/;
+export const isClaudePasteHint = (line: string): boolean => PASTE_HINT.test(line.replace(VIM_MODE_PREFIX, ""));
 export const isComposerFooter = (line: string): boolean => {
   const bar = line.replace(VIM_MODE_PREFIX, "");
   return (bar === "" && line !== "") || /(?:shift\+tab to cycle|\? for shortcuts)/i.test(bar) || MODE_BAR_START.test(bar)
@@ -75,6 +76,61 @@ export function startupOwnCollapsedPaste(pane: string | null, expected: string, 
   const { body } = composerRegion(pane, runtime);
   const label = body === null ? null : COLLAPSED_PASTE.exec(body);
   return label !== null && Number(label[1]) === expected.split("\n").length - 1;
+}
+
+// A fresh Claude's first input, as startup sends it; a runtime switch's handover to a Claude successor uses the same rules.
+// Expanded startup text can put the current input marker above 50 scrollback lines.
+export const STARTUP_SUBMIT_CAPTURE_LINES = 200;
+// Claude Code 2.1.289 has taken Enter on a large startup paste after the first look, while the composer
+// still showed that paste collapsed. Only that transient is looked at again, 200 ms apart, up to this many
+// times: about 5 s of waiting per send, plus capture time. Nothing is typed meanwhile.
+export const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
+// A prompt still staged after a guarded retry is retried again, up to this many retries in all, each after
+// the 200 ms look. Every retry is guarded: Enter goes in only while the composer holds exactly the text we typed.
+export const STARTUP_SUBMIT_RETRIES = 2;
+
+type ReadPane = () => Promise<string | null>;
+type Sleep = (ms: number) => Promise<void>;
+
+/**
+ * A fresh launch can read ready before Claude has drawn its input box: on Linux the pane names `claude` the moment
+ * Claude starts, and startup text pasted then sat unsent. Before a fresh start's first send, look at the visible
+ * screen until the input box the startup check reads is drawn, at most STARTUP_SUBMIT_SETTLE_LOOKS looks 200 ms
+ * apart. A screen that never shows one within that, or can't be read, is sent to as before. Observation only.
+ */
+export async function waitForClaudeInputBox(readScreen: ReadPane, sleep: Sleep): Promise<void> {
+  for (let look = 0; look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
+    let screen: string | null;
+    try { screen = await readScreen(); } catch { return; }
+    if (screen === null || claudeInputBoxDrawn(screen)) return;
+    await sleep(200);
+  }
+}
+
+/**
+ * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed, and a
+ * fresh Claude can still be drawing its screen, with no input line at all, when the first look comes. Only those
+ * two transients are looked at again, until the composer reads clear or staged, shows anything else, or the looks
+ * run out. A draft, ghost text, a dialog or any other mismatch keeps its verdict. Observation only.
+ * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
+ * as submitted.
+ */
+export async function settleOwnStartupPaste(read: ReadPane, pane: string, text: string, runtime: string | null, sleep: Sleep): Promise<{
+  pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number;
+}> {
+  let state = inspectStartupStagedText(pane, text, runtime);
+  let looks = 0;
+  while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS
+    && (startupOwnCollapsedPaste(pane, text, runtime) || startupNoInputLine(pane, runtime))) {
+    await sleep(200);
+    // A failed re-look adds nothing; the last usable observation stands.
+    const next = await read().catch(() => null);
+    if (!next?.trim()) break;
+    pane = next;
+    state = inspectStartupStagedText(pane, text, runtime);
+    looks++;
+  }
+  return { pane, state, looks };
 }
 
 export interface StartupSubmissionEvidence {

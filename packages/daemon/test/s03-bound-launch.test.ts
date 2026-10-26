@@ -11,10 +11,20 @@ import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seatLifecycleService } from "../src/routes/seat.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import { NO_SESSION_BUS } from "../src/domain/seat-runtime-dir.js";
+import { SEAT_ENV_KEYS_VAR } from "../src/domain/seat-env.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 // No provider, tmux or startup. Config-selection cases execute only a private
 // fake Claude through the generated shell command; other child calls are mocked.
-vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
+vi.mock("node:child_process", async importOriginal => ({
+  ...await importOriginal<typeof import("node:child_process")>(), execFile: vi.fn(),
+}));
 // Simulate eligibility for inert fixtures; path resolution/stat/replacement use
 // private real files. Config-selection cases additionally execute their fake.
 vi.mock("node:fs", async importOriginal => {
@@ -59,13 +69,27 @@ function fixture() {
   const deps: Record<string,unknown> = { rigRepo: { db }, sessionRegistry: { db }, eventBus, tmuxAdapter: tmux, runtimeAdapters: { "claude-code": adapter } };
   // Use the production route constructor and its actual adapter/service wiring.
   const service = seatLifecycleService({ get: key => deps[key] });
-  vi.spyOn(service as any, "resolveSeat").mockReturnValue({ nodeId: "node", entry: { runtime: "claude-code", cwd } });
+  vi.spyOn(service as any, "resolveSeat").mockReturnValue({ nodeId: "node", entry: { rigId: "rig", runtime: "claude-code", cwd } });
   vi.spyOn(service as any, "describe").mockReturnValue({ nodeId: "node", rigId: "rig", logicalId: "owner", rigName: "rig" });
   vi.mocked(execFile).mockImplementation(((file: string, _args: string[], options: any, done: any) => {
     expect(file).toBe(executable); expect(options.cwd).toBe(cwd); expect(options.env.PATH).toBe(path.join(cwd,"bin") + path.delimiter + daemonBin);
     expect(options.env.ANTHROPIC_API_KEY).toBeUndefined(); done(null, help);
   }) as any);
   return { root, cwd, executable, daemonBin, db, env, renderer, managed, tmux, calls, adapter, binding, service, eventBus };
+}
+// Exercise the actual initial-shell reset without starting a tmux server or native Claude.
+async function scopedPaneLaunch(env: Record<string, string>, command: string, runtimeDir?: string): Promise<string[]> {
+  const tmux = new TmuxAdapter(async () => { throw Error("argv fixture only"); }, undefined, async args => {
+    if (args.at(-1) === "default-shell") return "/bin/sh";
+    if (args.at(-1) === "update-environment") return "WAYLAND_DISPLAY TERM_PROGRAM TERM_PROGRAM_VERSION";
+    throw Error(`Unexpected option query: ${args.at(-1)}`);
+  });
+  tmux.launchEnvironment = () => ({ inheritTmuxEnvironment: false,
+    env: { ...env, TERM_PROGRAM: "daemon-editor", TERM_PROGRAM_VERSION: "daemon-version" }, runtimeDir });
+  const launch = await (tmux as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> })
+    .scopedLaunchCommand({ OPENRIG_NODE_ID: "node" }, command);
+  expect(launch).not.toBeNull();
+  return launch!;
 }
 const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "deliberate choice" };
 
@@ -172,11 +196,11 @@ if (process.argv.includes('--help')) {
     expect(command).not.toContain("UNAPPROVED_RENDERER_VALUE");
     expect(command).not.toMatch(/TMUX/);
   });
-  it.each([
+  for (const scoped of [false, true]) it.each([
     ["present", { TERM_PROGRAM: "tmux", TERM_PROGRAM_VERSION: "3.7c" }],
     ["absent", {}],
     ["empty", { TERM_PROGRAM: "", TERM_PROGRAM_VERSION: "" }],
-  ])("hands Claude the pane's TERM_PROGRAM when it is %s, so Claude asks tmux for extended keys", async (label, programEnv) => {
+  ])(`hands Claude the pane's TERM_PROGRAM when it is %s (scoped=${scoped}), so Claude asks tmux for extended keys`, async (label, programEnv) => {
     const f = fixture();
     // Claude requests extended keys (Shift+Enter) only when it can tell it runs inside tmux.
     writeFileSync(f.executable, `#!${process.execPath}\n
@@ -192,8 +216,9 @@ else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TER
     const paneEnv: Record<string, string> = { ...f.env, TMUX: "/tmp/tmux-1000/default,123,0", TMUX_PANE: "%1", ...programEnv };
     // Some shells set these themselves; model the absent case before the command expands them.
     const paneCommand = label === "absent" ? `unset TMUX TERM_PROGRAM TERM_PROGRAM_VERSION; ${command}` : command;
+    const launch = scoped ? await scopedPaneLaunch(f.env, paneCommand) : ["/bin/sh", "-c", paneCommand];
     const stdout = await new Promise<string>((resolve, reject) => {
-      native.execFile("/bin/sh", ["-c", paneCommand], { encoding: "utf8", timeout: 3000, env: paneEnv },
+      native.execFile(launch[0]!, launch.slice(1), { encoding: "utf8", timeout: 3000, env: paneEnv },
         (error, out) => error ? reject(error) : resolve(out));
     });
     // An empty or absent variable stays absent; TMUX and TMUX_PANE never arrive.
@@ -204,7 +229,8 @@ else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TER
   // without a per-spec value. WAYLAND_DISPLAY is resolved to an absolute path instead of forwarding XDG_RUNTIME_DIR.
   const sessionNames = ["EDITOR", "VISUAL", "DISPLAY", "XAUTHORITY"];
   // Present in the pane on purpose: they must stay out. XDG_RUNTIME_DIR is where sd-bus, GDBus and libdbus look for the
-  // session bus when DBUS_SESSION_BUS_ADDRESS is unset; the bus and desktop names reach services (keyring, notifications,
+  // session bus when DBUS_SESSION_BUS_ADDRESS is unset, so the pane's own pair stays out; only OpenRig's pair, with the
+  // bus address that can't connect, is forwarded (#2030, below). The desktop names reach services (notifications,
   // xdg-open) that nothing in the editor or paste path uses; SSH_AUTH_SOCK is a credential channel.
   const withheldNames = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "SSH_AUTH_SOCK", "TMUX", "TMUX_PANE"];
   const paneNames = [...sessionNames, "WAYLAND_DISPLAY", ...withheldNames];
@@ -212,7 +238,7 @@ else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TER
   // when the host has it (OPENRIG_TEST_DASH names one).
   const dash = [process.env.OPENRIG_TEST_DASH, "/usr/bin/dash", "/bin/dash"].find(file => file && existsSync(file));
   const shells = ["/bin/sh", ...(dash ? [dash] : [])];
-  async function runPane(f: ReturnType<typeof fixture>, pane: Record<string, string>, unset: string[] = [], shell = "/bin/sh"): Promise<Record<string, string>> {
+  async function runPane(f: ReturnType<typeof fixture>, pane: Record<string, string>, unset: string[] = [], shell = "/bin/sh", scopedRuntimeDir?: string): Promise<Record<string, string>> {
     writeFileSync(f.executable, `#!${process.execPath}\n
 if (process.argv.includes('--help')) console.log(${JSON.stringify(help)});
 else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
@@ -224,8 +250,9 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     const command = prepared.command(["--permission-mode", "auto"]);
     // Some shells set these themselves; model the absent case before the command expands them.
     const paneCommand = unset.length ? `unset ${unset.join(" ")}; ${command}` : command;
+    const launch = scopedRuntimeDir ? await scopedPaneLaunch(f.env, paneCommand, scopedRuntimeDir) : [shell, "-c", paneCommand];
     const stdout = await new Promise<string>((resolve, reject) => {
-      native.execFile(shell, ["-c", paneCommand], { encoding: "utf8", timeout: 3000, env: { ...f.env, ...pane } },
+      native.execFile(launch[0]!, launch.slice(1), { encoding: "utf8", timeout: 3000, env: { ...f.env, ...pane } },
         (error, out) => error ? reject(error) : resolve(out));
     });
     return JSON.parse(stdout);
@@ -262,6 +289,13 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     const unset = ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"].filter(key => !(key in pane));
     expect(await runPane(f, { ...withheldInPane, ...pane }, unset, shell)).toEqual(expected === undefined ? {} : { WAYLAND_DISPLAY: expected });
   });
+  it("resolves a relative Wayland display through the scoped reset and managed launch", async () => {
+    vi.stubEnv("WAYLAND_DISPLAY", "wayland-1");
+    const f = fixture();
+    expect(await runPane(f, {}, [], "/bin/sh", "/run/test user")).toEqual({
+      WAYLAND_DISPLAY: "/run/test user/wayland-1", XDG_RUNTIME_DIR: "/run/test user", DBUS_SESSION_BUS_ADDRESS: "disabled:",
+    });
+  });
   it("uses balanced case patterns and no unquoted substitution for WAYLAND_DISPLAY", async () => {
     const f = fixture();
     const cmd = (await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto")).command([]);
@@ -284,9 +318,35 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     const cmd = f.calls[0]!;
     for (const key of sessionNames) expect(cmd).toContain(`if [ -n "\${${key}-}" ]; then export ${key}; else unset ${key}; fi`);
     expect(cmd).toContain('export WAYLAND_DISPLAY="$__openrig_wayland_display"');
-    // XDG_RUNTIME_DIR is read to resolve WAYLAND_DISPLAY, never forwarded as a variable.
+    // XDG_RUNTIME_DIR resolves WAYLAND_DISPLAY, and it and the bus address are forwarded only as OpenRig's pair.
     expect(cmd).not.toMatch(/XDG_RUNTIME_DIR=\$|"XDG_RUNTIME_DIR=/);
-    for (const key of withheldNames.filter(key => key !== "XDG_RUNTIME_DIR")) expect(cmd).not.toContain(key);
+    expect(cmd).toContain(`if [ "\${DBUS_SESSION_BUS_ADDRESS-}" = ${shellQuote(NO_SESSION_BUS)} ]; then export DBUS_SESSION_BUS_ADDRESS; else unset DBUS_SESSION_BUS_ADDRESS; fi`);
+    for (const key of withheldNames.filter(key => !["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].includes(key))) expect(cmd).not.toContain(key);
+  });
+  // #2030: a pane with OpenRig's runtime-dir pair hands it to Claude; a pane's own runtime directory or bus address, from a
+  // shell profile or tmux's update-environment, stays out as before.
+  const openRigPair = { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS };
+  const runtimeDirCases: [string, Record<string, string>, Record<string, string>][] = [
+    ["OpenRig's pair", openRigPair, openRigPair],
+    ["OpenRig's bus address with no runtime directory", { DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS }, { DBUS_SESSION_BUS_ADDRESS: NO_SESSION_BUS }],
+    ["a runtime directory alone", { XDG_RUNTIME_DIR: "/run/user/1000" }, {}],
+    ["a runtime directory with the pane's own bus address", { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" }, {}],
+  ];
+  it.each(shells.flatMap(shell => runtimeDirCases.map(([label, pane, expected]) => [label, shell, pane, expected] as const)))(
+    "hands Claude the runtime directory only with OpenRig's bus address: %s under %s", async (_label, shell, pane, expected) => {
+    const unset = ["WAYLAND_DISPLAY", ...["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].filter(key => !(key in pane))];
+    expect(await runPane(fixture(), { ...withheldInPane, ...pane }, unset, shell)).toEqual(expected);
+  });
+  it.each([
+    ["own bus address", "DBUS_SESSION_BUS_ADDRESS", { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" },
+      { XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus" }],
+    ["own runtime directory", "XDG_RUNTIME_DIR", { XDG_RUNTIME_DIR: "/run/user/1000" }, { XDG_RUNTIME_DIR: "/run/user/1000" }],
+  ])("forwards a seat's %s as declared, with the runtime directory beside a declared bus address", async (_label, declared, pane, expected) => {
+    const f = fixture();
+    // A one-off launch name, read from the session, is a declared name like an env: entry.
+    const managed = new ClaudeManagedLaunch(f.db, f.env, f.renderer, async (_session, key) => key === SEAT_ENV_KEYS_VAR ? declared : undefined);
+    const unset = ["WAYLAND_DISPLAY", ...["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"].filter(key => !(key in pane))];
+    expect(await runPane({ ...f, managed }, { ...withheldInPane, ...pane }, unset)).toEqual(expected);
   });
   it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
     const f = fixture(); delete f.env.CLAUDE_CONFIG_DIR;
@@ -300,6 +360,39 @@ else console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(paneNames)}
     expect(f.db.prepare("SELECT mode FROM node_permission_selections").get()).toEqual({ mode: "auto" });
     expect(f.db.prepare("SELECT COUNT(*) n FROM events").get()).toEqual({ n: 1 }); expect(f.calls).toEqual([]);
     expect(JSON.stringify(f.db.prepare("SELECT * FROM events").all())).not.toContain(f.env.ANTHROPIC_API_KEY);
+  });
+  it("keeps node-ID permission saves bound to the real Claude generation check during help", async () => {
+    const f = fixture();
+    const db = createFullTestDb(); open.push(db);
+    const rigRepo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
+    const rig = rigRepo.createRig("node-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: f.cwd });
+    registry.registerSession(node.id, "worker@node-rig");
+    registry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "worker@node-rig", tmuxPane: "%1" });
+    const managed = new ClaudeManagedLaunch(db, f.env, f.renderer);
+    const service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus, tmuxAdapter: f.tmux,
+      runtimeAdapters: { "claude-code": { claudeManagedLaunch: managed } as never } });
+    const choice = { nodeId: node.id, mode: "auto", actor: "operator", reason: "reviewed native choice" };
+    let replaceDuringHelp = true;
+    vi.mocked(execFile).mockImplementation(((file: string, _args: string[], options: any, done: any) => {
+      expect(file).toBe(f.executable);
+      expect(options.cwd).toBe(f.cwd);
+      if (replaceDuringHelp) {
+        replaceDuringHelp = false;
+        registry.registerSession(node.id, "worker-next@node-rig", "handover");
+      }
+      done(null, help);
+    }) as any);
+
+    expect(await service.setPermissions(choice)).toMatchObject({ ok: false, code: "permission_selection_refused" });
+    expect(db.prepare("SELECT * FROM node_permission_selections WHERE node_id=?").all(node.id)).toEqual([]);
+    expect(db.prepare("SELECT * FROM events WHERE type='node.permissions_changed'").all()).toEqual([]);
+
+    // A fresh request prepares against the current generation and can save the choice.
+    expect(await service.setPermissions(choice)).toMatchObject({ ok: true, changed: true, seat: { nodeId: node.id, rigId: rig.id } });
+    expect(db.prepare("SELECT mode, actor FROM node_permission_selections WHERE node_id=?").get(node.id)).toEqual({ mode: "auto", actor: "operator" });
+    expect(db.prepare("SELECT COUNT(*) n FROM events WHERE type='node.permissions_changed'").get()).toEqual({ n: 1 });
+    expect(f.calls).toEqual([]);
   });
   it("does not try a daemon executable just because its vocabulary is newer", async () => {
     const f = fixture(); vi.stubEnv("PATH", f.daemonBin);

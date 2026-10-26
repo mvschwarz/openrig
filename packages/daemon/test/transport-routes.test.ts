@@ -566,33 +566,49 @@ describe("transport routes", () => {
     expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
-  it("POST /send maps wait timeout to 409 without sending text", async () => {
+  it.each([0, 5])("POST /send maps wait timeout to 409 without sending text (capture cost %ims)", async (captureCostMs) => {
     seedRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt",
-      sendText: sendTextSpy,
-    });
-    const transport = new SessionTransport({
-      db,
-      rigRepo,
-      sessionRegistry,
-      tmuxAdapter: tmux,
-      waitForIdlePollMs: 1,
-    });
-    const app = createApp({ sessionTransport: transport });
+    // Test expiry after a completed busy observation, independently of runner speed.
+    // Match the one-millisecond domain tests: advance the deadline and race timer only at the poll.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => {
+          const end = performance.now() + captureCostMs;
+          while (performance.now() < end) { /* controlled classification CPU cost */ }
+          return "Working on task...\n⠋ Processing\nesc to interrupt";
+        },
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter: tmux,
+        sleep,
+        waitForIdlePollMs: 1,
+      });
+      const app = createApp({ sessionTransport: transport });
 
-    const res = await app.request("/api/transport/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 1 }),
-    });
-    expect(res.status).toBe(409);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.reason).toBe("wait_for_idle_timeout");
-    expect(body.sent).toBe(false);
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      const res = await app.request("/api/transport/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: "dev-impl@my-rig", text: "hello", waitForIdleMs: 1 }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("wait_for_idle_timeout");
+      expect(body.sent).toBe(false);
+      expect(body.activity?.state).toBe("running");
+      expect(body.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("POST /send with ambiguous session returns 409", async () => {

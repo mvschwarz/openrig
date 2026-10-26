@@ -8,6 +8,8 @@
 //   GET    /api/context-packs/library/by-ref?ref=      — pack manifest + files
 //   DELETE /api/context-packs/library/by-ref?ref=      — remove a pack
 //   GET    /api/context-packs/library/by-ref/preview?ref= — assembled bundle (dry-run shape)
+//   POST   /api/context-packs/seat-recap               — write a seat's RECAP.md for a caller that can't
+//                                                         write the topology tree itself (a sandboxed seat)
 //
 // A pack is addressed by its path-like ref (e.g. `packs/compaction-restore`);
 // the entry's opaque `id` is `context-pack:<ref>` (UI routing key only).
@@ -25,6 +27,7 @@ import { composeNamedProfile, composeProfile, ProfileComposeError, type ComposeI
 import { isSeatRecapAddress, makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
+import { RecapWriteError, writeSeatRecapAt } from "../domain/context-packs/seat-recap-store.js";
 
 interface ComposeBody {
   outRef?: string;
@@ -72,6 +75,24 @@ export function contextPacksRoutes(): Hono {
     if (!lib) return c.json({ error: "context_pack_library_unavailable" }, 503);
     const result = lib.scan();
     return c.json({ ...result, entries: lib.list() });
+  });
+
+  // POST /seat-recap — `rig context recap-write` sends the recap here when its own write is refused: a sandboxed seat
+  // (a default Codex seat) can't write the topology tree, which the daemon owns. Same checks and store as the CLI's
+  // write (`writeSeatRecapAt`: the rig, `seats` and seat folder names and links, and no link followed at RECAP.md or its
+  // archive folder); the recap is seat-homed, never in the library.
+  router.post("/seat-recap", async (c) => {
+    const body = await c.req.json().catch(() => null) as { rig?: unknown; seat?: unknown; content?: unknown } | null;
+    if (!body || typeof body.rig !== "string" || typeof body.seat !== "string" || typeof body.content !== "string") {
+      return c.json({ error: "invalid_body", message: "rig, seat and content are required strings" }, 400);
+    }
+    try {
+      const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
+      return c.json(writeSeatRecapAt({ topologyRoot, rig: body.rig, seat: body.seat, content: body.content }));
+    } catch (err) {
+      if (err instanceof RecapWriteError) return c.json({ error: "recap_write_refused", message: err.message }, 400);
+      return c.json({ error: "recap_write_failed", message: (err as Error).message }, 500);
+    }
   });
 
   // POST /library/compose — Atom 3's delivery-free file -> durable-ref path.

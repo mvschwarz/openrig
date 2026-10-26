@@ -85,8 +85,8 @@ function fixture(options: { menu?: string; delay?: number; beforeMenu?: number; 
     readFile: () => { throw new Error("absent"); }, writeFile: () => {},
     exists: () => false, mkdirp: () => {}, listFiles: () => [], homedir: "/mock/home",
   };
-  // The process table reflects what was launched: a fork's Codex processes carry `fork <parent>`.
-  const forkArgs = () => / fork '?([^' ]+)'?$/.exec(launched)?.[1];
+  // The process table reflects what was launched: a fork's Codex processes carry `fork <parent>` (its git --add-dirs follow).
+  const forkArgs = () => / fork '?([^' ]+)'?(?= --add-dir |$)/.exec(launched)?.[1];
   // #1524 (b): a resume's Codex processes carry `resume <token>`, and Codex's records for them name that token once ready.
   const resumeArgs = () => / resume '?([^' ]+)'?/.exec(launched)?.[1];
   const listProcesses = vi.fn(() => (options.processes ?? processRows(options.shape ?? "wrapper")).map(row =>

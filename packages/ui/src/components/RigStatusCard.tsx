@@ -15,37 +15,44 @@ import { Button } from "./ui/button.js";
 import { cn } from "../lib/utils.js";
 import type { RigAggStatus } from "../hooks/useRigStatus.js";
 
+// The kernel card also names a skipped boot: its agent count cannot establish
+// the readiness verdict that the boot tracker did not observe.
+export type RigStatusCardStatus = RigAggStatus | "untracked";
+
 // Shared status vocabulary — also consumed by the compact topology
 // RigStatusControl (OPR.0.4.7.1) so both surfaces render one verdict language.
-export const statusToPip: Record<RigAggStatus, StatusPipStatus> = {
+export const statusToPip: Record<RigStatusCardStatus, StatusPipStatus> = {
   up: "running",
   partial: "warning",
   down: "stopped",
   blocked: "error",
   unknown: "info",
+  untracked: "info",
 };
 
-export const statusBadgeTone: Record<RigAggStatus, string> = {
+export const statusBadgeTone: Record<RigStatusCardStatus, string> = {
   up: "border-success text-success",
   partial: "border-warning text-warning",
   down: "border-stone-400 text-stone-500",
   blocked: "border-tertiary text-tertiary",
   unknown: "border-stone-300 text-stone-400",
+  untracked: "border-stone-300 text-stone-500",
 };
 
-export const statusHelp: Record<RigAggStatus, string> = {
+export const statusHelp: Record<RigStatusCardStatus, string> = {
   up: "All managed seats are running.",
   partial: "Some seats running, some stopped / detached / attention-required.",
   down: "No seats running — recoverable from snapshot.",
   blocked: "Restore cannot proceed without operator action (missing token / auth / spec).",
   unknown: "Daemon/API cannot confidently compute the state.",
+  untracked: "Kernel boot was skipped; readiness is not tracked.",
 };
 
 export interface RigStatusCardProps {
   rigId: string;
   rigName: string;
   isKernel?: boolean;
-  status: RigAggStatus;
+  status: RigStatusCardStatus;
   seatsRunning: number;
   seatsTotal: number;
   recoverable: boolean;
@@ -101,7 +108,7 @@ export function RigStatusCard({
             )}
           >
             <StatusPip status={pip} />
-            {status}
+            {status === "untracked" ? "boot not tracked" : status}
           </span>
         </div>
 

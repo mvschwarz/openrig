@@ -16,7 +16,7 @@ without spelunking through `packages/daemon/specs/`.
 | `_canonical/` | The mirrored skills, organized by category (`core/`, `pm/`, `pods/`, `process/`) plus a few uncategorized at the root. Do not edit files here directly — see "Authoring" below. |
 | `rigs/` | The `rigs` skill: a route into OpenRig for an ordinary Claude Code or Codex session. It isn't mirrored; see "Using these skills". |
 | `CHANGELOG.md` | Append-only log of skill changes per curation cycle close. Hand-authored. |
-| `LICENSE` | Apache-2.0, matching the parent project. |
+| `LICENSE` | OpenRig's Apache-2.0 license. Vendored skill folders include their upstream `LICENSE.txt` files. |
 
 ## What a skill is
 

@@ -16,6 +16,7 @@ import { SeatLifecycleService } from "./seat-lifecycle-service.js";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
 import { buildRestorePacket, type PredecessorRecapResolver } from "./seat-handover-service.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { clearCodexMemberPermissions } from "./codex-member-permissions.js";
 import { validateNativePermissionSelection, type NativePermissionSelection } from "./native-permission-selection.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { validateResumeToken } from "./resume-token-validation.js";
@@ -26,6 +27,7 @@ import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
+import { inspectStartupStagedText, settleOwnStartupPaste, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox } from "./startup-submission-evidence.js";
 
 /**
  * Slice 16: switch one live seat between Codex and Claude Code, successor first (founder
@@ -248,7 +250,12 @@ export class SeatRuntimeSwitchService {
         resolution: this.deps.materialResolution, openrigHome: this.deps.openrigHome });
     } catch (error) { return refuse("runtime_target_unavailable", (error as Error).message); }
 
-    const dropped = [...materials.dropped, ...(sourceSelection ? [{ setting: "native permission choice", value: `${sourceSelection.runtime}:${sourceSelection.mode}` }] : [])];
+    // An explicit Codex target mode replaces the seat's envelope, which the commit clears; inherit keeps it.
+    const envelope = target === "codex" && selection
+      ? (db.prepare("SELECT codex_permissions_json FROM nodes WHERE id = ?").get(node.id) as { codex_permissions_json: string | null } | undefined)?.codex_permissions_json
+      : null;
+    const dropped = [...materials.dropped, ...(sourceSelection ? [{ setting: "native permission choice", value: `${sourceSelection.runtime}:${sourceSelection.mode}` }] : []),
+      ...(envelope ? [{ setting: "codex permission envelope", value: envelope }] : [])];
     const plan: RuntimeSwitchPlan = {
       ...base,
       settings: materials.settings,
@@ -289,6 +296,13 @@ export class SeatRuntimeSwitchService {
     const { node, sessionName, target, materials } = ctx;
     const failed = (message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code: "runtime_switch_failed", committed: false, message,
       guidance: guidance ?? `${ctx.seatRef} is unchanged on ${node.runtime}. Correct the cause and try again.` });
+    // Refuse unreadable target settings before an active switch can hold sends to the current occupant.
+    let override: ReturnType<NativePermissionStore["launchOverride"]>;
+    try {
+      override = new NativePermissionStore(db).launchOverride(node.id, target, {
+        selection: ctx.selection, codexProfile: materials.settings.codexConfigProfile.value,
+      });
+    } catch (error) { return failed((error as Error).message); }
     const successorGeneration = sessionRegistry.reserveOccupantGeneration();
     if (!successorGeneration) return failed("No occupant generation could be reserved for the successor (the tenure ledger is unavailable).");
 
@@ -316,8 +330,6 @@ export class SeatRuntimeSwitchService {
     };
 
     // 1. The successor, on the target runtime, beside the predecessor.
-    const permissions = new NativePermissionStore(db);
-    const override = permissions.launchOverride(node.id, target, { selection: ctx.selection, codexProfile: materials.settings.codexConfigProfile.value });
     const policyPosture = rigRepo.getNodePolicyProvenance(node.id)?.launchPosture ?? rigRepo.getRigPolicyProvenance(node.rigId)?.launchPosture ?? "floor";
     const posture = override.launchPosture ?? policyPosture;
     // Codex has no auto mode; it launches at the floor, as its permission resolution says.
@@ -334,7 +346,8 @@ export class SeatRuntimeSwitchService {
       stagingSession: row.staging_session, canonicalSession: sessionName, occupantGeneration: successorGeneration,
       node: { id: node.id, runtime: target, cwd: node.cwd, model: materials.settings.model.value, effort: materials.settings.effort.value,
         advisor: materials.settings.advisor.value, codexConfigProfile: materials.settings.codexConfigProfile.value,
-        kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
+        claudePermissions: override.claudePermissions, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
+        ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
         seatEnv: withPluginDirs(rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
         ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
@@ -368,11 +381,17 @@ export class SeatRuntimeSwitchService {
         "Then wait for OpenRig's activation message. If you can't carry on (an unusable model, a login or permission problem), don't confirm; the switch then stops and the current occupant keeps the seat.",
       ].join("\n"),
     ].filter(Boolean).join("\n\n");
+    // The handover is a fresh Claude's first input, so it gets startup's protections: wait for Claude's input box before
+    // the paste, and after the Enter, a guarded Enter while the composer still holds exactly the handover.
+    const claudeSuccessor = target === "claude-code";
+    const drawnPane = successorPane;
+    if (claudeSuccessor && drawnPane) await waitForClaudeInputBox(() => tmux.capturePaneScreen(drawnPane), this.sleep);
     const typed = await tmux.sendText(row.staging_session, packet);
     if (!typed.ok) return abandon(`The handover couldn't be typed to the successor: ${typed.message}.`);
     await this.sleep(200);
     const entered = await tmux.sendKeys(row.staging_session, ["Enter"]);
     if (!entered.ok) return abandon(`The handover couldn't be submitted to the successor: ${entered.message}.`);
+    if (claudeSuccessor) await this.submitStagedHandover(row.staging_session, packet);
 
     // 3. Wait for the confirmation (P2's evidence), bounded.
     const timeoutMs = confirmTimeoutMs;
@@ -384,7 +403,8 @@ export class SeatRuntimeSwitchService {
       if (current.phase === "confirmed" && current.confirmation_note && current.confirmed_at) { confirmation = { note: current.confirmation_note, at: current.confirmed_at }; break; }
       if (this.now().getTime() >= deadline) {
         const tail = successorPane ? (await tmux.capturePaneScreen(successorPane).catch(() => null))?.trim().split("\n").slice(-6).join("\n") : null;
-        return abandon(`The ${target} successor didn't confirm the handover within ${Math.round(timeoutMs / 1000)} s, so it isn't shown able to carry on.${tail ? ` Its screen ended with:\n${tail}` : ""}`);
+        const staged = claudeSuccessor && inspectStartupStagedText(await this.readComposer(row.staging_session), packet, target) === "staged";
+        return abandon(`The ${target} successor didn't confirm the handover within ${Math.round(timeoutMs / 1000)} s, so it isn't shown able to carry on.${staged ? " The handover was still in its input, unsent." : ""}${tail ? ` Its screen ended with:\n${tail}` : ""}`);
       }
       const probe = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
       if (probe.state === "absent") return abandon(`The ${target} successor's session ended before it confirmed the handover.`);
@@ -451,6 +471,8 @@ export class SeatRuntimeSwitchService {
         .run(target, materials.settings.model.value, materials.settings.effort.value, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
       new NativePermissionStore(db).write(node.id, ctx.selection, ctx.input.requestedBy?.trim() || ctx.sessionName, ctx.input.reason);
+      // One explicit Codex choice: the switch's mode replaces the seat's envelope here, and the event says so.
+      const replaced = target === "codex" && ctx.selection ? clearCodexMemberPermissions(db, node.id) : undefined;
       db.prepare(`INSERT OR REPLACE INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)`)
         .run(node.id, JSON.stringify(materials.plan.entries.map((e) => ({ category: e.category, effectiveId: e.effectiveId, sourceSpec: e.sourceSpec, sourcePath: e.sourcePath,
           resourcePath: e.resourcePath, absolutePath: e.absolutePath, resourceType: e.resourceType, mergeStrategy: e.mergeStrategy, target: e.target }))),
@@ -487,9 +509,32 @@ export class SeatRuntimeSwitchService {
         .captureSnapshot(node.rigId, "runtime-switch", { deferNotify: (persisted) => notifications.push(persisted) });
       return eventBus.persistWithinTransaction({ type: "seat.runtime_changed", rigId: node.rigId, nodeId: node.id, switchId: ctx.id, from: node.runtime!, to: target,
         reason: ctx.input.reason, requestedBy: ctx.input.requestedBy ?? null, generation: ctx.successorGeneration, previousGeneration: ctx.predecessorGeneration,
-        settings: { ...materials.settings }, dropped: ctx.plan.dropped, permissionSelection: ctx.selection ? ctx.selection.mode : "inherit", claimsMoved });
+        settings: { ...materials.settings }, dropped: ctx.plan.dropped, permissionSelection: ctx.selection ? ctx.selection.mode : "inherit", claimsMoved,
+        ...(replaced !== undefined ? { replaced: { codexPermissions: replaced } } : {}) });
     })();
     return { event, notifications, claimsMoved, afterCommit };
+  }
+
+  /** The successor's composer, as startup reads it; null when it can't be read. */
+  private async readComposer(session: string): Promise<string | null> {
+    try { return await this.deps.tmuxAdapter.capturePaneContent(session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
+  }
+
+  /** Startup's check after its Enter: tmux accepting Enter doesn't prove Claude submitted a large paste. While the
+   *  composer still holds exactly the handover, read again just before each key, a bare Enter goes in, at most
+   *  STARTUP_SUBMIT_RETRIES times. Nothing is pasted again, and any other screen is left alone. Observation only: the
+   *  successor's confirmation stays the evidence. */
+  private async submitStagedHandover(session: string, handover: string): Promise<void> {
+    await this.sleep(200);
+    const first = await this.readComposer(session);
+    if (!first?.trim()) return;
+    let { state } = await settleOwnStartupPaste(() => this.readComposer(session), first, handover, "claude-code", this.sleep);
+    for (let retries = 0; state === "staged" && retries < STARTUP_SUBMIT_RETRIES; retries++) {
+      if (inspectStartupStagedText(await this.readComposer(session), handover, "claude-code") !== "staged") return;
+      if (!(await this.deps.tmuxAdapter.sendKeys(session, ["Enter"])).ok) return;
+      await this.sleep(200);
+      state = inspectStartupStagedText(await this.readComposer(session), handover, "claude-code");
+    }
   }
 
   /** After the commit: retire the predecessor (in the staging session), carry the successor's runtime on the seat's

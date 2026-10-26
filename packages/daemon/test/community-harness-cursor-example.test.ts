@@ -24,7 +24,7 @@ function run(setup: (dir: string) => Record<string, string> = () => ({})) {
   const dir = mkdtempSync(join(tmpdir(), "cursor-example-")); dirs.push(dir);
   const fake = join(dir, "cursor-agent");
   // create-chat prints an id and keeps running, as Cursor's does; any other call records its arguments and exits.
-  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = create-chat ]; then echo chat-abc; exec sleep 30; fi\necho "$@ CFG=$CURSOR_CONFIG_DIR" > "${dir}/started"\n`);
+  writeFileSync(fake, `#!/bin/sh\nif [ "$1" = create-chat ]; then echo chat-abc; exec sleep 30; fi\necho "$@ CFG=$CURSOR_CONFIG_DIR" > "${dir}/started"\nprintf '%s\\0' "$@" > "${dir}/args"\n`);
   chmodSync(fake, 0o755);
   const env = setup(dir);
   const root = join(dir, "results");
@@ -33,7 +33,7 @@ function run(setup: (dir: string) => Record<string, string> = () => ({})) {
     OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", OPENRIG_LAUNCH_RESULT: attempt.file, OPENRIG_LAUNCH_ATTEMPT: attempt.attempt, ...env },
     timeout: 20_000 }).status;
   const started = join(dir, "started");
-  return { exit, read: readLaunchResult(attempt, "cursor", root), started: existsSync(started) ? readFileSync(started, "utf8") : null, dir };
+  return { args: existsSync(join(dir, "args")) ? readFileSync(join(dir, "args"), "utf8").split("\0").slice(0, -1) : [], exit, read: readLaunchResult(attempt, "cursor", root), started: existsSync(started) ? readFileSync(started, "utf8") : null, dir };
 }
 
 describe("the documented Cursor launcher and preset", () => {
@@ -41,6 +41,15 @@ describe("the documented Cursor launcher and preset", () => {
     const { read, started, dir } = run();
     expect(read).toEqual({ ok: true, nativeRef: "chat-abc", producer: "openrig-cursor-launch 2" });
     expect(started?.trim()).toBe(`--resume chat-abc --trust CFG=${join(dir, "home", "state", "cursor", "node-1")}`);
+  });
+
+  it("passes a multiline first input as one positional prompt", () => {
+    const text = "identity\n'quoted' $literal\n";
+    const { args } = run(dir => {
+      const file = join(dir, "first.txt"); writeFileSync(file, text, { mode: 0o600 });
+      return { OPENRIG_FIRST_INPUT: file };
+    });
+    expect(args).toEqual(["--resume", "chat-abc", "--trust", text]);
   });
 
   it("reopens a chat Cursor holds in an already-set config folder, and reports that id", () => {
@@ -62,7 +71,7 @@ describe("the documented Cursor launcher and preset", () => {
     expect(exit).not.toBe(0);
   });
 
-  it("declares conversation reporting, resume and assisted startup", () => {
-    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, startupAssisted: true } });
+  it("declares conversation reporting, resume and first input without an assisted check", () => {
+    expect(loadCommunityHarnessPreset("cursor", EXAMPLE)).toMatchObject({ ok: true, preset: { command: "openrig-cursor-launch", launchResult: true, resume: true, firstInput: true, startupAssisted: false } });
   });
 });

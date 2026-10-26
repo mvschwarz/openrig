@@ -788,8 +788,9 @@ function assertNoRemovedContextSetting(fileConfig: Record<string, unknown>): voi
 // settings-store.ts — the parity test pins both twins (host-registry twin
 // discipline). Reserved segments cover key-level snake_case AND FILE-level
 // camelCase toggle names so no host id shadows a flat toggle at either
-// layer. Every other unknown key keeps the reject-loud behavior.
-const FEED_HOST_KEY_RE = /^feed\.subscriptions\.([A-Za-z0-9_-]+)\.enabled$/;
+// layer. The fixed prefix/suffix delimit a literal host id, including dots.
+// Every other unknown key keeps the reject-loud behavior.
+const FEED_HOST_KEY_RE = /^feed\.subscriptions\.([A-Za-z0-9_.-]+)\.enabled$/;
 export const FEED_HOST_RESERVED_SEGMENTS = new Set([
   "action_required",
   "actionRequired",

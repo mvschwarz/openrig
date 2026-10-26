@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import { seatRoutes } from "../src/routes/seat.js";
+import { transportRoutes } from "../src/routes/transport.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
@@ -181,6 +182,51 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
+  it("carries retained Claude rules into a target successor while replacing a Codex mode selection", async () => {
+    const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
+    db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
+    new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "floor" }, "operator", "earlier Codex choice");
+    const claude = adapter("claude-code");
+    const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", permissionMode: "acceptEdits", reason: "switch with retained rules" }))
+      .toMatchObject({ ok: true, to: "claude-code" });
+    expect(claude.launchHarness).toHaveBeenCalledWith(expect.objectContaining({
+      claudePermissions: rules, permissionMode: "acceptEdits",
+    }), expect.objectContaining({ name: SEAT }));
+  });
+
+  it("refuses unreadable target rules while keeping sends to the current occupant available", async () => {
+    db.prepare("UPDATE nodes SET claude_permissions_json = 'broken' WHERE id = ?").run(nodeId);
+    const svc = service();
+    await expect(svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "switch to Claude" }))
+      .resolves.toMatchObject({ ok: false, committed: false, message: expect.stringContaining("Repair the rules") });
+    expect(openSwitch()).toBeUndefined();
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    expect(nodeRow().runtime).toBe("codex");
+    expect(sessionRegistry.currentOccupantTenure(nodeId)!.generationUuid).toBe(predecessorGeneration);
+
+    const transport = { resolveSessions: vi.fn(async () => ({ ok: true, sessions: [{ sessionName: SEAT }] })),
+      send: vi.fn(async () => ({ ok: true, sent: true })) };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("db" as never, db as never);
+      c.set("sessionTransport" as never, transport as never);
+      await next();
+    });
+    app.route("/api/transport", transportRoutes());
+    const response = await app.request("/api/transport/send", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "operator@kernel" },
+      body: JSON.stringify({ session: SEAT, text: "please continue" }) });
+    expect(await response.json()).toMatchObject({ ok: true, sent: true });
+    expect(transport.send).toHaveBeenCalledTimes(1);
+
+    db.prepare("UPDATE nodes SET claude_permissions_json = NULL WHERE id = ?").run(nodeId);
+    successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "retry after repairing rules" }))
+      .toMatchObject({ ok: true, to: "claude-code" });
+  });
+
   it("the handover asks the successor to confirm, carries the seat's open work, and tells it not to act as the seat yet", async () => {
     await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review #1" });
     const svc = service();
@@ -201,6 +247,77 @@ describe("live seat runtime switch", () => {
     expect(result).toMatchObject({ ok: true, changed: true, from: "claude-code", to: "codex",
       settings: { codexConfigProfile: { value: "deep", source: "explicit" }, advisor: { value: null } } });
     expect(nodeRow()).toMatchObject({ runtime: "codex", codex_config_profile: "deep", advisor: null });
+  });
+
+  describe("a retained Codex envelope on the way back to Codex", () => {
+    // A narrow envelope kept while the seat ran Claude, under a policy that would bypass approvals and the sandbox.
+    const envelope = { sandbox: "read-only", approval: "on-request" };
+    const storedEnvelope = () => (db.prepare("SELECT codex_permissions_json j FROM nodes WHERE id = ?").get(nodeId) as { j: string | null }).j;
+    let codex: RuntimeAdapter;
+    beforeEach(() => {
+      db.prepare(`UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL, codex_permissions_json = ?,
+        permission_policy = 'builtin:yolo', policy_origin = 'builtin', policy_launch_posture = 'full_bypass' WHERE id = ?`).run(JSON.stringify(envelope), nodeId);
+      codex = adapter("codex");
+    });
+
+    it("inherit: the Codex successor launches with the envelope, not the policy's posture alone, and the seat keeps it", async () => {
+      const svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
+      successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "back to Codex" })).toMatchObject({ ok: true, to: "codex" });
+      // The staged successor's own binding carries the envelope, which the Codex adapter emits in place of the posture.
+      expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ codexPermissions: envelope }), expect.objectContaining({ name: SEAT }));
+      expect(JSON.parse(storedEnvelope()!)).toEqual(envelope);
+    });
+
+    it("an explicit target mode replaces it: the successor launches with the mode, and the commit clears the envelope and says so", async () => {
+      const svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
+      const plan = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "preview", dryRun: true });
+      expect(plan).toMatchObject({ ok: true, permission: { mode: "floor", source: "explicit" } });
+      expect((plan as { dropped: unknown[] }).dropped).toContainEqual({ setting: "codex permission envelope", value: JSON.stringify(envelope) });
+      expect(JSON.parse(storedEnvelope()!)).toEqual(envelope);
+      successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "back to Codex at the floor" }))
+        .toMatchObject({ ok: true, to: "codex", permission: { mode: "floor", source: "explicit" } });
+      expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ launchPosture: "floor" }), expect.objectContaining({ name: SEAT }));
+      expect((codex.launchHarness as ReturnType<typeof vi.fn>).mock.calls[0]![0].codexPermissions).toBeUndefined();
+      expect(storedEnvelope()).toBeNull();
+      expect(new NativePermissionStore(db).read(nodeId)).toMatchObject({ runtime: "codex", mode: "floor" });
+      const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.runtime_changed'").get() as { payload: string };
+      expect(JSON.parse(event.payload)).toMatchObject({ permissionSelection: "floor", replaced: { codexPermissions: envelope } });
+    });
+
+    it("a read error while clearing the envelope rolls the whole commit back, so no mode is recorded beside the envelope", async () => {
+      const svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
+      const prepare = db.prepare.bind(db);
+      let failClearingRead = false;
+      vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (failClearingRead && sql === "SELECT codex_permissions_json FROM nodes WHERE id = ?") throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+        return prepare(sql);
+      }) as typeof db.prepare);
+      // The successor confirms, and the commit's read of the envelope then fails.
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing" || !handoverTyped()) return;
+        failClearingRead = true;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "ready", actorSession: SEAT, generation: row.successor_generation });
+      };
+      const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "back to Codex at the floor" });
+      failClearingRead = false;
+      expect(result).toMatchObject({ ok: false, code: "runtime_switch_failed", committed: false, message: expect.stringContaining("disk I/O error") });
+      expect(JSON.parse(storedEnvelope()!)).toEqual(envelope);
+      expect(new NativePermissionStore(db).read(nodeId)).toBeNull();
+      expect(nodeRow().runtime).toBe("claude-code");
+      expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxPane: "%0" });
+    });
+
+    it("a switch that doesn't commit leaves the envelope and the seat's permission choice as they were", async () => {
+      const result = await service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } })
+        .setRuntime({ seatRef: SEAT, runtime: "codex", permissionMode: "floor", reason: "limit", confirmTimeoutMs: 10_000 });
+      expect(result).toMatchObject({ ok: false, code: "runtime_switch_failed", committed: false });
+      expect(JSON.parse(storedEnvelope()!)).toEqual(envelope);
+      expect(new NativePermissionStore(db).read(nodeId)).toBeNull();
+      expect(nodeRow().runtime).toBe("claude-code");
+    });
   });
 
   it("without a confirmation in time nothing changes: the current occupant keeps the seat and its claim, and the staged successor is retired", async () => {
@@ -393,6 +510,92 @@ describe("live seat runtime switch", () => {
         body: JSON.stringify({ model: "operator-choice", reason: "operator" }) });
       expect(operator.status).toBe(200);
       expect(nodeRow().model).toBe("operator-choice");
+    });
+  });
+
+  // The handover is a fresh Claude's first input, so it gets startup's protections: Claude's input box is drawn before
+  // the paste, and an Enter Claude didn't take is followed by a guarded Enter onto exactly the staged handover.
+  describe("a Claude successor's handover", () => {
+    const RULE = "────────────────────";
+    const drawn = (body = "") => `${RULE}\n❯ ${body}\n${RULE}\n⏵⏵ accept edits on (shift+tab to cycle)\n`;
+    const starting = "Claude Code v2.1.309\n";
+    const handover = () => typed.find((t) => t.target.startsWith("openrig-switch-"))?.text ?? "";
+    let enters: number;
+    let order: string[];
+    let successorScreens: string[];
+    let composer: () => string;
+    beforeEach(() => {
+      enters = 0;
+      order = [];
+      successorScreens = [];
+      composer = () => drawn();
+      fakeTmux.capturePaneScreen = vi.fn(async (pane: string) => {
+        if (pane !== "%5") return "predecessor screen tail";
+        order.push("look");
+        return successorScreens.shift() ?? drawn();
+      });
+      fakeTmux.sendText = vi.fn(async (target: string, text: string) => {
+        typed.push({ target, text });
+        if (target.startsWith("openrig-switch-")) order.push("paste");
+        return { ok: true };
+      });
+      fakeTmux.sendKeys = vi.fn(async (target: string) => {
+        if (target.startsWith("openrig-switch-")) { enters++; order.push("enter"); }
+        return { ok: true };
+      });
+      Object.assign(fakeTmux, { capturePaneContent: vi.fn(async () => composer()) });
+    });
+    /** The successor confirms only once its handover was submitted, by the given Enter. */
+    const confirmsAfterEnter = (svc: SeatRuntimeSwitchService, enter: number) => {
+      onSleep = () => {
+        const row = openSwitch();
+        if (row?.phase !== "preparing" || enters < enter) return;
+        svc.confirm({ seatRef: SEAT, switchId: row.id, note: "carrying on", actorSession: SEAT, generation: row.successor_generation });
+      };
+    };
+
+    it("waits for Claude to draw its input box before typing the handover, and adds no Enter once it's taken", async () => {
+      successorScreens = [starting, starting, drawn()];
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(order.slice(0, order.indexOf("paste"))).toEqual(["look", "look", "look"]);
+      expect(enters).toBe(1);
+    });
+
+    it("presses a guarded Enter when the handover is still in Claude's input after the first, and types it only once", async () => {
+      composer = () => enters < 2 ? drawn(handover()) : drawn();
+      const svc = service();
+      confirmsAfterEnter(svc, 2);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(enters).toBe(2);
+      expect(typed.filter((t) => t.target.startsWith("openrig-switch-"))).toHaveLength(1);
+    });
+
+    it("presses no further Enter onto an input that holds anything else", async () => {
+      composer = () => drawn("a person's draft");
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit" });
+      expect(enters).toBe(1);
+    });
+
+    it("stops after startup's two guarded Enters, and says the handover was never sent when no confirmation comes", async () => {
+      composer = () => drawn(handover());
+      const result = await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 });
+      expect(result).toMatchObject({ ok: false, committed: false });
+      expect((result as { message: string }).message).toMatch(/within 10 s, so it isn't shown able to carry on\. The handover was still in its input, unsent\./);
+      expect(enters).toBe(3);
+      expect(typed.filter((t) => t.target.startsWith("openrig-switch-"))).toHaveLength(1);
+    });
+
+    it("leaves a Codex successor's handover as it was: no look and one Enter", async () => {
+      db.prepare("UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL WHERE id = ?").run(nodeId);
+      const svc = service();
+      confirmsAfterEnter(svc, 1);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "limit" })).toMatchObject({ ok: true, changed: true });
+      expect(order).toEqual(["paste", "enter"]);
+      expect((fakeTmux as unknown as { capturePaneContent: ReturnType<typeof vi.fn> }).capturePaneContent).not.toHaveBeenCalled();
     });
   });
 });

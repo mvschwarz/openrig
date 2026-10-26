@@ -1,0 +1,15 @@
+# The Gateway must already run. Configure its route and authentication in this seat's OPENCLAW_CONFIG_PATH.
+format: 1
+name: openclaw-gateway
+command: openrig-openclaw-launch --gateway
+maintainer: Your name or team
+limits:
+  - connects to an existing Gateway; this launcher never starts or stops that service
+  - stopping the TUI closes its client; an accepted turn may keep running on the Gateway
+  - uses only agent main; automatic session resets must stay off
+  - typing /new changes the native key while the seat keeps the name OpenRig gave it
+  - no guidance, skills or startup files are placed
+  - needs-input and approval prompts are read from the screen only
+names_conversation: true
+resume: true
+first_input: true

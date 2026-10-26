@@ -82,6 +82,54 @@ describe("ComposeServicesAdapter", () => {
     expect(exec).not.toHaveBeenCalled();
   });
 
+  describe("without Docker Compose v2", () => {
+    // Docker without its Compose plugin reads Compose's -f as its own flag, so every `docker compose` command fails.
+    const noCompose = (containers: string | Error) => vi.fn<ExecFn>(async (cmd: string) => {
+      if (cmd.startsWith("docker compose")) throw Object.assign(new Error("Command failed"), { stderr: "unknown shorthand flag: 'f' in -f" });
+      if (cmd.startsWith("docker ps")) { if (containers instanceof Error) throw containers; return containers; }
+      return "";
+    });
+    const down = (adapter: ComposeServicesAdapter) => adapter.down({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets", policy: "down" });
+
+    it("says the Compose check failed, with its own diagnostic, without claiming one cause", async () => {
+      const result = await new ComposeServicesAdapter(noCompose("")).composeAvailable();
+      expect(result).toEqual({ ok: false, message: "Service bundles need Docker Compose v2, and `docker compose version` failed: unknown shorthand flag: 'f' in -f. Make sure this Docker has its Compose v2 plugin." });
+    });
+
+    it("names Docker's own reason, not the exec header or Docker's pointer to its help", async () => {
+      // How the daemon's exec reports a failed `docker compose version` without the plugin.
+      const exec = vi.fn<ExecFn>(async () => { throw new Error("Command failed: docker compose version 2>&1\ndocker: 'compose' is not a docker command.\nSee 'docker --help'"); });
+      expect(await new ComposeServicesAdapter(exec).composeAvailable()).toEqual({ ok: false,
+        message: "Service bundles need Docker Compose v2, and `docker compose version` failed: docker: 'compose' is not a docker command. Make sure this Docker has its Compose v2 plugin." });
+    });
+
+    it("up names the missing Compose before Docker's own error", async () => {
+      const result = await new ComposeServicesAdapter(noCompose("")).up({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets" });
+      expect(result).toMatchObject({ ok: false, code: "compose_up_failed", message: expect.stringMatching(/^Service bundles need Docker Compose v2[\s\S]*unknown shorthand flag/) });
+    });
+
+    it("down finds nothing to take down when plain Docker shows the project has no containers", async () => {
+      const exec = noCompose("");
+      expect(await down(new ComposeServicesAdapter(exec))).toEqual({ ok: true });
+      expect(exec.mock.calls.map(([cmd]) => cmd)).toContainEqual("docker ps -aq --filter 'label=com.docker.compose.project=openrig-secrets' 2>&1");
+    });
+
+    it("any other failure is reported as it came, with no further Docker commands", async () => {
+      const exec = vi.fn<ExecFn>(async () => { throw new Error("Cannot connect to the Docker daemon"); });
+      const adapter = new ComposeServicesAdapter(exec);
+      expect(await adapter.up({ composeFile: "/rig/compose.yaml", projectName: "openrig-secrets" })).toEqual({ ok: false, code: "compose_up_failed", message: "Cannot connect to the Docker daemon" });
+      expect(await down(adapter)).toEqual({ ok: false, code: "compose_down_failed", message: "Cannot connect to the Docker daemon" });
+      expect(exec).toHaveBeenCalledTimes(2);
+    });
+
+    it("down still fails, naming the missing Compose, when the project has containers or Docker can't be read", async () => {
+      for (const containers of ["3f2a1b9c\n", new Error("Cannot connect to the Docker daemon")]) {
+        expect(await down(new ComposeServicesAdapter(noCompose(containers)))).toMatchObject({ ok: false, code: "compose_down_failed",
+          message: expect.stringContaining("Service bundles need Docker Compose v2") });
+      }
+    });
+  });
+
   it("status parses one-object-per-line format", async () => {
     const exec = vi.fn<ExecFn>().mockResolvedValue(COMPOSE_PS_LINE);
     const adapter = new ComposeServicesAdapter(exec);
@@ -361,6 +409,17 @@ describe("ServiceOrchestrator", () => {
     // Receipt cleared after teardown
     const record = rigRepo.getServicesRecord(rig.id);
     expect(record?.latestReceiptJson).toBeNull();
+  });
+
+  it("teardown — without Docker Compose v2 and with no containers, the rig's services are down, so rig down can remove it", async () => {
+    const rig = seedRigWithServices({ kind: "compose", composeFile: "docker-compose.yml" });
+    const exec = vi.fn<ExecFn>(async (cmd: string) => {
+      if (cmd.startsWith("docker compose")) throw new Error("unknown shorthand flag: 'f' in -f");
+      return "";
+    });
+    const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: new ComposeServicesAdapter(exec) });
+    expect(await orchestrator.teardown(rig.id)).toEqual({ ok: true });
+    expect(rigRepo.getServicesRecord(rig.id)?.latestReceiptJson).toBeNull();
   });
 
   it("teardown — leave_running policy skips compose down", async () => {

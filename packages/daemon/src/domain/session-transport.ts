@@ -1,9 +1,10 @@
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
+import { currentClaudeResumePicker } from "./native-resume-probe.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
-import { COLLAPSED_PASTE, composerRegion, isComposerFooter, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import { COLLAPSED_PASTE, composerRegion, isComposerFooter, isClaudePasteHint, inspectStartupStagedText, QUEUED_PLACEHOLDER, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
 import {
   composerContainsOwnedText,
   composerNumberedChoicePattern,
@@ -163,6 +164,51 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+const PI_DIALOG_HINTS = [
+  /^↑↓ navigate\s+\S.* select\s+\S.* cancel$/,
+  /^\S+ submit\s+\S+ cancel$/,
+  /^\S+ submit\s+\S+ newline\s+\S+ cancel\s+\S+ external editor$/,
+] as const;
+
+/** Adopted Pi TUIs have no runner hooks. Anchor on the selector/input/editor chrome:
+ * footer metadata is optional, and an extension can add rows below the dialog. */
+function findCurrentPiDialog(paneContent: string): string | null {
+  const lines = paneContent.split("\n").map(line => line.trimEnd());
+  const visible = lines.flatMap((line, at) => line.trim() ? [{ text: line.trim(), at }] : []);
+  const border = (text: string) => /^─{3,}$/.test(text);
+  // At most six nonblank footer/widget rows may follow the selector's border.
+  for (let help = visible.length - 2; help >= Math.max(1, visible.length - 8); help--) {
+    // Text word-wraps the hints. Join at most three adjacent physical rows, not separated prose.
+    const rows = (n: number) => visible.slice(help - n + 1, help + 1).map(row => row.text).join(" ");
+    const span = [1, 2, 3].find(n => help - n >= 0
+      && visible[help]!.at - visible[help - n + 1]!.at === n - 1
+      && PI_DIALOG_HINTS.some(pattern => pattern.test(rows(n)))) ?? 1;
+    const hint = rows(span);
+    const selector = PI_DIALOG_HINTS[0].test(hint);
+    const input = PI_DIALOG_HINTS[1].test(hint);
+    const editor = PI_DIALOG_HINTS[2].test(hint);
+    if (!(selector || input || editor) || !border(visible[help + 1]!.text)) continue;
+    // A later editor or closing Markdown fence makes the selector historical/quoted.
+    if (visible.slice(help + 2).some(row => border(row.text) || /^(?:`{3,}|~{3,})/.test(row.text))) continue;
+    const end = visible[help - span]!.at;
+    // Input needs its field and nearby opening rule. Editor's bottom rule and spaced four-action
+    // hint remain visible even when its tall body/top rule is outside the 20-line capture.
+    if (input && /^>(?:\s|$)/.test(lines[end]!.trim()) && !lines[end - 1]?.trim()
+      && lines.slice(Math.max(0, end - PROMPT_SCAN_LINES), end).some(line => border(line.trim()))) return truncateEvidence(hint);
+    // ExtensionEditor puts one spacer on either side of the hint; a main-editor draft doesn't.
+    if (editor && /^(?:─{3,}|─+ [↑↓] \d+ more ─*)$/.test(lines[end]!.trim())
+      && visible[help - span + 1]!.at === end + 2
+      && visible[help + 1]!.at === visible[help]!.at + 2) return truncateEvidence(hint);
+    if (!selector) continue;
+    let start = end;
+    // The native spacer before the options separates arbitrary title/description text.
+    while (start > Math.max(0, end - PROMPT_SCAN_LINES) && lines[start - 1]!.trim() && !border(lines[start - 1]!.trim())) start--;
+    const selected = lines.slice(start, end + 1).map(line => line.trim()).filter(line => /^→ \S/.test(line));
+    if (selected.length === 1) return truncateEvidence(selected[0]!);
+  }
+  return null;
+}
+
 function findCurrentClaudeQuestion(paneContent: string): string | null {
   // Claude 2.1.289 can wrap a current choice beyond the general prompt window.
   // Anchor at its terminal footer, then follow only the adjoining choice block.
@@ -229,7 +275,12 @@ function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = 
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
-  const lines = paneContent.split("\n").slice(-20)
+  // The 20 end at the last drawn row: Claude draws inline, so a short screen in a tall pane leaves its input box above
+  // blank rows that the capture keeps.
+  const physical = paneContent.split("\n");
+  let end = physical.length;
+  while (end > 0 && physical[end - 1]!.trim().length === 0) end--;
+  const lines = physical.slice(Math.max(0, end - 20), end)
     .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   const bar = findClaudeFooterIndex(lines);
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
@@ -394,7 +445,9 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     const last = visible.length - 1;
     const cursorAtEnd = y === start + last && x === prefix + stringWidth(visible[last] ?? "");
     const label = visible.length === 1 && COMPOSER_COLLAPSED_PASTE_PATTERN.test(visible[0]!) ? visible[0]! : null;
-    const frame = JSON.stringify([prompt.glyph, prefix, width, footer]);
+    // Claude replaces its mode hint after our paste; that noninteractive hint is not a new composer.
+    const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
+    const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
     const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
@@ -526,6 +579,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     return { state: "unknown", reason: "empty_capture", evidence: null };
   }
 
+  const piConfirmation = findCurrentPiDialog(paneContent);
+  if (piConfirmation) return { state: "attention", reason: "selection_prompt", evidence: piConfirmation };
+
   const recentLines = lastNonBlank.slice(-8);
   const claudeComposer = findClaudeComposer(paneContent, options);
   // Claude's own timer row above its complete, empty input box means the turn is running, not waiting at a dialogue,
@@ -569,7 +625,9 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const currentComposerSelection = currentComposerText
     ? findPatternEvidence(currentComposerText.split("\n").map(line => line.trimStart()), [COMPOSER_SELECTION_SCAN_PATTERN])
     : null;
-  const selectionPromptEvidence = currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
+  // Claude's resume picker types a paste into its search and resumes a card on Enter. A Codex or Pi pane printing one is output.
+  const claudePicker = options.runtime === "codex" || options.runtime === "pi" ? null : currentClaudeResumePicker(paneContent);
+  const selectionPromptEvidence = claudePicker ?? currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     currentComposerSelection ?? (options.currentClaudeDialogueOnly ? null
       : findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]));
   if (selectionPromptEvidence) {
@@ -3028,6 +3086,7 @@ export class SessionTransport {
         // no-op here (the option is kept for back-compat). needs_input (positive picker) remains the
         // ONLY hard refuse; unknown/stale/missing already proceed-with-advisory above.
         sendAdvisory = [sendAdvisory, "target pane appears mid-task; sent anyway (busy is advisory, not a block)."].filter(Boolean).join(" ");
+        if (runtime === "codex") sendAdvisory += " This message joins its running turn and may redirect it; for separate work, use --wait-for-idle <seconds>.";
         // fall through to the send below.
       }
       // idle (or running/unknown — now advisory-and-proceed) → proceed to send.
@@ -3628,7 +3687,30 @@ export class SessionTransport {
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
     let hasRuntime: boolean | null = null;
-    if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
+    const urlNames = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"];
+    const tokenNames = ["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"];
+    const runtimeNames = ["OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+    const inspected = typeof this.tmuxAdapter?.hasSessionEnvBatch === "function" || typeof this.tmuxAdapter?.hasSessionEnv === "function";
+    if (typeof this.tmuxAdapter?.hasSessionEnvBatch === "function") {
+      // One fresh listing for every name, read once per diagnosis: all aliases see the same moment. A failed listing
+      // leaves every name unknown (never absent) and is not retried name by name.
+      let presence: Record<string, boolean | null> = {};
+      try {
+        presence = await this.tmuxAdapter.hasSessionEnvBatch(sessionName, [...urlNames, ...tokenNames, ...runtimeNames]);
+      } catch { /* every name stays unknown */ }
+      const anyPresent = (names: string[]): boolean | null => {
+        let unknown = false;
+        for (const name of names) {
+          const present = presence[name];
+          if (present === true) return true;
+          if (present !== false) unknown = true;
+        }
+        return unknown ? null : false;
+      };
+      hasUrl = anyPresent(urlNames);
+      hasToken = anyPresent(tokenNames);
+      hasRuntime = anyPresent(runtimeNames);
+    } else if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -3642,9 +3724,9 @@ export class SessionTransport {
         }
         return unknown ? null : false;
       };
-      hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
-      hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
-      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
+      hasUrl = await anyPresent(urlNames);
+      hasToken = await anyPresent(tokenNames);
+      hasRuntime = await anyPresent(runtimeNames);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
@@ -3657,8 +3739,7 @@ export class SessionTransport {
       { label: "OPENRIG_RUNTIME", present: hasRuntime },
     ];
     const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
-    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
-      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const unread = inspected ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
     const envNote = absent.length > 0 || unread.length > 0
       ? `seat-env UNKNOWN — ${[
         absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,
