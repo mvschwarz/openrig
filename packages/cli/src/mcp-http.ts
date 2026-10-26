@@ -192,7 +192,7 @@ const unavailable = (log: string): Refusal => ({
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string" && item !== "");
 
 /** One request's caller from Cloud's answer for its key. A refusal never falls back to the token file or the env's seat. */
-async function cloudCaller(cloud: CloudGrantOptions, url: URL, key: string, instance: string): Promise<{ seat: string; access: McpAccess } | Refusal> {
+async function cloudCaller(cloud: CloudGrantOptions, url: URL, key: string, instance: string): Promise<{ seat: string; access: McpAccess; principal: McpPrincipal } | Refusal> {
   let res: Response;
   try {
     res = await fetch(url, {
@@ -227,7 +227,10 @@ async function cloudCaller(cloud: CloudGrantOptions, url: URL, key: string, inst
     : grant.expires_at !== null && grant.expires_at !== undefined && !(Date.parse(grant.expires_at) > Date.now()) ? "expired" : null;
   if (problem === "expired") return unauthenticated("This credential has expired.");
   if (problem) return unavailable(`an active answer with an unusable ${problem}`);
-  return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false, customer: { objects } } };
+  // The principal the daemon records beside this caller's rows. A version that isn't a number is left out: the daemon would
+  // refuse the whole principal for it.
+  return { seat, access: { principal: principal.id, owner: false, rigs, roots, workspace: false, customer: { objects } },
+    principal: { source: "cloud", id: principal.id, grant: grant.id, ...(Number.isFinite(grant.version) ? { version: grant.version } : {}) } };
 }
 
 export type McpHttpOptions = {
@@ -295,7 +298,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   const NO_BEARER = "This server needs a bearer credential: Authorization: Bearer <token>.";
 
   /** The caller of one request on a Cloud-granted server: its key's grant, checked with Cloud, for a seat on this instance. */
-  const cloudRequestCaller = async (req: http.IncomingMessage): Promise<{ seat: string; access: McpAccess } | Refusal> => {
+  const cloudRequestCaller = async (req: http.IncomingMessage): Promise<{ seat: string; access: McpAccess; principal: McpPrincipal } | Refusal> => {
     const key = bearer(req);
     if (!key) return unauthenticated(NO_BEARER);
     if (!CLOUD_KEY.test(key)) return unauthenticated(NOT_VALID_HERE);
@@ -327,7 +330,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     if (cloud) {
       const caller = await cloudRequestCaller(req);
       if (!("seat" in caller)) { refuse(res, caller); return; }
-      ({ access, seat } = caller);
+      ({ access, seat, principal } = caller);
       authenticated = true;
     } else {
       let grants: McpGrant[] | null;

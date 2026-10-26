@@ -149,6 +149,22 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     expect(asked.length).toBe(before);
   });
 
+  it("records the Cloud grant's principal, with its grant id and version, on the rows its caller writes", async () => {
+    // This host's own daemon, provably: the id it minted (read from its database) is the id its /healthz answers with.
+    const identity = path.join(home, "identity.sqlite");
+    const idDb = createDb(identity);
+    idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+    idDb.prepare("INSERT INTO self_host_identity VALUES (1, ?)").run(INSTANCE);
+    idDb.close();
+    vi.stubEnv("OPENRIG_DB", identity);
+    closers.push(async () => { vi.unstubAllEnvs(); });
+    const asCustomer = await connect((await listen()).url);
+    const created = await asCustomer("rig_queue_create", { destination: "lead@team-a", body: "attributed to the customer" });
+    expect(created.isError).toBe(false);
+    expect(db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(created.structured.qitemId))
+      .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "cloud", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
+  });
+
   it("refuses every answer but active, a timeout, an unbound instance and a missing seat, with no fallback and nothing written", async () => {
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
