@@ -554,10 +554,30 @@ function draftComposerLine(lines: string[], verdict: PaneActivityClassification)
   return lines[last]!.trim();
 }
 
+const OPENCLAW_TURN_NOT_RECOVERED = "OpenClaw turn not recovered; inspect the pane before retrying";
+
+/** The pinned OpenClaw local error frame, not a quoted error in history or a recovery-state diagnosis.
+ * Multiple native branches emit the same refusal; observe it without touching native session state. */
+function currentOpenClawTurnRefusal(paneContent: string): string | null {
+  const lines = trimPaneLines(styledTextLines(paneContent).map(line => line.text).join("\n"));
+  if (!/^─{3,}$/.test(lines.at(-1) ?? "")) return null;
+  for (let at = lines.length - 1; at >= 0; at--) {
+    if (!/^(?:local|gateway)\s+.*\|/.test(lines[at]!)) continue;
+    if (lines[at]!.replace(/\s+/g, " ") !== "local ready | error"
+      || !lines[at + 1]?.startsWith("agent main | session ")) return null;
+    const error = lines.slice(Math.max(0, at - 12), at).join(" ");
+    const match = /(?:^| )run error:\s*Session\s+"[^"]+"\s+changed while\s+starting work\.\s+Retry\.$/.exec(error);
+    return match ? truncateEvidence(match[0]) : null;
+  }
+  return null;
+}
+
 /** A community harness's screen never proves it's idle: a quiet prompt can be an approval or a pause, so its idle
  *  reading becomes unknown. Positive work and attention are kept. `communityHarness` is the seat's recorded selection
  *  (`communityHarnessOf`); without it the classification is returned as it is. */
-export function communityHarnessPaneActivity(classification: PaneActivityClassification, communityHarness: string | null | undefined): PaneActivityClassification {
+export function communityHarnessPaneActivity(classification: PaneActivityClassification, communityHarness: string | null | undefined, paneContent = ""): PaneActivityClassification {
+  const refused = communityHarness === "openclaw" ? currentOpenClawTurnRefusal(paneContent) : null;
+  if (refused) return { state: "attention", reason: OPENCLAW_TURN_NOT_RECOVERED, evidence: refused };
   return communityHarness && classification.state === "agent_idle"
     ? { state: "unknown", reason: "community_harness_no_idle_signal", evidence: classification.evidence }
     : classification;
@@ -892,7 +912,7 @@ export async function probeSessionActivity(input: {
       postCompactTurnBoundary: input.postCompactTurnBoundary === true,
     };
     let classification = communityHarnessPaneActivity(classifyPaneActivity(paneContent ?? "", { ...classifyOptions,
-      composerSnapshot: snapshot ?? undefined, runtime }), input.communityHarness);
+      composerSnapshot: snapshot ?? undefined, runtime }), input.communityHarness, paneContent ?? "");
     // Claude renders its prompt suggestion faint, which the plain capture loses. When a Claude pane reads
     // as a draft, one capture with styling is classified on its own. Newer attention or work there is
     // kept. A faint suggestion counts only when it's the same composer text this capture read as a draft;
@@ -3066,7 +3086,9 @@ export class SessionTransport {
             sessionName,
             reason: "target_needs_input",
             activity: readiness,
-            error: `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
+            error: readiness.reason === OPENCLAW_TURN_NOT_RECOVERED
+              ? `Refused: OpenClaw refused the turn and OpenRig has not recovered or retried it. Inspect its native conversation with rig capture ${sessionName} before deliberately retrying. No text was sent.`
+              : `Refused: '${sessionName}' is at an interactive prompt (${readiness.reason}). A message must not select or approve it. To deliberately drive the prompt: rig send ${sessionName} "<text>" --dangerously-interact --reason "<why>".${clearAttentionHint(sessionName, readiness.reason)} No text was sent.`,
           };
         }
       } else if (readiness.state === "unknown") {
