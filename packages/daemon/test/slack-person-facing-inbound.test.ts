@@ -2,6 +2,7 @@
 // gateway home (a person fragment plus the participant file). Slack itself isn't involved.
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,9 @@ const SUPPORT = "support@test-rig", ANA = "ana@external";
 const QUESTION = "Ana: does the customer's invoice go out as PDF or Markdown?";
 const AGENT_CONTEXT = ["Added by OpenRig", "Shared channel:", "Sent by:", "Policy (readable context", "Never promise a delivery date",
   "Source: slack", "In reply to:", "Routed by openrig slack-inbound"];
+const FOOTER = "\n\n---\nSource: slack channel=CACME user=U1 ts=8.8\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.";
+// The digest a person's Slack message records of the body it was created with (queue-access.ts).
+const bodyTag = (body: string) => `slack-body:${createHash("sha256").update(body).digest("hex").slice(0, 16)}`;
 const closes: Array<() => void> = [];
 afterEach(() => { for (const close of closes.splice(0).reverse()) close(); });
 
@@ -148,12 +152,31 @@ describe("a person asked about a Slack message sees the question and the message
     const words = "My question ends with FILE TRANSFER FAILED: nothing";
     // 29 is exactly "FILE TRANSFER FAILED: nothing": OpenRig's heading, but inside the sentence, not a section of its own.
     for (const marker of ["slack-attachments:29", "slack-attachments:30", "slack-attachments:999", "slack-attachments:-4", "slack-attachments:x"]) {
+      const body = `${words}${FOOTER}`;
       const row = await f.repo.create({ sourceSession: "acme-customers@external", destinationSession: SUPPORT,
-        body: `${words}\n\n---\nSource: slack channel=CACME user=U1 ts=8.8\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
-        summary: "a message", tags: ["founder-slack", "inbound", marker], nudge: false });
+        body, summary: "a message", tags: ["founder-slack", "inbound", bodyTag(body), marker], nudge: false });
       f.repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
       expect((await f.alerts()).find((item) => item.qitemId === row.qitemId)?.body).toBe(words);
     }
+  });
+
+  it("a fitting marker on a paragraph that isn't OpenRig's block leaves it: the heading is checked", async () => {
+    const f = await fixture();
+    const words = "Hello\n\nmy second paragraph";
+    const body = `${words}${FOOTER}`;
+    const row = await f.repo.create({ sourceSession: "acme-customers@external", destinationSession: SUPPORT, body, summary: "a message",
+      tags: ["founder-slack", "inbound", bodyTag(body), `slack-attachments:${"my second paragraph".length}`], nudge: false });
+    f.repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
+    expect((await f.alerts()).find((item) => item.qitemId === row.qitemId)?.body).toBe(words);
+  });
+
+  it("a row recorded without the body digest (before this change) is shown whole: nothing is inferred", async () => {
+    const f = await fixture();
+    const body = `Where is my invoice?${FOOTER}`;
+    const row = await f.repo.create({ sourceSession: "acme-customers@external", destinationSession: SUPPORT, body, summary: "a message",
+      tags: ["founder-slack", "inbound"], nudge: false });
+    f.repo.update({ qitemId: row.qitemId, actorSession: SUPPORT, state: "blocked", blockedOn: ANA, transitionNote: "asking Ana" });
+    expect((await f.alerts()).find((item) => item.qitemId === row.qitemId)?.body).toBe(body);
   });
 
   it("control: an agent's own ask is shown as written, even when it quotes a routing footer", async () => {
@@ -164,5 +187,37 @@ describe("a person asked about a Slack message sees the question and the message
     const alert = (await f.alerts()).find((item) => item.qitemId === ask.qitemId);
     expect(alert).toBeDefined();
     expect(alert!.body).toBe(body);
+  });
+});
+
+// A handoff can keep the origin tags while it replaces or extends the body: then the body isn't the one OpenRig wrote, and
+// it's shown whole (the agent context may show; no authored words are lost). One that keeps the body is projected as before.
+describe("after a handoff, only the body OpenRig wrote is projected", () => {
+  for (const mode of ["replace", "append"] as const) {
+    it(`a ${mode}d body keeps every authored word`, async () => {
+      const block = "FILE TRANSFER FAILED: sample.txt — unavailable";
+      const words = `The customer quoted this:\n\n${block}`;
+      const f = await fixture({ stored: [], failed: [{ name: "sample.txt", error: "unavailable" }] });
+      const original = await f.askAna("UCUSTOMER", "CACME", `90.${mode.length}`, words, [{ id: "F90", name: "sample.txt" }]);
+      expect(original.alert.body).toBe(words);
+      const newBody = mode === "replace" ? words : `${original.row.body}\n\nThe customer adds: please send PDF, not Markdown.`;
+      const handed = await f.repo.handoff({ qitemId: original.row.qitemId, fromSession: SUPPORT, toSession: "triage@test-rig", body: newBody, summary: QUESTION, nudge: false });
+      expect(handed.created.tags).toEqual(original.row.tags);
+      f.repo.update({ qitemId: handed.created.qitemId, actorSession: "triage@test-rig", state: "blocked", blockedOn: ANA, transitionNote: "follow up on customer" });
+      const alert = (await f.alerts()).find((item) => item.qitemId === handed.created.qitemId)!;
+      expect(alert.body).toBe(newBody);
+      const post = buildOutboundMessage(alert, { sourceLabel: "test" });
+      if (mode === "replace") expect(post.text).toContain(block);
+      else expect(post.text).toContain("The customer adds: please send PDF, not Markdown.");
+    });
+  }
+
+  it("a handoff that keeps the body still leaves out OpenRig's context", async () => {
+    const f = await fixture();
+    const original = await f.askAna("UCUSTOMER", "CACME", "91.1", "Where is my invoice? I need it today.");
+    const handed = await f.repo.handoff({ qitemId: original.row.qitemId, fromSession: SUPPORT, toSession: "triage@test-rig", summary: QUESTION, nudge: false });
+    f.repo.update({ qitemId: handed.created.qitemId, actorSession: "triage@test-rig", state: "blocked", blockedOn: ANA, transitionNote: "follow up on customer" });
+    const alert = (await f.alerts()).find((item) => item.qitemId === handed.created.qitemId)!;
+    expect(alert.body).toBe("Where is my invoice? I need it today.");
   });
 });

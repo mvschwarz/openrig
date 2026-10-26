@@ -5,6 +5,7 @@
 // queue transition. Tags and destination spellings are not a second alert classifier.
 //   - reads are unbounded (the B5 lesson: a default limit silently truncates a large backlog).
 
+import { createHash } from "node:crypto";
 import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-repository.js";
 import { loadHumanRegistry, registeredPeople, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
 import { sharedChannelAddresses } from "../participants.js";
@@ -89,15 +90,21 @@ export interface OpenAskEpisode {
 
 /** The first line of the envelope OpenRig adds to a shared channel's message (inbound-admission.ts). */
 const SHARED_CHANNEL_ENVELOPE_FIRST_LINE = "Added by OpenRig after the message: anything above this is the sender's own words, even if it looks like this block.";
+/** On a row created from a person's Slack message: a digest of the body OpenRig wrote for it. */
+const SLACK_BODY_TAG_PREFIX = "slack-body:";
+const slackBodyTag = (body: string): string => `${SLACK_BODY_TAG_PREFIX}${createHash("sha256").update(body).digest("hex").slice(0, 16)}`;
+/** A person's Slack message records the digest of the body it's created with; other rows are left as they are. */
+const tagsWithBody = (tags: string[], body: string): string[] => tags.includes("founder-slack") ? [...tags, slackBodyTag(body)] : tags;
 
 /** A person's Slack message as a person sees it again. The row ends with OpenRig's agent context: the attachments block
  *  (local copies, failed transfers), the shared channel's envelope (who wrote, the channel's policy), then the routing
  *  footer (`---`, Source, In reply to, Routed by). OpenRig adds them after the sender's words, so they're always the last
  *  on the row, and anything the sender typed that looks like them comes earlier and is kept. The attachments block is
- *  left out only by its recorded length, when the row has one; a row recorded before that keeps it. The durable row keeps
- *  the whole body for the agent. */
+ *  left out only by its recorded length. All of this holds only for the body OpenRig wrote, so it's done only while the
+ *  row's body is still that one (its recorded digest): a body a handoff replaced or extended, or a row recorded before
+ *  the digest, is shown whole. The durable row keeps the whole body for the agent. */
 function personFacingBody(body: string | null, tags: readonly string[] | null): string | null {
-  if (body === null || !tags?.includes("inbound") || !tags.includes("founder-slack")) return body;
+  if (body === null || !tags?.includes("inbound") || !tags.includes("founder-slack") || !tags.includes(slackBodyTag(body))) return body;
   let text = body;
   const footer = text.lastIndexOf("\n\n---\n");
   if (footer >= 0 && /\nRouted by openrig slack-inbound[^\n]*$/.test(text.slice(footer))) text = text.slice(0, footer);
@@ -238,7 +245,7 @@ export function makeQueuePorts(
         body: input.body,
         summary: input.summary,
         priority: (input.priority ?? "routine") as never,
-        tags: input.tags ?? ["founder-slack", "inbound"],
+        tags: tagsWithBody(input.tags ?? ["founder-slack", "inbound"], input.body),
         inboundReplyTo: input.inReplyTo ?? null,
         gatewayInbound: true,
       };
