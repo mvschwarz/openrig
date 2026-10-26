@@ -1025,6 +1025,30 @@ describe("MCP Server", () => {
       expect(await tagsSent(customer, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
     });
 
+    it("rig_queue_create: a Cloud customer hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {
+      const created = async (access: McpAccess, destination: string, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination, body: "Do X", ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        return { posted: postFn.mock.calls.length, refused: (result.structuredContent as { code?: string } | undefined)?.code === "out_of_scope" };
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const customer: McpAccess = { ...work, principal: "cus_A1", customer: { objects: { queue: ["create", "show", "list"] } } };
+      for (const destination of ["cus-a1-caller@team", "cus-b2-caller@team"]) {
+        expect(await created(customer, destination)).toEqual({ posted: 0, refused: true });
+        expect(await created(customer, destination, "qitem-0")).toEqual({ posted: 0, refused: true });
+        expect(await created(work, destination)).toEqual({ posted: 1, refused: false });
+      }
+      expect(await created(customer, "lead@team")).toEqual({ posted: 1, refused: false });
+    });
+
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {
       const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
       await setup({ post: postFn });
