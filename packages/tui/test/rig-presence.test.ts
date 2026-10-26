@@ -71,7 +71,7 @@ describe("rig presence survives clipping, selection and lifecycle text", () => {
     }) as typeof fetch });
     const view = createViewState({ instanceId: "t", getSnapshot: demoSnapshot });
     const snap = await hydrateSnapshot(client, new Map(), null, null, null, view.get());
-    expect(snap.hosts[0]!.rigs.map(r => r.hasLiveAgents)).toEqual([true, false, null]);
+    expect(snap.hosts[0]!.rigs.map(r => [r.name, r.hasLiveAgents])).toEqual([["live", true], ["older-daemon", null], ["stopped", false]]);
     expect(seen.filter(path => path === "/api/rigs/summary")).toHaveLength(1);
     expect(seen.filter(path => /^\/api\/rigs\/[^/]+\//.test(path))).toEqual([]);
   });
