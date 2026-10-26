@@ -30,7 +30,7 @@ import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } 
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
-import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { TmuxAdapter, TmuxResult } from "../adapters/tmux.js";
 import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_OPTION, withWindowPin, type PinRelease } from "../terminal/window-pin.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
@@ -1886,7 +1886,7 @@ export interface CaptureResult {
   promptPane?: { width: number; height: number; hint: string };
   /** When the caller asked to read at a readable size: the size it asked for and what letting the window go did, or
    *  why the window wasn't resized. */
-  readable?: { resized: true; width: number; height: number; release: PinRelease } | { resized: false; reason: string };
+  readable?: { resized: true; width: number; height: number; release: PinRelease; sizeBack?: string } | { resized: false; reason: string };
 }
 
 export interface BroadcastResult {
@@ -3921,7 +3921,11 @@ export class SessionTransport {
     const started = this.now().getTime();
     const deadline = started + budget.remainingMs;
     const asItIs = async (reason: string) => ({ value: await read(), readable: { resized: false as const, reason } });
+    const spent = `this capture's ${CAPTURE_READABLE_BUDGET_MS / 1000} s for readable reads ran out`;
+    const late = () => deadline - this.now().getTime() < READABLE_MIN_REMAINING_MS;
     try {
+      // Spent: no readable setup at all (no queue wait or sizing reads), so a long fan-out still returns in time.
+      if (late()) return await asItIs(spent);
       const window = (await this.tmuxAdapter.readWindow(sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.id;
       if (!window) return await asItIs("the window's sizing couldn't be read, so it couldn't be given back");
       const pin = await withWindowPin(window, async () => {
@@ -3938,17 +3942,21 @@ export class SessionTransport {
         const pane = panes[0]!;
         const bigEnough = pane.width >= size.width && pane.height >= size.height;
         if (bigEnough && !leftover) return `the pane is already ${pane.width}x${pane.height}`;
-        if (!bigEnough && deadline - this.now().getTime() < READABLE_MIN_REMAINING_MS) {
-          return `this capture's ${CAPTURE_READABLE_BUDGET_MS / 1000} s for readable reads ran out`;
-        }
+        if (!bigEnough && late()) return spent;
         const holder = newPinHolder();
         if (!(await recordPin(this.tmuxAdapter, sizing, holder))) return "its restore record couldn't be written, so it wasn't resized";
+        // The record can settle late: past the deadline, let go without resizing.
+        if (!bigEnough && late()) return { holder, pane, resized: null, spent: true };
         const resized = bigEnough ? null
           : await this.tmuxAdapter.resizeWindow(window, Math.max(size.width, pane.width), Math.max(size.height, pane.height));
-        return { holder, pane, resized };
+        return { holder, pane, resized, spent: false };
       });
       if (typeof pin === "string") return await asItIs(pin);
       const { holder, pane, resized } = pin;
+      if (pin.spent) {
+        await releasePin(this.tmuxAdapter, window, holder);
+        return await asItIs(spent);
+      }
       let readable: NonNullable<CaptureResult["readable"]> | undefined;
       let value: T;
       try {
@@ -3966,10 +3974,15 @@ export class SessionTransport {
       } finally {
         // As the last holder: back to its size first (that pins it again), then its own sizing, so a window with
         // clients follows them again.
+        let sizeBack: TmuxResult | null = null;
         const release = await releasePin(this.tmuxAdapter, window, holder, resized ? async () => {
-          await this.tmuxAdapter.resizeWindow(window, pane.width, pane.height);
+          sizeBack = await this.tmuxAdapter.resizeWindow(window, pane.width, pane.height);
         } : undefined);
-        if (readable?.resized) readable.release = release;
+        if (readable?.resized) {
+          readable.release = release;
+          const back = sizeBack as TmuxResult | null;
+          if (back && !back.ok) readable.sizeBack = `putting its size back failed: ${back.message}`;
+        }
         else if (!resized && release === "given-back" && readable) readable.reason += "; a pin left on its window was given back";
       }
       return { value, readable: readable! };

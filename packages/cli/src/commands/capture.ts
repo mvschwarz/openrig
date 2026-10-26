@@ -119,9 +119,13 @@ function renderCapture(data: Record<string, unknown>): void {
     const pane = r["promptPane"] as { hint?: string } | undefined;
     if (pane && typeof pane.hint === "string") console.error(`[rig capture: ${r["sessionName"]}: ${pane.hint}]`);
     // --readable: the size it was read at, or why the window was left as it was.
-    const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string; release?: string } | undefined;
-    if (readable?.resized === true) console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; ${readableRelease(readable.release)}]`);
-    else if (readable?.resized === false) console.error(`[rig capture: ${r["sessionName"]}: not resized for reading: ${readable.reason}]`);
+    const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string; release?: string; sizeBack?: string } | undefined;
+    if (readable?.resized === true) {
+      const after = readable.release === "given-back" && readable.sizeBack
+        ? `its own window-size was given back, but ${readable.sizeBack}`
+        : readableRelease(readable.release);
+      console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; ${after}]`);
+    } else if (readable?.resized === false) console.error(`[rig capture: ${r["sessionName"]}: not resized for reading: ${readable.reason}]`);
   };
 
   // Multi-target result

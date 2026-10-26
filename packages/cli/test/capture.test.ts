@@ -59,7 +59,8 @@ describe("Capture CLI", () => {
             // --readable: the daemon says the size it read at, or why it left the window as it was.
             const readable = parsed.readable ? (parsed.session === "pinned@my-rig"
               ? { resized: false, reason: "the window's size is pinned (its window-size is manual)" }
-              : { resized: true, ...parsed.readable, release: parsed.session === "kept@my-rig" ? "kept-by-another-holder" : "given-back" }) : undefined;
+              : { resized: true, ...parsed.readable, release: parsed.session === "kept@my-rig" ? "kept-by-another-holder" : "given-back",
+                ...(parsed.session === "sizeback@my-rig" ? { sizeBack: "putting its size back failed: busy" } : {}) }) : undefined;
             res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20, ...(readable ? { readable } : {}) }));
           } else if (parsed.rig) {
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -179,6 +180,11 @@ describe("Capture CLI", () => {
     it("says so when a web terminal took the window over meanwhile, instead of claiming a give-back", async () => {
       const { err } = await run(["kept@my-rig", "--readable"]);
       expect(err).toEqual(["[rig capture: kept@my-rig: read at 120x40; a web terminal opened on it meanwhile and holds its window now; it gives the window back when it closes]"]);
+    });
+
+    it("says when the size couldn't be put back, without claiming it was", async () => {
+      const { err } = await run(["sizeback@my-rig", "--readable"]);
+      expect(err).toEqual(["[rig capture: sizeback@my-rig: read at 120x40; its own window-size was given back, but putting its size back failed: busy]"]);
     });
 
     it("a readable request waits out the daemon's readable budget; other captures keep the usual wait", async () => {

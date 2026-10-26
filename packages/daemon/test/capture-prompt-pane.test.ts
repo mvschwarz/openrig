@@ -99,7 +99,8 @@ describe("rig capture --readable reads a small seat, then gives its window back"
 
   /** One fake window `@2`, the seat's current window: its own window-size and the pin record. Holder tokens read as H. */
   function fakeTmux(opts: { panes?: Array<{ width: number; height: number }>; own?: string | null | undefined; recorded?: string;
-    read?: () => Promise<string | null>; screen?: () => string; recordWrite?: "fails" | "throws"; beforePanes?: () => Promise<void> } = {}) {
+    read?: () => Promise<string | null>; screen?: () => string; recordWrite?: "fails" | "throws"; beforePanes?: () => Promise<void>;
+    onRecord?: () => void; sizeBackFails?: boolean } = {}) {
     const calls: string[] = [];
     const window = { own: "own" in opts ? opts.own : null as string | null | undefined, recorded: opts.recorded ?? "" };
     const norm = (value: string) => value.replace(/\b\d+\.\d+\b/g, "H");
@@ -115,10 +116,14 @@ describe("rig capture --readable reads a small seat, then gives its window back"
         if (option !== "window-size" && opts.recordWrite === "throws") throw new Error("tmux went away");
         if (option !== "window-size" && opts.recordWrite === "fails") return { ok: false, code: "unavailable", message: "busy" };
         calls.push(norm(`set ${target} ${option}=${value}`));
+        if (option !== "window-size") opts.onRecord?.();
         if (option === "window-size") window.own = value; else window.recorded = value;
         return { ok: true };
       }),
-      resizeWindow: vi.fn(async (target: string, w: number, h: number) => { calls.push(`resize ${target} ${w}x${h}`); window.own = "manual"; return { ok: true }; }),
+      resizeWindow: vi.fn(async (target: string, w: number, h: number) => {
+        if (opts.sizeBackFails && w < 120) return { ok: false, code: "unavailable", message: "busy" };
+        calls.push(`resize ${target} ${w}x${h}`); window.own = "manual"; return { ok: true };
+      }),
       restoreWindowOption: vi.fn(async (target: string, option: string, value: string | null) => {
         calls.push(`restore ${target} ${option}=${value}`);
         if (option === "window-size") window.own = value; else window.recorded = value ?? "";
@@ -204,6 +209,32 @@ describe("rig capture --readable reads a small seat, then gives its window back"
     const second = await transport.capture("review@rig", { readable: { width: 120, height: 40 }, readableBudget });
     expect(second.readable).toEqual({ resized: false, reason: "this capture's 8 s for readable reads ran out" });
     expect(tmux.resizeWindow).toHaveBeenCalledTimes(2); // the first seat's resize and give-back only
+    expect(window).toEqual({ own: null, recorded: "" });
+  });
+
+  it("once the shared budget is spent, a seat takes no readable setup: no sizing reads, queue wait or resize", async () => {
+    const { tmux } = fakeTmux();
+    const result = await (await transportOver(tmux)).capture("review@rig", { readable: { width: 120, height: 40 }, readableBudget: { remainingMs: 0 } });
+    expect(result.readable).toEqual({ resized: false, reason: "this capture's 8 s for readable reads ran out" });
+    for (const call of [tmux.readWindow, tmux.getWindowLocalOption, tmux.listPanes, tmux.setWindowOption, tmux.resizeWindow]) {
+      expect(call).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a record that lands after the deadline: no resize, and the pin is let go", async () => {
+    const clock = fakeClock();
+    const { tmux, window } = fakeTmux({ onRecord: () => { void clock.sleep(900); } }); // the record write takes 0.9 s
+    const result = await (await transportOver(tmux, clock.sleep, clock.now))
+      .capture("review@rig", { readable: { width: 120, height: 40 }, readableBudget: { remainingMs: 1_000 } });
+    expect(result.readable).toEqual({ resized: false, reason: "this capture's 8 s for readable reads ran out" });
+    expect(tmux.resizeWindow).not.toHaveBeenCalled();
+    expect(window).toEqual({ own: null, recorded: "" });
+  });
+
+  it("a size that couldn't be put back is said, while the window's own sizing is still given back", async () => {
+    const { tmux, window } = fakeTmux({ sizeBackFails: true });
+    const result = await (await transportOver(tmux)).capture("review@rig", { readable: { width: 120, height: 40 } });
+    expect(result.readable).toEqual({ resized: true, width: 120, height: 40, release: "given-back", sizeBack: "putting its size back failed: busy" });
     expect(window).toEqual({ own: null, recorded: "" });
   });
 
