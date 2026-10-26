@@ -22,7 +22,8 @@ import { addHumanFragment, loadHumanRegistry } from "../../daemon/src/domain/gat
 import { makeQueuePorts } from "../../daemon/src/domain/gateway/slack/queue-access.js";
 import { buildOutboundMessage } from "../../daemon/src/domain/gateway/slack/message.js";
 import { createHash } from "node:crypto";
-import { addGrant, readCloudGrantHeader, startMcpHttpServer } from "../src/mcp-http.js";
+import { addGrant, McpHttpConfigError, readCloudGrantHeader, startMcpHttpServer } from "../src/mcp-http.js";
+import { mcpCommand } from "../src/commands/mcp.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
 const SCHEMA = "openrig.cloud.grant/v1";
@@ -524,6 +525,113 @@ describe("rig mcp serve --http --cloud-grants on the daemon's routes", () => {
     const denied = await mine("deny me");
     expect((await asLead(`${denied}/update`, { state: "done", closureReason: "denied", closureTarget: "outside what this team does" })).status).toBe(200);
     expect((await asCustomer("rig_queue_show", { qitemId: denied })).structured.item).toMatchObject({ closureReason: "denied", closureTarget: "outside what this team does" });
+  });
+
+  /** One request with exactly these headers (a proxy's own Host included), read whole. */
+  function raw(url: string, method: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+    return new Promise((resolve, reject) => {
+      const target = new URL(url);
+      const body = method === "POST" ? JSON.stringify(INITIALIZE) : undefined;
+      const req = http.request({ host: target.hostname, port: target.port, path: target.pathname, method,
+        headers: { ...(body ? { "Content-Type": "application/json", Accept: "application/json, text/event-stream" } : {}), ...headers } }, (res) => {
+        let text = "";
+        res.on("data", (chunk) => { text += chunk; });
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+  }
+
+  it("with OAuth discovery set, serves only the configured resource's metadata, without a credential or Cloud, and challenges a missing credential apart from a refused one", async () => {
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const resource = "https://mcp.example/customer/mcp";
+      const issuer = "https://account.example";
+      const metadataUrl = "https://mcp.example/.well-known/oauth-protected-resource/customer/mcp";
+      const metadataPath = "/.well-known/oauth-protected-resource/customer/mcp";
+      // Without it: no metadata, and the challenge is the realm alone.
+      const plain = await listen();
+      const plainRoot = plain.url.replace(/\/mcp$/, "");
+      expect((await raw(`${plainRoot}${metadataPath}`, "GET")).status).toBe(404);
+      expect((await raw(plain.url, "POST")).headers["www-authenticate"]).toBe('Bearer realm="openrig"');
+
+      const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
+        cloudGrants: { url: cloudUrl, timeoutMs: 1_000 }, oauth: { resource, issuer } });
+      closers.push(() => served.close());
+      const root = served.url.replace(/\/mcp$/, "");
+      const before = asked.length;
+      // The configured values exactly, whatever Host the proxy sends, and Cloud isn't asked.
+      for (const headers of [{}, { Host: "evil.example" }]) {
+        const metadata = await raw(`${root}${metadataPath}`, "GET", headers);
+        expect(metadata.status).toBe(200);
+        expect(JSON.parse(metadata.body)).toEqual({ resource, authorization_servers: [issuer], scopes_supported: ["openrig.work"], bearer_methods_supported: ["header"] });
+      }
+      // Only that path: no root document, no local /mcp alias, and GET only.
+      for (const [pathname, method] of [["/.well-known/oauth-protected-resource", "GET"], ["/.well-known/oauth-protected-resource/mcp", "GET"], [metadataPath, "POST"]] as const) {
+        expect((await raw(`${root}${pathname}`, method)).status, `${method} ${pathname}`).toBe(404);
+      }
+      expect(asked.length).toBe(before);
+
+      // No credential: pointed at the metadata, with no error. A refused one: also invalid_token. Whatever the Host.
+      const missing = await raw(served.url, "POST", { Host: "evil.example" });
+      expect([missing.status, missing.headers["www-authenticate"]]).toEqual([401, `Bearer realm="openrig", resource_metadata="${metadataUrl}"`]);
+      const refused = `Bearer realm="openrig", resource_metadata="${metadataUrl}", error="invalid_token"`;
+      expect((await raw(served.url, "POST", { Authorization: "Bearer orm_not-a-customer-key" })).headers["www-authenticate"]).toBe(refused);
+      for (const status of ["unknown", "revoked", "expired", "wrong_instance"]) {
+        answer = () => [401, { schema: SCHEMA, status }];
+        const res = await raw(served.url, "POST", { Authorization: `Bearer ${KEY}` });
+        expect([res.status, res.headers["www-authenticate"]], status).toEqual([401, refused]);
+      }
+      // Cloud or the seat unavailable stays a 503 with no challenge.
+      answer = () => [503, { schema: SCHEMA, status: "unavailable" }];
+      const outage = await raw(served.url, "POST", { Authorization: `Bearer ${KEY}` });
+      expect([outage.status, outage.headers["www-authenticate"]]).toEqual([503, undefined]);
+      answer = () => [200, active({ seat: "cus-nobody01-caller@team-a" })];
+      const noSeat = await raw(served.url, "POST", { Authorization: `Bearer ${KEY}` });
+      expect([noSeat.status, noSeat.headers["www-authenticate"]]).toEqual([503, undefined]);
+      // A valid key is served as before.
+      answer = () => [200, active()];
+      expect((await raw(served.url, "POST", { Authorization: `Bearer ${KEY}` })).status).toBe(200);
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  it("refuses OAuth discovery at startup without Cloud grants, or for a resource or issuer of any other shape", async () => {
+    const start = (oauth: { resource: string; issuer: string }, cloud = true) => startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0,
+      tokenFile: path.join(home, "mcp-http-tokens.json"), ...(cloud ? { cloudGrants: { url: cloudUrl } } : {}), oauth });
+    const issuer = "https://account.example";
+    await expect(start({ resource: "https://mcp.example/customer/mcp", issuer }, false)).rejects.toThrow(McpHttpConfigError);
+    for (const resource of ["http://mcp.example/customer/mcp", "https://mcp.example/customer/mcp?x", "https://mcp.example/customer/mcp#y",
+      "https://u@mcp.example/customer/mcp", "https://mcp.example/customer", "https://mcp.example/customer/mcp/", "https://MCP.example/customer/mcp",
+      "https://mcp.example:443/customer/mcp", "not a url"]) {
+      await expect(start({ resource, issuer }), resource).rejects.toThrow(McpHttpConfigError);
+    }
+    for (const bad of ["http://account.example", "https://account.example?x", "https://account.example#y", "https://u@account.example", "not a url"]) {
+      await expect(start({ resource: "https://mcp.example/customer/mcp", issuer: bad }), bad).rejects.toThrow(McpHttpConfigError);
+    }
+  });
+
+  it("rig mcp serve takes --oauth-resource and --oauth-issuer together, and only with --http --cloud-grants", async () => {
+    const lines: string[] = [];
+    const quiet = vi.spyOn(console, "error").mockImplementation((line) => { lines.push(String(line)); });
+    const exitCode = process.exitCode;
+    try {
+      for (const args of [
+        ["--http", "--cloud-grants", cloudUrl, "--oauth-resource", "https://mcp.example/customer/mcp"],
+        ["--http", "--cloud-grants", cloudUrl, "--oauth-issuer", "https://account.example"],
+        ["--http", "--oauth-resource", "https://mcp.example/customer/mcp", "--oauth-issuer", "https://account.example"],
+      ]) {
+        process.exitCode = undefined;
+        await mcpCommand().parseAsync(["serve", "--port", "1", ...args], { from: "user" });
+        expect(process.exitCode, args.join(" ")).toBe(1);
+      }
+      expect(lines.filter((line) => line.includes("--oauth-resource and --oauth-issuer"))).toHaveLength(3);
+    } finally {
+      process.exitCode = exitCode;
+      quiet.mockRestore();
+    }
   });
 
   it("reads the grant request's header from a one-line secret file, and refuses one that would replace the request's own", () => {
