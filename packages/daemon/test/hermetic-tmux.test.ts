@@ -148,7 +148,7 @@ setInterval(() => {}, 1000);
     }
   });
 
-  it("keeps failed cleanup failed on a second call while its captured child lives", async () => {
+  it.each([false, true])("settles the timeout fixture even if readiness fails (%s)", async (failReadiness) => {
     const { execFile } = await import("node:child_process");
     const { writeFileSync, readFileSync } = await import("node:fs");
     const { promisify } = await import("node:util");
@@ -164,31 +164,68 @@ if (process.argv[2] === "child") {
   process.once("SIGHUP", () => writeFileSync(${JSON.stringify(stopped)}, "still alive"));
   writeFileSync(${JSON.stringify(ready)}, String(process.pid));
 } else {
-  const child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: "ignore" });
-  process.once("SIGHUP", () => { child.kill("SIGHUP"); process.exit(0); });
+  let child;
+  process.once("SIGHUP", () => child?.kill("SIGHUP"));
+  process.once("SIGTERM", () => { if (child) child.kill("SIGTERM"); else process.exit(0); });
+  child = require("node:child_process").spawn(process.execPath, [__filename, "child"], { stdio: "ignore" });
+  child.once("exit", () => process.exit(0));
 }
 setInterval(() => {}, 1000);
 `);
-    await run("tmux", ["-S", s.tmuxSocketPath, "new-session", "-d", "-s", "writer",
-      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(writer)}`], {
-      env: s.env as NodeJS.ProcessEnv,
+    const at = (args: string[]) => run("tmux", ["-S", s.tmuxSocketPath, ...args], {
+      env: s.env as NodeJS.ProcessEnv, timeout: 2_000,
     });
-    await vi.waitFor(() => expect(existsSync(ready)).toBe(true), { timeout: 2_000, interval: 10 });
+    let panePid: number | undefined, serverPid: number | undefined;
+    const exercise = async () => {
+      try {
+        const started = await at(["new-session", "-d", "-P", "-F", "#{pid} #{pane_pid}", "-s", "writer",
+          process.execPath, writer]);
+        [serverPid, panePid] = started.stdout.trim().split(/\s+/).map(Number);
+        await vi.waitFor(() => {
+          expect(existsSync(ready)).toBe(true);
+          if (failReadiness) throw new Error("forced readiness failure");
+        }, { timeout: 2_000, interval: 10 });
+        const childPid = Number(readFileSync(ready, "utf8"));
+        expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
+        expect(existsSync(stopped)).toBe(true);
+        expect(process.kill(childPid, 0)).toBe(true);
+        expect(existsSync(s.root)).toBe(true);
+        expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
+        expect(existsSync(s.home)).toBe(true);
+      } finally {
+        // A partially started session is still owned, even before the ready-file PID is read.
+        if (panePid === undefined && existsSync(s.tmuxSocketPath)) {
+          [serverPid, panePid] = (await at(["display-message", "-p", "-t", "writer", "#{pid} #{pane_pid}"]))
+            .stdout.trim().split(/\s+/).map(Number);
+        }
+        if (panePid !== undefined) {
+          if (!Number.isInteger(panePid) || panePid <= 1) throw new Error("Fixture pane identity unavailable");
+          try { process.kill(panePid, "SIGTERM"); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+          // The fixture parent exits only after its child, including on partial startup.
+          await vi.waitFor(() => expect(() => process.kill(panePid!, 0)).toThrow(), { timeout: 2_000, interval: 10 });
+        }
+        // Normal teardown may remove the socket; successful startup may already have latched failure.
+        if (existsSync(s.tmuxSocketPath)) {
+          try { await at(["kill-server"]); }
+          catch (error) {
+            if ((error as { code?: unknown }).code !== 1 || !String(error).includes("no server running")) throw error;
+          }
+        }
+        if (serverPid !== undefined) {
+          if (!Number.isInteger(serverPid) || serverPid <= 1) throw new Error("Fixture server identity unavailable");
+          await vi.waitFor(() => expect(() => process.kill(serverPid!, 0)).toThrow(), { timeout: 2_000, interval: 10 });
+        }
+        rmSync(s.root, { recursive: true, force: true });
+      }
+    };
+    if (failReadiness) await expect(exercise()).rejects.toThrow("forced readiness failure");
+    else await exercise();
+    expect(existsSync(s.root)).toBe(false);
+    expect(existsSync(s.tmuxSocketPath)).toBe(false);
+    if (panePid !== undefined) expect(() => process.kill(panePid!, 0)).toThrow();
     const childPid = Number(readFileSync(ready, "utf8"));
-    try {
-      expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
-      expect(existsSync(stopped)).toBe(true);
-      expect(process.kill(childPid, 0)).toBe(true);
-      expect(existsSync(s.root)).toBe(true);
-      expect(() => s.cleanup()).toThrow("Private scenario processes did not exit");
-      expect(existsSync(s.home)).toBe(true);
-    } finally {
-      try { process.kill(childPid, "SIGTERM"); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
-      await vi.waitFor(() => expect(() => process.kill(childPid, 0)).toThrow(), { timeout: 2_000, interval: 10 });
-      // This fixture deliberately makes cleanup fail; remove only after its child exits.
-      rmSync(s.root, { recursive: true, force: true });
-    }
+    expect(() => process.kill(childPid, 0)).toThrow();
   });
 
   it("cleanup terminates repeated scaffold-owned tmux servers without touching an unrelated server", async () => {
