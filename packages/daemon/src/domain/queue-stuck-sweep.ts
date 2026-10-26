@@ -48,6 +48,13 @@ const RECOVERY_SEAT_RULES = [
   "the row's creator",
 ] as const;
 
+/** How an unroutable destination's finding names the rule that chose its recipient, in the order tried. */
+const NO_WAKE_ROUTE_RULES = [
+  "the operator seat (workspace.operator_seat_name), a person",
+  "the row's creator",
+  "the operator agent (agents.operator_session)",
+] as const;
+
 // S01 ladder marker vocabulary (the seam contract). S01 writes these transition-note
 // prefixes; the sweep derives "live ladder" from the latest marker. An attempt/rung is
 // LIVE, an exhausted marker hands the row back, and a later attempt starts a live cycle
@@ -750,6 +757,25 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // Name the rule that chose it, so whoever receives the finding knows why, and which setting to change.
       c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}, ${RECOVERY_SEAT_RULES[chosen]}`;
       c.route = floor;
+    }
+
+    // A destination its own wake found unroutable (no terminal, not a person: a hosted member, or a mistyped
+    // address) can't hear its finding either. Only a person can make a hosted member check its work, so the
+    // person goes first: the operator seat when it's a person's address, else the row's creator, else the
+    // operator agent.
+    for (const c of candidates) {
+      if (c.route !== c.row.destinationSession || !c.row.lastNudgeResult?.startsWith("unroutable:")) continue;
+      const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
+      const person = operatorSeat && deps.queueRepo.classifyDestinationOf(operatorSeat).class === "gateway-routable" ? operatorSeat : null;
+      const choices = [person, c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat));
+      c.why += `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`;
+      if (chosen < 0) {
+        c.why += `. No person, creator or operator agent is available, so this finding stays addressed to it`;
+        continue;
+      }
+      c.why += `. This finding goes to ${choices[chosen]}, ${NO_WAKE_ROUTE_RULES[chosen]}`;
+      c.route = choices[chosen]!;
     }
 
     // Route: idempotent per (row, kind). An existing open finding refreshes its age; a

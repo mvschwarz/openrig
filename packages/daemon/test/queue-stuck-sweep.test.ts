@@ -363,7 +363,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     ["operator-admin@kernel", "operator-admin@kernel"],
     ["  operator-admin@kernel  ", "operator-admin@kernel"],
     ["", null],
-    ["human-founder@external", null],
+    ["human-person@external", null],
     ["human@kernel", null],
     ["not a session", null],
   ])("the operator agent setting %j resolves to %j", async (value, expected) => {
@@ -407,6 +407,36 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const [finding] = await findingsFor(row.qitemId);
     expect(finding!.destinationSession).toBe("worker@r");
     expect(finding!.body).toContain("no live recovery seat is available");
+  });
+
+  // A hosted member (no terminal, not a person) can't be woken, so its finding addressed to it would reach nobody.
+  async function mkUnroutableRow(): Promise<QueueItem> {
+    const row = await mkRow("grok@r");
+    const recorded = repo.classifyDestinationOf("grok@r");
+    expect(recorded.class).toBe("unroutable");
+    if (recorded.class === "unroutable") setNudgeResult(row.qitemId, recorded.teaching, new Date());
+    return row;
+  }
+
+  it("work for an address with no wake route (a hosted member) is told to the person, and says why", async () => {
+    const row = await mkUnroutableRow();
+    await runSweep({ resolveOperatorSeat: () => "person@external", resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("person@external");
+    expect(finding!.body).toContain("grok@r has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address. This finding goes to person@external, the operator seat (workspace.operator_seat_name), a person");
+
+    // Once the member checks in and claims it, the sweep closes the finding itself.
+    repo.claim({ qitemId: row.qitemId, destinationSession: "grok@r" });
+    await runSweep({ resolveOperatorSeat: () => "person@external" });
+    expect((await findingsFor(row.qitemId))[0]!.state).toBe("done");
+  });
+
+  it("with no person as the operator seat, the finding for an address with no wake route goes to the row's creator", async () => {
+    const row = await mkUnroutableRow();
+    await runSweep({ resolveOperatorSeat: () => "approver@r", resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("sender@r");
+    expect(finding!.body).toContain("This finding goes to sender@r, the row's creator");
   });
 
   it("a verdict from before the seat's relaunch, or no verdict, doesn't count as missing", () => {
