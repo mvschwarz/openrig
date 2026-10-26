@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedIdentity, transportSenderSession } from "./require-sender-identity.js";
 import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
 import { runtimeSwitchCommittedSince, runtimeSwitchSummary } from "../domain/seat-runtime-switch-service.js";
 import type Database from "better-sqlite3";
@@ -208,11 +208,15 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         try {
+          // The MCP adapter's caller, on a direct attributed send; otherwise the stamp this route has always recorded.
+          const attributed = resolveRecordedIdentity(c, { provenance: "transport:v1" });
           const entry = outbox.record({
             senderSession: derivedActor,
             destinationSession: body.session,
             body: result.envelopeOmitted && exactText !== undefined ? exactText : body.text,
-            identityProvenance: "transport:v1",
+            ...(attributed.identityPrincipal
+              ? { identityProvenance: "principal:v1", identityPrincipal: attributed.identityPrincipal }
+              : { identityProvenance: "transport:v1" }),
           });
           // The input was dispatched successfully; mark its audit row as broadcast does.
           outbox.markDelivered(entry.outboxId);

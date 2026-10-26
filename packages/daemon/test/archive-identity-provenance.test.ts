@@ -44,7 +44,8 @@ describe("archived audit identity — real migration, writer and history readers
     const column = (db.prepare("PRAGMA table_info(queue_transitions_archive)").all() as Array<{name: string; notnull: number}>)
       .find((c) => c.name === "identity_provenance");
     expect(column).toMatchObject({ notnull: 0 });
-    expect(db.prepare("SELECT * FROM queue_transitions_archive").get()).toEqual({ ...before, identity_provenance: null });
+    // 140 adds the principal column too; an old row gets neither value.
+    expect(db.prepare("SELECT * FROM queue_transitions_archive").get()).toEqual({ ...before, identity_provenance: null, identity_principal: null });
     migrate(db, ALL_MIGRATIONS);
     expect(new QueueTransitionLog(db).listForQitem("legacy")[0]?.identityProvenance).toBeNull();
   });

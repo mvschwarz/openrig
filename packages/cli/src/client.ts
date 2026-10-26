@@ -153,6 +153,9 @@ interface DaemonClientOptions {
   timeoutMs?: number;
   /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
   sessionName?: string;
+  /** With sessionName: the caller whose grant the MCP adapter checked, sent as X-OpenRig-Principal (JSON of its source,
+   *  id and, for a Cloud grant, grant id and version; never a credential). */
+  principal?: { source: "file" | "cloud"; id: string; grant?: string; version?: number | string };
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -183,8 +186,16 @@ export class DaemonClient {
   private identity?: Promise<Record<string, string>>;
   private originUnknown = false;
   private readonly sessionName?: string;
+  private readonly principal?: DaemonClientOptions["principal"];
 
   private async identityHeaders(): Promise<Record<string, string>> {
+    const headers = await this.senderHeaders();
+    // Only beside a seat this client was built for; the daemon records it only on a direct, attributed request.
+    return this.principal && this.sessionName !== undefined && !this.remoteTarget
+      ? { ...headers, "X-OpenRig-Principal": JSON.stringify(this.principal) } : headers;
+  }
+
+  private async senderHeaders(): Promise<Record<string, string>> {
     const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
     if (!session || session.split("@").length >= 3) return localHeaders;
@@ -248,6 +259,7 @@ export class DaemonClient {
     this.ownerProbe = options?.ownerProbe ?? ((url, timeoutMs) => assessLocalDaemonOwner(url, { fetchImpl: this.fetchImpl, timeoutMs }));
     this.timeoutMs = options?.timeoutMs ?? 5_000;
     this.sessionName = options?.sessionName;
+    this.principal = options?.principal;
   }
 
   /** Shared with raw CLI data readers. Constructor URLs alone do not establish explicit intent. */

@@ -13,7 +13,7 @@ import type {
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
 import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, resolveRecordedIdentity, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -630,7 +630,7 @@ export function queueRoutes(): Hono {
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+        ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
@@ -649,7 +649,7 @@ export function queueRoutes(): Hono {
     const destinationSession = identity.session;
     { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
-      const item = getRepo(c).claim({ qitemId, destinationSession, identityProvenance: resolveRecordedProvenance(c, identity) });
+      const item = getRepo(c).claim({ qitemId, destinationSession, ...resolveRecordedIdentity(c, identity) });
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -666,7 +666,8 @@ export function queueRoutes(): Hono {
     const destinationSession = identity.session;
     { const held = switchCustody(c, destinationSession); if (held) return held; }
     try {
-      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", resolveRecordedProvenance(c, identity));
+      const recorded = resolveRecordedIdentity(c, identity);
+      const item = getRepo(c).unclaim(qitemId, destinationSession, body.reason ?? "manual", recorded.identityProvenance, recorded.identityPrincipal);
       return c.json(item);
     } catch (err) {
       return errorResponse(c, err);
@@ -744,7 +745,7 @@ export function queueRoutes(): Hono {
         wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+        ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       return c.json(item);
     } catch (err) {
@@ -830,7 +831,7 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         humanAlert: body.humanAlert,
-        identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
+        ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const advisory = destinationAdvisory(c, result.created.destinationSession);
       return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);

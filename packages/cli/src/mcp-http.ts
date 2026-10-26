@@ -138,13 +138,17 @@ export function isLoopbackHost(host: string): boolean {
 
 export class McpHttpConfigError extends Error {}
 
+/** The caller whose grant this server checked, as the daemon records it beside the rows it writes (principal:v1). */
+export type McpPrincipal = { source: "file" | "cloud"; id: string; grant?: string; version?: number | string };
+
 export type McpHttpOptions = {
   daemonUrl: string;
   host: string;
   port: number;
   tokenFile: string;
-  /** Builds the daemon client for one request; sessionName is the grant's seat (absent: the env's). */
-  clientFactory?: (daemonUrl: string, sessionName?: string) => DaemonClient;
+  /** Builds the daemon client for one request; sessionName is the grant's seat (absent: the env's), and principal the
+   *  caller whose grant was checked. */
+  clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
 };
 
 function reply(res: http.ServerResponse, status: number, body: Record<string, unknown>, headers: Record<string, string> = {}): void {
@@ -171,7 +175,8 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
   }
-  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string) => new DaemonClient(url, sessionName === undefined ? undefined : { sessionName }));
+  const makeClient = opts.clientFactory ?? ((url: string, sessionName?: string, principal?: McpPrincipal) =>
+    new DaemonClient(url, sessionName === undefined ? undefined : { sessionName, ...(principal ? { principal } : {}) }));
   let boundPort = opts.port;
   // Once auth has been configured here, a missing token file is a broken configuration, not a return to local-owner
   // mode: that takes a restart with no file. A beyond-loopback listener always starts with auth.
@@ -195,6 +200,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     if (grants !== null) authSeen = true;
     let access: McpAccess | undefined;
     let seat: string | undefined;
+    let principal: McpPrincipal | undefined;
     if (grants !== null) {
       const token = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
       const grant = token ? grantFor(grants, token) : null;
@@ -207,6 +213,8 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
       }
       access = { principal: grant.name, owner: grant.owner === true, rigs: grant.rigs ?? [], roots: grant.roots ?? [], workspace: grant.workspace === true };
       seat = grant.seat;
+      // A token-file grant has a name and nothing more: no grant id or version is invented for it.
+      principal = { source: "file", id: grant.name };
     }
     let body: unknown;
     if (req.method === "POST") {
@@ -218,7 +226,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
         return;
       }
     }
-    const mcp = createMcpServer(makeClient(opts.daemonUrl, seat), { seat, access });
+    const mcp = createMcpServer(makeClient(opts.daemonUrl, seat, principal), { seat, access });
     // With no auth (loopback only), refuse a Host that isn't loopback, as a page reaching localhost through DNS rebinding
     // or a forward from elsewhere would send. With auth, the credential is the check, so a tunnel's Host is fine.
     const transport = new StreamableHTTPServerTransport({

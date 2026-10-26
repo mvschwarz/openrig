@@ -115,6 +115,8 @@ export function requireSenderIdentity(
  *   - `relay:v1`     — a forwarding daemon re-stamped from its OWN authenticated context (cross-host).
  *   - `claimed:v1`   — a founder-visible-surface UI/MCP tap under a not-yet-plumbed principal (the named
  *                      deferral); honest "pre-verification" of a TODAY actor.
+ * A fifth value, `principal:v1`, lives outside this union (RecordedProvenance below): only the four stores migration 140
+ * gives an identity_principal column record it, for a direct transport:v1 request whose local MCP adapter named its caller.
  * NULL / absent is deliberately NOT a member — it is reserved for pre-sweep-legacy / unstamped rows, so a
  * legacy row stays distinguishable from a `claimed:v1` tap today (the era boundary). A forward must
  * PRESERVE `claimed:v1` (never upgrade it to transport:v1/relay:v1 — that would launder unverified→verified).
@@ -207,4 +209,55 @@ export function resolveRecordedProvenance(
   if (!relayed) return identity.provenance; // transport:v1 (proven here) | claimed:v1 (the deferral)
   const carried = c.req.header(IDENTITY_PROVENANCE_HEADER)?.trim();
   return carried === "origin-unknown:v1" ? carried : carried === "transport:v1" ? "relay:v1" : "claimed:v1";
+}
+
+/**
+ * The principal an MCP HTTP adapter's per-request client carries: the caller whose grant the adapter checked, a token-file
+ * grant by its name or an OpenRig Cloud grant by its principal id with its grant id and version. Attribution supplied by
+ * that trusted local adapter, not daemon authentication, and never a credential.
+ */
+export const IDENTITY_PRINCIPAL_HEADER = "x-openrig-principal";
+
+/** `principal:v1` is recorded only on the four stores migration 140 gives an identity_principal column; every other row
+ *  keeps the IdentityProvenance alphabet, so no other reader meets it. */
+export type RecordedProvenance = IdentityProvenance | "principal:v1";
+
+const MAX_PRINCIPAL_HEADER_BYTES = 512;
+
+/** The header's principal as stored (normalized JSON), or null when it's absent or isn't exactly the closed shape. */
+export function parseIdentityPrincipal(raw: string | undefined): string | null {
+  if (!raw || Buffer.byteLength(raw, "utf8") > MAX_PRINCIPAL_HEADER_BYTES) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { source, id, grant, version, ...rest } = value as Record<string, unknown>;
+  const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim() !== "" && v.length <= max;
+  if (Object.keys(rest).length > 0 || (source !== "file" && source !== "cloud") || !text(id, 200)) return null;
+  if (grant !== undefined && !text(grant, 200)) return null;
+  if (version !== undefined && !(typeof version === "number" && Number.isFinite(version)) && !text(version, 64)) return null;
+  return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}) });
+}
+
+/** Whether the request's TCP peer is this machine. A request without a socket (an in-process call) isn't. */
+function fromLoopbackPeer(c: Context): boolean {
+  const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress;
+  if (!address) return false;
+  const v4 = address.startsWith("::ffff:") ? address.slice(7) : address;
+  return v4 === "::1" || /^127\.\d+\.\d+\.\d+$/.test(v4);
+}
+
+/**
+ * What one of those four stores records for a request: `principal:v1` with the principal only when the request is DIRECT
+ * and ATTRIBUTED (resolveRecordedProvenance says transport:v1: the header named the seat at this hop, not relayed, not
+ * origin-unknown, not claimed), its peer is loopback, and its principal header is exactly the closed shape. Otherwise
+ * exactly what resolveRecordedProvenance records today, and no principal. Nothing here can strengthen a relayed,
+ * unknown-origin or claimed actor, and a remote peer can't supply the principal.
+ */
+export function resolveRecordedIdentity(
+  c: Context,
+  identity: { provenance: Exclude<IdentityProvenance, "relay:v1"> },
+): { identityProvenance: RecordedProvenance; identityPrincipal: string | null } {
+  const provenance = resolveRecordedProvenance(c, identity);
+  const principal = provenance === "transport:v1" && fromLoopbackPeer(c) ? parseIdentityPrincipal(c.req.header(IDENTITY_PRINCIPAL_HEADER)) : null;
+  return principal ? { identityProvenance: "principal:v1", identityPrincipal: principal } : { identityProvenance: provenance, identityPrincipal: null };
 }

@@ -194,8 +194,10 @@ export function archiveAgedTerminalTransitions(
   const identityColumn = activeColumns.has("identity_provenance") ? ", identity_provenance" : "";
   const carriesOwnerNotification = ["owner_notification_kind", "owner_notification_level"]
     .every((column) => activeColumns.has(column) && archiveColumns.has(column));
-  const ownerInsert = carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "";
-  const ownerSelect = carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "";
+  // A row's principal moves with it (migration 140 gave both tables the column).
+  const carriesPrincipal = activeColumns.has("identity_principal") && archiveColumns.has("identity_principal");
+  const ownerInsert = (carriesOwnerNotification ? ", owner_notification_kind, owner_notification_level" : "") + (carriesPrincipal ? ", identity_principal" : "");
+  const ownerSelect = ownerInsert;
   const selectRows = db.prepare(
     `INSERT INTO queue_transitions_archive (
        transition_id, qitem_id, ts, state, transition_note,

@@ -326,6 +326,12 @@ type WakeAttemptOutcome = {
   nudgeResult: string;
 };
 
+/** `principal:v1` marks only the transitions that record the request's own action. What that action sets off elsewhere
+ *  (a successor's wake intent, a parked row released, a blocker moved) carries the seat's stamp, transport:v1. */
+function sideEffectProvenance(provenance: string | null | undefined): string | null {
+  return provenance === "principal:v1" ? "transport:v1" : provenance ?? null;
+}
+
 export interface QueueCreateInput {
   /** Internal: a row OpenRig creates itself (a sweep finding, a health notice, a mode-end notice) wakes as OpenRig's own
    *  message at the destination's interruption level. Queue create and the cross-host forward never take it from a request. */
@@ -380,6 +386,8 @@ export interface QueueCreateInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
    *  header chokepoint). Threaded onto the 'created' transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
+  identityPrincipal?: string | null;
 }
 
 export interface QueueUpdateInput {
@@ -442,6 +450,8 @@ export interface QueueUpdateInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (actorSession derived from the transport
    *  header chokepoint). Threaded onto the transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
+  identityPrincipal?: string | null;
   /** System-owned ceremony kind. Never exposed as a free-form route field. */
   ownerNotificationKind?: "human-decision-resolved";
 }
@@ -470,6 +480,8 @@ export interface QueueHandoffInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (fromSession derived from the transport
    *  header chokepoint). Threaded onto both the source-close and new-item transitions. */
   identityProvenance?: string | null;
+  /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
+  identityPrincipal?: string | null;
   /** As on create: a handoff to a person lands on Steering, and true also sends one Slack alert. */
   humanAlert?: boolean;
 }
@@ -489,6 +501,8 @@ export interface QueueClaimInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (destinationSession derived from the
    *  transport header chokepoint). Threaded onto the claim transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
+  identityPrincipal?: string | null;
 }
 
 export interface QueueListOptions {
@@ -1762,7 +1776,7 @@ export class QueueRepository {
         try {
           // A savepoint removes any partial intent when staging fails, while
           // preserving ordinary create's existing acceptance of the task.
-          this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, input.identityProvenance ?? null, input.nudge, input.wakeTrigger))();
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, sideEffectProvenance(input.identityProvenance), input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
           this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
@@ -1982,6 +1996,7 @@ export class QueueRepository {
       actorSession: input.sourceSession,
       transitionNote: "created",
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+      identityPrincipal: input.identityPrincipal ?? null,
       ownerNotificationKind: notification?.kind,
       ownerNotificationLevel: notification?.level,
     });
@@ -2118,6 +2133,7 @@ export class QueueRepository {
         closureReason: "handed_off_to",
         closureTarget: input.toSession,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+        identityPrincipal: input.identityPrincipal ?? null,
       });
 
       // OPR.0.5.8.1 S1b — THE ROUTE THE FOUNDING SPECIMEN TOOK. Row b7a70333 went
@@ -2161,6 +2177,7 @@ export class QueueRepository {
         actorSession: input.fromSession,
         transitionNote: `handoff from ${source.qitemId}`,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+        identityPrincipal: input.identityPrincipal ?? null,
         ownerNotificationKind: successorNotification?.kind,
         ownerNotificationLevel: successorNotification?.level,
       });
@@ -2168,7 +2185,7 @@ export class QueueRepository {
       // W1-a: the durable wake intent joins the SAME transaction as the close +
       // successor create. If this (or anything above) throws, the whole act rolls
       // back — one act or none.
-      this.stageWakeIntent(newId, input.fromSession, input.toSession, input.identityProvenance ?? null, input.nudge);
+      this.stageWakeIntent(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
 
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
@@ -2186,7 +2203,7 @@ export class QueueRepository {
         qitemId: source.qitemId,
         terminalState: "handed-off",
         actorSession: input.fromSession,
-        identityProvenance: input.identityProvenance ?? null,
+        identityProvenance: sideEffectProvenance(input.identityProvenance),
         ts,
       })) {
         events.push({ name: "queue.updated", payload: dependentEvent });
@@ -2296,6 +2313,7 @@ export class QueueRepository {
         closureReason: "handed_off_to",
         closureTarget: input.toSession,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+        identityPrincipal: input.identityPrincipal ?? null,
       });
 
       // OPR.0.5.8.1 S1b — same structural bypass as handoff(): own transaction,
@@ -2343,7 +2361,7 @@ export class QueueRepository {
 
       // W1-a: the durable wake intent joins the SAME transaction as the close +
       // successor create — one act or none (symmetric with handoff()).
-      this.stageWakeIntent(newId, input.fromSession, input.toSession, input.identityProvenance ?? null, input.nudge);
+      this.stageWakeIntent(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
 
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
@@ -2361,7 +2379,7 @@ export class QueueRepository {
         qitemId: source.qitemId,
         terminalState: "done",
         actorSession: input.fromSession,
-        identityProvenance: input.identityProvenance ?? null,
+        identityProvenance: sideEffectProvenance(input.identityProvenance),
         ts,
       })) {
         events.push({ name: "queue.updated", payload: dependentEvent });
@@ -2508,7 +2526,7 @@ export class QueueRepository {
         qitemId: input.qitemId,
         terminalState: input.terminalState,
         actorSession: input.fromSession,
-        identityProvenance: input.identityProvenance ?? null,
+        identityProvenance: sideEffectProvenance(input.identityProvenance),
         ts,
       })) {
         events.push(dependentEvent);
@@ -2654,6 +2672,7 @@ export class QueueRepository {
         // or changing the note execution-view uses to exclude claim activity.
         closureTarget: qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+        identityPrincipal: input.identityPrincipal ?? null,
       });
 
       // OPR.0.5.8.1 S1b — CLAIM-RESUME. A blocked row is claimable ("only
@@ -2679,7 +2698,7 @@ export class QueueRepository {
     return this.getByIdOrThrow(input.qitemId);
   }
 
-  unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null): QueueItem {
+  unclaim(qitemId: string, destinationSession: string, reason: string, identityProvenance?: string | null, identityPrincipal?: string | null): QueueItem {
     const qitem = this.getById(qitemId);
     if (!qitem) {
       throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found`);
@@ -2713,6 +2732,7 @@ export class QueueRepository {
         actorSession: destinationSession,
         transitionNote: `unclaimed: ${reason}`,
         identityProvenance: identityProvenance ?? null, // P21 §4 era-stamp
+        identityPrincipal: identityPrincipal ?? null,
       });
 
       return this.eventBus.persistWithinTransaction({
@@ -2876,6 +2896,7 @@ export class QueueRepository {
         // Carry its audit pointer so a later state write can end this chain.
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
         identityProvenance: input.identityProvenance ?? null,
+        identityPrincipal: input.identityPrincipal ?? null,
       });
       const persistedEvent = this.eventBus.persistWithinTransaction({
         type: "queue.updated",
@@ -3264,6 +3285,7 @@ export class QueueRepository {
       closureReason: validation.closureReason ?? undefined,
       closureTarget: validation.closureTarget ?? undefined,
       identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
+      identityPrincipal: input.identityPrincipal ?? null,
       ownerNotificationKind: notification?.kind,
       ownerNotificationLevel: notification?.level,
     });
@@ -3324,7 +3346,7 @@ export class QueueRepository {
           qitemId: input.qitemId,
           terminalState: input.state,
           actorSession: input.actorSession,
-          identityProvenance: input.identityProvenance ?? null,
+          identityProvenance: sideEffectProvenance(input.identityProvenance),
           ts,
         })
       : [];

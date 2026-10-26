@@ -150,6 +150,25 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(who.text).toContain("\"principal\":\"bob\"");
   });
 
+  it("tells the daemon which grant's caller acted: concurrent callers' rows each carry their own principal, never one a caller sends", async () => {
+    const alice = await grant("alice");
+    const bob = await grant("bob");
+    const served = await listen();
+    // A caller's own X-OpenRig-Principal goes no further than this server: the daemon hears the grant's principal.
+    const forged = { "X-OpenRig-Principal": JSON.stringify({ source: "cloud", id: "mallory", grant: "g", version: 1 }) };
+    const caller = async (token: string) => {
+      const client = new Client({ name: "principal-test", version: "1.0.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(served.url), { requestInit: { headers: { Authorization: `Bearer ${token}`, ...forged } } }));
+      closers.push(() => client.close());
+      return async (body: string) => ((await client.callTool({ name: "rig_queue_create", arguments: { destination: "impl@team", body } })).structuredContent as { qitemId: string }).qitemId;
+    };
+    const [asAlice, asBob] = await Promise.all([caller(alice), caller(bob)]);
+    const ids = await Promise.all([asAlice("one"), asBob("two"), asAlice("three"), asBob("four")]);
+    const stamp = (id: string) => db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(id);
+    const as = (id: string) => ({ p: "principal:v1", who: JSON.stringify({ source: "file", id }) });
+    expect(ids.map(stamp)).toEqual([as("alice"), as("bob"), as("alice"), as("bob")]);
+  });
+
   it("reaches only its scope: an out-of-scope write creates nothing, and items, successors, artifacts and owner tools stay out of reach", async () => {
     const carol = await grant("carol");
     const served = await listen();

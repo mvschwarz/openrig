@@ -83,6 +83,8 @@ export interface OutboxRecordInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (senderSession derived from the transport
    *  header chokepoint). Written onto the outbox row; absence = claimed-era. */
   identityProvenance?: string | null;
+  /** With `principal:v1`: the caller the local MCP adapter named (resolveRecordedIdentity). */
+  identityPrincipal?: string | null;
 }
 
 export class OutboxHandlerError extends Error {
@@ -111,12 +113,13 @@ export class OutboxHandler {
   /** P21 §4: detected once — a curated-migration test DB (or a pre-067 daemon) may lack the
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
+  private readonly hasIdentityPrincipalColumn: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
-    this.hasIdentityProvenanceColumn = (
-      this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>
-    ).some((col) => col.name === "identity_provenance");
+    const columns = (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).map((col) => col.name);
+    this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
+    this.hasIdentityPrincipalColumn = columns.includes("identity_principal");
   }
 
   record(input: OutboxRecordInput): OutboxEntry {
@@ -129,11 +132,14 @@ export class OutboxHandler {
     const urgency = input.urgency ?? "routine";
 
     if (this.hasIdentityProvenanceColumn) {
+      // A principal is kept only beside principal:v1; a schema without the column records today's stamp instead.
+      const principal = input.identityProvenance === "principal:v1" && this.hasIdentityPrincipalColumn ? input.identityPrincipal ?? null : null;
+      const provenance = input.identityProvenance === "principal:v1" && !principal ? "transport:v1" : input.identityProvenance ?? null;
       this.db
         .prepare(
           `INSERT INTO outbox_entries (
-            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer, identity_provenance
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            outbox_id, sender_session, destination_session, body, tags, urgency, ts_dispatched, audit_pointer, identity_provenance${principal ? ", identity_principal" : ""}
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?${principal ? ", ?" : ""})`
         )
         .run(
           id,
@@ -144,7 +150,8 @@ export class OutboxHandler {
           urgency,
           ts,
           input.auditPointer ?? null,
-          input.identityProvenance ?? null
+          provenance,
+          ...(principal ? [principal] : []),
         );
     } else {
       this.db

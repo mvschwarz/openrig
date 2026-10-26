@@ -5,6 +5,7 @@ import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_reading
 // trap). Append new migrations to the END, in order.
 
 import { nodeClaudePermissionsSchema } from "./migrations/139_node_claude_permissions.js";
+import { identityPrincipalSchema } from "./migrations/140_identity_principal.js";
 import { nodeCodexPermissionsSchema } from "./migrations/137_node_codex_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
@@ -277,4 +278,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeClaudeTokenRefSchema,
   nodeClaudePermissionsSchema,
   nodeCodexPermissionsSchema,
+  identityPrincipalSchema,
 ];
