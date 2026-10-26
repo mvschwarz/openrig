@@ -31,7 +31,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { tmuxResizeWindowCommand } from "../adapters/tmux-server.js";
+import { tmuxResizeWindowCommand, tmuxRestoreWindowSizingCommand } from "../adapters/tmux-server.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -3905,7 +3905,7 @@ export class SessionTransport {
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
     return { width: pane.width, height: pane.height,
-      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}) and capture again` };
+      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}), capture again, then let its clients size it again (${tmuxRestoreWindowSizingCommand(sessionName)})` };
   }
 
   /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the

@@ -113,6 +113,9 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   await a.sendShellCommand(SESSION, "echo 'hi there'", undefined, { sourceInPane: true });
   await a.sendKeys(SESSION, ["Enter; rm -rf /", "C-c"]);
   await a.setWindowOption(SESSION, "@openrig x", "a b'c");
+  await a.getWindowLocalOption(SESSION, "window-size");
+  await a.restoreWindowOption(SESSION, "window-size", "a b'c");
+  await a.restoreWindowOption(SESSION, "window-size", null);
   await a.resizeWindow(SESSION, 120, 40);
   await a.killSession(SESSION);
   await a.respawnPane("%1", "codex resume 'tok en'", { cwd: "/w x", env: { A: "b c", Q: "it's" } });

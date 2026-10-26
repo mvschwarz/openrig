@@ -72,3 +72,9 @@ export function tmuxAttachCommand(session: string): string {
 export function tmuxResizeWindowCommand(session: string, width: number, height: number): string {
   return `${tmuxOnDaemonServer()} resize-window -t ${shellWord(`=${session}:`)} -x ${width} -y ${height}`;
 }
+
+/** resize-window also sets the window's `window-size` to manual, so its clients (Herdr, attach) stop sizing it. This
+ *  unsets that again, on the daemon's server, and the window follows its clients as before. */
+export function tmuxRestoreWindowSizingCommand(session: string): string {
+  return `${tmuxOnDaemonServer()} set-option -wu -t ${shellWord(`=${session}:`)} window-size`;
+}

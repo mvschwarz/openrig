@@ -1050,6 +1050,34 @@ export class TmuxAdapter {
     }
   }
 
+  /** The window's OWN value for an option, without the inherited global value: the string, null when the window
+   *  sets none, undefined when tmux could not be read. A caller that changes the option for a while restores
+   *  exactly this with restoreWindowOption. */
+  async getWindowLocalOption(target: string, option: string): Promise<string | null | undefined> {
+    const window = exactTarget(target, "window");
+    try {
+      const output = await this.run(["tmux", "show-options", "-w", "-v", "-t", window, option],
+        `tmux show-options -w -v -t ${shellQuote(window)} ${shellQuote(option)}`);
+      return output.length === 0 ? null : output.replace(/\r?\n$/, "");
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Put back what getWindowLocalOption read: set the value, or unset the window's own value when it had none. */
+  async restoreWindowOption(target: string, option: string, value: string | null): Promise<TmuxResult> {
+    const window = exactTarget(target, "window");
+    const argv = value === null
+      ? ["tmux", "set-option", "-w", "-u", "-t", window, option]
+      : ["tmux", "set-option", "-w", "-t", window, option, value];
+    try {
+      await this.run(argv, argv.map((part, index) => index < 2 ? part : shellQuote(part)).join(" "));
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
   async resizeWindow(target: string, cols: number, rows: number): Promise<TmuxResult> {
     if (!Number.isFinite(cols) || !Number.isInteger(cols) || cols < 1) {
       return { ok: false, code: "validation_error", message: `resizeWindow: cols must be a positive integer, got ${cols}` };

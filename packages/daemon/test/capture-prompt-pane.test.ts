@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setDaemonTmuxServer, tmuxResizeWindowCommand } from "../src/adapters/tmux-server.js";
+import { setDaemonTmuxServer, tmuxResizeWindowCommand, tmuxRestoreWindowSizingCommand } from "../src/adapters/tmux-server.js";
 import { createDb } from "../src/db/connection.js";
 import { transportRoutes } from "../src/routes/transport.js";
 const exec = promisify(execFile);
@@ -43,7 +43,7 @@ describe("rig capture says when a pane is too small to show the prompt the seat 
     const result = await transport.capture("review@rig", { promptPane: true });
     expect(result).toMatchObject({ ok: true, content: NARROW_APPROVAL, promptPane: { width: 18, height: 12 } });
     expect(result.promptPane?.hint).toBe(
-      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig: -x 120 -y 40) and capture again");
+      "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =review@rig: -x 120 -y 40), capture again, then let its clients size it again (tmux set-option -wu -t =review@rig: window-size)");
   });
 
   // Real private tmux server: a window in another session that has the seat's name must not be the one resized.
@@ -58,6 +58,11 @@ describe("rig capture says when a pane is too small to show the prompt the seat 
       await exec("/bin/sh", ["-c", tmuxResizeWindowCommand("review@rig", 120, 40)], { env });
       const sizes = (await tmux(["list-windows", "-a", "-F", "#{session_name} #{window_width}x#{window_height}"])).split("\n").sort();
       expect(sizes).toEqual(["other 90x30", "review@rig 120x40"]);
+      // resize-window pins the window (its clients stop sizing it); the hint's second command unsets that again.
+      expect(await tmux(["show-options", "-w", "-v", "-t", "=review@rig:", "window-size"])).toBe("manual");
+      await exec("/bin/sh", ["-c", tmuxRestoreWindowSizingCommand("review@rig")], { env });
+      expect(await tmux(["show-options", "-w", "-v", "-t", "=review@rig:", "window-size"])).toBe("");
+      expect(await tmux(["show-options", "-w", "-v", "-t", "=other:", "window-size"])).toBe("");
     } finally {
       setDaemonTmuxServer([]);
       await tmux(["kill-server"]).catch(() => {});
