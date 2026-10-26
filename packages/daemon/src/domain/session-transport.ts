@@ -31,7 +31,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { newPinHolder, readPinSizing, recordPin, releasePin } from "../terminal/window-pin.js";
+import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_OPTION, withWindowPin, type PinRelease } from "../terminal/window-pin.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -1884,8 +1884,9 @@ export interface CaptureResult {
   inputBox?: InputBoxAnnotation;
   /** When the caller asked: the captured screen is at a prompt in a pane smaller than 80x24, which may cut it off. */
   promptPane?: { width: number; height: number; hint: string };
-  /** When the caller asked to read at a readable size: the size it was read at, or why the window wasn't resized. */
-  readable?: { resized: true; width: number; height: number } | { resized: false; reason: string };
+  /** When the caller asked to read at a readable size: the size it asked for and what letting the window go did, or
+   *  why the window wasn't resized. */
+  readable?: { resized: true; width: number; height: number; release: PinRelease } | { resized: false; reason: string };
 }
 
 export interface BroadcastResult {
@@ -3834,7 +3835,7 @@ export class SessionTransport {
    *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
    *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
   async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget; promptPane?: boolean;
-    readable?: { width: number; height: number } }): Promise<CaptureResult> {
+    readable?: { width: number; height: number }; readableBudget?: ReadableBudget }): Promise<CaptureResult> {
     sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
@@ -3900,51 +3901,88 @@ export class SessionTransport {
       return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}), ...(promptPane ? { promptPane } : {}) };
     };
     if (!opts?.readable) return read();
-    const { value, readable } = await this.readAtReadableSize(sessionName, opts.readable, read);
+    const { value, readable } = await this.readAtReadableSize(sessionName, opts.readable,
+      opts.readableBudget ?? { remainingMs: CAPTURE_READABLE_BUDGET_MS }, read);
     return value.ok ? { ...value, readable } : value;
   }
 
   /**
    * Run `read` with the seat's window enlarged to at least `size`, then put the window back: its size, and its own
    * `window-size` exactly. resize-window sets that to manual, which would stop the window's clients (Herdr, attach)
-   * sizing it. The window is named by its id and the resize is recorded as a pin (window-pin.ts), so a web terminal
-   * that opens meanwhile keeps the window's own value and the window is put back only when the last holder lets go.
-   * A window already that big is read as it is, and so is one whose own `window-size` is manual (pinned by the web
-   * terminal while a browser watches, by a person, or by another readable capture), one whose sizing can't be read
-   * (it couldn't be given back exactly), and one with several panes.
+   * sizing it. The window is named by its id, and the resize is recorded as a pin (window-pin.ts) in the window's
+   * queue, so a web terminal that opens meanwhile keeps the window's own value and the window is put back only when the
+   * last live holder lets go. Read as it is, with the reason: a window already that big; one whose own `window-size`
+   * is manual for a live holder or a person (a pin whose holders are gone is taken over and given back); one whose
+   * sizing can't be read or whose record couldn't be written (it couldn't be given back); one with several panes; and
+   * any seat once `budget` (shared across a fan-out) is spent.
    */
-  private async readAtReadableSize<T>(sessionName: string, size: { width: number; height: number }, read: () => Promise<T>):
-  Promise<{ value: T; readable: NonNullable<CaptureResult["readable"]> }> {
+  private async readAtReadableSize<T>(sessionName: string, size: { width: number; height: number }, budget: ReadableBudget,
+    read: () => Promise<T>): Promise<{ value: T; readable: NonNullable<CaptureResult["readable"]> }> {
+    const started = this.now().getTime();
+    const deadline = started + budget.remainingMs;
     const asItIs = async (reason: string) => ({ value: await read(), readable: { resized: false as const, reason } });
-    const sizing = await readPinSizing(this.tmuxAdapter, sessionName);
-    if (!sizing) return asItIs("the window's sizing couldn't be read, so it couldn't be given back");
-    if (sizing.live === "manual") return asItIs("the window's size is pinned (its window-size is manual)");
-    const panes = await this.tmuxAdapter.listPanes(sizing.window).catch(() => []);
-    if (panes.length !== 1) return asItIs(panes.length === 0 ? "the window's size couldn't be read" : "the window has several panes");
-    const pane = panes[0]!;
-    if (pane.width >= size.width && pane.height >= size.height) return asItIs(`the pane is already ${pane.width}x${pane.height}`);
-    const width = Math.max(size.width, pane.width);
-    const height = Math.max(size.height, pane.height);
-    const holder = newPinHolder();
-    await recordPin(this.tmuxAdapter, sizing, holder);
     try {
-      const resized = await this.tmuxAdapter.resizeWindow(sizing.window, width, height);
-      if (!resized.ok) return await asItIs(`the resize failed: ${resized.message}`);
-      await this.settleRedraw(sessionName);
-      return { value: await read(), readable: { resized: true, width, height } };
-    } finally {
-      // As the last holder: back to its size first (that pins it again), then its own sizing, so a window with
-      // clients follows them again.
-      await releasePin(this.tmuxAdapter, sizing.window, holder, async () => {
-        await this.tmuxAdapter.resizeWindow(sizing.window, pane.width, pane.height);
+      const window = (await this.tmuxAdapter.readWindow(sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.id;
+      if (!window) return await asItIs("the window's sizing couldn't be read, so it couldn't be given back");
+      const pin = await withWindowPin(window, async () => {
+        const sizing = await readPinSizing(this.tmuxAdapter, window);
+        if (!sizing) return "the window's sizing couldn't be read, so it couldn't be given back";
+        if (sizing.live === "manual" && (sizing.prior === "manual" || sizing.holders.length > 0)) {
+          return "the window's size is pinned (its window-size is manual)";
+        }
+        // Still manual here: a pin whose holders are gone (a capture or a web terminal that ended without giving it back).
+        // It's taken over, and given back after this read even when the pane is already big enough.
+        const leftover = sizing.live === "manual";
+        const panes = await this.tmuxAdapter.listPanes(window).catch(() => []);
+        if (panes.length !== 1) return panes.length === 0 ? "the window's size couldn't be read" : "the window has several panes";
+        const pane = panes[0]!;
+        const bigEnough = pane.width >= size.width && pane.height >= size.height;
+        if (bigEnough && !leftover) return `the pane is already ${pane.width}x${pane.height}`;
+        if (!bigEnough && deadline - this.now().getTime() < READABLE_MIN_REMAINING_MS) {
+          return `this capture's ${CAPTURE_READABLE_BUDGET_MS / 1000} s for readable reads ran out`;
+        }
+        const holder = newPinHolder();
+        if (!(await recordPin(this.tmuxAdapter, sizing, holder))) return "its restore record couldn't be written, so it wasn't resized";
+        const resized = bigEnough ? null
+          : await this.tmuxAdapter.resizeWindow(window, Math.max(size.width, pane.width), Math.max(size.height, pane.height));
+        return { holder, pane, resized };
       });
+      if (typeof pin === "string") return await asItIs(pin);
+      const { holder, pane, resized } = pin;
+      let readable: NonNullable<CaptureResult["readable"]> | undefined;
+      let value: T;
+      try {
+        if (!resized) {
+          readable = { resized: false, reason: `the pane is already ${pane.width}x${pane.height}` };
+          value = await read();
+        } else if (!resized.ok) {
+          readable = { resized: false, reason: `the resize failed: ${resized.message}` };
+          value = await read();
+        } else {
+          await this.settleRedraw(sessionName, deadline);
+          value = await read();
+          readable = { resized: true, width: Math.max(size.width, pane.width), height: Math.max(size.height, pane.height), release: "not-listed" };
+        }
+      } finally {
+        // As the last holder: back to its size first (that pins it again), then its own sizing, so a window with
+        // clients follows them again.
+        const release = await releasePin(this.tmuxAdapter, window, holder, resized ? async () => {
+          await this.tmuxAdapter.resizeWindow(window, pane.width, pane.height);
+        } : undefined);
+        if (readable?.resized) readable.release = release;
+        else if (!resized && release === "given-back" && readable) readable.reason += "; a pin left on its window was given back";
+      }
+      return { value, readable: readable! };
+    } finally {
+      budget.remainingMs = Math.max(0, budget.remainingMs - (this.now().getTime() - started));
     }
   }
 
-  /** After a resize, give the seat's TUI time to redraw: two equal screens 150 ms apart, for at most about 2 s. */
-  private async settleRedraw(sessionName: string): Promise<void> {
+  /** After a resize, give the seat's TUI time to redraw: two equal screens 150 ms apart, at most 12 looks, and never
+   *  past `deadline`. */
+  private async settleRedraw(sessionName: string, deadline: number): Promise<void> {
     let last: string | null = null;
-    for (let look = 0; look < 12; look++) {
+    for (let look = 0; look < 12 && this.now().getTime() + 150 <= deadline; look++) {
       await this.sleep(150);
       const screen = await this.tmuxAdapter.capturePaneScreen(sessionName).catch(() => null);
       if (screen !== null && screen === last) return;
@@ -4249,6 +4287,18 @@ const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's 
 // How long a capture's input-box reads may take in all before the box reports unknown: one seat's three reads, or a
 // whole fan-out's (the send path's INPUT_BOX_READ_DEADLINE_MS bounds one read each).
 export const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
+
+/** The time a capture's readable reads (`--readable`, `--size`) may take: the resize, the redraw and the read, for one
+ *  seat or a whole fan-out. Seats left once it's spent are read as they are, so the request returns inside the CLI's
+ *  wait (capture.ts's READABLE_REQUEST_TIMEOUT_MS). Each window is given back whatever is left. */
+export const CAPTURE_READABLE_BUDGET_MS = 8_000;
+/** Below this, a seat isn't resized: two redraw looks and the read wouldn't fit. */
+const READABLE_MIN_REMAINING_MS = 500;
+
+/** The time a capture's readable reads may still take; the capture route shares one across a fan-out. */
+export interface ReadableBudget {
+  remainingMs: number;
+}
 
 /** The time a capture's input-box reads may still take; the capture route shares one across a fan-out. */
 export interface InputBoxBudget {

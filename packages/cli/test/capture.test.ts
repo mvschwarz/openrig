@@ -59,7 +59,7 @@ describe("Capture CLI", () => {
             // --readable: the daemon says the size it read at, or why it left the window as it was.
             const readable = parsed.readable ? (parsed.session === "pinned@my-rig"
               ? { resized: false, reason: "the window's size is pinned (its window-size is manual)" }
-              : { resized: true, ...parsed.readable }) : undefined;
+              : { resized: true, ...parsed.readable, release: parsed.session === "kept@my-rig" ? "kept-by-another-holder" : "given-back" }) : undefined;
             res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20, ...(readable ? { readable } : {}) }));
           } else if (parsed.rig) {
             res.writeHead(200, { "Content-Type": "application/json" });
@@ -173,7 +173,28 @@ describe("Capture CLI", () => {
       const { out, err } = await run(["read@my-rig", "--readable"]);
       expect(requests.at(-1)!.readable).toEqual({ width: 120, height: 40 });
       expect(out).toEqual(["line1\nline2\n"]);
-      expect(err).toEqual(["[rig capture: read@my-rig: read at 120x40; its window was then given back its size and sizing]"]);
+      expect(err).toEqual(["[rig capture: read@my-rig: read at 120x40; its window was then given back its size and its own window-size]"]);
+    });
+
+    it("says so when a web terminal took the window over meanwhile, instead of claiming a give-back", async () => {
+      const { err } = await run(["kept@my-rig", "--readable"]);
+      expect(err).toEqual(["[rig capture: kept@my-rig: read at 120x40; a web terminal opened on it meanwhile and holds its window now; it gives the window back when it closes]"]);
+    });
+
+    it("a readable request waits out the daemon's readable budget; other captures keep the usual wait", async () => {
+      const seen: Array<{ timeoutMs?: number } | undefined> = [];
+      const deps = runningDeps(port);
+      const spying = { ...deps, clientFactory: (url: string) => {
+        const client = deps.clientFactory(url);
+        const post = client.post.bind(client);
+        client.post = ((path: string, body: unknown, options?: { timeoutMs?: number }) => { seen.push(options); return post(path, body, options as never); }) as typeof client.post;
+        return client;
+      } };
+      const prog = new Command(); prog.exitOverride(); prog.addCommand(captureCommand(spying));
+      await captureLogs(async () => { await prog.parseAsync(["node", "rig", "capture", "--rig", "my-rig", "--readable"]); });
+      const plain = new Command(); plain.exitOverride(); plain.addCommand(captureCommand(spying));
+      await captureLogs(async () => { await plain.parseAsync(["node", "rig", "capture", "--rig", "my-rig"]); });
+      expect(seen.map((options) => options?.timeoutMs)).toEqual([15_000, undefined]);
     });
 
     it("--size WxH asks for that size", async () => {

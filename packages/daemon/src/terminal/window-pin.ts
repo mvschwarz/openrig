@@ -31,6 +31,20 @@ export interface PinSizing {
 const heldHere = new Set<string>();
 let holderCount = 0;
 
+// One queue per window in this process, so a readable capture and a web terminal on the same window take and give back
+// a pin one at a time: each reads the record, writes it and changes the window's size before the next one reads. Another
+// process isn't covered (tmux has no compare-and-set), and nothing waits on another process.
+const windowQueues = new Map<string, Promise<unknown>>();
+
+/** Run `step` (a read, record and pin, or a release) on `window` after any step already queued for it in this process. */
+export function withWindowPin<T>(window: string, step: () => Promise<T>): Promise<T> {
+  const run = (windowQueues.get(window) ?? Promise.resolve()).then(step);
+  const settled = run.then(() => {}, () => {});
+  windowQueues.set(window, settled);
+  void settled.then(() => { if (windowQueues.get(window) === settled) windowQueues.delete(window); });
+  return run;
+}
+
 export function newPinHolder(): string {
   return `${process.pid}.${++holderCount}`;
 }
@@ -69,30 +83,42 @@ export async function readPinSizing(tmux: PinTmux, target: string): Promise<PinS
   return { window: current.id, live, prior: live, holders: [] };
 }
 
-/** Record `holder` as holding a pin on the window read by readPinSizing, keeping its prior. Before the pin itself. */
-export async function recordPin(tmux: PinTmux, sizing: PinSizing, holder: string): Promise<void> {
+/** Record `holder` as holding a pin on the window read by readPinSizing, keeping its prior. Before the pin itself.
+ *  False when the record didn't land: there's then nothing to give the window back from. */
+export async function recordPin(tmux: PinTmux, sizing: PinSizing, holder: string): Promise<boolean> {
   heldHere.add(holder);
-  await tmux.setWindowOption(sizing.window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(sizing.prior, [...sizing.holders, holder])).catch(() => {});
+  const written = await tmux.setWindowOption(sizing.window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(sizing.prior, [...sizing.holders, holder]))
+    .catch(() => null);
+  if (!written?.ok) heldHere.delete(holder);
+  return written?.ok === true;
 }
+
+/** What letting go did: the window got its prior back; another live holder keeps the pin; the window no longer lists
+ *  this holder; or the give-back failed (the record is kept for the next holder). */
+export type PinRelease = "given-back" | "kept-by-another-holder" | "not-listed" | "failed";
 
 /** Let go of `holder`'s pin on `window`, once. While another live holder remains, only drop this one. As the last one,
  *  run `beforeGiveBack` (a readable capture puts the size back), then give back the prior and drop the record. A window
  *  that no longer lists this holder (the record was cleared, or the tmux server restarted and `@N` is another window)
  *  is left alone. */
-export async function releasePin(tmux: PinTmux, window: string, holder: string, beforeGiveBack?: () => Promise<void>): Promise<void> {
-  try {
-    const record = parsePinRecord((await tmux.readWindow?.(window, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.userOption ?? "");
-    if (!record?.holders.includes(holder)) return;
-    const others = record.holders.filter((other) => other !== holder && holderLive(other));
-    if (others.length > 0) {
-      await tmux.setWindowOption(window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(record.prior, others)).catch(() => {});
-      return;
+export function releasePin(tmux: PinTmux, window: string, holder: string, beforeGiveBack?: () => Promise<void>): Promise<PinRelease> {
+  return withWindowPin(window, async () => {
+    try {
+      const record = parsePinRecord((await tmux.readWindow?.(window, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.userOption ?? "");
+      if (!record?.holders.includes(holder)) return "not-listed";
+      const others = record.holders.filter((other) => other !== holder && holderLive(other));
+      if (others.length > 0) {
+        await tmux.setWindowOption(window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(record.prior, others)).catch(() => {});
+        return "kept-by-another-holder";
+      }
+      await beforeGiveBack?.().catch(() => {});
+      const restored = await tmux.restoreWindowOption?.(window, "window-size", record.prior).catch(() => null);
+      // Kept when the give-back failed: this holder is then no longer live, so the next one gives it back instead.
+      if (!restored?.ok) return "failed";
+      await tmux.restoreWindowOption?.(window, WINDOW_SIZE_PRIOR_OPTION, null).catch(() => {});
+      return "given-back";
+    } finally {
+      heldHere.delete(holder);
     }
-    await beforeGiveBack?.().catch(() => {});
-    const restored = await tmux.restoreWindowOption?.(window, "window-size", record.prior).catch(() => null);
-    // Kept when the give-back failed: this holder is then no longer live, so the next one gives it back instead.
-    if (restored?.ok) await tmux.restoreWindowOption?.(window, WINDOW_SIZE_PRIOR_OPTION, null).catch(() => {});
-  } finally {
-    heldHere.delete(holder);
-  }
+  });
 }

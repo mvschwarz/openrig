@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
+import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import { OCCUPANT_GENERATION_HEADER, runtimeSwitchCustodyRefusal } from "./runtime-switch-custody.js";
@@ -266,9 +266,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
       // One budget for the whole fan-out's input-box reads, so slow tmux adds at most that to the request.
       const inputBoxBudget = { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS };
+      // And one for readable reads, so a fan-out of small seats returns inside the CLI's wait.
+      const readableBudget = { remainingMs: CAPTURE_READABLE_BUDGET_MS };
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget, promptPane, ...(readable ? { readable } : {}) });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget, promptPane,
+          ...(readable ? { readable, readableBudget } : {}) });
         results.push(result);
       }
       return c.json({ results });

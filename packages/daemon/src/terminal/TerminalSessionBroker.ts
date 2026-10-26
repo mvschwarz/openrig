@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { TmuxResult, TmuxCursorPosition } from "../adapters/tmux.js";
-import { newPinHolder, readPinSizing, recordPin, releasePin } from "./window-pin.js";
+import { newPinHolder, readPinSizing, recordPin, releasePin, WINDOW_SIZE_PRIOR_OPTION, withWindowPin } from "./window-pin.js";
 
 // OPR.0.4.0.38 - real-terminal session broker.
 //
@@ -413,18 +413,13 @@ export class TerminalSessionBroker {
     // window's own value is read first and recorded on the window with this
     // broker as a holder, and given back when the last holder lets go. The window
     // is named by its id, so the pin and the give-back reach the same window even
-    // after a client switches windows.
-    // Without a window id or a readable value, the session's window is pinned as before with nothing to give back.
-    const sizing = await readPinSizing(this.tmux, this.sessionName);
-    if (this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // disposed: pin nothing
-    if (sizing) {
-      this.pinnedWindow = sizing.window;
-      await recordPin(this.tmux, sizing, this.holder);
-    }
-    const window = sizing?.window ?? this.sessionName;
-    await this.tmux.setWindowOption(window, "window-size", "manual").catch(() => {});
-    await this.tmux.resizeWindow(window, this.cols, this.rows).catch(() => {});
-    if (this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // dispose gives it back
+    // after a client switches windows, and the read, record and pin run in its
+    // queue (window-pin.ts), so a readable capture in this daemon takes its turn.
+    // Without a window id or a readable value, the session's window is pinned as
+    // before with nothing to give back.
+    const window = (await this.tmux.readWindow?.(this.sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.id ?? null;
+    const pinned = await (window ? withWindowPin(window, () => this.pinWindow(window)) : this.pinWindow(null));
+    if (!pinned || this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // dispose gives it back
 
     const outputPath = path.join(
       os.tmpdir(),
@@ -447,6 +442,20 @@ export class TerminalSessionBroker {
     // (parity with the prior single-connection behavior; FR-9 no regression).
     await this.tmux.sendKeys(this.sessionName, ["", ""]).catch(() => {});
     return { ok: true };
+  }
+
+  /** Read the window's sizing, record this broker as a holder, then pin the window (FR-7). False: disposed first. */
+  private async pinWindow(window: string | null): Promise<boolean> {
+    const sizing = window ? await readPinSizing(this.tmux, window) : null;
+    if (this.torndown) return false; // disposed: pin nothing
+    if (sizing) {
+      this.pinnedWindow = sizing.window;
+      await recordPin(this.tmux, sizing, this.holder);
+    }
+    const target = sizing?.window ?? this.sessionName;
+    await this.tmux.setWindowOption(target, "window-size", "manual").catch(() => {});
+    await this.tmux.resizeWindow(target, this.cols, this.rows).catch(() => {});
+    return true;
   }
 
   private async seed(sub: TerminalSubscriber): Promise<void> {

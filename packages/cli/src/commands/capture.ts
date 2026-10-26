@@ -46,7 +46,21 @@ function exactLineCount(opts: CaptureOpts, linesFromCli: boolean): number | unde
   return n > 0 ? n : undefined;
 }
 
+/** How long a readable capture request may take: the daemon's 8 s for readable reads (CAPTURE_READABLE_BUDGET_MS, shared
+ *  across a fan-out), its 1 s for input-box reads, and the client's usual 5 s for the rest. */
+export const READABLE_REQUEST_TIMEOUT_MS = 15_000;
+
 /** `--readable` reads at 120x40; `--size WxH` at that size. Null when neither was given; an error for a bad --size. */
+/** What happened to the window after a readable read, as far as OpenRig knows. */
+export function readableRelease(release: string | undefined): string {
+  switch (release) {
+    case "given-back": return "its window was then given back its size and its own window-size";
+    case "kept-by-another-holder": return "a web terminal opened on it meanwhile and holds its window now; it gives the window back when it closes";
+    case "failed": return "giving its window back failed; a later readable capture or web terminal visit gives it back";
+    default: return "its window's record had changed, so OpenRig left the window as it found it";
+  }
+}
+
 export function readableSize(opts: Pick<CaptureOpts, "readable" | "size">): { width: number; height: number } | null | { error: string } {
   if (opts.size === undefined) return opts.readable ? { width: 120, height: 40 } : null;
   const match = /^(\d{1,4})x(\d{1,4})$/.exec(opts.size);
@@ -105,8 +119,8 @@ function renderCapture(data: Record<string, unknown>): void {
     const pane = r["promptPane"] as { hint?: string } | undefined;
     if (pane && typeof pane.hint === "string") console.error(`[rig capture: ${r["sessionName"]}: ${pane.hint}]`);
     // --readable: the size it was read at, or why the window was left as it was.
-    const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string } | undefined;
-    if (readable?.resized === true) console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; its window was then given back its size and sizing]`);
+    const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string; release?: string } | undefined;
+    if (readable?.resized === true) console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; ${readableRelease(readable.release)}]`);
     else if (readable?.resized === false) console.error(`[rig capture: ${r["sessionName"]}: not resized for reading: ${readable.reason}]`);
   };
 
@@ -254,7 +268,8 @@ Supported notes:
       body.inputBox = true; // the input box note; a daemon without it ignores the field
       if (size) body.readable = size; // a daemon without it ignores the field and captures as before
 
-      const res = await client.post<Record<string, unknown>>("/api/transport/capture", body, { headers: terminalAuthHeaders() });
+      const res = await client.post<Record<string, unknown>>("/api/transport/capture", body,
+        { headers: terminalAuthHeaders(), ...(size ? { timeoutMs: READABLE_REQUEST_TIMEOUT_MS } : {}) });
       if (res.status < 400) res.data = withExactLines(res.data, opts.exactLines);
 
       if (opts.json) {
@@ -363,7 +378,8 @@ async function runHttpHostCapture(
   const size = readableSize(opts);
   if (size && !("error" in size)) body.readable = size;
 
-  const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps, {});
+  const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps,
+    body.readable ? { timeoutMs: READABLE_REQUEST_TIMEOUT_MS } : {});
   if (result.ok) result.data = withExactLines(result.data, opts.exactLines);
 
   if (opts.json) {
