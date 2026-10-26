@@ -568,7 +568,7 @@ Herdr session per request, including session-bound previews and window reuse.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--history-plus-pane`<br>`--host <id>`<br>`--json` |
+| `rig capture [session]` | — | `--rig <name>`<br>`--pod <name>`<br>`--lines <n>`<br>`--history-plus-pane`<br>`--readable`<br>`--size <WxH>`<br>`--host <id>`<br>`--json` |
 
 ### broadcast
 

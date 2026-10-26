@@ -28,7 +28,7 @@ const SHORT = ["$ for i in 1 2 3 4 5", "line1", "line2", "line3", "line4", "line
 const BUSY_CLAUDE = ["● Reading the queue row", "", "✻ Waddling… (12s · ↓ 1.2k tokens · esc to interrupt)", "", "╭──────────────────╮", "│ >                │", "╰──────────────────╯", "  ? for shortcuts"].join("\n") + "\n";
 const PANES: Record<string, string> = { "tall@my-rig": TALL, "short@my-rig": SHORT, "busy@my-rig": BUSY_CLAUDE, "ghost@my-rig": "pane text\n", "empty@my-rig": "pane text\n", "small@my-rig": "Do you want to\n" };
 // What the daemon adds when the captured screen is at a prompt in a pane smaller than 80x24.
-const SMALL_PANE_HINT = "pane 18x12 is smaller than 80x24, so the prompt may be cut off; resize it (tmux resize-window -t =small@my-rig: -x 120 -y 40), capture again, then unset its own window-size so its clients size it again (tmux set-option -wu -t =small@my-rig: window-size); a window-size set on that window before isn't kept";
+const SMALL_PANE_HINT = "pane 18x12 is smaller than 80x24, so the prompt may be cut off; read it at a readable size with rig capture small@my-rig --readable";
 const PROMPT_PANES: Record<string, unknown> = { "small@my-rig": { width: 18, height: 12, hint: SMALL_PANE_HINT } };
 // What the daemon adds for a Claude Code or Codex seat: the input box as the cursor and styling read it.
 const GHOST_HINT = "The input box shows \"/compact\", likely a Claude Code suggestion (cursor at the input's start; text drawn faint), not something the person typed: it isn't their intent, a draft or a staged command.";
@@ -56,7 +56,11 @@ describe("Capture CLI", () => {
             res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: PANES[parsed.session], lines: parsed.lines, ...(INPUT_BOXES[parsed.session] ? { inputBox: INPUT_BOXES[parsed.session] } : {}), ...(PROMPT_PANES[parsed.session] ? { promptPane: PROMPT_PANES[parsed.session] } : {}) }));
           } else if (parsed.session) {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20 }));
+            // --readable: the daemon says the size it read at, or why it left the window as it was.
+            const readable = parsed.readable ? (parsed.session === "pinned@my-rig"
+              ? { resized: false, reason: "the window's size is pinned (its window-size is manual)" }
+              : { resized: true, ...parsed.readable }) : undefined;
+            res.end(JSON.stringify({ ok: true, sessionName: parsed.session, content: "line1\nline2\n", lines: 20, ...(readable ? { readable } : {}) }));
           } else if (parsed.rig) {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ results: [
@@ -146,10 +150,55 @@ describe("Capture CLI", () => {
       expect(err).toEqual([]);
     });
 
-    it("a prompt in a pane too small to show it is named on stderr, with the daemon's resize command", async () => {
+    it("a prompt in a pane too small to show it is named on stderr, with the daemon's hint", async () => {
       const { out, err } = await run(["small@my-rig"]);
       expect(out).toEqual(["Do you want to\n"]);
       expect(err).toEqual([`[rig capture: small@my-rig: ${SMALL_PANE_HINT}]`]);
+    });
+  });
+
+  describe("--readable reads a small seat at a readable size", () => {
+    async function run(argv: string[]): Promise<{ out: string[]; err: string[]; exitCode: number | undefined }> {
+      const out: string[] = []; const err: string[] = [];
+      const origLog = console.log; const origErr = console.error;
+      console.log = (...args: unknown[]) => out.push(args.join(" ")); console.error = (...args: unknown[]) => err.push(args.join(" "));
+      process.exitCode = undefined;
+      try { await makeCmd().parseAsync(["node", "rig", "capture", ...argv]); } finally { console.log = origLog; console.error = origErr; }
+      const exitCode = process.exitCode as number | undefined;
+      process.exitCode = undefined;
+      return { out, err, exitCode };
+    }
+
+    it("asks for 120x40 and notes the size it was read at on stderr", async () => {
+      const { out, err } = await run(["read@my-rig", "--readable"]);
+      expect(requests.at(-1)!.readable).toEqual({ width: 120, height: 40 });
+      expect(out).toEqual(["line1\nline2\n"]);
+      expect(err).toEqual(["[rig capture: read@my-rig: read at 120x40; its window was then given back its size and sizing]"]);
+    });
+
+    it("--size WxH asks for that size", async () => {
+      await run(["read@my-rig", "--size", "160x50"]);
+      expect(requests.at(-1)!.readable).toEqual({ width: 160, height: 50 });
+    });
+
+    it("says why a window was left as it was", async () => {
+      const { err } = await run(["pinned@my-rig", "--readable"]);
+      expect(err).toEqual(["[rig capture: pinned@my-rig: not resized for reading: the window's size is pinned (its window-size is manual)]"]);
+    });
+
+    it("a bad --size is refused before any request", async () => {
+      const before = requests.length;
+      for (const size of ["120", "0x40", "120x", "abcxdef", "2000x40"]) {
+        const { err, exitCode } = await run(["read@my-rig", "--size", size]);
+        expect(err[0]).toContain("--size wants WIDTHxHEIGHT");
+        expect(exitCode).toBe(1);
+      }
+      expect(requests.length).toBe(before);
+    });
+
+    it("a capture without it asks for nothing", async () => {
+      await run(["read@my-rig"]);
+      expect(requests.at(-1)).not.toHaveProperty("readable");
     });
   });
 

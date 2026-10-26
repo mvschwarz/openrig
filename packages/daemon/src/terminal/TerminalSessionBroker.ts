@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { TmuxResult, TmuxCursorPosition } from "../adapters/tmux.js";
+import { newPinHolder, readPinSizing, recordPin, releasePin } from "./window-pin.js";
 
 // OPR.0.4.0.38 - real-terminal session broker.
 //
@@ -44,38 +45,6 @@ const MAX_HISTORY_BYTES = 64 * 1024;
  */
 export const CANONICAL_COLS = 90;
 export const CANONICAL_ROWS = 27;
-
-/** A window user option recording a pin: the window's own `window-size` from before it ("inherit" for none), then the
- *  brokers holding it (`<pid>.<n>`). It lives on the window, so a pin whose holders are gone (a daemon restart or crash)
- *  is given back by the next broker for that window, and a pin another live broker holds is kept until it lets go. */
-export const WINDOW_SIZE_PRIOR_OPTION = "@openrig-window-size-prior";
-const INHERITED_WINDOW_SIZE = "inherit";
-
-// This process's brokers that hold a pin. A holder from this process is live while listed here; one from another
-// process (another daemon on the same tmux server) while that process runs.
-const heldHere = new Set<string>();
-let holderCount = 0;
-
-function holderLive(holder: string): boolean {
-  const pid = Number(holder.split(".")[0]);
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  if (pid === process.pid) return heldHere.has(holder);
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "EPERM"; // running, as another user
-  }
-}
-
-function parsePinRecord(value: string): { prior: string | null; holders: string[] } | null {
-  const [prior, ...holders] = value.split(" ").filter(Boolean);
-  return prior ? { prior: prior === INHERITED_WINDOW_SIZE ? null : prior, holders } : null;
-}
-
-function pinRecord(prior: string | null, holders: string[]): string {
-  return [prior ?? INHERITED_WINDOW_SIZE, ...holders].join(" ");
-}
 
 /** A connected viewer of one broker. The route adapts a WebSocket to this. */
 export interface TerminalSubscriber {
@@ -230,7 +199,7 @@ export class TerminalSessionBroker {
   // The window this broker pinned, by its immutable id, and listed itself as a holder of. When the last live holder lets
   // go, the window gets back its own `window-size`, so native clients (Herdr, attach) size it again. Null: nothing held.
   private pinnedWindow: string | null = null;
-  private readonly holder = `${process.pid}.${++holderCount}`;
+  private readonly holder = newPinHolder();
 
   constructor(sessionName: string, tmux: BrokerTmux, opts: BrokerOptions = {}) {
     this.sessionName = sessionName;
@@ -445,12 +414,12 @@ export class TerminalSessionBroker {
     // broker as a holder, and given back when the last holder lets go. The window
     // is named by its id, so the pin and the give-back reach the same window even
     // after a client switches windows.
-    const sizing = await this.readWindowSizing();
+    // Without a window id or a readable value, the session's window is pinned as before with nothing to give back.
+    const sizing = await readPinSizing(this.tmux, this.sessionName);
     if (this.torndown) return { ok: false, code: 1011, reason: "terminal broker unavailable" }; // disposed: pin nothing
     if (sizing) {
-      heldHere.add(this.holder);
       this.pinnedWindow = sizing.window;
-      await this.tmux.setWindowOption(sizing.window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(sizing.prior, [...sizing.holders, this.holder])).catch(() => {});
+      await recordPin(this.tmux, sizing, this.holder);
     }
     const window = sizing?.window ?? this.sessionName;
     await this.tmux.setWindowOption(window, "window-size", "manual").catch(() => {});
@@ -478,20 +447,6 @@ export class TerminalSessionBroker {
     // (parity with the prior single-connection behavior; FR-9 no regression).
     await this.tmux.sendKeys(this.sessionName, ["", ""]).catch(() => {});
     return { ok: true };
-  }
-
-  /** The session's current window, its own `window-size` from before any broker pinned it, and the live holders of a
-   *  pin on it. A `manual` window with a record is pinned: its prior is the recorded one, kept for its live holders, or
-   *  taken over from holders a crash left behind. Otherwise the live value is the prior. Null without a window id or a
-   *  readable value: the broker then pins the session's window as before and has nothing to give back. */
-  private async readWindowSizing(): Promise<{ window: string; prior: string | null; holders: string[] } | null> {
-    const current = await this.tmux.readWindow?.(this.sessionName, WINDOW_SIZE_PRIOR_OPTION).catch(() => null);
-    if (!current) return null;
-    const live = await this.tmux.getWindowLocalOption?.(current.id, "window-size").catch(() => undefined);
-    if (live === undefined) return null;
-    const record = parsePinRecord(current.userOption);
-    if (live === "manual" && record) return { window: current.id, prior: record.prior, holders: record.holders.filter(holderLive) };
-    return { window: current.id, prior: live, holders: [] };
   }
 
   private async seed(sub: TerminalSubscriber): Promise<void> {
@@ -648,22 +603,7 @@ export class TerminalSessionBroker {
   private async restoreWindowSize(): Promise<void> {
     const window = this.pinnedWindow;
     this.pinnedWindow = null;
-    if (!window) return;
-    try {
-      const record = parsePinRecord((await this.tmux.readWindow?.(window, WINDOW_SIZE_PRIOR_OPTION).catch(() => null))?.userOption ?? "");
-      // No longer this broker's pin (the record was cleared, or the tmux server restarted and `@N` is another window).
-      if (!record?.holders.includes(this.holder)) return;
-      const others = record.holders.filter((holder) => holder !== this.holder && holderLive(holder));
-      if (others.length > 0) {
-        await this.tmux.setWindowOption(window, WINDOW_SIZE_PRIOR_OPTION, pinRecord(record.prior, others)).catch(() => {});
-        return;
-      }
-      const restored = await this.tmux.restoreWindowOption?.(window, "window-size", record.prior).catch(() => null);
-      // Kept when the give-back failed: this broker is then no longer live, so the next broker gives it back instead.
-      if (restored?.ok) await this.tmux.restoreWindowOption?.(window, WINDOW_SIZE_PRIOR_OPTION, null).catch(() => {});
-    } finally {
-      heldHere.delete(this.holder);
-    }
+    if (window) await releasePin(this.tmux, window, this.holder);
   }
 
   private teardownResources(): void {

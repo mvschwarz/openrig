@@ -297,6 +297,18 @@ describe("capture --host (cross-host short-circuit)", () => {
     expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5", "--history-plus-pane"]);
   });
 
+  it("forwards --readable and --size", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--readable", "--size", "160x50"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--readable", "--size", "160x50"]);
+  });
+
   it("unknown host id surfaces a friendly error", async () => {
     const cmd = captureCommand(deps());
     await cmd.parseAsync(["--host", "vm-bogus", "s@r"], { from: "user" });

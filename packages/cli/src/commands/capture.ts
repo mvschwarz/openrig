@@ -26,6 +26,8 @@ interface CaptureOpts {
   host?: string;
   json?: boolean;
   historyPlusPane?: boolean;
+  readable?: boolean;
+  size?: string;
   /** --lines was given on the command line (not the "20" default). */
   linesGiven?: boolean;
   /** Set when --lines N was given (and --history-plus-pane wasn't): the output is cut to the last N lines. */
@@ -42,6 +44,16 @@ function exactLineCount(opts: CaptureOpts, linesFromCli: boolean): number | unde
   if (!linesFromCli || opts.historyPlusPane || !/^\d+$/.test(opts.lines ?? "")) return undefined;
   const n = parseInt(opts.lines!, 10);
   return n > 0 ? n : undefined;
+}
+
+/** `--readable` reads at 120x40; `--size WxH` at that size. Null when neither was given; an error for a bad --size. */
+export function readableSize(opts: Pick<CaptureOpts, "readable" | "size">): { width: number; height: number } | null | { error: string } {
+  if (opts.size === undefined) return opts.readable ? { width: 120, height: 40 } : null;
+  const match = /^(\d{1,4})x(\d{1,4})$/.exec(opts.size);
+  const width = match ? Number(match[1]) : 0;
+  const height = match ? Number(match[2]) : 0;
+  if (!match || width < 1 || height < 1 || width > 1000 || height > 1000) return { error: `--size wants WIDTHxHEIGHT, each from 1 to 1000 (got ${JSON.stringify(opts.size)})` };
+  return { width, height };
 }
 
 /**
@@ -92,6 +104,10 @@ function renderCapture(data: Record<string, unknown>): void {
     // A prompt in a pane too small to show it: say so, with the resize command, rather than leave a reader guessing.
     const pane = r["promptPane"] as { hint?: string } | undefined;
     if (pane && typeof pane.hint === "string") console.error(`[rig capture: ${r["sessionName"]}: ${pane.hint}]`);
+    // --readable: the size it was read at, or why the window was left as it was.
+    const readable = r["readable"] as { resized?: boolean; width?: number; height?: number; reason?: string } | undefined;
+    if (readable?.resized === true) console.error(`[rig capture: ${r["sessionName"]}: read at ${readable.width}x${readable.height}; its window was then given back its size and sizing]`);
+    else if (readable?.resized === false) console.error(`[rig capture: ${r["sessionName"]}: not resized for reading: ${readable.reason}]`);
   };
 
   // Multi-target result
@@ -130,6 +146,8 @@ export function captureCommand(depsOverride?: CaptureDeps): Command {
     .option("--pod <name>", "Capture all sessions in a pod")
     .option("--lines <n>", "Show the last N lines of the pane (without it: 20 history lines plus the whole visible pane)", "20")
     .option("--history-plus-pane", "With --lines N, show N history lines plus the whole visible pane, as before --lines was exact")
+    .option("--readable", "Read a seat whose pane is smaller than 120x40 at that size, then give its window back")
+    .option("--size <WxH>", "With or without --readable: read at this size instead (for example 160x50)")
     .option("--host <id>", "Capture on a remote host declared in ~/.openrig/hosts.yaml (ssh hosts shell out; http hosts go CLI-direct to the remote daemon)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -137,6 +155,7 @@ Examples:
   rig capture dev-impl@my-rig
   rig capture dev-impl@my-rig --lines 50
   rig capture dev-impl@my-rig --lines 5 --history-plus-pane
+  rig capture dev-impl@my-rig --readable
   rig capture --rig my-rig
   rig capture --pod dev --rig my-rig
   rig capture --rig my-rig --json
@@ -151,9 +170,14 @@ Supported notes:
     suggestion regions on the visible screen (zero-based rows and columns), evidence and hint.
   - When the captured screen is at a prompt and the seat's pane is smaller than 80x24, a
     "[rig capture: ...: pane WxH is smaller than 80x24, ...]" note on stderr says the prompt may be
-    cut off and gives the tmux resize-window command that makes it readable, then the command
-    that unsets the window's own window-size so its clients size it again (a window-size set on
-    that window before isn't kept). --json has it as promptPane: width, height and hint.
+    cut off and suggests --readable. --json has it as promptPane: width, height and hint.
+  - --readable (or --size WxH) reads a seat whose pane is smaller than that: it resizes the seat's
+    window, waits for the seat to redraw, captures, then puts the window back, both its size and
+    its own window-size setting, so Herdr, tmux attach and other clients size it as before. The
+    seat redraws twice, and anyone watching it sees the resize briefly. A window that's already big
+    enough is read as it is, and so is one whose size is pinned (window-size manual, as while the
+    web terminal shows it), one whose sizing can't be read, and one with several panes. A stderr
+    note says which; --json has it as readable.
   - --lines N shows at most the last N lines, counted up from the last non-blank line. When lines
     above them are left out, a "[rig capture: ...]" note on stderr says how many; --json reports
     lines (returned), requestedLines and omittedLines. Trailing rows that are entirely whitespace
@@ -186,6 +210,12 @@ Supported notes:
       const deps = getDeps();
       opts.linesGiven = cmd.getOptionValueSource("lines") === "cli";
       opts.exactLines = exactLineCount(opts, opts.linesGiven);
+      const size = readableSize(opts);
+      if (size && "error" in size) {
+        console.error(size.error);
+        process.exitCode = 1;
+        return;
+      }
 
       // OPR.0.4.6.MH4 §4 — `agent@rig@host` target sugar (session operand
       // only; --rig/--pod values are names, never sugar-parsed). Suffix must
@@ -222,6 +252,7 @@ Supported notes:
       if (opts.pod) body.pod = opts.pod;
       if (session) body.session = session;
       body.inputBox = true; // the input box note; a daemon without it ignores the field
+      if (size) body.readable = size; // a daemon without it ignores the field and captures as before
 
       const res = await client.post<Record<string, unknown>>("/api/transport/capture", body, { headers: terminalAuthHeaders() });
       if (res.status < 400) res.data = withExactLines(res.data, opts.exactLines);
@@ -285,6 +316,8 @@ async function runCrossHostCapture(
   // Only an explicit --lines is forwarded: the remote's own default stays the default.
   if (opts.linesGiven || opts.historyPlusPane) argv.push("--lines", opts.lines ?? "20");
   if (opts.historyPlusPane) argv.push("--history-plus-pane");
+  if (opts.readable) argv.push("--readable");
+  if (opts.size !== undefined) argv.push("--size", opts.size);
   if (opts.json) argv.push("--json");
 
   const result = await runner(host, argv);
@@ -327,6 +360,8 @@ async function runHttpHostCapture(
   if (opts.pod) body.pod = opts.pod;
   if (session) body.session = session;
   body.inputBox = true;
+  const size = readableSize(opts);
+  if (size && !("error" in size)) body.readable = size;
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps, {});
   if (result.ok) result.data = withExactLines(result.data, opts.exactLines);

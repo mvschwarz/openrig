@@ -66,15 +66,3 @@ function tmuxOnDaemonServer(): string {
 export function tmuxAttachCommand(session: string): string {
   return `${tmuxOnDaemonServer()} attach -t ${session}`;
 }
-
-/** Resize a seat's window so a person or peer can read it, on the daemon's server. `=<session>:` is that session's
- *  current window; a bare `=<session>` can resolve to a same-named window in another session. */
-export function tmuxResizeWindowCommand(session: string, width: number, height: number): string {
-  return `${tmuxOnDaemonServer()} resize-window -t ${shellWord(`=${session}:`)} -x ${width} -y ${height}`;
-}
-
-/** resize-window also sets the window's `window-size` to manual, so its clients (Herdr, attach) stop sizing it. This
- *  unsets that again, on the daemon's server, and the window follows its clients as before. */
-export function tmuxRestoreWindowSizingCommand(session: string): string {
-  return `${tmuxOnDaemonServer()} set-option -wu -t ${shellWord(`=${session}:`)} window-size`;
-}

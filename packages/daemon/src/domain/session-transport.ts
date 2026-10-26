@@ -31,7 +31,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { tmuxResizeWindowCommand, tmuxRestoreWindowSizingCommand } from "../adapters/tmux-server.js";
+import { newPinHolder, readPinSizing, recordPin, releasePin } from "../terminal/window-pin.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
@@ -1884,6 +1884,8 @@ export interface CaptureResult {
   inputBox?: InputBoxAnnotation;
   /** When the caller asked: the captured screen is at a prompt in a pane smaller than 80x24, which may cut it off. */
   promptPane?: { width: number; height: number; hint: string };
+  /** When the caller asked to read at a readable size: the size it was read at, or why the window wasn't resized. */
+  readable?: { resized: true; width: number; height: number } | { resized: false; reason: string };
 }
 
 export interface BroadcastResult {
@@ -3831,7 +3833,8 @@ export class SessionTransport {
   /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads), for callers that
    *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
    *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
-  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget; promptPane?: boolean }): Promise<CaptureResult> {
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget; promptPane?: boolean;
+    readable?: { width: number; height: number } }): Promise<CaptureResult> {
     sessionName = physicalSessionName(this.db, sessionName);
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
@@ -3876,24 +3879,77 @@ export class SessionTransport {
     }
 
     const lines = opts?.lines ?? 20;
-    const content = await this.tmuxAdapter.capturePaneContent(sessionName, lines);
-    if (content === null) {
-      return {
-        ok: false,
-        sessionName,
-        reason: "capture_failed",
-        error: `Could not capture pane content for '${sessionName}'.`,
-      };
+    const read = async (): Promise<CaptureResult> => {
+      const content = await this.tmuxAdapter.capturePaneContent(sessionName, lines);
+      if (content === null) {
+        return {
+          ok: false,
+          sessionName,
+          reason: "capture_failed",
+          error: `Could not capture pane content for '${sessionName}'.`,
+        };
+      }
+
+      await this.reconcileStartupReadiness(sessionName).catch(() => {});
+
+      const runtime = sessionMeta.runtime;
+      const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
+        ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
+        : undefined;
+      const promptPane = opts?.promptPane ? await this.capturePromptPane(sessionName, content, runtime) : undefined;
+      return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}), ...(promptPane ? { promptPane } : {}) };
+    };
+    if (!opts?.readable) return read();
+    const { value, readable } = await this.readAtReadableSize(sessionName, opts.readable, read);
+    return value.ok ? { ...value, readable } : value;
+  }
+
+  /**
+   * Run `read` with the seat's window enlarged to at least `size`, then put the window back: its size, and its own
+   * `window-size` exactly. resize-window sets that to manual, which would stop the window's clients (Herdr, attach)
+   * sizing it. The window is named by its id and the resize is recorded as a pin (window-pin.ts), so a web terminal
+   * that opens meanwhile keeps the window's own value and the window is put back only when the last holder lets go.
+   * A window already that big is read as it is, and so is one whose own `window-size` is manual (pinned by the web
+   * terminal while a browser watches, by a person, or by another readable capture), one whose sizing can't be read
+   * (it couldn't be given back exactly), and one with several panes.
+   */
+  private async readAtReadableSize<T>(sessionName: string, size: { width: number; height: number }, read: () => Promise<T>):
+  Promise<{ value: T; readable: NonNullable<CaptureResult["readable"]> }> {
+    const asItIs = async (reason: string) => ({ value: await read(), readable: { resized: false as const, reason } });
+    const sizing = await readPinSizing(this.tmuxAdapter, sessionName);
+    if (!sizing) return asItIs("the window's sizing couldn't be read, so it couldn't be given back");
+    if (sizing.live === "manual") return asItIs("the window's size is pinned (its window-size is manual)");
+    const panes = await this.tmuxAdapter.listPanes(sizing.window).catch(() => []);
+    if (panes.length !== 1) return asItIs(panes.length === 0 ? "the window's size couldn't be read" : "the window has several panes");
+    const pane = panes[0]!;
+    if (pane.width >= size.width && pane.height >= size.height) return asItIs(`the pane is already ${pane.width}x${pane.height}`);
+    const width = Math.max(size.width, pane.width);
+    const height = Math.max(size.height, pane.height);
+    const holder = newPinHolder();
+    await recordPin(this.tmuxAdapter, sizing, holder);
+    try {
+      const resized = await this.tmuxAdapter.resizeWindow(sizing.window, width, height);
+      if (!resized.ok) return await asItIs(`the resize failed: ${resized.message}`);
+      await this.settleRedraw(sessionName);
+      return { value: await read(), readable: { resized: true, width, height } };
+    } finally {
+      // As the last holder: back to its size first (that pins it again), then its own sizing, so a window with
+      // clients follows them again.
+      await releasePin(this.tmuxAdapter, sizing.window, holder, async () => {
+        await this.tmuxAdapter.resizeWindow(sizing.window, pane.width, pane.height);
+      });
     }
+  }
 
-    await this.reconcileStartupReadiness(sessionName).catch(() => {});
-
-    const runtime = sessionMeta.runtime;
-    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
-      ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
-      : undefined;
-    const promptPane = opts?.promptPane ? await this.capturePromptPane(sessionName, content, runtime) : undefined;
-    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}), ...(promptPane ? { promptPane } : {}) };
+  /** After a resize, give the seat's TUI time to redraw: two equal screens 150 ms apart, for at most about 2 s. */
+  private async settleRedraw(sessionName: string): Promise<void> {
+    let last: string | null = null;
+    for (let look = 0; look < 12; look++) {
+      await this.sleep(150);
+      const screen = await this.tmuxAdapter.capturePaneScreen(sessionName).catch(() => null);
+      if (screen !== null && screen === last) return;
+      last = screen;
+    }
   }
 
   /** A prompt drawn in a pane smaller than an 80x24 terminal may be cut off, so a reader can't see what the seat asks.
@@ -3905,7 +3961,7 @@ export class SessionTransport {
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
     return { width: pane.width, height: pane.height,
-      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; resize it (${tmuxResizeWindowCommand(sessionName, 120, 40)}), capture again, then unset its own window-size so its clients size it again (${tmuxRestoreWindowSizingCommand(sessionName)}); a window-size set on that window before isn't kept` };
+      hint: `pane ${pane.width}x${pane.height} is smaller than 80x24, so the prompt may be cut off; read it at a readable size with rig capture ${sessionName} --readable` };
   }
 
   /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the
