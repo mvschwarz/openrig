@@ -313,6 +313,12 @@ function groupPods(nodes: NodeInventoryRead[]): PodNode[] {
   return [...pods.entries()].map(([name, agents]) => ({ name, agents }));
 }
 
+// Rigs are listed as `rig ps` lists them: by name, compared as SQLite's `ORDER BY r.name` does (so uppercase before
+// lowercase). The summary arrives in creation order and the sort is stable, so equal names keep that order, as in `rig ps`.
+function byRigName(a: { name: string }, b: { name: string }): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+}
+
 function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
   // verbatim carry: served kind + summary/evidence; the target is the
   // session/where the daemon already names (identity prefix for derived rows)
@@ -658,7 +664,7 @@ export async function hydrateSnapshot(
     id: "local",
     name: instanceHealth?.selfHostId?.trim() || "local",
     reachable: true,
-    rigs,
+    rigs: rigs.sort(byRigName),
   };
   // A remote host is any registered host, or one the attention aggregate answered for. Its reachability is the aggregate's
   // answer where there is one, else the registry's probe. Only a drilled-into remote host's rigs are read, through this
@@ -676,7 +682,7 @@ export async function hydrateSnapshot(
     name: id,
     reachable: aggStatus.has(id) ? aggStatus.get(id) === "ok" : registered.some((h) => h.id === id && h.reachable),
     rigs: id === drilledRemote
-      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id }))
+      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id })).sort(byRigName)
       : [],
   }));
 
