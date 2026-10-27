@@ -387,6 +387,29 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect((await findingsFor(row.qitemId))[0]!.destinationSession).toBe("sender@r");
   });
 
+  // #2151: a row created before its seat's pane was bound records an unroutable wake. Once the binding exists, the sweep
+  // sends that wake instead of reporting it.
+  it("re-sends a wake recorded unroutable once the seat's terminal binding exists, and raises no finding for it", async () => {
+    // Real topology, so the repository's pre-topology transport shortcut doesn't apply.
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
+    });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    expect(row.lastNudgeResult).toMatch(/^unroutable:/);
+    expect(sent).toEqual([]);
+    // The seat's pane comes up: its tmux binding is written.
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    await runSweep();
+    expect(sent).toEqual(["late@r"]);
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^unroutable:/);
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
   // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
   it("a dead seat's own row with no operator agent or seat stays with it, and its why says no live recovery seat is available", async () => {
     const row = await repo.create({ sourceSession: "worker@r", destinationSession: "worker@r", body: "work" });
