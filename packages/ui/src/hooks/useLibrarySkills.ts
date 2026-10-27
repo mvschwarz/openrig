@@ -2,7 +2,7 @@
 //
 // Pre-C4 the hook fanned out per-allowlist-root × per-candidate-path probes
 // (N×3 fetches) and recursively walked nested category folders client-side.
-// QA verdict on slice 28 C-2 (qitem-20260513045711-39ccfdf3) proved that
+// QA verdict on slice 28 C-2 proved that
 // approach fails when the operator's allowlist doesn't include the daemon's
 // source tree.
 //

@@ -789,7 +789,7 @@ export class RunnerCore {
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
     if (event.type === "agent_end") {
-      // QA RED fold (qitem-20260707020922): live events do not reliably carry
+      // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
       // completed turn — get_entries returns append-order entries with stable
@@ -1004,7 +1004,7 @@ function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; tok
 }
 
 /** The runner-side sidecar handshake, extracted for hermetic testing (guard
- *  re-verdict, qitem-20260707013815): read the PRIOR record's durable cursor
+ *  re-verdict): read the PRIOR record's durable cursor
  *  FIRST, then stamp the launch-scoped pending record — the write carries the
  *  cursor forward so no reset in the chain can erase it. `catchUpSince` is
  *  only surfaced when resuming: a fresh/fork session has no prior projection

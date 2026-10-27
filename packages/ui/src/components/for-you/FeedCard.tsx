@@ -365,7 +365,7 @@ export function FeedCard({
    * for event-derived cards, string-id for queue-derived attention
    * cards). The prior `(seq: number)` signature collided across all
    * queue-derived cards (all share synthetic seq=-1) — banked guard
-   * BLOCKER qitem-20260518190827.
+   * BLOCKER.
    */
   onDismiss?: (card: FeedCardModel) => void;
   /**

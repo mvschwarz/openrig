@@ -7,7 +7,7 @@
 // R2's HOLD was exactly the drift this module removes: reporting surfaces
 // selecting historical rows the execution path would never resume.
 //
-// FOUR-WAY OCCUPANT TRUTH (repair ruling qitem-20260829080039-c47a571e):
+// FOUR-WAY OCCUPANT TRUTH (repair ruling):
 // the ONLY case where legacy inference may run is the WHOLE relation map
 // being absent (a pre-convention snapshot). A PRESENT map is the authority —
 // a null value, a missing node key, or a dangling id each fails LOUDLY; the

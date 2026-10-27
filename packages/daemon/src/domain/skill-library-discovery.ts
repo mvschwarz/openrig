@@ -3,8 +3,8 @@
 // SC-29 EXCEPTION #11 (slice 28 library-explorer-finishing) — cumulative scope.
 // C-1 (plugin endpoints) declared #11 verbatim at routes/plugins.ts header.
 // This file extends the slice 28 surface with skill-library discovery to
-// close HG-5 / HG-7 / HG-8 / HG-9 cascade on the founder-walk VM (QA verdict
-// qitem-20260513045711-39ccfdf3): the operator's allowlist does not include
+// close HG-5 / HG-7 / HG-8 / HG-9 cascade on the founder-walk VM (QA verdict):
+// the operator's allowlist does not include
 // the daemon's source tree, so the prior /api/files-based useLibrarySkills
 // 3-path probe could not reach `packages/daemon/specs/agents/shared/skills`.
 //

@@ -135,7 +135,7 @@ export function mergeAttentionIntoFeed(
  * out of the seq-prune input (queue cards have synthetic seq=-1
  * and would otherwise pin min-seq at -1, breaking the
  * useDismissedSeqs auto-prune for event-derived dismissals — guard
- * re-verify-2 qitem-20260518192210 CLEANUP-1).
+ * re-verify-2 CLEANUP-1).
  */
 export const QUEUE_DERIVED_CARD_ID_PREFIX = "queue-attention-";
 export const ACTIVITY_NEEDS_INPUT_CARD_ID_PREFIX = "activity-needs-input-";

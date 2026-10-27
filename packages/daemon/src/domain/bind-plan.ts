@@ -4,7 +4,7 @@
 // environment may inject) can NEVER select the single-bind branch. The lived cost of
 // the old conflation: the parent daemon inherited OPENRIG_HOST=127.0.0.1 from a
 // maintenance command run in a managed environment and silently lost its Tailscale
-// listener (operator baton qitem-20260827070400). This re-grounds the
+// listener (operator baton). This re-grounds the
 // auth-bearer-tailscale-trust ruling — explicit opt-in vs default — on a channel that
 // managed environments never inject; it does not overturn it.
 

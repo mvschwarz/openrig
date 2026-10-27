@@ -52,7 +52,7 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 
 export interface PiRunnerState {
   ready: boolean;
-  /** Launch-attempt scope (guard fold, code-review qitem-20260707011908):
+  /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar
    *  carrying it, and passes --launch-id to the runner; the runner stamps it
    *  into every sidecar write. Readiness/resume polls IGNORE any state whose
@@ -74,8 +74,8 @@ export interface PiRunnerState {
 /** The launch-scoped pending record every writer uses when resetting the
  *  sidecar for a new attempt. It deliberately CARRIES the prior lastEntryId:
  *  the durable catch-up cursor (FR-5) must survive the stale-artifact reset —
- *  erasing it broke get_entries-since on resume (guard re-verdict,
- *  qitem-20260707013815). Everything else from the prior record is exactly
+ *  erasing it broke get_entries-since on resume (guard re-verdict).
+ *  Everything else from the prior record is exactly
  *  the stale state the reset exists to scope away. */
 export function buildPendingRunnerState(
   launchId: string,

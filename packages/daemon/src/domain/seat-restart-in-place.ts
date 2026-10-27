@@ -1093,8 +1093,8 @@ export function accountTextMark(capture: { history: string; all: string } | null
   return { anchor: aligned ? anchor : [], counts };
 }
 
-/** Whether a status `Account:` line names `expected` as a whole value: `bob@corp.com` doesn't match
- *  `jimbob@corp.com` or `bob@corp.com.au`. Case-insensitive, as account names are. */
+/** Whether a status `Account:` line names `expected` as a whole value: `bob@example.com` doesn't match
+ *  `jimbob@example.com` or `bob@example.com.au`. Case-insensitive, as account names are. */
 export function accountLineNames(line: string, expected: string): boolean {
   const want = expected.trim();
   if (!want) return false;

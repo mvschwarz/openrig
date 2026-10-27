@@ -522,7 +522,7 @@ activityRoutes.post("/hooks", async (c) => {
 });
 
 // ── S19 AM-R18 — the push substrate: GET /api/activity/events (SSE) ──
-// Desk-accepted shape (ruling row qitem-20260827001530): CHANGE NOTIFICATIONS ONLY —
+// Desk-accepted shape (ruling row): CHANGE NOTIFICATIONS ONLY —
 // seat.activity_changed (identity + seq) and seat.rung_health stream to the open view;
 // the view REHYDRATES from /api/ps. The push never carries derived vocabulary, so "no
 // second activity mechanism" holds by construction. No timers: pure bus relay;

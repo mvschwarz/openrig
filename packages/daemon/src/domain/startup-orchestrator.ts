@@ -809,7 +809,7 @@ export class StartupOrchestrator {
       challengeOnlyPrompt = challenge.promptBlock;
     }
 
-    // OPR.0.4.7.17 restore-order-correction (qitem-e99624f7). On a resumed
+    // OPR.0.4.7.17 restore-order-correction. On a resumed
     // restore the work-triggering guidance/role.md is delivered as a post-launch
     // send_text file (step 7 below) and starts the seat's first turn at once. An
     // after_ready send_text "BEFORE you do anything else, load skills" preload

@@ -2,7 +2,7 @@
 // daemon-client (FR-8 one-module rule): this module consumes an OPENER and parses SSE
 // frames. Pushes are CHANGE NOTIFICATIONS ONLY (seat + seq) — the open view re-renders
 // by rehydrating the same /api/ps projection, so no second activity derivation exists
-// anywhere on this path (desk-accepted shape, ruling row qitem-20260827001530).
+// anywhere on this path (desk-accepted shape, ruling row).
 // A definite null open (non-OK / non-SSE answer) disables the leg permanently.
 // Opening deadlines and network errors are temporary connection failures, like an
 // established stream dropping. Retry with doubling backoff, capped at 30 seconds;

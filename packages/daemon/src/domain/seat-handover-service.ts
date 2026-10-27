@@ -206,7 +206,7 @@ interface SeatHandoverServiceDeps {
    */
   authoredRecapResolver?: (seatRef: string) => { address: string; chainLength: number } | { absentReason: string };
   /**
-   * S19 (territory ruling qitem-20260827001530, EXACT bounds): ONE narrow call into the
+   * S19 (territory ruling, EXACT bounds): ONE narrow call into the
    * activity oracle at the completion/rebind commit point so seat-keyed activity state
    * treats the cutover as its own visible event and the successor's rung inventory
    * starts unpromoted (never inheriting the retiree's rung authority). Optional: absent

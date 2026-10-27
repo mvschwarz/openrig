@@ -843,7 +843,7 @@ export class BootstrapOrchestrator {
     const anyFailed = result.nodes.some((n) => n.status === "failed");
     const anyAttention = result.nodes.some((n) => n.status === "attention_required");
 
-    // OPR.0.3.2.CT (guard verdict qitem-20260518082933 BLOCKER 1):
+    // OPR.0.3.2.CT (guard verdict BLOCKER 1):
     // attention_required nodes are recoverable but NOT done — the
     // launch is partial and the operator needs the same inspection
     // surface the all-attention path already gets. Treating mixed

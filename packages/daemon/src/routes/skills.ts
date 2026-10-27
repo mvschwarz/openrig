@@ -10,7 +10,7 @@
 //   GET /api/skills/:id/files/read?path=<rel>        → file content
 //
 // Why this exists: see velocity-qa BLOCKING verdict for slice 28 C-final
-// (qitem-20260513045711-39ccfdf3) — on the founder-walk VM the daemon's
+// — on the founder-walk VM the daemon's
 // allowlist doesn't include the openrig source tree, so the prior
 // useLibrarySkills 3-path probe over /api/files/list couldn't reach
 // `packages/daemon/specs/agents/shared/skills`. Daemon-owned discovery

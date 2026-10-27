@@ -30,8 +30,8 @@ import { terminatePaneInPlace } from "./pane-cutover.js";
 import { inspectStartupStagedText, settleOwnStartupPaste, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox } from "./startup-submission-evidence.js";
 
 /**
- * Slice 16: switch one live seat between Codex and Claude Code, successor first (founder
- * decision-20261014-0454-1214-successor-first; built from #1214 by Aschenbath, whose design is the starting point).
+ * Slice 16: switch one live seat between Codex and Claude Code, successor first (the
+ * successor-first decision; built from #1214 by Aschenbath, whose design is the starting point).
  *
  * The seat keeps its address, edges, queue rows and claims. Its successor starts on the target runtime in a staging
  * session beside the current occupant, reads a handover, and confirms it through OpenRig with its own reserved

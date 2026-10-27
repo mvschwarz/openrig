@@ -424,7 +424,7 @@ export function extractProofContract(prd: string | null): PromisedItem[] {
 }
 
 // ---------------------------------------------------------------------------
-// PM dogfood #1 (qitem-20260720015700-630eef64) — per-SECTION source
+// PM dogfood #1 — per-SECTION source
 // selection, shared by this composer and the slice-detail projector: an
 // authored PRD section is canonical, but a PRESENT-and-PRISTINE scaffold-only
 // PRD section yields to an authored (non-pristine) README section. Missing /

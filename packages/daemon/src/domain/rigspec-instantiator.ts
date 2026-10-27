@@ -1878,7 +1878,7 @@ export class PodRigInstantiator {
     // Carry sessionName + evidence through to InstantiateResult.nodes
     // so BootstrapOrchestrator can build AttentionNode[] in the mixed
     // launched+attention_required path (guard verdict
-    // qitem-20260518082933 BLOCKER 1).
+    // BLOCKER 1).
     const resultNodes = nodeResults.map((n) => ({
       logicalId: n.logicalId,
       status: n.status,

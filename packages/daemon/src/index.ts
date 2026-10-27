@@ -275,8 +275,8 @@ export async function startServer(port?: number) {
   // The overloaded routing env (OPENRIG_HOST/RIGGED_HOST) is observed for the
   // provenance line below and NEVER selects the bind branch: a managed environment's
   // injected endpoint is byte-indistinguishable from opt-in, and the parent daemon
-  // silently lost its Tailscale listener to exactly that (operator baton
-  // qitem-20260827070400). The auth-bearer-tailscale-trust ruling rides the new
+  // silently lost its Tailscale listener to exactly that (operator baton).
+  // The auth-bearer-tailscale-trust ruling rides the new
   // surface unchanged.
   const bindPlan = resolveBindPlan({
     bindHostEnv: process.env.OPENRIG_BIND_HOST,

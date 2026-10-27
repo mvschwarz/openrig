@@ -55,7 +55,7 @@ export function slicesRoutes(): Hono {
     if (refresh === "1" || refresh === "true") {
       deps.indexer.invalidate();
     }
-    // qitem-ccf87c0d corrective — ONE HTTP request is ONE composite
+    // ONE HTTP request is ONE composite
     // operation: the list rebuild, the boundToWorkflow per-slice get loop,
     // and the mission sidecar share ONE membership batch (pre-scope, each
     // uncached get built its own 2-scan batch: 2+2N total queue scans).

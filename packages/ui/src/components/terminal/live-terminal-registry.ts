@@ -1,6 +1,6 @@
 // OPR.0.4.0.1 — global live-terminal cap registry.
 //
-// PM-locked architecture (concurrence qitem-20260621004748-63ec48b1):
+// PM-locked architecture (concurrence):
 //   - the cap is GLOBAL: total simultaneously-live terminals across graph +
 //     table + topology surfaces must be <= MAX_LIVE_TERMINALS;
 //   - opening a live terminal past the cap EVICTS THE OLDEST live one, which

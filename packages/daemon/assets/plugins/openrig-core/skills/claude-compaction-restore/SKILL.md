@@ -161,8 +161,8 @@ not establish completed restoration. The earlier acknowledgement-only boundary
 is not a restore request.
 
 1. **Check for a hold first.** Read the restore request, the per-seat instruction file
-   (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named by your full session such as
-   `dev-impl@my-rig.md`) when it exists, the newest row or message from whoever routes your work, and any hold
+   (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named after your full session, such as
+   `dev-impl@my-rig` with `.md` added) when it exists, the newest row or message from whoever routes your work, and any hold
    from the authority above them. A hold, a release order or an operator's own restore map overrides the default
    order below. Before any write, also run `rig whoami --json` and `rig queue whoami`.
 2. **Name your class and state its read budget** before reading (see "Two restore classes"), with a

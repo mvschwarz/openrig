@@ -1189,13 +1189,13 @@ export function queueRoutes(): Hono {
     // attention filtering. Window-independent by construction: an
     // old human-gate item is never evicted by routine open qitems,
     // however many of them land after it (guard re-verify
-    // qitem-20260518190827 BLOCKER 1). The earlier fetch-then-filter
+    // BLOCKER 1). The earlier fetch-then-filter
     // shape (ATTENTION_FETCH_BOUND) is gone — the LIMIT bound is the
     // user-facing one only, applied at the SQL layer post-predicate.
     //
     // destinationSession/sourceSession/targetRepo are composable with
     // the attention predicate at the SQL layer (guard re-verify
-    // qitem-20260518192210 BLOCKER 1 — the previous forward-fix
+    // BLOCKER 1 — the previous forward-fix
     // dropped composition). Scoped attention queries (e.g.,
     // attention=1&destinationSession=...) return ONLY the matching
     // attention items.

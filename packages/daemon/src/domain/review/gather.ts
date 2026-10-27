@@ -171,7 +171,7 @@ export class ReviewGatherer {
   }
 
   composeMission(mission: string): ComposedMissionReview | null {
-    // qitem-ccf87c0d corrective — one mission compose is ONE composite
+    // One mission compose is ONE composite
     // operation: the cold list() plus gatherSlice()->indexer.get() per
     // mission slice share ONE membership batch (pre-scope each uncached get
     // built its own 2-scan batch: 2+2N membership scans — 82 at 40 slices).

@@ -1288,7 +1288,7 @@ export class WorkflowRuntime {
 
       // P34 (site :791) — NO SEAM ASSERT HERE, deliberately.
       //
-      // Canonical correction, transition 5764 on qitem-20260809175537-8e25384f:
+      // Canonical correction:
       // "Intent goes on :791; the assert runs only where a real source->successor
       // pair exists." This transaction has no such pair. The N exception closes
       // above are terminal closes with NO successor of their own (`no-follow-on`),
@@ -1805,8 +1805,8 @@ export class WorkflowRuntime {
   }
 
   /**
-   * OPR.0.4.6.WF1 FR-2 COMPLETION FIXBACK (build-vs-ratified-AC debt,
-   * qitem-20260706211220-279039f5): the ratified FR-2 AC requires the
+   * OPR.0.4.6.WF1 FR-2 COMPLETION FIXBACK (build-vs-ratified-AC debt):
+   * the ratified FR-2 AC requires the
    * stuck classification to be "queryable via list/show/trace … with
    * the evidence (step, owner, deadline, age)". The merged WF-1 build
    * surfaced it only through the boot sweep + keepalive nudges; this

@@ -173,7 +173,7 @@ export class AgentActivityStore {
     //      the seat has not earned; marking null-tenure fresh is bare-attribution one field over). The
     //      STORE delivers the row carrying generationProvenance='unresolved' at the ACTIVITY layer. The
     //      tap's discard-condition change that turns this label into a still-flowing consumer row is a
-    //      FOLLOW-ON (qitem-20260808183747-f7f04662, verify-demotion) — NOT this fold; in the INTERIM
+    //      FOLLOW-ON (verify-demotion) — NOT this fold; in the INTERIM
     //      the unchanged tap still discards it (a bounded regression whose exposure is the mint-race
     //      transient; mm2 is unaffected — its daemon carries no occupant_tenures table until 0.5.1).
     //      Ignorance and evidence get DIFFERENT verdicts; the two paths must not collapse.
@@ -279,7 +279,7 @@ export class AgentActivityStore {
    *  State UNKNOWN + a distinct reason + stale:true so no consumer reads it as verified-live (fresh is
    *  a positive liveness claim). The STORE delivers the row carrying generationProvenance:"unresolved"
    *  at the ACTIVITY layer; turning that label into a still-flowing CONSUMER row is the tap FOLLOW-ON
-   *  (verify-demotion, qitem-20260808183747-f7f04662) — the unchanged tap still discards it in the
+   *  (verify-demotion) — the unchanged tap still discards it in the
    *  INTERIM (a bounded regression, mint-race-transient exposure; mm2 has no occupant_tenures table
    *  until 0.5.1). Kept DISTINCT from generationMismatch: ignorance and evidence get different verdicts,
    *  and the paths must not collapse — at the store now, and at the tap when the follow-on lands. */

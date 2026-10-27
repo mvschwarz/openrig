@@ -349,8 +349,8 @@ export class ContextPackLibraryService {
     }
 
     const name = segments.at(-1)!;
-    // OPR.0.5.6.10 — compose stamps a FIXED `mission` class (desk ruling on
-    // qitem-20260828092429-d2f94323: true of every current compose consumer;
+    // OPR.0.5.6.10 — compose stamps a FIXED `mission` class (desk ruling:
+    // true of every current compose consumer;
     // a caller-supplied taxonomy is DEFERRED to slice 08, where the second
     // consumer earns the option's existence). The emission must satisfy the
     // parser this service itself scans with, or compose rejects its own output.

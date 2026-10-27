@@ -1303,7 +1303,7 @@ export function attachTerminalActivityAndWork(
 }
 
 /**
- * QA baseline-deep-dogfood BLOCKING-A2 (qitem-20260518063900-85745917):
+ * QA baseline-deep-dogfood BLOCKING-A2:
  * adopted/live-session rigs do NOT surface assigned queue work because
  * the prior lookup matched destination_session ONLY against
  * canonicalSessionName.
