@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
-import { HerdrAdapter } from "../../daemon/src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANES_UNCONFIRMED_NOTE } from "../../daemon/src/domain/terminal/herdr-adapter.js";
 import { terminalRoutes } from "../../daemon/src/routes/terminal.js";
 import { DaemonClient } from "../src/daemon-client.js";
 import { hydrateSnapshot } from "../src/hydrate.js";
@@ -13,9 +13,11 @@ import { parseCommand } from "../src/grammar.js";
 import type { FleetSnapshot, ViewStateStore } from "../src/types.js";
 
 let snap: FleetSnapshot, view: ViewStateStore, client: DaemonClient, service: TerminalService;
-let effects: Array<{ method: string; params: any }>, requests: string[], alive: boolean, providerAlive: boolean, failPage: boolean;
+let effects: Array<{ method: string; params: any }>, requests: string[], alive: boolean, providerAlive: boolean, failPage: boolean, unconfirmed: "none" | "idless" | "listing" | "second-page";
 beforeEach(() => {
-  effects = []; requests = []; alive = true; providerAlive = true; failPage = false;
+  effects = []; requests = []; alive = true; providerAlive = true; failPage = false; unconfirmed = "none";
+  let page = 0;
+  const panes: Array<{ tab_id: string; label: string }> = [];
   const provider = new HerdrAdapter({ transportFactory: () => ({
     probe: async () => ({ alive: providerAlive, version: "fixture", protocol: 1 }),
     request: async (method, params) => {
@@ -24,6 +26,20 @@ beforeEach(() => {
       // Like Herdr, list every workspace created so far; a duplicate label is accepted.
       if (method === "workspace.list") {
         return { type: "workspace_list", workspaces: effects.filter(e => e.method === "workspace.create").map(e => ({ label: e.params.label })) };
+      }
+      if (method === "layout.apply") {
+        const tab_id = `own-fixture:t${++page}`;
+        const collect = (node: any): void => {
+          if (node.type === "pane") panes.push({ tab_id, label: node.label });
+          else { collect(node.first); collect(node.second); }
+        };
+        collect((params as any).root);
+        return unconfirmed === "idless" || (unconfirmed === "second-page" && page === 2)
+          ? { type: "layout_apply" } : { type: "layout_apply", layout: { tab_id } };
+      }
+      if (method === "pane.list") {
+        if (unconfirmed === "listing") throw new Error("pane listing unreadable");
+        return { type: "pane_list", panes };
       }
       return { type: "fixture", workspace: { workspace_id: "own-fixture" } };
     },
@@ -88,11 +104,36 @@ describe("terminal browser → preview → explicit Open", () => {
     const result = await client.openTerminal(open.view, open.expectedPlan);
     expect(result.opened).toEqual(preview.composed.opened.map(m => m.seat));
     expect(result.absent).toHaveLength(1); expect(result.degraded).toHaveLength(1);
-    expect(effects.map(e => e.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
+    expect(effects.map(e => e.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus"]);
     expect(effects.filter(e => e.method === "layout.apply").map(e => e.params.root)).toEqual((preview.grids as any[]).map(g => g.root));
     view.dispatch({ type: "back" }); await refresh();
     expect(view.get().terminalView).toBe(before.terminalView);
     expect(view.get().selection).toBe(before.selection);
+  });
+
+  it.each(["idless", "listing"] as const)("keeps a %s open unconfirmed through HTTP and the TUI client without replay", async mode => {
+    unconfirmed = mode;
+    view.dispatch({ type: "terminal-preview", view: "saved:fixture" }); await refresh();
+    const before = view.get();
+    const preview = snap.terminals!.preview!;
+    await expect(client.openTerminal(preview.view, preview.planId)).rejects.toThrow(/Unconfirmed: member-1/);
+    expect(effects.filter(e => e.method === "layout.apply")).toHaveLength(2);
+    expect(effects.some(e => e.method === "tab.focus" || e.method === "tab.close")).toBe(false);
+    expect(view.get()).toEqual(before);
+  });
+
+  it("counts only the confirmed page and names the unconfirmed page in the result notice", async () => {
+    unconfirmed = "second-page";
+    const preview = await client.previewTerminal("saved:fixture");
+    const result = await client.openTerminal(preview.view, preview.planId);
+    expect(result.opened).toHaveLength(16);
+    expect(result.degraded.filter(d => d.code === "pane_unconfirmed").map(d => d.seat)).toEqual(["member-17", "member-18", "member-19"]);
+    const notice = terminalWindowNotice(preview.view, result);
+    expect(notice).toContain("16 tiles prepared; 1 absent; 4 degraded.");
+    expect(notice).toContain(`Unconfirmed: member-19 — ${HERDR_PANES_UNCONFIRMED_NOTE}`);
+    expect(notice).not.toContain("19 tiles prepared");
+    expect(effects.filter(e => e.method === "layout.apply")).toHaveLength(2);
+    expect(effects.find(e => e.method === "tab.focus")?.params).toEqual({ tab_id: "own-fixture:t1" });
   });
 
   it("refuses a changed plan before any launch, then allows a fresh preview", async () => {

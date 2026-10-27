@@ -76,14 +76,14 @@ function humanOpen(r: OpenViewResult): string {
         ? `Terminal window requested. Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
         : tiled > 0
           ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${target}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-          : `No tiles opened in ${target}.`,
+          : `No tiles ${r.degraded.some(d => d.code === "pane_unconfirmed") ? "confirmed" : "opened"} in ${target}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
   if (r.space) lines.push(`  ${r.provider} session: ${JSON.stringify(r.space.label)} (${r.space.id}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
-  for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — skipped (${d.host}): ${d.reason}`);
+  for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
   for (const n of r.notes ?? []) lines.push(`  note: ${n}`);
   return lines.join("\n");
 }

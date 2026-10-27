@@ -168,49 +168,53 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.degraded.map((d) => d.seat)).toEqual(["b", "c"]);
   });
 
-  it("an unlabelled remainder is never counted as filler: nothing is degraded, the loss is a note", async () => {
+  it("an unlabelled remainder confirms no seats: every seat is degraded with a note", async () => {
     const { adapter } = herdrOpening(() => listed(undefined));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-    expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a", "b", "c"]);
-    expect(res.degraded).toEqual([]);
-    expect(res.notes?.join(" ")).toContain("3 pane(s) exited right after opening");
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
+    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
 
-  it("a seat whose label is blank is never attributed: with every pane alive it stays opened, with the note", async () => {
+  it("a blank-labelled seat is degraded while its confirmed labelled siblings stay opened", async () => {
     // A saved view may give a member a whitespace-only label.
     const { adapter } = herdrOpening(() => listed(" ", "b", "c", ""));
     const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
     expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a", "b", "c"]);
-    expect(res.degraded).toEqual([]);
+    expect(res.opened).toEqual(["b", "c"]);
+    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
-  it("a blank-labelled seat keeps the filler-only rule from applying: nothing is degraded, with the note", async () => {
+  it("a blank-labelled seat prevents filler-only attribution: every seat is degraded with a note", async () => {
     const { adapter } = herdrOpening(() => listed(""));
     const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
-    expect(res.opened).toEqual(["a", "b", "c"]);
-    expect(res.degraded).toEqual([]);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
-  it("the tab isn't in the listing (another id form) or the listing is empty: seats stay opened, with a note", async () => {
+  it("an absent tab or empty listing confirms no seats: every seat is degraded with a note", async () => {
     const otherTab: HerdrResult = { type: "pane_list", panes: [{ pane_id: "p0", tab_id: "1", label: "a" }] };
     for (const reply of [otherTab, { type: "pane_list", panes: [] }]) {
       const { adapter } = herdrOpening(() => reply);
       const res = await adapter.openView(viewOf(pane("a"), pane("b")));
-      expect(res.ok).toBe(true);
-      expect(res.opened).toEqual(["a", "b"]);
-      expect(res.degraded).toEqual([]);
+      expect(res.ok).toBe(false);
+      expect(res.opened).toEqual([]);
+      expect(res.degraded.length).toBeGreaterThan(0);
+      expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
       expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
   });
 
-  it("listed labels that match none of the page's seats: nothing is degraded, with a note", async () => {
+  it("unmatched listed labels confirm no seats and report an unconfirmed note", async () => {
     const { adapter } = herdrOpening(() => listed("renamed-1", "renamed-2", ""));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.opened).toEqual([]);
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
@@ -222,28 +226,37 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.notes).toBeUndefined();
   });
 
+  it("one truncated label cannot confirm two differently labelled seats", async () => {
+    const { adapter } = herdrOpening(() => listed("pod.a…", "other"));
+    const res = await adapter.openView(viewOf(pane("a", "pod.alpha"), pane("b", "pod.alpine"), pane("c", "other")));
+    expect(res.opened).toEqual(["c"]);
+    expect(res.degraded.map(d => [d.seat, d.code])).toEqual([["a", "pane_unconfirmed"], ["b", "pane_unconfirmed"]]);
+  });
+
   it("seats sharing a label are not attributed; a note says one exited", async () => {
     const { adapter } = herdrOpening(() => listed("same"));
     const res = await adapter.openView(viewOf(pane("x", "same"), pane("y", "same")));
-    expect(res.opened).toEqual(["x", "y"]);
-    expect(res.degraded).toEqual([]);
-    expect(res.notes?.join(" ")).toContain("share that label");
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
+    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
 
-  it("a listing without labels: a partial loss is a note and the seats stay opened", async () => {
+  it("a listing without labels confirms no seats and reports an unconfirmed note", async () => {
     const { adapter } = herdrOpening(() => listed(undefined, undefined));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-    expect(res.opened).toEqual(["a", "b", "c"]);
-    expect(res.notes?.join(" ")).toContain("2 pane(s) exited right after opening");
+    expect(res.opened).toEqual([]);
+    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
 
-  it("an unreadable or unrecognised listing keeps every seat opened, with a note", async () => {
+  it("an unreadable or unrecognised listing degrades every seat with a note", async () => {
     for (const paneList of [() => { throw new Error("unknown method"); }, () => ({ type: "ok" })]) {
       const { adapter } = herdrOpening(paneList);
       const res = await adapter.openView(viewOf(pane("a"), pane("b")));
-      expect(res.ok).toBe(true);
-      expect(res.opened).toEqual(["a", "b"]);
-      expect(res.degraded).toEqual([]);
+      expect(res.ok).toBe(false);
+      expect(res.opened).toEqual([]);
+      expect(res.degraded.length).toBeGreaterThan(0);
+      expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
       expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
   });

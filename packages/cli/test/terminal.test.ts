@@ -140,6 +140,32 @@ describe("rig terminal CLI", () => {
     } finally { log.mockRestore(); }
   });
 
+  it.each([false, true])("names unconfirmed panes without claiming none opened (json=%s)", async json => {
+    const result = opened([], { degraded: [{ seat: "a-seat", host: "herdr", code: "pane_unconfirmed", reason: "Inspect the terminal before retrying." }] });
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: result } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux", ...(json ? ["--json"] : [])]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.filter(c => c.method === "POST")).toHaveLength(1);
+    if (json) expect(JSON.parse(logs[0]!)).toEqual(result);
+    else {
+      expect(logs[0]).toContain("No tiles confirmed in herdr.");
+      expect(logs[0]).toContain("a-seat — unconfirmed (herdr): Inspect");
+      expect(logs[0]).not.toMatch(/No tiles opened|skipped|Prepared/);
+    }
+  });
+
+  it("counts a confirmed seat while naming an unconfirmed sibling", async () => {
+    const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: opened(["a-seat"], {
+      degraded: [{ seat: "b-seat", host: "herdr", code: "pane_unconfirmed", reason: "pane list unreadable" }],
+    }) } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "acme-build", "--provider", "cmux"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(logs[0]).toContain("Prepared 1 tile(s)");
+    expect(logs[0]).toContain("b-seat — unconfirmed (herdr): pane list unreadable");
+  });
+
   it("open with ZERO panes opened is a failure — non-zero exit", async () => {
     const { deps } = makeDeps({
       routes: { "POST /api/terminal/open": { status: 200, data: opened([], { ok: false, code: "herdr_unavailable", error: "no binary" }) } },

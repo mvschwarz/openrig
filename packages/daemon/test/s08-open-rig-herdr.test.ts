@@ -169,6 +169,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
   // The list read before the create can fail; a refused duplicate name is still numbered after it.
   it("if herdr refuses a duplicate name, it retries with a numbered suffix and says so", async () => {
     let lists = 0;
+    const panes: Array<{ tab_id: string; label: string }> = [];
     const { transport, requests } = herdrTransport((m, p) => {
       if (m === "workspace.list" && ++lists === 1) throw new Error("list unavailable");
       if (m === "workspace.create") {
@@ -176,35 +177,51 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
         return { type: "c", workspace: { workspace_id: "w2" }, tab: { tab_id: "w2:t0" } };
       }
       if (m === "workspace.list") return { type: "workspaces", workspaces: [{ label: RIG }, { label: `${RIG} (2)` }] };
-      if (m === "layout.apply") return { type: "l", layout: { tab_id: "w2:t1" } };
+      if (m === "layout.apply") {
+        panes.push(...leafLabels(p["root"]).map(label => ({ tab_id: "w2:t1", label })));
+        return { type: "l", layout: { tab_id: "w2:t1" } };
+      }
+      if (m === "pane.list") return { type: "pane_list", panes };
       return { type: "ok" };
     });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.filter((r) => r.method === "workspace.create").map((c) => c.params["label"])).toEqual([RIG, `${RIG} (3)`]);
     expect(res.ok).toBe(true);
-    // This fake answers pane.list with no listing, so the page is unconfirmed (#707) and stays opened.
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`, HERDR_PANES_UNCONFIRMED_NOTE]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, `A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`]);
   });
 
   it("a refused focus or close is a note; the opened seats are unchanged", async () => {
-    const { transport } = herdrTransport((m, _p, n) => {
+    let page = 0;
+    const panes: Array<{ tab_id: string; label: string }> = [];
+    const { transport } = herdrTransport((m, p) => {
       if (m === "workspace.create") return { type: "c", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
-      if (m === "layout.apply") return { type: "l", layout: { tab_id: `w1:t${n + 1}` } };
+      if (m === "layout.apply") {
+        const tab_id = `w1:t${++page}`;
+        panes.push(...leafLabels(p["root"]).map(label => ({ tab_id, label })));
+        return { type: "l", layout: { tab_id } };
+      }
+      if (m === "pane.list") return { type: "pane_list", panes };
       throw new Error(`${m} unsupported`);
     });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(res.opened).toHaveLength(17);
     expect(res.degraded).toEqual([]);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
   });
 
   it("honest partials: a page herdr refuses names its seats as degraded; the tile count never overclaims", async () => {
     let applyCall = 0;
-    const { transport } = herdrTransport((m) => {
+    const panes: Array<{ tab_id: string; label: string }> = [];
+    const { transport } = herdrTransport((m, p) => {
       if (m === "workspace.create") return { type: "c", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
-      if (m === "layout.apply") { applyCall++; if (applyCall === 2) throw new Error("page refused"); return { type: "l", layout: { tab_id: "w1:t1" } }; }
+      if (m === "layout.apply") {
+        if (++applyCall === 2) throw new Error("page refused");
+        panes.push(...leafLabels(p["root"]).map(label => ({ tab_id: "w1:t1", label })));
+        return { type: "l", layout: { tab_id: "w1:t1" } };
+      }
+      if (m === "pane.list") return { type: "pane_list", panes };
       return { type: "ok" };
     });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
@@ -222,16 +239,19 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
 
   it("a page applied without a tab id (maybe into the starting tab) keeps the starting tab; the known page is focused", async () => {
     let n = 0;
-    const { transport, requests } = herdrTransport((m) => {
+    let labels: string[] = [];
+    const { transport, requests } = herdrTransport((m, p) => {
       if (m === "workspace.create") return create;
-      if (m === "layout.apply") { n++; return n === 1 ? { type: "l" } : { type: "l", layout: { tab_id: "t2" } }; }
+      if (m === "layout.apply") { n++; labels = leafLabels(p["root"]); return n === 1 ? { type: "l" } : { type: "l", layout: { tab_id: "t2" } }; }
+      if (m === "pane.list") return { type: "pane_list", panes: labels.map(label => ({ tab_id: "t2", label })) };
       return { type: "ok" };
     });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(closes(requests)).toEqual([]);
     expect(requests.find((r) => r.method === "tab.focus")!.params).toEqual({ tab_id: "t2" });
-    expect(res.opened).toHaveLength(17);
+    expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
+    expect(res.degraded.map(d => [d.seat, d.code])).toEqual(rows.slice(0, 16).map(row => [row.canonicalSessionName, "pane_unconfirmed"]));
     expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
@@ -240,14 +260,20 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded).toHaveLength(17);
+    expect(res.degraded.every(d => d.code === "pane_unconfirmed")).toBe(true);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
   });
 
   it("a failed apply (which may still have taken effect) keeps the starting tab; its seats stay degraded, not counted", async () => {
     let n = 0;
-    const { transport, requests } = herdrTransport((m) => {
+    let labels: string[] = [];
+    const { transport, requests } = herdrTransport((m, p) => {
       if (m === "workspace.create") return create;
-      if (m === "layout.apply") { n++; if (n === 1) throw new Error("reply lost"); return { type: "l", layout: { tab_id: "t2" } }; }
+      if (m === "layout.apply") { n++; if (n === 1) throw new Error("reply lost"); labels = leafLabels(p["root"]); return { type: "l", layout: { tab_id: "t2" } }; }
+      if (m === "pane.list") return { type: "pane_list", panes: labels.map(label => ({ tab_id: "t2", label })) };
       return { type: "ok" };
     });
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
@@ -255,7 +281,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded).toHaveLength(16);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
+    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, KEPT]);
   });
 
   it("every page fails: nothing is focused or closed", async () => {

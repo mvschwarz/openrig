@@ -79,8 +79,8 @@ const HERDR_SURFACE_HOST = "herdr";
 /** The degrade reason for a seat whose pane was already gone right after its page applied (#707). */
 export const HERDR_PANE_EXITED_REASON = "the pane had already exited when OpenRig checked right after herdr opened it";
 
-/** The note when the pane listing can't confirm a page's panes; its seats stay listed as opened. */
-export const HERDR_PANES_UNCONFIRMED_NOTE = "herdr's pane list couldn't confirm the panes after layout, so those seats are listed as opened without that check.";
+/** The note for accepted layouts whose seat panes cannot be confirmed. */
+export const HERDR_PANES_UNCONFIRMED_NOTE = "herdr could not confirm these panes after layout; unconfirmed seats are reported as degraded. Inspect the terminal before retrying.";
 
 const normalLabel = (label: string): string => label.trim().replace(/\s+/g, " ");
 
@@ -96,10 +96,10 @@ function labelMatches(listed: string, composed: string): boolean {
  * the workspace's panes right after a page applies finds seats whose pane is already gone. There is
  * no wait, so only a pane that exited before this read is seen.
  *
- * It fails safe: a seat is degraded only when the listing positively shows the page's tab, and
+ * A seat is known gone only when the listing positively shows the page's tab, and
  * either another seat's label from the same apply is matched there (so labels compare) or the tab
  * holds nothing but blank filler panes. A missing tab, an empty or unreadable listing, or labels
- * that match nothing keep today's `opened`, with a note.
+ * that match nothing are explicitly unconfirmed rather than counted as opened.
  */
 export async function exitedSeats(
   transport: HerdrTransport,
@@ -108,9 +108,11 @@ export async function exitedSeats(
   pagePanes: ComposedPane[],
   blanks: number,
   notes: string[],
+  unknown = new Set<string>(),
 ): Promise<Set<string>> {
   const gone = new Set<string>();
-  const unconfirmed = (): Set<string> => {
+  const unconfirmed = (seats = pagePanes): Set<string> => {
+    for (const pane of seats) unknown.add(pane.seat);
     if (!notes.includes(HERDR_PANES_UNCONFIRMED_NOTE)) notes.push(HERDR_PANES_UNCONFIRMED_NOTE);
     return gone;
   };
@@ -124,12 +126,7 @@ export async function exitedSeats(
   const live = listed.filter((p): p is Record<string, unknown> =>
     p !== null && typeof p === "object" && (p as Record<string, unknown>)["tab_id"] === tabId);
   if (live.length === 0) return unconfirmed();
-  if (!live.every((p) => typeof p["label"] === "string")) {
-    // Panes without labels can't be told apart, so a loss is only counted.
-    const missing = pagePanes.length + blanks - live.length;
-    if (missing > 0) notes.push(`${missing} pane(s) exited right after opening. herdr's pane list doesn't say which, so those seats stay listed as opened.`);
-    return gone;
-  }
+  if (!live.every((p) => typeof p["label"] === "string")) return unconfirmed();
   const liveLabels = live.map((p) => p["label"] as string);
   // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
   const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
@@ -140,13 +137,18 @@ export async function exitedSeats(
     for (const pane of pagePanes) gone.add(pane.seat);
     return gone;
   }
-  if (blankSeats.length > 0) unconfirmed();
+  if (blankSeats.length > 0) unconfirmed(blankSeats);
   if (!pagePanes.some((pane) => liveLabels.some((l) => labelMatches(l, pane.label)))) return unconfirmed();
   const perLabel = new Map<string, ComposedPane[]>();
   for (const pane of pagePanes) {
     const key = normalLabel(pane.label);
     if (key === "") continue; // never attributed; the note above says so
     perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
+  }
+  // A truncated label matching different seat labels cannot confirm either seat.
+  for (const liveLabel of liveLabels) {
+    const matches = pagePanes.filter(pane => labelMatches(liveLabel, pane.label));
+    if (new Set(matches.map(pane => normalLabel(pane.label))).size > 1) unconfirmed(matches);
   }
   const shared: string[] = [];
   for (const [label, seats] of perLabel) {
@@ -155,10 +157,11 @@ export async function exitedSeats(
       if (alive === 0) gone.add(seats[0]!.seat);
     } else if (alive < seats.length) {
       shared.push(label);
+      unconfirmed(seats);
     }
   }
   if (shared.length > 0) {
-    notes.push(`A pane labelled ${shared.map((l) => `"${l}"`).join(", ")} exited right after opening. Several seats share that label, so they stay listed as opened.`);
+    notes.push(`A pane labelled ${shared.map((l) => `"${l}"`).join(", ")} exited right after opening. Several seats share that label, so their panes are unconfirmed.`);
   }
   return gone;
 }
@@ -600,16 +603,22 @@ export class HerdrAdapter implements TerminalProvider {
         });
         const tabId = extractTabId(applied);
         // Without a tab id the page's panes can't be told apart from other tabs, so no check runs.
+        const uncertain = new Set<string>();
         const gone = tabId
-          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes)
+          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes, uncertain)
           : new Set<string>();
-        resumeReports.push(...pageResumeReports(applied, pagePlan.root, pagePanes, gone, unmatchedResume));
+        if (!tabId) {
+          for (const pane of pagePanes) uncertain.add(pane.seat);
+          if (!notes.includes(HERDR_PANES_UNCONFIRMED_NOTE)) notes.push(HERDR_PANES_UNCONFIRMED_NOTE);
+        }
+        resumeReports.push(...pageResumeReports(applied, pagePlan.root, pagePanes, new Set([...gone, ...uncertain]), unmatchedResume));
         if (tabId) {
           appliedTabIds.push(tabId);
-          if (pagePanes.some((pane) => !gone.has(pane.seat))) firstPopulatedTabId ??= tabId;
+          if (pagePanes.some((pane) => !gone.has(pane.seat) && !uncertain.has(pane.seat))) firstPopulatedTabId ??= tabId;
         } else everyPageKnown = false;
         for (const pane of pagePanes) {
           if (gone.has(pane.seat)) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, reason: HERDR_PANE_EXITED_REASON });
+          else if (uncertain.has(pane.seat)) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE });
           else opened.push(pane.seat);
         }
       } catch (err) {
@@ -627,17 +636,17 @@ export class HerdrAdapter implements TerminalProvider {
 
     // Land on a known populated tab, then remove the create's starting tab (#26) only when it is
     // known to be blank. When that is uncertain the tab is kept: closing it could remove seats.
-    if (opened.length > 0) {
+    if (opened.length > 0 || degraded.some(seat => seat.code === "pane_unconfirmed")) {
       if (firstPopulatedTabId) {
         try { await this.transport.request("tab.focus", { tab_id: firstPopulatedTabId }); }
         catch (err) { notes.push(`herdr did not focus the first tab: ${err instanceof Error ? err.message : String(err)}`); }
-      } else {
+      } else if (appliedTabIds.length === 0) {
         notes.push("herdr returned no tab id for any page, so no tab was focused explicitly.");
       }
       if (defaultTabId) {
         if (!everyPageKnown) {
           notes.push("The starting tab was kept because it could not be confirmed empty.");
-        } else if (!appliedTabIds.includes(defaultTabId)) {
+        } else if (opened.length > 0 && !appliedTabIds.includes(defaultTabId)) {
           try { await this.transport.request("tab.close", { tab_id: defaultTabId }); }
           catch (err) { notes.push(`herdr kept the blank starting tab: ${err instanceof Error ? err.message : String(err)}`); }
         }

@@ -198,13 +198,14 @@ describe("owned Herdr viewer", () => {
     joined = false;
     expect(await svc.ensureViewer(req)).toMatchObject({ ok: false, code: "preview_changed" }); expect(calls).toBe(1);
   });
-  it("keeps the legacy open result without claiming a verified viewer mapping", async () => {
+  it("reports an id-less layout as unconfirmed without claiming a verified viewer mapping", async () => {
     const f = fixture();
     const adapter = new HerdrAdapter({ viewer: f.viewer(), transportFactory: () => ({ probe: async () => ({ alive: true, version: "0.7.1", protocol: 14 }),
       request: async method => method === "workspace.create" ? { type: "workspace_created", workspace_id: "w" }
         : method === "layout.apply" ? { type: "layout_apply" } : { type: "workspace_list", workspaces: [] } }) });
     const result = await adapter.openView({ id: "fixture", opened: [f.target], absent: [], degraded: [], pages: [[f.target]] });
-    expect(result.ok).toBe(true); expect(result.opened).toEqual([f.target.seat]);
+    expect(result.ok).toBe(false); expect(result.opened).toEqual([]);
+    expect(result.degraded).toEqual([expect.objectContaining({ seat: f.target.seat, code: "pane_unconfirmed" })]);
     expect(await adapter.lookupViewer(key, f.target)).toMatchObject({ ok: false, code: "viewer_not_provisioned" });
   });
   it("protects the ensure HTTP operation with the existing owner bearer", async () => {

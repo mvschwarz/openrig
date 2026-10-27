@@ -41,7 +41,7 @@ export interface TerminalOpenResult {
   ok: boolean;
   opened: string[];
   absent: Array<{ seat: string; reason: string }>;
-  degraded: Array<{ seat: string; reason: string }>;
+  degraded: Array<{ seat: string; reason: string; code?: "pane_unconfirmed" }>;
   pages: number;
   error?: string;
   code?: string;
@@ -450,7 +450,7 @@ export class DaemonClient {
   async openTerminal(view: string, expectedPlan?: string): Promise<TerminalOpenResult> {
     const result = (await this.post(`/api/terminal/open`, { view, ...(expectedPlan !== undefined ? { expectedPlan } : {}) })) as TerminalOpenResult;
     if (!Array.isArray(result.opened) || result.opened.length === 0) {
-      throw new Error(`terminal open failed: ${result.error ?? result.code ?? ([...new Set(result.degraded?.map(m => m.reason))].join("; ") || "no tiles opened")}`);
+      throw new Error(`terminal open failed: ${result.error ?? result.code ?? ([...new Set(result.degraded?.map(m => `${m.code === "pane_unconfirmed" ? "Unconfirmed" : "Skipped"}: ${m.seat} — ${m.reason}`))].join("; ") || "no tiles opened")}`);
     }
     return result;
   }

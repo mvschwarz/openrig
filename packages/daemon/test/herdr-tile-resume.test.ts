@@ -7,7 +7,7 @@ import { shellQuote } from "../src/adapters/shell-quote.js";
 // `layout.apply` echoes the applied tree with a `pane_id` on each leaf.
 import { describe, expect, it } from "vitest";
 import { composeView, type ViewMemberInput } from "../src/domain/terminal/view-composer.js";
-import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANES_UNCONFIRMED_NOTE } from "../src/domain/terminal/herdr-adapter.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { ComposedView } from "../src/domain/terminal/terminal-provider.js";
 import type { HostEntry } from "../src/domain/hosts/hosts-registry-reader.js";
@@ -117,6 +117,16 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     const res = await adapter.openView(compose(member("a@r", "claude-code"), member("b@r", "claude-code"), member("c@r", "claude-code")));
     expect(res.opened).toEqual(["a@r", "c@r"]);
     expect(reports().map((r) => [r["pane_id"], (r["resume_argv"] as string[])[7]])).toEqual([["w1:p1", "a@r"], ["w1:p3", "c@r"]]);
+  });
+
+  it("does not register restart commands for unconfirmed panes", async () => {
+    const { adapter, reports, sleeps } = herdr({ liveLabels: () => [] });
+    const result = await adapter.openView(compose(member("dev-impl@r", "claude-code")));
+    expect(result.opened).toEqual([]);
+    expect(result.degraded).toEqual([expect.objectContaining({ seat: "dev-impl@r", code: "pane_unconfirmed" })]);
+    expect(result.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+    expect(reports()).toEqual([]);
+    expect(sleeps).toEqual([]);
   });
 
   it("a report Herdr refuses for another reason isn't retried: the seat stays opened and a note says to reopen after a restart", async () => {

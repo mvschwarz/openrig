@@ -40,6 +40,19 @@ and slice views, pagination, absent seats and partial results all use the same
 composer. Selecting a session changes where those tiles are placed. It does
 not relaunch the seats' tmux sessions or move queue ownership.
 
+## Open results
+
+For Herdr, a successful layout request alone does not count its seats as opened.
+OpenRig checks the returned tab's pane list. A missing tab identity or an
+unreadable, empty or unattributable listing puts the affected seats in
+`degraded`, with `code: "pane_unconfirmed"`, instead of `opened`. The CLI and
+TUI name those seats as unconfirmed. Inspect the terminal before retrying:
+the layout may have taken effect even though its panes could not be confirmed.
+Confirmed seats on other pages still count; with none confirmed, the command
+returns a nonzero exit status. Reusing an existing workspace keeps its separate
+reuse result. This pane check does not prove desktop visibility or create a
+verified viewer mapping.
+
 ## Replacing a seat's session
 
 New tiles keep their place when a seat's tmux session is replaced. They wait up

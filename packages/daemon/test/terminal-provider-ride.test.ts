@@ -452,6 +452,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
         requests.push({ method, params });
         if (opts?.respond) return opts.respond(method, params);
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ tab_id: "wG:t2", label: pane.label }] };
         return { type: "layout_apply", layout: { workspace_id: "wG", tab_id: "wG:t2" } };
       },
     };
@@ -503,7 +504,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.pages).toBe(1);
     // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
     // this create reply carries no default tab id).
-    // #707: the applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
+    // The applied page is followed by one pane.list read confirming its labelled seat.
     // #1604: the open workspaces are read first, so a re-open can be numbered.
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
     expect(requests[1]!.params).toEqual({ focus: false, label: "v" });
@@ -545,8 +546,9 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "t" });
     const res = await adapter.openView(view);
-    expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a@r"]);
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual([expect.objectContaining({ seat: "a@r", code: "pane_unconfirmed" })]);
     // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
     expect((requests[4]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
@@ -584,10 +586,11 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ tab_id: "wG:t2", label: pane.label }] };
         if (method !== "layout.apply") return { type: "ok" };
         applies += 1;
         if (applies === 2) throw new Error("herdr error: bad tree");
-        return { type: "layout_apply" };
+        return { type: "layout_apply", layout: { tab_id: "wG:t2" } };
       },
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport });

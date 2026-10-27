@@ -50,6 +50,8 @@ export interface AbsentSeat {
 /** A seat that is honestly degraded (e.g. an http-registered host that tiles cannot reach over ssh). */
 export interface DegradedSeat {
   seat: string;
+  /** The provider accepted the layout but could not confirm this seat's pane. */
+  code?: "pane_unconfirmed";
   /** Structured host id (degrade is always host-driven). */
   host: string;
   reason: string;

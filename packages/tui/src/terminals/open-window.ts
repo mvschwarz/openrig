@@ -11,7 +11,7 @@ export function terminalWindowNotice(view: string, result: TerminalOpenResult): 
     `${result.opened.length} tiles prepared; ${result.absent.length} absent; ${result.degraded.length} degraded.`,
     ...(result.error ? [result.error] : []),
     ...result.absent.map(member => `Absent: ${member.seat} — ${member.reason}`),
-    ...result.degraded.map(member => `Skipped: ${member.seat} — ${member.reason}`),
+    ...result.degraded.map(member => `${member.code === "pane_unconfirmed" ? "Unconfirmed" : "Skipped"}: ${member.seat} — ${member.reason}`),
     ...(result.notes ?? []),
   ].join("\n");
 }
@@ -121,7 +121,7 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
     throw new Error([result.error ?? executionError ?? "No terminals were confirmed open.",
       ...(cmux && result.code === "cmux_unavailable" ? [CMUX_SOCKET_HINT] : []), ...(result.notes ?? []),
       ...result.absent.map(member => `Absent: ${member.seat} — ${member.reason}`),
-      ...result.degraded.map(member => `Skipped: ${member.seat} — ${member.reason}`),
+      ...result.degraded.map(member => `${member.code === "pane_unconfirmed" ? "Unconfirmed" : "Skipped"}: ${member.seat} — ${member.reason}`),
       ...(result.window ? [`Terminal: ${result.window.app} (${result.window.surface})`] : []),
     ].join("\n"));
   }

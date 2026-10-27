@@ -144,6 +144,25 @@ describe("TUI desktop terminal action", () => {
     expect(f.calls()).toHaveLength(1);
   });
 
+  it("retains accepted-but-unconfirmed panes on a nonzero result, without replay", async () => {
+    const onUnavailable = vi.fn();
+    const f = child({ ...opened, ok: false, opened: [], degraded: [{ seat: "operator", code: "pane_unconfirmed", reason: "Inspect the terminal before retrying." }] }, 1);
+    await expect(openWithRecovery("saved:kernel", "http://localhost:7433", f.entry, "plan", onUnavailable)).rejects.toThrow(/Unconfirmed: operator — Inspect/);
+    expect(f.calls()).toHaveLength(1);
+    expect(onUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("separates confirmed tiles, unconfirmed panes and skipped members in a partial notice", () => {
+    const notice = terminalWindowNotice("saved:kernel", { ...opened, opened: ["operator"], degraded: [
+      { seat: "advisor", code: "pane_unconfirmed", reason: "pane listing unreadable" },
+      { seat: "remote", reason: "no SSH route" },
+    ] });
+    expect(notice).toContain("1 tiles prepared; 0 absent; 2 degraded.");
+    expect(notice).toContain("Unconfirmed: advisor — pane listing unreadable");
+    expect(notice).toContain("Skipped: remote — no SSH route");
+    expect(notice).not.toContain("Skipped: advisor");
+  });
+
   it("reports named partial results and visibility limits without claiming a visible window", () => {
     const notice = terminalWindowNotice("saved:kernel", { ...opened, ok: false,
       absent: [{ seat: "review", reason: "stopped" }],
