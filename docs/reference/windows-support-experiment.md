@@ -7,7 +7,28 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Main rebase, 2026-10-26
+## Main rebase, 2026-10-27
+
+Rebased all 28 experiment commits onto upstream main
+`a6f61d9a0a8c8425ea13f7861d4dce56eb77ff87`; the previous public head was
+`21d7e283a2b2a5593b7fc2ac3df57852a4e8cdeb`, with actual merge base
+`4222e608049085faba14a473d73d1973d24a7860`. The code revision tested after
+rebase is `1578412932533b30446b41c49fbad690c6d75621`; this entry is a
+documentation-only follow-up.
+
+On native Windows, workspace build and lint passed. The focused Windows, Pi,
+queue-recovery, launch and CLI selection passed 702 tests with 15 skips. With
+psmux 3.4.0, the actual multiline submission and exact argv/environment checks
+also passed (three tests including the transport regression). These results do
+not establish Linux/macOS, installed-package or every-provider acceptance.
+
+Full `npm test` is not green: a bounded run did not finish within ten minutes;
+an unbuffered diagnostic run exposed repository-fixture failures involving
+Windows shell, symlink and executable-path assumptions. No assertions were
+weakened or checks reported as passing because the focused selection passed.
+Deployment-specific Pi and queue recovery overlays remain outside the public PR.
+
+## Historical main rebase, 2026-10-26
 
 Rebased onto main c241fbb45fe248191dc34b40d31ea0a26de29f58.
 Windows launch paths retain upstream runtime-home selection, launch identity and
