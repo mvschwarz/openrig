@@ -192,10 +192,10 @@ export class HerdrFollowView {
       for (const leaving of plan.leaves) {
         const tile = state.tiles.find(t => t.key === leaving.key)!;
         const retainInput = () => {
-          const deadline = tile.inputRecheckAt ?? (now() + 30000);
-          tile.inputRecheckAt = deadline;
-          if (deadline > now()) plan.nextAt = Math.min(plan.nextAt ?? Infinity, deadline);
           if (!members.some(m => m.key === tile.key)) {
+            const deadline = tile.inputRecheckAt ?? (now() + 30000);
+            tile.inputRecheckAt = deadline;
+            if (deadline > now()) plan.nextAt = Math.min(plan.nextAt ?? Infinity, deadline);
             tile.departedAt ??= now(); plan.tiles.push(tile);
             plan.retained.push({ key: tile.key, seat: tile.seat, reason: "Left the task; keeping its typed or unconfirmed input." });
           }

@@ -156,6 +156,19 @@ describe("stable task-following workspace", () => {
     expect((await f.follow(["a", "b"], { suppress: ["b"], suppressionMs: 1000 })).opened).not.toContain("b");
     f.advance(1000); expect((await f.follow(["a", "b"])).opened).toContain("b");
   });
+  it.each(["text", "unknown"] as const)("suppressed current %s input keeps only the suppression-expiry deadline", async input => {
+    const f = fixture(); await f.follow(); f.inputs.set("b", input);
+    const hidden = await f.follow(undefined, { suppress: ["b"], suppressionMs: 120000 });
+    expect(hidden.opened).toContain("b"); expect(hidden.following!.nextAt).toBe(120100);
+    for (let boundary = 0; boundary < 2; boundary++) {
+      f.advance(30000);
+      const retained = await f.follow();
+      expect(retained.opened).toContain("b"); expect(retained.following!.nextAt).toBe(120100);
+    }
+    f.advance(60000);
+    expect((await f.follow()).following!.nextAt).toBeUndefined();
+    expect(f.calls.filter(c => c[1] === "close")).toHaveLength(0);
+  });
   it("a new provider terminal generation retains previous tiles and creates/closes nothing", async () => {
     const f = fixture(); await f.follow(); const count = f.calls.length;
     [...f.panes.values()][1]!.terminal_id = "restarted";
