@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -249,6 +250,55 @@ describe("RigTeardownOrchestrator", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(db.prepare("SELECT status, intentionally_stopped FROM sessions WHERE id = ?").get(sessionId))
       .toEqual({ status: "exited", intentionally_stopped: 1 });
+  });
+
+  // A failed start rolls its blank provisional session back to `superseded`. That row is the seat's newest, so
+  // `rig start --last` reads it; restore skips it and keeps reading the seat's own older session.
+  function seedRolledBackStart(): { rigId: string; nodeId: string; historyId: string; rollbackId: string } {
+    const { rigId, nodeId, sessionId: historyId } = seedRig();
+    sessionRegistry.updateStatus(historyId, "exited");
+    sessionRegistry.updateResumeToken(historyId, "claude_id", "native-history");
+    db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(historyId);
+    const rollback = sessionRegistry.registerSession(nodeId, "r01-dev");
+    sessionRegistry.updateStatus(rollback.id, "superseded");
+    return { rigId, nodeId, historyId, rollbackId: rollback.id };
+  }
+  const sessionRow = (id: string) => db.prepare("SELECT status, intentionally_stopped, resume_token FROM sessions WHERE id = ?").get(id);
+
+  it("records explicit down of a failed start's rolled-back session and keeps it superseded", async () => {
+    const { rigId, historyId, rollbackId } = seedRolledBackStart();
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    expect(await buildTeardown(tmux).teardown(rigId)).toMatchObject({ alreadyStopped: true, sessionsKilled: 0 });
+    expect(sessionRow(rollbackId)).toEqual({ status: "superseded", intentionally_stopped: 1, resume_token: null });
+    // The seat's own history is untouched, so a later restore still resumes it.
+    expect(sessionRow(historyId)).toEqual({ status: "exited", intentionally_stopped: 0, resume_token: "native-history" });
+    // What `rig start --last` reads for the seat: the newest session, now recorded as stopped on purpose.
+    expect(getNodeInventory(db, rigId)[0]).toMatchObject({ sessionStatus: "superseded", intentionallyStopped: true });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves a rolled-back session unmarked while its tmux session is present or its binding changes", async () => {
+    for (const kind of ["present", "binding"] as const) {
+      const { rigId, nodeId, rollbackId } = seedRolledBackStart();
+      const tmux = mockTmux();
+      tmux.probeSession = vi.fn(async () => {
+        if (kind === "binding") sessionRegistry.updateBinding(nodeId, { tmuxSession: "new-owner", tmuxPane: "%new" });
+        return { state: kind === "present" ? "present" : "absent" };
+      });
+      await buildTeardown(tmux).teardown(rigId);
+      expect(sessionRow(rollbackId)).toEqual({ status: "superseded", intentionally_stopped: 0, resume_token: null });
+      expect(tmux.killSession).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not record a stop for a rolled-back session without an explicit down", async () => {
+    const { rigId, rollbackId } = seedRolledBackStart();
+    const tmux = mockTmux();
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    const { Reconciler } = await import("../src/domain/reconciler.js");
+    await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rigId);
+    expect(sessionRow(rollbackId)).toEqual({ status: "superseded", intentionally_stopped: 0, resume_token: null });
   });
 
   it("records down after reconciliation leaves a detached session's original binding", async () => {
