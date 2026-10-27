@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { Command } from "commander";
 import { attachCommand, resolveAttachContext } from "../src/commands/attach.js";
 import { DaemonClient } from "../src/client.js";
@@ -170,15 +171,8 @@ describe("Attach CLI", () => {
   });
 
   it("resolveAttachContext detects tmux session metadata when TMUX_PANE is set", () => {
-    const savedPane = process.env["TMUX_PANE"];
-    process.env["TMUX_PANE"] = "%42";
-    const mockTmuxExec = vi.fn(() => "dev1-impl2@rigged-buildout\n@12\n%42");
-
-    const result = resolveAttachContext(mockTmuxExec);
-
-    if (savedPane === undefined) delete process.env["TMUX_PANE"];
-    else process.env["TMUX_PANE"] = savedPane;
-
+    const result = withTmuxPane("%42", () =>
+      resolveAttachContext(fakeTmux({ session: "dev1-impl2@rigged-buildout", window: "@12", pane: "%42" })));
     expect(result).toEqual({
       attachmentType: "tmux",
       tmuxSession: "dev1-impl2@rigged-buildout",
@@ -186,4 +180,65 @@ describe("Attach CLI", () => {
       tmuxPane: "%42",
     });
   });
+
+  // Real tmux rewrote the newlines of a combined format as "_" ("unrelated-shell_@2_%2"), and the session fell back to
+  // external_cli, so replies to the self-attached member had no transport.
+  it.each([
+    ["the shape real tmux returned", "unrelated-shell"],
+    ["a name holding underscores, spaces and id-like words", "team_1 rig_b @7 %9"],
+  ])("resolveAttachContext resolves the pane from %s", (_label, session) => {
+    const result = withTmuxPane("%2", () => resolveAttachContext(fakeTmux({ session, window: "@2", pane: "%2" })));
+    expect(result).toEqual({ attachmentType: "tmux", tmuxSession: session, tmuxWindow: "@2", tmuxPane: "%2" });
+  });
+
+  it("resolveAttachContext keeps external_cli outside tmux, and when tmux can't answer", () => {
+    const notCalled = vi.fn(() => "");
+    expect(withTmuxPane(undefined, () => resolveAttachContext(notCalled))).toEqual({ attachmentType: "external_cli" });
+    expect(notCalled).not.toHaveBeenCalled();
+    for (const tmux of [vi.fn(() => { throw new Error("no server running"); }), vi.fn(() => ""), vi.fn(() => "unexpected")]) {
+      expect(withTmuxPane("%2", () => resolveAttachContext(tmux))).toEqual({ attachmentType: "external_cli" });
+    }
+  });
 });
+
+const TMUX_SOCKET = `openrig-attach-test-${process.pid}`;
+const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
+
+describe.runIf(tmuxAvailable)("resolveAttachContext against a real tmux server (private socket)", () => {
+  afterAll(() => { spawnSync("tmux", ["-L", TMUX_SOCKET, "kill-server"]); });
+
+  it("resolves the session, window and pane of a session whose name holds spaces and underscores", () => {
+    const session = "unrelated_shell b";
+    execFileSync("tmux", ["-L", TMUX_SOCKET, "-f", "/dev/null", "new-session", "-d", "-s", session]);
+    const read = (format: string) => execFileSync("tmux", ["-L", TMUX_SOCKET, "list-panes", "-t", `=${session}`, "-F", format],
+      { encoding: "utf8" }).trim();
+    const pane = read("#{pane_id}");
+    const window = read("#{window_id}");
+    const onSocket = (cmd: string) => execSync(cmd.replace(/^tmux /, `tmux -L ${TMUX_SOCKET} `), { encoding: "utf8" }).trim();
+    expect(withTmuxPane(pane, () => resolveAttachContext(onSocket)))
+      .toEqual({ attachmentType: "tmux", tmuxSession: session, tmuxWindow: window, tmuxPane: pane });
+  });
+});
+
+/** A `tmux display-message -p` double that renders the requested format as real tmux does, control characters
+ *  included: tmux writes each one as "_". */
+function fakeTmux(values: { session: string; window: string; pane: string }) {
+  return vi.fn((cmd: string) => {
+    const format = /'([^']*)'\s*$/.exec(cmd)?.[1] ?? /"([^"]*)"\s*$/.exec(cmd)?.[1];
+    if (format === undefined) throw new Error(`unexpected tmux command: ${cmd}`);
+    return format.replace(/#\{session_name\}/g, values.session).replace(/#\{window_id\}/g, values.window)
+      .replace(/#\{pane_id\}/g, values.pane).replace(/[\u0000-\u001f]/g, "_");
+  });
+}
+
+function withTmuxPane<T>(pane: string | undefined, run: () => T): T {
+  const saved = process.env["TMUX_PANE"];
+  if (pane === undefined) delete process.env["TMUX_PANE"];
+  else process.env["TMUX_PANE"] = pane;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env["TMUX_PANE"];
+    else process.env["TMUX_PANE"] = saved;
+  }
+}
