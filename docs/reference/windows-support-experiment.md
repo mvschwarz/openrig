@@ -28,6 +28,14 @@ Windows shell, symlink and executable-path assumptions. No assertions were
 weakened or checks reported as passing because the focused selection passed.
 Deployment-specific Pi and queue recovery overlays remain outside the public PR.
 
+The final refresh also includes upstream main
+`9110ab9dc911773d514b050c4bd63b0ae8209b31` (the attach pane separator fix).
+Build and lint passed again. The two attach suites passed 13 tests with one
+platform skip after registering their own ephemeral loopback fixture origins
+with the existing fetch guard. Windows can allocate ports below the guard's
+assumed ephemeral range; no production target or blanket network exemption was
+added. The earlier full-suite failures and acceptance limits still apply.
+
 ## Historical main rebase, 2026-10-26
 
 Rebased onto main c241fbb45fe248191dc34b40d31ea0a26de29f58.
