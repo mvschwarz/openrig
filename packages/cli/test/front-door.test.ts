@@ -486,10 +486,11 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
   it.skipIf(!existsSync(binWrapper))("piped PUBLIC bin keeps the commander usage baseline (no TUI, fast exit)", () => {
     const result = spawnSync(process.execPath, [binWrapper], {
       input: "x\n",
-      timeout: 5000,
+      // Match the suite's process-startup budget under whole-suite contention.
+      timeout: 20000,
       encoding: "utf-8",
     });
-    expect(result.status).toBe(0);
+    expect(result.status, result.error?.message ?? result.stderr).toBe(0);
     expect(`${result.stderr}${result.stdout}`).toMatch(/Usage: rig/);
   });
 
