@@ -112,7 +112,9 @@ describe("stable task-following workspace", () => {
   });
   it("complete empty membership drains viewer tiles but keeps its workspace", async () => {
     const f = fixture(); await f.follow(); await f.follow([]); f.advance(16000);
-    expect(await f.follow([])).toMatchObject({ ok: true, opened: [], workspaceId: "w1", following: { state: "empty" } });
+    const empty = await f.follow([]);
+    expect(empty).toMatchObject({ ok: true, opened: [], workspaceId: "w1", following: { state: "empty", enabled: false } });
+    expect(empty.following!.events.at(-1)).toContain("Automatic following has stopped");
     expect(f.panes.size).toBe(1); expect(f.calls.filter(c => c[1] === "close")).toHaveLength(3);
   });
   it("moves focus to a surviving member before closing a focused leaver", async () => {

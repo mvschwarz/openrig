@@ -191,6 +191,16 @@ export class HerdrFollowView {
       }
       for (const leaving of plan.leaves) {
         const tile = state.tiles.find(t => t.key === leaving.key)!;
+        const retainInput = () => {
+          const deadline = tile.inputRecheckAt ?? (now() + 30000);
+          tile.inputRecheckAt = deadline;
+          if (deadline > now()) plan.nextAt = Math.min(plan.nextAt ?? Infinity, deadline);
+          if (!members.some(m => m.key === tile.key)) {
+            tile.departedAt ??= now(); plan.tiles.push(tile);
+            plan.retained.push({ key: tile.key, seat: tile.seat, reason: "Left the task; keeping its typed or unconfirmed input." });
+          }
+          notice(`${tile.seat}: Keeping its tile because input is typed or unconfirmed.`); save();
+        };
         const retainLateFocus = (current: ViewerPane): boolean => {
           if (!current.focused || observations.get(tile.key)?.focused || policy.focusRetentionMs === 0) return false;
           tile.departedAt ??= now();
@@ -203,7 +213,7 @@ export class HerdrFollowView {
         if (!await stillCurrent()) throw new Error("Membership changed before a departure; remaining tiles were kept.");
         // A draft can appear after planning. Suppression is an explicit request
         // to hide, but it still must not destroy an in-progress typed draft.
-        if (await this.deps.input?.(tile.target) !== "empty") { notice(`${tile.seat}: Keeping its tile because input is typed or unconfirmed.`); continue; }
+        if (await this.deps.input?.(tile.target) !== "empty") { retainInput(); continue; }
         const current = await currentPane(tile.viewer);
         if (retainLateFocus(current)) continue;
         if (current.focused) {
@@ -214,9 +224,8 @@ export class HerdrFollowView {
         }
         const verified = await viewers.lookup(tile.member, tile.target);
         if (!verified.ok || JSON.stringify(verified.viewer) !== JSON.stringify(tile.viewer)) throw new Error("Departure viewer identity changed; no tile was closed.");
-        if (!await stillCurrent() || await this.deps.input?.(tile.target) !== "empty") {
-          notice(`${tile.seat}: Membership or input changed before closing; its viewer is kept.`); continue;
-        }
+        if (!await stillCurrent()) throw new Error("Membership changed before closing; remaining viewers were kept.");
+        if (await this.deps.input?.(tile.target) !== "empty") { retainInput(); continue; }
         if (retainLateFocus(await currentPane(tile.viewer))) continue;
         state.closing = tile.key; save();
         await this.deps.run(["pane", "close", tile.viewer.paneId]);
@@ -228,6 +237,7 @@ export class HerdrFollowView {
         if (!tile) continue;
         const changed = tile.reason !== retained.reason;
         tile.departedAt = plan.tiles.find(t => t.key === tile.key)?.departedAt;
+        tile.inputRecheckAt = plan.tiles.find(t => t.key === tile.key)?.inputRecheckAt;
         tile.reason = retained.reason;
         if (changed) {
           notice(`${tile.seat}: ${retained.reason}`);
@@ -238,16 +248,17 @@ export class HerdrFollowView {
       // Clear a previous departure marker when a member rejoins.
       for (const tile of state.tiles) if (members.some(m => m.key === tile.key)) {
         if (tile.reason) await this.deps.run(["pane", "report-metadata", tile.viewer.paneId, "--source", "openrig-follow", "--display-agent", tile.seat, "--seq", String(now())]);
-        delete tile.departedAt; delete tile.focusRetainUntil; delete tile.reason;
+        delete tile.departedAt; delete tile.focusRetainUntil; delete tile.inputRecheckAt; delete tile.reason;
       }
       for (const member of view.task.members) if (member.availability !== "available") notice(`${member.seat}: ${member.reason ?? member.availability}`);
       for (const overflow of plan.overflow) notice(`${overflow.seat}: ${overflow.reason}`);
-      if (!members.length && !state.tiles.length) notice("No open obligation remains in this task. The workspace is kept.");
+      if (!members.length && !state.tiles.length) notice("No open obligation remains. Automatic following has stopped; the workspace is kept. Use --follow to resume it.");
       save();
       const unavailableJoins = plan.joins.filter(join => !state!.tiles.some(tile => tile.key === join.key)
         && view.task!.members.some(m => keyOf(m.key.hostId, m.key.nodeId) === join.key && m.availability === "available"));
       const answer = result(unavailableJoins.length === 0, members.length === 0 && state.tiles.length === 0 ? "empty" : "following",
         unavailableJoins.length ? "Some current members have unconfirmed viewers; see the explanation strip. Inspect before refreshing." : undefined, plan.nextAt);
+      if (answer.following!.state === "empty") answer.following!.enabled = false;
       answer.following!.overflow = plan.overflow;
       answer.following!.tiles = state.tiles.map(t => ({ key: t.key, seat: t.seat, departedAt: t.departedAt,
         ...(plan.retained.find(r => r.key === t.key) ? { reason: plan.retained.find(r => r.key === t.key)!.reason } : {}) }));

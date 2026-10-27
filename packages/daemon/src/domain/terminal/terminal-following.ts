@@ -32,7 +32,7 @@ export class TerminalFollowing {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.loadError = "Saved following selectors are unreadable; their file was preserved.";
     }
     this.unsubscribe = bus.subscribe(event => {
-      if (/^(queue|session|node)\./.test(event.type) || event.type === "agent.activity") this.changed();
+      if (/^(queue|session|node)\./.test(event.type)) this.changed();
     });
     if (this.selections.size) this.changed();
   }
@@ -60,6 +60,14 @@ export class TerminalFollowing {
   private async apply(selected: Selection, controls: FollowControls): Promise<OpenViewResult> {
     const result = await this.render(selected.selector, controls);
     const key = this.key(selected.selector);
+    // A complete empty task has finished. Keep its provider workspace, but
+    // retire automatic work and release the active-selector slot. Explicit
+    // --follow can resume the same journaled workspace if work returns.
+    if (result.ok && result.following?.state === "empty") {
+      this.selections.delete(key); selected.enabled = false;
+      result.following.enabled = false;
+      this.save();
+    }
     this.latest.set(key, result);
     this.deadline(key, selected.enabled ? result.following?.nextAt : undefined);
     return result;

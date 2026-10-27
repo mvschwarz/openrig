@@ -33,6 +33,16 @@ describe("Core-event terminal following", () => {
     await vi.advanceTimersByTimeAsync(600000);
     expect(f.render).toHaveBeenCalledTimes(2);
   });
+  it("activity hooks from unrelated working agents never wake a render", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    await service.open(selector, { enabled: true });
+    for (let tick = 0; tick < 100; tick++) {
+      f.emit("agent.activity"); await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(f.render).toHaveBeenCalledTimes(1);
+    f.emit("session.started"); await vi.advanceTimersByTimeAsync(100);
+    expect(f.render).toHaveBeenCalledTimes(2);
+  });
   it("one-shot deadlines resume retention without replaying pin/suppress commands", async () => {
     vi.useFakeTimers(); const f = fixture(), service = f.create();
     f.render.mockResolvedValueOnce({ ...answer(), following: { ...answer().following!, nextAt: Date.now() + 4000 } });
@@ -55,5 +65,21 @@ describe("Core-event terminal following", () => {
     expect(service.list()).toEqual([]);
     f.emit("node.updated"); await vi.advanceTimersByTimeAsync(10000);
     expect(f.render).toHaveBeenCalledTimes(2);
+  });
+  it("complete empty tasks retire, do no event work and do not consume the 64 active slots", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    f.render.mockImplementation(async () => ({ ...answer(), opened: [], following: { ...answer().following!, state: "empty" } }));
+    for (let i = 0; i < 65; i++) {
+      const result = await service.open({ ...selector, view: `qitem:empty-${i}` }, { enabled: true });
+      expect(result).toMatchObject({ ok: true, following: { state: "empty", enabled: false } });
+    }
+    expect(service.list()).toEqual([]);
+    f.emit("queue.created"); f.emit("node.updated"); await vi.advanceTimersByTimeAsync(10000);
+    expect(f.render).toHaveBeenCalledTimes(65);
+    // Retired selectors do not revive from disk either.
+    await service.stop(); const restored = f.create(); await vi.advanceTimersByTimeAsync(1000);
+    expect(f.render).toHaveBeenCalledTimes(65);
+    const resumed = await restored.open({ ...selector, view: "qitem:empty-0" }, { enabled: true });
+    expect(resumed.ok).toBe(true); expect(f.render).toHaveBeenCalledTimes(66);
   });
 });

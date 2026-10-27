@@ -36,6 +36,7 @@ export interface FollowTile {
   seat: string;
   departedAt?: number;
   focusRetainUntil?: number;
+  inputRecheckAt?: number;
 }
 export interface FollowObservation {
   focused: boolean;
@@ -67,6 +68,8 @@ export function planFollowingTiles(
     retained: previous.map(t => ({ ...t, reason: "Membership or provider identity is incomplete; keeping the previous view." })) };
   const desired = new Map(members.map(m => [m.key, m]));
   const pins = new Set(policy.pins);
+  const capacityExempt = new Set(previous.filter(t => !desired.has(t.key) && observations.get(t.key)?.input !== "empty").map(t => t.key));
+  const capacityUsed = () => result.tiles.filter(t => !capacityExempt.has(t.key)).length;
   const wake = (at: number) => { if (at > now && (result.nextAt === undefined || at < result.nextAt)) result.nextAt = at; };
   const suppressed = (key: string) => {
     const until = policy.suppressed[key] ?? 0;
@@ -86,7 +89,7 @@ export function planFollowingTiles(
     }
     if (member) {
       const observation = observations.get(old.key);
-      if (result.tiles.length >= policy.maxTiles && !pins.has(old.key)
+      if (capacityUsed() >= policy.maxTiles && !pins.has(old.key)
         && observation?.input === "empty" && !observation.focused) {
         result.leaves.push({ ...old, reason: "Hidden by the view's tile limit; the agent keeps running." });
       } else result.tiles.push({ ...member });
@@ -98,6 +101,11 @@ export function planFollowingTiles(
     if (now < grace) { retain(tile, "Left the task; keeping its tile for the departure grace period."); wake(grace); continue; }
     const observed = observations.get(old.key);
     if (!observed || observed.input !== "empty") {
+      // Exactly one delayed check per departure, independent of global hook
+      // activity. After it, keep unknown/draft input until a relevant lifecycle
+      // event or explicit refresh; never create a recurring input poll.
+      tile.inputRecheckAt ??= now + 30000;
+      wake(tile.inputRecheckAt);
       retain(tile, observed?.input === "text" ? "Left the task; keeping its typed draft."
         : "Left the task; input is unconfirmed, so its tile is kept.");
       continue;
@@ -111,7 +119,7 @@ export function planFollowingTiles(
   const shown = new Set(result.tiles.map(t => t.key));
   for (const member of members) {
     if (shown.has(member.key) || suppressed(member.key)) continue;
-    if (result.tiles.length >= policy.maxTiles && !pins.has(member.key)) {
+    if (capacityUsed() >= policy.maxTiles && !pins.has(member.key)) {
       result.overflow.push({ ...member, reason: `Not shown: the view's limit is ${policy.maxTiles} tiles. Raise maxTiles explicitly to show more.` });
       continue;
     }

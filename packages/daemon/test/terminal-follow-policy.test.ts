@@ -47,7 +47,9 @@ describe("task-following presentation policy", () => {
       expect.stringContaining("Pinned"), expect.stringContaining("typed draft"), expect.stringContaining("unconfirmed"),
     ]);
     expect(result.joins).toEqual([]);
-    expect(result.nextAt).toBeUndefined(); // no polling while waiting for an input/membership event
+    expect(result.nextAt).toBe(130000); // one delayed input check, never a recurring poll
+    const checked = planFollowingTiles(result.tiles, [], true, input, policy({ pins: ["a"] }), 130000);
+    expect(checked.nextAt).toBeUndefined();
   });
 
   it("suppression expires on a one-shot deadline; raising the explicit cap admits overflow", () => {
@@ -58,5 +60,14 @@ describe("task-following presentation policy", () => {
     const restored = planFollowingTiles(hidden.tiles, members, true, empty, policy({ suppressed: { b: 15000 }, maxTiles: 3 }), 15000);
     expect(restored.tiles).toEqual(members);
     expect(restored.joins.map(t => t.key)).toEqual(["b", "c"]);
+  });
+  it("departed unreadable input keeps its tile without taking the joining member's cap slot", () => {
+    const unknown = new Map<string, FollowObservation>([["a", { focused: false, input: "unknown" }]]);
+    const initial = planFollowingTiles([members[0]!], [members[1]!], true, unknown, policy({ maxTiles: 1, graceMs: 0 }), 0);
+    expect(initial.tiles.map(t => t.key)).toEqual(["a", "b"]);
+    expect(initial.joins.map(t => t.key)).toEqual(["b"]);
+    expect(initial.overflow).toEqual([]); expect(initial.nextAt).toBe(30000);
+    const once = planFollowingTiles(initial.tiles, [members[1]!], true, unknown, policy({ maxTiles: 1, graceMs: 0 }), 30000);
+    expect(once.nextAt).toBeUndefined(); expect(once.tiles.map(t => t.key)).toEqual(["a", "b"]);
   });
 });

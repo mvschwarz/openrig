@@ -223,7 +223,7 @@ export class TerminalService {
     };
     const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent);
     return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
-      ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
+      ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
 
   private selectProvider(req: Pick<OpenViewRequest, "provider" | "session">): {

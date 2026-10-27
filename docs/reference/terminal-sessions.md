@@ -222,8 +222,9 @@ rig terminal open qitem:example --no-follow
 ```
 
 `--unpin` and `--unsuppress` reverse those presentation choices. The default
-cap is eight tiles; explicitly raising `--max-tiles` overrides it. Pins and
-retained input can exceed the cap rather than being evicted. Disabling removes
+cap is eight tiles; explicitly raising `--max-tiles` overrides it. Pins can
+exceed the cap rather than being evicted. A departed tile retained for typed or
+unconfirmed input does not consume a slot for joining members. Disabling removes
 the saved following selector and keeps the existing layout intact.
 
 The default departure grace is four seconds (`--grace-ms`). A focused leaver
@@ -231,16 +232,22 @@ gets another twelve seconds for reading (`--focus-retention-ms`); before its
 tile closes, focus moves to a verified surviving member, or to the explanation
 strip when none remains. Typed or unconfirmed input keeps the tile, labeled
 as no longer participating. Explicit suppression also retains a typed draft.
-Later Core activity/membership events or an explicit repeat of the follow
-command can reconsider it; input is not polled. Draft text is never saved.
+Pi, terminal and community harness input may be unreadable to the composer
+inspector: those tiles remain while input is unconfirmed, even after unpinning.
+Each input-retained departure gets one delayed recheck after thirty seconds.
+After that, queue or node/session lifecycle events, or an explicit repeat of
+the follow command, can reconsider it. Activity hooks do not wake following,
+and input is not repeatedly polled. Draft text is never saved.
 
 Following consumes Core events and one-shot retention/suppression deadlines,
 not repeated CLI membership queries. Complete empty membership drains the
-tiles and preserves the workspace. An incomplete source, failed provider read
+tiles and preserves the workspace. Once no retained tiles remain, following
+stops and the selector releases its active slot; new work does not automatically
+restart it. Run `--follow` again to resume the same workspace. An incomplete source, failed provider read
 or changed pane/terminal generation retains the previous view and reports
 the uncertainty. It never authorizes a blind workspace rebuild or close.
 `rig terminal views --json` and `rig terminal status --json` include the saved
-selectors and latest following status. Selectors and owned viewer provenance
+active selectors and latest following status. Active selectors and owned viewer provenance
 survive daemon restarts; task membership is always re-derived.
 
 The owner-authorized HTTP operation is `POST /api/terminal/follow` with
