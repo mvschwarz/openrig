@@ -145,10 +145,12 @@ export async function exitedSeats(
     if (key === "") continue; // never attributed; the note above says so
     perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
   }
-  // A truncated label matching different seat labels cannot confirm either seat.
+  // Exact prefix labels are not ambiguous when every matched seat is listed in full.
+  const exactLiveLabels = new Set(liveLabels.map(normalLabel));
   for (const liveLabel of liveLabels) {
     const matches = pagePanes.filter(pane => labelMatches(liveLabel, pane.label));
-    if (new Set(matches.map(pane => normalLabel(pane.label))).size > 1) unconfirmed(matches);
+    if (new Set(matches.map(pane => normalLabel(pane.label))).size > 1
+      && !matches.every(pane => exactLiveLabels.has(normalLabel(pane.label)))) unconfirmed(matches);
   }
   const shared: string[] = [];
   for (const [label, seats] of perLabel) {

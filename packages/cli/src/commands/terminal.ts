@@ -32,7 +32,7 @@ export interface OpenViewResult {
   ok: boolean;
   opened: string[];
   absent: { seat: string; host: string | null; reason: string }[];
-  degraded: { seat: string; host: string; reason: string }[];
+  degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
   pages: number;
   error?: string;
   code?: string;

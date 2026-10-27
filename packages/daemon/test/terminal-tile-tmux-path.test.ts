@@ -173,7 +173,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
     expect(res.ok).toBe(false);
     expect(res.opened).toEqual([]);
-    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.map(d => d.seat)).toEqual(["a", "b", "c"]);
     expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
@@ -184,7 +184,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["b", "c"]);
-    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.map(d => d.seat)).toEqual(["a"]);
     expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
@@ -193,7 +193,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const { adapter } = herdrOpening(() => listed(""));
     const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
     expect(res.opened).toEqual([]);
-    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.map(d => d.seat)).toEqual(["a", "b", "c"]);
     expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
@@ -205,7 +205,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
       const res = await adapter.openView(viewOf(pane("a"), pane("b")));
       expect(res.ok).toBe(false);
       expect(res.opened).toEqual([]);
-      expect(res.degraded.length).toBeGreaterThan(0);
+      expect(res.degraded.map(d => d.seat)).toEqual(["a", "b"]);
       expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
       expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
@@ -215,6 +215,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const { adapter } = herdrOpening(() => listed("renamed-1", "renamed-2", ""));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
     expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual(["a", "b", "c"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
     expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
@@ -224,6 +225,18 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.opened).toEqual(["a", "b"]);
     expect(res.degraded).toEqual([]);
     expect(res.notes).toBeUndefined();
+  });
+
+  it.each(["ops", "lead@ops"])("exact labels with prefix %s both stay opened", async label => {
+    const labels = [label, `${label}-qa`];
+    const { adapter, methods } = herdrOpening(() => listed(...labels));
+    const res = await adapter.openView(viewOf(...labels.map(value => pane(value))));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(labels);
+    expect(res.degraded).toEqual([]);
+    expect(res.code).toBeUndefined();
+    expect(res.notes).toBeUndefined();
+    expect(methods).toContain("tab.focus");
   });
 
   it("one truncated label cannot confirm two differently labelled seats", async () => {
@@ -237,7 +250,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const { adapter } = herdrOpening(() => listed("same"));
     const res = await adapter.openView(viewOf(pane("x", "same"), pane("y", "same")));
     expect(res.opened).toEqual([]);
-    expect(res.degraded.length).toBeGreaterThan(0);
+    expect(res.degraded.map(d => d.seat)).toEqual(["x", "y"]);
     expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
     expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
@@ -246,6 +259,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     const { adapter } = herdrOpening(() => listed(undefined, undefined));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
     expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual(["a", "b", "c"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
     expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
   });
 
@@ -255,7 +269,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
       const res = await adapter.openView(viewOf(pane("a"), pane("b")));
       expect(res.ok).toBe(false);
       expect(res.opened).toEqual([]);
-      expect(res.degraded.length).toBeGreaterThan(0);
+      expect(res.degraded.map(d => d.seat)).toEqual(["a", "b"]);
       expect(res.degraded.every(d => d.code === "pane_unconfirmed" && d.reason === HERDR_PANES_UNCONFIRMED_NOTE)).toBe(true);
       expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
