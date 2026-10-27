@@ -319,19 +319,19 @@ export class RigTeardownOrchestrator {
     tx();
   }
 
-  /** An explicit down also covers already-detached seats, but neither a stale
-   * row nor an unavailable probe proves that its session is absent. */
+  /** An explicit down also covers already-detached seats, and a failed start's rolled-back (superseded) session,
+   * but neither a stale row nor an unavailable probe proves that its session is absent. */
   private async recordAlreadyStoppedIntent(rigId: string): Promise<void> {
     const probe = this.deps.tmuxAdapter.probeSession;
     if (!probe) return;
     const eligible = this.db.prepare(`
-      SELECT s.id, s.node_id, s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id
-      WHERE n.rig_id = ? AND s.status IN ('exited', 'detached')
+      SELECT s.id, s.node_id, s.session_name, s.status FROM sessions s JOIN nodes n ON n.id = s.node_id
+      WHERE n.rig_id = ? AND s.status IN ('exited', 'detached', 'superseded')
         AND s.intentionally_stopped = 0
         AND s.id = (SELECT latest.id FROM sessions latest WHERE latest.node_id = n.id
           ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1)
     `);
-    for (const row of eligible.all(rigId) as Array<{ id: string; node_id: string; session_name: string }>) {
+    for (const row of eligible.all(rigId) as Array<{ id: string; node_id: string; session_name: string; status: string }>) {
       const binding = this.deps.sessionRegistry.getBindingForNode(row.node_id);
       if (binding && (binding.attachmentType !== "tmux" || binding.tmuxSession !== row.session_name)) continue;
       const stillEligible = () => (eligible.all(rigId) as Array<{ id: string }>).some(current => current.id === row.id)
@@ -354,7 +354,9 @@ export class RigTeardownOrchestrator {
       this.db.transaction(() => {
         // Every await above can admit a new binding or latest session. Check again at the write.
         if (stillEligible()) {
-          this.deps.sessionRegistry.markIntentionallyStopped(row.id);
+          // A superseded row stays superseded: restore skips it and keeps reading the seat's own history.
+          if (row.status === "superseded") this.deps.sessionRegistry.recordStopIntent(row.id);
+          else this.deps.sessionRegistry.markIntentionallyStopped(row.id);
           this.deps.sessionRegistry.clearBinding(row.node_id);
         }
       })();

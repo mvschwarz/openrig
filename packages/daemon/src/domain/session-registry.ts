@@ -480,6 +480,12 @@ export class SessionRegistry {
     ).run(sessionId);
   }
 
+  /** Record a supported stop on a row that keeps its status: a rolled-back launch's superseded session is
+   * occupant history, and turning it into an exit would make it a restore candidate. */
+  recordStopIntent(sessionId: string): void {
+    this.db.prepare("UPDATE sessions SET intentionally_stopped = 1 WHERE id = ?").run(sessionId);
+  }
+
   updateStartupStatus(sessionId: string, status: "pending" | "ready" | "attention_required" | "failed", completedAt?: string): void {
     if (completedAt) {
       this.db
