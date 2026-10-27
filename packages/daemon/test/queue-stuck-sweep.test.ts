@@ -424,9 +424,13 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     });
     const outbox = new OutboxHandler(db);
     repo.attachOutbox(outbox);
-    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    const created = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    // With an outbox, the create's wake runs after its commit: read the row back once that wake has settled.
+    await vi.waitFor(() => expect(outbox.getById(`wake-intent-${created.qitemId}`)?.deliveryState).not.toMatch(/^(pending|sending)$/));
+    const row = repo.getById(created.qitemId)!;
     expect(row.lastNudgeResult).toMatch(/^unroutable:/);
     expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("failed");
+    expect(sent).toEqual([]);
     db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
     return { sent, outbox, row };
   }
@@ -442,12 +446,14 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(sent).toEqual(["late@r"]);
   });
 
+  // The row still raises the sweep's finding here; it goes to the orchestrator, so only the row's own wake could reach the seat.
   it.each(["sending", "delivered"])("doesn't send again when the row's wake intent is already %s", async (state) => {
     const { sent, outbox, row } = await lateSeatWithOutbox();
     db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ?").run(state, `wake-intent-${row.qitemId}`);
-    await runSweep();
-    expect(sent).toEqual([]);
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(sent).not.toContain("late@r");
     expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe(state);
+    expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(row.lastNudgeAttempt);
   });
 
   // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
