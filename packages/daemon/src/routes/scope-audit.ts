@@ -9,6 +9,7 @@ import {
   deriveMissionDependencyGraph,
   type MissionDependencyGraph,
   type ScopeAuditResult,
+  SLICE_DIRECTORY_NAME,
 } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { NOTES_FILE_PRECEDENCE, resolveNodeFile, resolveNotesFile } from "../domain/scope/node-file.js";
@@ -280,7 +281,7 @@ export function scopeAuditRoutes(): Hono {
               : null,
           });
 
-          if (!/^\d{2}-/.test(entry)) {
+          if (!SLICE_DIRECTORY_NAME.test(entry)) {
             sliceResult.findings.push({
               kind: "id_convention_violation",
               severity: "high",

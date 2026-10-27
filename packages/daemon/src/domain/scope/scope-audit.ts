@@ -166,6 +166,11 @@ export function deriveMissionDependencyGraph(input: MissionDependencyGraphInput)
 // without this file changing too).
 export const MISSION_BRIEF_HEADERS = ["What & why", "Building", "Progress", "Proven", "Needs you", "Pointers"];
 
+// A slice directory's name: two or more digits, a dash, then the slug. `rig scope slice create` numbers past 99
+// (100-…), so a two-digit-only check flags names OpenRig made. The CLI audit and the daemon's audit route both read
+// this one pattern.
+export const SLICE_DIRECTORY_NAME = /^\d{2,}-/;
+
 function childPath(parent: string, child: string): string {
   return parent.endsWith("/") ? `${parent}${child}` : `${parent}/${child}`;
 }

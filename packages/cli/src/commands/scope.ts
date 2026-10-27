@@ -1068,7 +1068,7 @@ function buildResolveNotesCommand(): Command {
 
 function buildAuditCommand(): Command {
   return new Command("audit")
-    .description("Read-only scope audit: flag scope findings and show the advisory dependency graph")
+    .description("Read-only scope audit: flag scope structure findings and show the advisory dependency graph. It doesn't read proof readiness: use rig proof show")
     .requiredOption("--mission <name>", "Mission to audit")
     .option("--json", "Machine-readable JSON output")
     .action(async (opts, command) => {
@@ -1076,7 +1076,7 @@ function buildAuditCommand(): Command {
       const json = Boolean(opts.json);
       try {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
-        const { classifyScopeItem } = await import("../lib/scope/scope-audit.js");
+        const { classifyScopeItem, SLICE_DIRECTORY_NAME } = await import("../lib/scope/scope-audit.js");
         const missionName = opts.mission as string;
 
         const missionDir = path.join(missionsRoot, missionName);
@@ -1215,7 +1215,7 @@ function buildAuditCommand(): Command {
                 : null,
             });
 
-            if (!/^\d{2,}-/.test(entry)) {
+            if (!SLICE_DIRECTORY_NAME.test(entry)) {
               sliceResult.findings.push({
                 kind: "id_convention_violation",
                 severity: "high",
