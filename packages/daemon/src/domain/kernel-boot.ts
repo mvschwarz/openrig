@@ -177,15 +177,18 @@ export function expectedKernelSeats(specPath: string): string[] | null {
 
 export type ManagedKernel =
   | { kind: "live" | "lost"; rigId: string; seats: string[] }
-  | { kind: "stopped" | "unknown" };
+  | { kind: "stopped" | "stale" | "unknown" };
 
 /** What startup reconcile left of the existing kernel rig, from each seat's newest session:
  *  - live: some seat is still running;
  *  - lost: every seat is detached, which reconcile does to a seat whose tmux session is gone, and
- *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared);
+ *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared),
+ *    and this start's reconcile detached at least one of them (`detachedAtStart`);
+ *  - stale: the same, but no seat was detached by this start: the kernel was already down before it;
  *  - stopped: some seat was stopped on purpose (`rig down kernel` or a seat stop marks it exited);
  *  - unknown: anything else, including more than one current kernel rig or a seat with no session.
- *  Only `lost` is restored, so a deliberate stop survives daemon restarts. */
+ *  Only `lost` is restored, so a deliberate stop survives daemon restarts and a long-gone kernel
+ *  doesn't come back with its old conversations. */
 export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry,
   detachedAtStart: ReadonlySet<string> = new Set()): ManagedKernel {
   try {
@@ -211,7 +214,9 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
       const session = latest.get(node.id);
       return !!session && sessionRegistry.getBindingForNode(node.id)?.tmuxSession === session.sessionName;
     });
-    if (statuses.every((status) => status === "detached") && stillBound) return { kind: "lost", rigId, seats };
+    if (statuses.every((status) => status === "detached") && stillBound) {
+      return nodes.some((node) => detachedAtStart.has(latest.get(node.id)!.id)) ? { kind: "lost", rigId, seats } : { kind: "stale" };
+    }
     if (statuses.some((status) => status === "exited")) return { kind: "stopped" };
     return { kind: "unknown" };
   } catch {
