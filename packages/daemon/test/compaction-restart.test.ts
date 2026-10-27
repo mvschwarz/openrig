@@ -18,6 +18,8 @@ afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{rec
 function fixture(){
  const home=mkdtempSync(join(tmpdir(),'compaction-restart-'));homes.push(home);
  let clock=10000,generation='generation-one';
+ // Transport deadlines and the enforcer's injected sleeps must share the fixture clock.
+ vi.spyOn(Date, 'now').mockImplementation(()=>clock);
  const db={prepare:()=>({get:()=>undefined,all:()=>[]})} as any;
  const writes:string[]=[];
  // onWrite sees each text as it is written; busy holds the seat non-idle; failCompact loses a /compact's result; box is
