@@ -266,6 +266,11 @@ source. The seat's setup does two things.
      argument in your Pi version.
    - `first_input` carries text, not files: it doesn't install the skills.
 
+**In a plain terminal seat, a queue wake doesn't reach Pi.** OpenRig doesn't treat a `runtime: terminal` seat as an agent
+seat. When a parked row's wake fires, OpenRig doesn't type it into Pi, and a handoff to that seat records a failed wake
+(`failed:terminal-seat`). Parking still records the wait, but `--wake-after` won't bring Pi back. Check the seat's parked
+rows yourself (`rig queue whoami --session <seat>`, or `rig queue show <id>`), or tell Pi to continue the named row.
+
 **What this shows, and what it doesn't.** A copied folder and a startup line put the text in front of the agent. They don't
 show that Pi discovered the skill by itself, or that the agent follows it. Check those separately: that the agent read the
 whole file (its tool trace), and what its rows record, such as a CI wait parked on `external:` with a wake, and a handoff
