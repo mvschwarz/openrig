@@ -264,7 +264,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
         // know whether the kernel itself reached ready. Operators who
         // need a kernel-ready signal opt in here.
         if (opts.waitForKernel) {
-          const { waitForKernelReady } = await import("../daemon-lifecycle.js");
+          const { waitForKernelReady, skippedKernelMessage } = await import("../daemon-lifecycle.js");
           const timeoutMs = opts.waitForKernelMs && /^\d+$/.test(opts.waitForKernelMs)
             ? parseInt(opts.waitForKernelMs, 10)
             : 60_000;
@@ -272,6 +272,10 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           const result = await waitForKernelReady(baseUrl, timeoutMs);
           if (result.ok) {
             console.log(`Kernel ${result.kernelState}; variant=${result.variant ?? "(none)"}`);
+          } else if (result.kernelState === "skipped") {
+            // Skipped on purpose, so neither a timeout nor an auth problem: say why, and the way back.
+            console.error(skippedKernelMessage(result.detail));
+            process.exitCode = 1;
           } else {
             // Honest 3-part error per banked discipline.
             console.error(

@@ -1318,6 +1318,18 @@ export interface KernelReadyResult {
   existingRestore?: "in_progress" | "finished";
 }
 
+/** What to tell a person when daemon start skipped the kernel on purpose (kernel_state `skipped`).
+ *  The daemon also skips when a kernel rig already exists (kernel-boot.ts); that rig need not be running.
+ *  A longer detail with the same start is the daemon's own reason, such as a kernel already down before it started. */
+export function skippedKernelMessage(detail: string | null): string {
+  const d = detail ?? "";
+  return d === "kernel rig already managed"
+    ? "Kernel auto-boot skipped (kernel rig already managed). If its seats are not running, for example after a reboot, bring it back with: rig up kernel --existing"
+    : d.startsWith("kernel rig already managed")
+      ? `Kernel auto-boot skipped: ${d}`
+      : "Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.";
+}
+
 export async function waitForKernelReady(
   baseUrl: string,
   timeoutMs: number,
