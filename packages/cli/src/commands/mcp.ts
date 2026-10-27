@@ -23,7 +23,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
       const deps = getDepsF();
 
       let daemonUrl: string;
-      if (opts.port) {
+      if (opts.port !== undefined) {
         const daemonPort = parseInt(opts.port, 10);
         // A port outside 1..65535 started the server anyway, and then every tool call failed with
         // "Failed to parse URL". Same parseInt as before, so each --port that worked still does.

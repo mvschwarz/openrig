@@ -5,13 +5,13 @@ import type { StatusDeps } from "../src/commands/status.js";
 
 function deps(): { deps: StatusDeps; clientFactory: ReturnType<typeof vi.fn> } {
   const clientFactory = vi.fn((url: string) => new DaemonClient(url));
-  return { deps: { lifecycleDeps: {} as never, clientFactory }, clientFactory };
+  return { deps: { lifecycleDeps: { exists: () => false } as never, clientFactory }, clientFactory };
 }
 
 describe("rig mcp serve --port", () => {
   afterEach(() => { process.exitCode = undefined; vi.restoreAllMocks(); });
 
-  it.each(["abc", "0", "-1", "65536", "99999"])("refuses %s before starting the server", async (port) => {
+  it.each(["", "abc", "0", "-1", "65536", "99999"])("refuses %s before starting the server", async (port) => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const { deps: d, clientFactory } = deps();
     await mcpCommand(d).parseAsync(["serve", "--port", port], { from: "user" });
