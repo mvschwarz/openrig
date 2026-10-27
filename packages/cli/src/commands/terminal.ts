@@ -162,7 +162,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
         }
         let expectedPlan = opts.expectedPlan;
         if (session !== undefined) {
-          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider)}&session=${encodeURIComponent(session)}`);
+          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`);
           if (preview.status >= 400 || preview.data.session !== session || typeof preview.data.planId !== "string") {
             printResult(opts.json ?? false, { error: preview.data.error ?? "The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.", code: "terminal_session_unconfirmed" }, preview.status >= 400 ? preview.status : 409); return;
           }

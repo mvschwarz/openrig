@@ -73,6 +73,31 @@ describe("reopening a Herdr view in a desktop window", () => {
   });
   afterEach(() => { process.exitCode = originalExit; vi.restoreAllMocks(); });
 
+  it.each([true, false])("following binds default named daemon endpoint before tab selection (matches=%s)", async matches => {
+    const f = fixture([{ workspace_id: "follow-w", tab_id: "follow-t", label: "following" }], "kernel");
+    const namedSocket = "/daemon home/sessions/daemon-named/herdr.sock";
+    f.get.mockImplementation(async (url: string) => ({ status: 200, data: url.includes("preview")
+      ? { planId, composed: f.composed, status: { launch: { socketPath: namedSocket, session: "daemon-named" } } }
+      : { providers: [{ liveness: { alive: true }, status: { launch: { socketPath: namedSocket, session: "daemon-named" } } }] } }) as never);
+    f.post.mockResolvedValue({ status: 200, data: { provider: "herdr", ok: true, workspaceId: "follow-w", opened: ["operator"], absent: [], degraded: [], pages: 1,
+      following: { id: "same", enabled: true, state: "following", maxTiles: 8, tiles: [], events: [], overflow: [] } } } as never);
+    const original = f.exec.getMockImplementation()!;
+    f.exec.mockImplementation(async (file, args) => args.includes("status") && args.includes("server")
+      ? JSON.stringify({ result: { running: true, socket: matches ? namedSocket : "/wrong/default.sock" } }) : original(file, args));
+    await f.run(["--follow", "--json"]);
+    const parsed = JSON.parse(logs[0]!);
+    if (matches) {
+      expect(parsed).toMatchObject({ ok: true, workspaceId: "follow-w" });
+      expect(f.focus).toHaveBeenCalledExactlyOnceWith("follow-t");
+      for (const [, args] of f.exec.mock.calls.filter(([, args]) => args.includes("status") || args.includes("tab"))) {
+        expect(args).toContain("--session"); expect(args).toContain("daemon-named");
+      }
+    } else {
+      expect(parsed.ok).toBe(false); expect(f.focus).not.toHaveBeenCalled(); expect(f.list).not.toHaveBeenCalled();
+      expect(parsed.error).toContain("exact following endpoint");
+    }
+  });
+
   it("a named session scopes every reuse inventory and focus command to the selected socket", async () => {
     const f = fixture([{ workspace_id: "existing", tab_id: "existing-tab", label: label() }], "kernel", "prod");
     await f.run(["--session", "prod", "--json"]);

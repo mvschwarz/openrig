@@ -35,6 +35,7 @@ export interface FollowTile {
   key: string;
   seat: string;
   departedAt?: number;
+  focusRetainUntil?: number;
 }
 export interface FollowObservation {
   focused: boolean;
@@ -101,7 +102,7 @@ export function planFollowingTiles(
         : "Left the task; input is unconfirmed, so its tile is kept.");
       continue;
     }
-    const focusUntil = grace + policy.focusRetentionMs;
+    const focusUntil = Math.max(grace + policy.focusRetentionMs, tile.focusRetainUntil ?? 0);
     if (observed.focused && now < focusUntil) {
       retain(tile, "Left the task; keeping the focused tile briefly for reading."); wake(focusUntil); continue;
     }

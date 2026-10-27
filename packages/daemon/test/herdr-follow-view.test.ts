@@ -22,6 +22,8 @@ function fixture() {
   const panes = new Map<string, ViewerPane & { argv: string[] }>();
   const calls: string[][] = [], rpc: Array<{ method: string; params: unknown }> = [];
   const inputs = new Map<string, "empty" | "text" | "unknown">();
+  let transform = (view: ComposedView) => view;
+  let lateFocus: { seat: string; reads: number } | undefined;
   let clock = 100, lostCreate = false, lostClose = false, readsFailed = false;
   const run = async (args: string[]) => {
     calls.push(args);
@@ -63,7 +65,12 @@ function fixture() {
     throw new Error(`Unexpected operation ${args}`);
   };
   const create = () => new HerdrFollowView({ root, socketPath: socket, platform: "linux", run,
-    now: () => clock, input: async target => inputs.get(target.seat) ?? "empty",
+    now: () => clock, input: async target => {
+      if (lateFocus?.seat === target.seat && ++lateFocus.reads === 2) {
+        for (const selected of panes.values()) selected.focused = selected.argv.at(-1) === `$${target.seat}`;
+      }
+      return inputs.get(target.seat) ?? "empty";
+    },
     inspect: async argv => ({ sessionId: `$${argv[4]}`, nodeId: argv[4]! }),
     transport: { probe: async () => ({ alive: true, version: "0.9.5", protocol: 22 }), request: async (method, params) => {
       rpc.push({ method, params });
@@ -72,9 +79,12 @@ function fixture() {
       return { type: "pane_focused" };
     } } });
   const provider = create();
-  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true) => provider.follow("qitem:task", task(seats, complete), { enabled: true, ...controls }, async () => true);
+  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true) => provider.follow("qitem:task", transform(task(seats, complete)), { enabled: true, ...controls }, async () => true);
   return { follow, create, panes, calls, rpc, inputs, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
+    changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
+      ? { ...target, paneCommand: `${target.paneCommand} --changed`, attachArgv: [...target.attachArgv!.slice(0, 4), "replacement-a", ...target.attachArgv!.slice(5)] } : target) }); },
+    focusAfterPlanning: (seat: string) => { lateFocus = { seat, reads: 0 }; },
     focusSeat: (seat: string) => { for (const selected of panes.values()) selected.focused = selected.argv.at(-1) === `$${seat}`; } };
 }
 
@@ -111,6 +121,20 @@ describe("stable task-following workspace", () => {
     expect((await f.follow(["a", "b"])).opened).toEqual(["a", "b"]);
     expect(f.rpc).toEqual([{ method: "pane.focus", params: { pane_id: expect.any(String) } }]);
     expect([...f.panes.values()].find(p => p.focused)?.argv.at(-1)).toBe("$a");
+  });
+  it("does not confirm an old viewer when the same node has a new Core attachment", async () => {
+    const f = fixture(); await f.follow(); const before = f.calls.length; f.changeTarget();
+    const result = await f.follow();
+    expect(result).toMatchObject({ ok: false, following: { state: "retained" }, error: expect.stringContaining("current attachment differs") });
+    expect(f.calls.slice(before).some(c => ["create", "split", "run", "close"].includes(c[1]!))).toBe(false);
+  });
+  it("a leaver gaining focus after planning gets its reading retention before any transfer or close", async () => {
+    const f = fixture(); await f.follow(); await f.follow(["a", "b"]); f.advance(4000); f.focusAfterPlanning("c");
+    const held = await f.follow(["a", "b"]);
+    expect(held.opened).toContain("c"); expect(held.following!.nextAt).toBe(16100);
+    expect(f.rpc).toHaveLength(0); expect(f.calls.filter(c => c[1] === "close")).toHaveLength(0);
+    f.advance(12000); expect((await f.follow(["a", "b"])).opened).toEqual(["a", "b"]);
+    expect(f.rpc).toHaveLength(1);
   });
   it.each(["text", "unknown"] as const)("keeps a departed %s input, labels it nonparticipant, and never closes it", async input => {
     const f = fixture(); await f.follow(); f.inputs.set("c", input); await f.follow(["a", "b"]); f.advance(20000);

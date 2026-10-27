@@ -152,6 +152,14 @@ export class HerdrFollowView {
       // Validate ALL old identities before any change. One failed read retains
       // the whole view, rather than presenting an untrusted partial inventory.
       for (const tile of state.tiles) {
+        const currentMember = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === tile.key);
+        if (currentMember?.availability === "available") {
+          const target = view.opened.find(p => p.seat === currentMember.seat);
+          if (!target || target.paneCommand !== tile.target.paneCommand || target.readOnly !== tile.target.readOnly
+            || JSON.stringify(target.attachArgv) !== JSON.stringify(tile.target.attachArgv)) {
+            throw new Error(`${tile.seat}: Core's current attachment differs from the retained viewer; keeping the previous view unconfirmed.`);
+          }
+        }
         const current = await currentPane(tile.viewer);
         const verified = await viewers.lookup(tile.member, tile.target);
         if (!verified.ok || JSON.stringify(verified.viewer) !== JSON.stringify(tile.viewer)) throw new Error("A retained viewer is unconfirmed; keeping the whole view.");
@@ -183,11 +191,21 @@ export class HerdrFollowView {
       }
       for (const leaving of plan.leaves) {
         const tile = state.tiles.find(t => t.key === leaving.key)!;
+        const retainLateFocus = (current: ViewerPane): boolean => {
+          if (!current.focused || observations.get(tile.key)?.focused || policy.focusRetentionMs === 0) return false;
+          tile.departedAt ??= now();
+          tile.focusRetainUntil = now() + policy.focusRetentionMs;
+          const reason = "Left the task; keeping the newly focused tile briefly for reading.";
+          plan.retained.push({ key: tile.key, seat: tile.seat, reason }); plan.tiles.push(tile);
+          plan.nextAt = Math.min(plan.nextAt ?? Infinity, tile.focusRetainUntil);
+          notice(`${tile.seat}: ${reason}`); save(); return true;
+        };
         if (!await stillCurrent()) throw new Error("Membership changed before a departure; remaining tiles were kept.");
         // A draft can appear after planning. Suppression is an explicit request
         // to hide, but it still must not destroy an in-progress typed draft.
         if (await this.deps.input?.(tile.target) !== "empty") { notice(`${tile.seat}: Keeping its tile because input is typed or unconfirmed.`); continue; }
         const current = await currentPane(tile.viewer);
+        if (retainLateFocus(current)) continue;
         if (current.focused) {
           const survivor = state.tiles.find(t => t.key !== tile.key && !plan.leaves.some(l => l.key === t.key));
           const focus = survivor ? await currentPane(survivor.viewer) : await currentPane(state.pane);
@@ -199,6 +217,7 @@ export class HerdrFollowView {
         if (!await stillCurrent() || await this.deps.input?.(tile.target) !== "empty") {
           notice(`${tile.seat}: Membership or input changed before closing; its viewer is kept.`); continue;
         }
+        if (retainLateFocus(await currentPane(tile.viewer))) continue;
         state.closing = tile.key; save();
         await this.deps.run(["pane", "close", tile.viewer.paneId]);
         if (!await viewers.forgetClosed(tile.member, tile.viewer)) throw new Error("Tile close remains unconfirmed; no second close was attempted.");
@@ -219,7 +238,7 @@ export class HerdrFollowView {
       // Clear a previous departure marker when a member rejoins.
       for (const tile of state.tiles) if (members.some(m => m.key === tile.key)) {
         if (tile.reason) await this.deps.run(["pane", "report-metadata", tile.viewer.paneId, "--source", "openrig-follow", "--display-agent", tile.seat, "--seq", String(now())]);
-        delete tile.departedAt; delete tile.reason;
+        delete tile.departedAt; delete tile.focusRetainUntil; delete tile.reason;
       }
       for (const member of view.task.members) if (member.availability !== "available") notice(`${member.seat}: ${member.reason ?? member.availability}`);
       for (const overflow of plan.overflow) notice(`${overflow.seat}: ${overflow.reason}`);
