@@ -637,6 +637,15 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // live release job is orphaned: both stay findings, with their own reason.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
+      // A wake recorded unroutable because the seat's pane wasn't bound yet (#2151). Once its binding exists, send the wake
+      // through the ordinary path instead of reporting it; the next tick reads the new result, so a failed send is reported
+      // then. A row with a live retry ladder is left to the ladder.
+      if (!humanNotice && row.lastNudgeResult?.startsWith("unroutable:")
+        && !hasLiveLadder(deps.db, row.qitemId, now, suppressionMinutes)
+        && deps.queueRepo.classifyDestinationOf(row.destinationSession).class === "pane-bound") {
+        await deps.queueRepo.maybeNudge(row.qitemId, row.destinationSession, true, row.sourceSession);
+        if (!deps.queueRepo.getById(row.qitemId)?.lastNudgeResult?.startsWith("unroutable:")) continue;
+      }
       // The ladder check runs LAST, so only a row the ladder ALONE would have stopped counts
       // as ladder-suppressed (#1419). Agent wake retries do not own the separate notice to a
       // person: a human notice is never the ladder's to suppress.
