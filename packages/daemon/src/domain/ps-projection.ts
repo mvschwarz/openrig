@@ -11,6 +11,7 @@ import {
   type AssignedWorkCounts,
 } from "./node-inventory.js";
 import { archiveWhereClause, type RigArchiveFilter } from "./rig-repository.js";
+import { runningNonArchivedRigIds } from "./periodic-snapshot-scheduler.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { SeatStructuralActivityService } from "./seat-structural-activity-service.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
@@ -54,7 +55,8 @@ export interface PsEntry {
   archivedAt: string | null;
   /** OPR.0.3.3.19 - convenience flag; true iff `archivedAt !== null`. */
   isArchived: boolean;
-  /** OPR.0.3.4.9 — periodic snapshot floor: whether the scheduler is active. */
+  /** OPR.0.3.4.9 — periodic snapshot floor: whether the scheduler is active and snapshots this rig (running, not
+   *  archived). */
   periodicSnapshotActive: boolean;
   /** OPR.0.3.4.9 — periodic snapshot interval in seconds (0 if inactive). */
   periodicSnapshotIntervalSeconds: number;
@@ -213,6 +215,8 @@ export class PsProjectionService {
       ${where}
     `).all() as Array<{ node_id: string; created_at: string | null }>;
     const sessionCreatedAt = new Map(sessionTimes.map((row) => [row.node_id, row.created_at]));
+    // The scheduler snapshots only running, non-archived rigs; ask it which, so a stopped rig doesn't read as saved.
+    const snapshotted = this.periodicSnapshotActive ? new Set(runningNonArchivedRigIds(this.db)) : null;
 
     return rows.map((r) => {
       // Derive rig-level lifecycleState by folding per-node states. FS-1 W1.2:
@@ -309,7 +313,7 @@ export class PsProjectionService {
         latestSnapshot: r.latest_snapshot_at ? formatAge(now - new Date(r.latest_snapshot_at + "Z").getTime()) : null,
         archivedAt: r.archived_at,
         isArchived: r.archived_at !== null,
-        periodicSnapshotActive: this.periodicSnapshotActive,
+        periodicSnapshotActive: snapshotted?.has(r.rig_id) ?? false,
         periodicSnapshotIntervalSeconds: this.periodicSnapshotIntervalSeconds,
         autoPeriodicSnapshotCount: r.auto_periodic_count,
         attentionCount,

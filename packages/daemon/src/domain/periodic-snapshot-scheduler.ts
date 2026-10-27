@@ -133,18 +133,23 @@ export class PeriodicSnapshotScheduler {
   }
 
   private getRunningNonArchivedRigs(rigId?: string): string[] {
-    // Latest-session-per-node semantics: a node is running only when its
-    // NEWEST session (by created_at DESC, id DESC) has status='running'.
-    // Mirrors ps-projection.ts:116-118. An older running + newer exited
-    // session means the node is NOT running.
-    const rows = this.deps.db.prepare(
-      `SELECT DISTINCT r.id FROM rigs r
-       JOIN nodes n ON n.rig_id = r.id
-       WHERE r.archived_at IS NULL
-         ${rigId ? "AND r.id = ?" : ""}
-         AND (SELECT s.status FROM sessions s WHERE s.node_id = n.id
-              ORDER BY s.created_at DESC, s.id DESC LIMIT 1) = 'running'`
-    ).all(...(rigId ? [rigId] : [])) as Array<{ id: string }>;
-    return rows.map((r) => r.id);
+    return runningNonArchivedRigIds(this.deps.db, rigId);
   }
+}
+
+/** The rigs the scheduler snapshots: not archived, with at least one running node. `rig ps` reads the same set, so
+ *  its periodic snapshot flag is true only for a rig the scheduler would snapshot. */
+export function runningNonArchivedRigIds(db: Database.Database, rigId?: string): string[] {
+  // Latest-session-per-node semantics: a node is running only when its
+  // NEWEST session (by created_at DESC, id DESC) has status='running'.
+  // An older running + newer exited session means the node is NOT running.
+  const rows = db.prepare(
+    `SELECT DISTINCT r.id FROM rigs r
+     JOIN nodes n ON n.rig_id = r.id
+     WHERE r.archived_at IS NULL
+       ${rigId ? "AND r.id = ?" : ""}
+       AND (SELECT s.status FROM sessions s WHERE s.node_id = n.id
+            ORDER BY s.created_at DESC, s.id DESC LIMIT 1) = 'running'`
+  ).all(...(rigId ? [rigId] : [])) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
 }
