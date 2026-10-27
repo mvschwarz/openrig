@@ -255,16 +255,25 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
-  it("no page reports a tab id: no focus and no close, both said", async () => {
+  it("no page reports a tab id: no focus or close, with direct attach recovery", async () => {
     const { transport, requests } = herdrTransport((m) => (m === "workspace.create" ? create : { type: "l" }));
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "layout.apply"]);
     expect(res.ok).toBe(false);
     expect(res.opened).toEqual([]);
-    expect(res.degraded).toHaveLength(17);
+    expect(res.degraded.map(d => d.seat)).toEqual(rows.map(row => row.canonicalSessionName));
     expect(res.degraded.every(d => d.code === "pane_unconfirmed")).toBe(true);
-    expect(res.notes).toEqual([TEAM_HANDOFF_NOTE, HERDR_PANES_UNCONFIRMED_NOTE, "herdr returned no tab id for any page, so no tab was focused explicitly.", KEPT]);
+    // No pane is confirmed, so the service preserves its existing route to the live seat sessions.
+    expect(res.notes).toEqual([
+      "In a new terminal on the daemon's host, attach directly using one of these commands:",
+      ...rows.map(row => `${row.logicalId}: env -u TMUX tmux attach -f ignore-size -t '${row.tmuxSession}'`),
+      "Each labelled command above opens a different seat. When sharing how to join this team, include every command in full, unchanged, including env -u TMUX, paths and quoting.",
+      TEAM_HANDOFF_NOTE,
+      HERDR_PANES_UNCONFIRMED_NOTE,
+      "herdr returned no tab id for any page, so no tab was focused explicitly.",
+      KEPT,
+    ]);
   });
 
   it("a failed apply (which may still have taken effect) keeps the starting tab; its seats stay degraded, not counted", async () => {
