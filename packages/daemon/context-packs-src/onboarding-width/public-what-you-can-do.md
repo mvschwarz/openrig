@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.3`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.4`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -88,7 +88,10 @@ one command away. Your memory of the fleet is a claim about the past.
 - **`rig roster list` / `show` / `find`** — who across your rigs and hosts is recommended for a
   kind of work, from JSON rosters in `<workspace.root>/rosters`. Read-only: it dispatches nothing
   and does not claim anyone is available. The built-in starter and factory leads publish their
-  team's roster at first start. `show` and `find` include each seat's last observed model.
+  team's roster at first start. `show` and `find` include each seat's last observed model. A
+  roster entry marked `"hosted": true` is a member that lives outside a terminal (an assistant
+  connected over MCP); `show` and `find` say so, and when it last called the team's MCP server.
+  With no evidence that reads unknown, never idle.
 - **`rig telemetry events` / `transitions` / `tenures <node-id>`** — past events, queue
   transitions and a seat's occupants, one bounded page at a time with gaps reported. Reach for it
   before querying the database yourself.
@@ -210,6 +213,12 @@ unseen — which makes messages the one delivery channel that never gets skipped
   existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
   view in a provider that is already running, without opening a window; each such open adds a new
   workspace, so to come back to a view, focus its open space.
+  **`qitem:<id>` as the view** previews or opens the current local owners of that task: its
+  pending, in-progress and blocked rows through explicitly linked successors, without closed
+  predecessors or past senders. It's a read-only membership view: stopped, missing, external and
+  unresolved owners are named, and incomplete lineage is reported rather than cut short. It doesn't
+  follow the task as it moves, and an explicit open still has the provider's usual workspace
+  effects. Preview and open responses carry `viewDescriptor` (`kind`, `name`).
   Add `--session <name>` to select a Herdr session for that request; `--session default`
   explicitly selects its default session. `rig terminal status --session <name>` inspects
   the same endpoint. Omitting the flag keeps the daemon's configured endpoint. Herdr tiles come
@@ -594,6 +603,12 @@ because someone lost work once.
 When your user says OpenRig isn't working, start with **`rig context get help`**: the one help guide for the installed
 version, from checking the environment to a useful report to the OpenRig team.
 
+- **`rig seat history --rig <id> --node-id <id>`** — which recorded Claude or Codex conversations this exact node
+  could resume, read-only (`--json`; check one reference with `--snapshot-id` and `--history-session-id` together).
+  The IDs are `rigId` in `rig ps --nodes --json` and `identity.nodeId` in `rig whoami --session <seat> --json`.
+  A client can then ask the daemon's startup review for that node to resume
+  the history the person reviewed; it rechecks the choice and refuses rather than substitute another
+  conversation or start fresh.
 - **`rig start`** — the box rebooted and everything is gone: bring the whole topology back in one
   move, rather than hand-restoring rig by rig. Selected-rig recovery now demands positive runtime
   evidence and refuses stale identity by name rather than substituting an occupant. `--last`
@@ -604,6 +619,9 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  Startup brings back a kernel that this start found down (what a reboot leaves). A kernel that
+  was already down before this start stays down: `rig start` and `rig daemon start
+  --wait-for-kernel` say so, and `rig up kernel --existing` brings it back.
   `/healthz` reports the daemon's effective UID as `euid`, beside `pid`. Running several OpenRig
   homes on one machine on purpose: `rig config set daemon.db_conflict stop` refuses a start whose
   database another live daemon already holds (the default, `warn`, only warns), and
@@ -1279,14 +1297,28 @@ your circumstances is configuration, and the ones that are not, another agent ca
   shell command. Its queue tools (`rig_queue_create`, `rig_queue_show`, `rig_queue_list`,
   `rig_queue_claim`, `rig_queue_update`, `rig_queue_handoff`, `rig_queue_unclaim`) act as the seat
   named by `OPENRIG_SESSION_NAME`, so an agent with no shell can hand work to the team, read the
-  closing note as its answer, and pass on or put back work it holds. Nothing
-  wakes such an agent; it sees new work when it checks. Its tools cover the whole delegation loop:
+  closing note as its answer, and pass on or put back work it holds. Unless it declares a webhook
+  trigger (below), nothing wakes such an agent; it sees new work when it checks. Its tools cover
+  the whole delegation loop:
   find its seat, team and lead (`rig_whoami`, `rig_team`), hand work on and follow the handoff's
   successor, find finished work and read its artifact, decide inside a person's decision room,
   follow a restore it started (`rig_restore_status`) and read the event log
   (`rig_telemetry_events`). **`rig mcp serve --http`** serves the same tools to a client on another
   host; `rig mcp token add <name> --seat <session>` gives each caller its own grant, acting as that
-  seat.
+  seat. `--grant-service <url>` checks each request's key with an external grant service instead
+  of the token file (`--grant-service-header-file` adds one header to each lookup), and
+  `--oauth-resource` with `--oauth-issuer` lets an OAuth client discover how to authenticate and
+  get a standard challenge; the key and its grant still decide what a caller may do. The rows a
+  granted caller's actions write record whose grant acted: attribution, not authentication.
+  Clients on MCP protocol revision 2026-07-28 and on the 2025 revisions share the same endpoint.
+  **An assistant connected this way can be a hosted member of a rig:** mark its roster entry
+  `"hosted": true` and `rig_team` lists it with its declared capabilities and caveat, activity
+  `unknown`. The server's instructions teach it the loop: its inbox, claiming, closing or handing
+  on, and asking a person while keeping the item (it blocks the item on that person, and the
+  answer returns it in progress). A roster entry can declare a webhook trigger (`wake.webhook`,
+  with secret names, never values): OpenRig then POSTs a pointer to the row when work lands, and a
+  2xx records only that the ring was accepted, not that anything woke. When work waits for a
+  member nothing can wake, or a rung member doesn't claim it in time, its person is told.
 - **`rig skill loadout --runtime <claude-code|codex>`** — inspect the exact catalog revision,
   selectors, target, and current/missing/shadowed/conflicting state for one working directory.
   `--apply` writes only the managed ownership set, is idempotent, and refuses local edits or
