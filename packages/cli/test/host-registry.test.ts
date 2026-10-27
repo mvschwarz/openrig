@@ -40,9 +40,9 @@ describe("host registry — loadHostRegistry", () => {
   it("loads a valid single-host registry", () => {
     withTempFile("hosts.yaml", `
 hosts:
-  - id: vm-claude-test
+  - id: vm-test-a
     transport: ssh
-    target: vm-claude-test.local
+    target: vm-test-a.local
     user: tester
     notes: "Tart VM"
 `, (path) => {
@@ -51,9 +51,9 @@ hosts:
       if (r.ok) {
         expect(r.registry.hosts).toHaveLength(1);
         expect(r.registry.hosts[0]).toEqual({
-          id: "vm-claude-test",
+          id: "vm-test-a",
           transport: "ssh",
-          target: "vm-claude-test.local",
+          target: "vm-test-a.local",
           user: "tester",
           notes: "Tart VM",
         });

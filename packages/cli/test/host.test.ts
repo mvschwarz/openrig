@@ -235,7 +235,7 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
       if (cmd.includes("ss -tln")) return okRun(`LISTEN 0 511 ${addr}:7433 0.0.0.0:*`);
       return okRun("");
     });
-    const inRange = await postureCheck(sshHost, mk("100.103.199.127"));
+    const inRange = await postureCheck(sshHost, mk("100.88.0.21"));
     expect(inRange.find((r) => r.step === "daemon-bind-not-public")!.status).toBe("pass");
     const outOfRange = await postureCheck(sshHost, mk("100.1.2.3"));
     expect(outOfRange.find((r) => r.step === "daemon-bind-not-public")!.status).toBe("fail");

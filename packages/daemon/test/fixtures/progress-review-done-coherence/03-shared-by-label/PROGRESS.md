@@ -11,7 +11,7 @@ Final candidate `5afea9d` is committed, independently verified, and delivery-loc
 - [x] Implementation complete — awaiting post-edit QA
 - [x] Tests passing — 10/10 in actions/__tests__/albums.test.ts (added empty/whitespace fallback per QA)
 - [x] Review approved — QA POST-EDIT APPROVED at the working-tree gate (10/10, scoped diff clean, visual compare PASS, design coherence PASS)
-- [x] Committed — FINAL candidate SHA `5afea9d` on branch `stripe-pro-tier` (3 files, +243/-6). Metadata-only re-author of `9360fb1` → author+committer `Mike Schwarz <esoteric.run@gmail.com>` (repo convention); tree-SHA identical (`90a3cac`), zero content drift
+- [x] Committed — FINAL candidate SHA `5afea9d` on branch `stripe-pro-tier` (3 files, +243/-6). Metadata-only re-author of `9360fb1` → author+committer `Mike Schwarz <person@example.com>` (repo convention); tree-SHA identical (`90a3cac`), zero content drift
 - [x] Proof drop — canonical QA PASS against final `5afea9d`, mapped to items 1-6 with curated real-Tailwind render
 - [x] Scope audit — `ok: true`, zero findings for mission and slice
 - [x] Delivery-lock — approved by `dev1-qa@product-team` at `2026-07-11T01:49:25.159Z`

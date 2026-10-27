@@ -56,17 +56,17 @@ describe("rig host ls — the hostId join key is visible, bound or not", () => {
   }
 
   it("carries hostId through the WRITE path and resolves by it afterwards", () => {
-    expect(addHostEntry({ id: "mm2-host", transport: "http", url: "http://x:7433", hostId: "host-84c37990" }).ok).toBe(true);
+    expect(addHostEntry({ id: "remote-host", transport: "http", url: "http://x:7433", hostId: "host-84c37990" }).ok).toBe(true);
     const loaded = loadHostRegistry();
     expect(loaded.ok).toBe(true);
     if (!loaded.ok) return;
     expect(loaded.registry.hosts[0]!.hostId).toBe("host-84c37990");
 
     // Both directions resolve to the same entry — that IS alias -> id -> transport.
-    expect(resolveHost(loaded.registry, "mm2-host").ok).toBe(true);
+    expect(resolveHost(loaded.registry, "remote-host").ok).toBe(true);
     const byJoinKey = resolveHost(loaded.registry, "host-84c37990");
     expect(byJoinKey.ok).toBe(true);
-    if (byJoinKey.ok) expect(byJoinKey.host.id).toBe("mm2-host");
+    if (byJoinKey.ok) expect(byJoinKey.host.id).toBe("remote-host");
   });
 
   it("shows the join key in --json, and null (not a missing key) when unbound", async () => {

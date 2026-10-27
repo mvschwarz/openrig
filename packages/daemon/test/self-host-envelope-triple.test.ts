@@ -15,8 +15,8 @@ describe("wrapPaneEnvelope — bare-as-received sender (CLI twin, byte-identical
   });
 
   it("an arriving ORIGIN triple renders verbatim (the cross-host boundary constructed it; never re-stamped)", () => {
-    const out = wrapPaneEnvelope("dev50-driver@v-openrig-build@mm2-openrig1", "guard@my-rig", "hi");
-    expect(out).toContain("From: dev50-driver@v-openrig-build@mm2-openrig1");
-    expect(out).toContain('\u21a9 Reply: rig send dev50-driver@v-openrig-build@mm2-openrig1 "..."');
+    const out = wrapPaneEnvelope("dev50-driver@v-openrig-build@self-vm", "guard@my-rig", "hi");
+    expect(out).toContain("From: dev50-driver@v-openrig-build@self-vm");
+    expect(out).toContain('\u21a9 Reply: rig send dev50-driver@v-openrig-build@self-vm "..."');
   });
 });

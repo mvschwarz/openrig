@@ -30,7 +30,7 @@ describe("queue sender identity — bare at local write, triple only from the fo
   });
 
   it("stores a forwarded ORIGIN triple verbatim (the not-bare guard: never re-stamped)", async () => {
-    const row = await repo.create({ sourceSession: "pm@other-rig@mm2-openrig1", destinationSession: "b@r", body: "x" });
-    expect(row.sourceSession).toBe("pm@other-rig@mm2-openrig1");
+    const row = await repo.create({ sourceSession: "pm@other-rig@self-vm", destinationSession: "b@r", body: "x" });
+    expect(row.sourceSession).toBe("pm@other-rig@self-vm");
   });
 });

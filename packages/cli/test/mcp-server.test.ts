@@ -362,7 +362,7 @@ describe("MCP Server", () => {
   it("rig_queue_show names where a handed-on item went, and says when it can't tell", async () => {
     const lists: string[] = [];
     const getFn = vi.fn(async (path: string) => {
-      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-20261023-abc@mm2-host" } };
+      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-remote-successor@remote-host" } };
       if (path === "/api/queue/qitem-done") return { status: 200, data: { qitemId: "qitem-done", state: "done", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path === "/api/queue/qitem-old") return { status: 200, data: { qitemId: "qitem-old", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path.endsWith("/transitions")) return { status: 200, data: [] };
@@ -381,7 +381,7 @@ describe("MCP Server", () => {
     const successor = async (qitemId: string) => ((await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId } })).structuredContent as { successor: unknown }).successor;
 
     // A cross-host handoff is named from its closure target, not fetched.
-    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-20261023-abc", host: "mm2-host" });
+    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-remote-successor", host: "remote-host" });
     expect(lists).toEqual([]);
     // A handoff-and-complete closes the source done, and it still has a successor: the newest, with the others named.
     expect(await successor("qitem-done")).toEqual({ qitemId: "qitem-next", destinationSession: "qa@team", state: "pending", otherSuccessors: ["qitem-earlier"] });
