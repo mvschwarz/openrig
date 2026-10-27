@@ -128,6 +128,8 @@ inverted the default-nudge polarity.
 - **Use the write's response.** Read the row back only when the response doesn't show what you need (an indeterminate outcome, a field the compact output left out, downstream wake or pickup, a team custody rule): openrig-user, "After a queue write".
 - **Brief for the model that will read it.** Before handing a peer open-ended work, check which model it runs: `delegating-work`, "Check what kind of agent you're handing it to".
 
+**Write so the receiver can act after one read.** Open with the request, decision or change that affects their next step. Use full words and ordinary spacing. Keep the limits that change that step in the message; link the supporting detail. Put reference IDs and paths after the action. Send an additional message when it changes what the receiver should do. Put the complete request near the start of the task body; its summary helps discovery and does not replace reading the body.
+
 ## Queue-body hygiene (token + parse safety)
 
 The qitem body is durable DATA the daemon stores and replays on every
