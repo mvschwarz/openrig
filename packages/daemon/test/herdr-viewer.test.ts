@@ -33,7 +33,10 @@ function fixture() {
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
-    if (command === "workspace list") return JSON.stringify({ result: unreadable ? {} : { workspaces: workspaceInventory ?? (enumerable ? [{ workspace_id: ids.workspace_id, label }] : []) } });
+    if (command === "workspace list") {
+      if (args.length !== 2) throw new Error("usage: herdr workspace list");
+      return JSON.stringify({ result: unreadable ? {} : { workspaces: workspaceInventory ?? (enumerable ? [{ workspace_id: ids.workspace_id, label }] : []) } });
+    }
     if (command === "pane list") return JSON.stringify({ result: paneInventory ? paneInventory[args[args.indexOf("--workspace") + 1]!] : { panes: [ids] } });
     if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {

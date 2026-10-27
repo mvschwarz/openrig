@@ -38,7 +38,10 @@ function fixture() {
       if (lostCreate) { lostCreate = false; throw new Error("lost create response"); }
       return JSON.stringify({ result: { [command === "workspace create" ? "root_pane" : "pane"]: made } });
     }
-    if (command === "workspace list") return JSON.stringify({ result: { workspaces: [{ workspace_id: "w1" }] } });
+    if (command === "workspace list") {
+      if (args.length !== 2) throw new Error("usage: herdr workspace list");
+      return JSON.stringify({ result: { workspaces: [{ workspace_id: "w1" }] } });
+    }
     if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()] } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");

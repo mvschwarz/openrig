@@ -58,7 +58,8 @@ function pane(raw: unknown): Pane | null {
 
 /** Complete endpoint-wide attribution; mutable labels are never ownership. */
 export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string): Promise<Pane[]> {
-  const listed = body(await run(["workspace", "list", "--json"]));
+  // 0.9.5 emits JSON by default here; unlike status server, list rejects --json.
+  const listed = body(await run(["workspace", "list"]));
   if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
   const found: Pane[] = [];
   for (const workspace of listed.workspaces as Array<Record<string, unknown>>) {
