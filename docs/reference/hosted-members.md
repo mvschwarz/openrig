@@ -3,6 +3,10 @@
 A hosted member is a tool that lives outside a terminal, such as an assistant, a chat bot or a cloud routine, and works as a member of a rig. You
 address work to it like any seat. It reaches the team through OpenRig's MCP server under a grant you issue and can revoke. It never gets a pane.
 
+Assistants that run on your machine can reach OpenRig's MCP server locally. Many assistants live in a vendor's cloud, and those can only reach a server on the internet.
+
+> **Experimental and unsupported. Off by default.** Nothing in OpenRig listens on the internet unless you set it up yourself. You serve `rig mcp serve --http`, put it behind your own TLS tunnel or proxy, and issue a token. Doing that is like opening a port in your firewall. Anyone with the URL and a valid token can act as that member within its grant. Treat the token like a password, give the member the narrowest grant, and revoke it when you're done (`rig mcp token revoke <name>`). We don't support, and take no responsibility for, an OpenRig reachable from the internet, just as with running OpenRig itself on the open internet. Use at your own risk.
+
 ## Set one up
 
 1. **Pick its address** on an existing rig: `<member>@<rig>`, for example `grok@research`. No node is added; the queue takes rows for it.
