@@ -23,7 +23,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--port <port>", "Daemon port override")
     .option("--http", "Serve over Streamable HTTP at /mcp instead of stdio")
     .option("--bind <host:port>", "With --http: where to listen (default 127.0.0.1:7437). Beyond loopback needs a grant (rig mcp token add)")
-    .option("--grant-service <url>", "With --http: check each request's key with an external grant service's endpoint instead of the token file")
+    .option("--grant-service <url>", "With --http: check each request's key with the grant service at this URL instead of the token file")
     .option("--grant-service-header-file <path>", "With --grant-service: a file holding one 'Name: value' header to send with each grant request")
     .option("--oauth-resource <url>", "With --grant-service and --oauth-issuer: the public https URL clients reach this server as (its path ends in /mcp), for OAuth discovery")
     .option("--oauth-issuer <url>", "With --oauth-resource: the OAuth authorization server that issues the keys --grant-service checks")
@@ -38,10 +38,10 @@ through a tunnel or proxy: they arrive on loopback too. If the token file then g
 request is refused; serving unauthenticated again takes a restart with no token file. TLS comes from the tunnel or
 proxy, not from this server.
 
-With --grant-service, every request needs a key that grant service issued, checked with it on each request
-for this daemon's instance (its self id); the token file isn't read. The caller acts as the seat its grant names,
-which must already exist here (created is enough; it needn't have been launched), and reaches only what the grant
-names. If the grant service can't answer, the request is refused.
+With --grant-service, every request needs a key the grant service issued, checked with that service on each request
+for this daemon's instance (its self id); the token file isn't read. A caller acts as the seat its grant names, which
+must already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If
+the grant service can't answer, the request is refused.
 
 With --grant-service, --oauth-resource and --oauth-issuer (both or neither) add OAuth discovery (RFC 9728) for clients
 that sign in with OAuth. The resource is the public URL this server is reached as, and the issuer is the authorization
@@ -187,7 +187,7 @@ async function serveHttp(daemonUrl: string, bind: string, grantService?: string,
   }
   const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   console.error(grantService
-    ? `OpenRig MCP over HTTP at ${served.url}: each request needs a grant key, checked with ${grantService}.`
+    ? `OpenRig MCP over HTTP at ${served.url}: each request needs a key from the grant service, checked with ${grantService}.`
     : served.authenticated
     ? `OpenRig MCP over HTTP at ${served.url}: each request needs a bearer credential from ${tokenFile}.`
     : `OpenRig MCP over HTTP at ${served.url}: no grants, so loopback only, acting as ${seat || "no seat"}, declared and not authenticated. Add a grant (rig mcp token add) before reaching it through a tunnel or proxy.`);

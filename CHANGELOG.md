@@ -361,8 +361,8 @@ from the commit tagged `v0.7.3`. The changes since 0.7.2:
   client submit retry ([#2090](https://github.com/mvschwarz/openrig/pull/2090)),
   the prime-agent runtime
   ([#2069](https://github.com/mvschwarz/openrig/pull/2069)), hosted members on
-  a team ([#2095](https://github.com/mvschwarz/openrig/pull/2095)) and Cloud
-  grants for `rig mcp serve --http`
+  a team ([#2095](https://github.com/mvschwarz/openrig/pull/2095)) and grants
+  from an external grant service for `rig mcp serve --http`
   ([#2096](https://github.com/mvschwarz/openrig/pull/2096)). The limits listed
   for 0.7.2 still apply unless a change above names them fixed.
 
