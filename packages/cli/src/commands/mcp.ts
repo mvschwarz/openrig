@@ -25,6 +25,8 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--bind <host:port>", "With --http: where to listen (default 127.0.0.1:7437). Beyond loopback needs a grant (rig mcp token add)")
     .option("--cloud-grants <url>", "With --http: check each request's key with OpenRig Cloud's grant endpoint instead of the token file")
     .option("--cloud-grant-header-file <path>", "With --cloud-grants: a file holding one 'Name: value' header to send with each grant request")
+    .option("--oauth-resource <url>", "With --cloud-grants and --oauth-issuer: the public https URL clients reach this server as (its path ends in /mcp), for OAuth discovery")
+    .option("--oauth-issuer <url>", "With --oauth-resource: the OAuth authorization server that issues the keys --cloud-grants checks")
     .addHelpText("after", `
 Both MCP protocol revisions are served, over stdio and --http alike: clients on 2026-07-28 (which may start with
 server/discover) and clients that open with 2025's initialize handshake.
@@ -39,8 +41,15 @@ proxy, not from this server.
 With --cloud-grants, every request needs an OpenRig Cloud customer key, checked with Cloud on each request for this
 daemon's instance (its self id); the token file isn't read. A customer acts as the seat its grant names, which must
 already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If Cloud
-can't answer, the request is refused.`)
-    .action(async (opts: { port?: string; http?: boolean; bind?: string; cloudGrants?: string; cloudGrantHeaderFile?: string }) => {
+can't answer, the request is refused.
+
+With --cloud-grants, --oauth-resource and --oauth-issuer (both or neither) add OAuth discovery (RFC 9728) for clients
+that sign in with OAuth. The resource is the public URL this server is reached as, and the issuer is the authorization
+server that issues the keys --cloud-grants checks. GET /.well-known/oauth-protected-resource<resource path> then answers
+with both, exactly as given, without a credential or a call to the grant service, and every 401 points there. Both must
+be https with no userinfo, query or fragment, written as a URL writes them (a lowercase host, no default port). /mcp
+stays the endpoint; a proxy in front forwards the metadata path unchanged.`)
+    .action(async (opts: { port?: string; http?: boolean; bind?: string; cloudGrants?: string; cloudGrantHeaderFile?: string; oauthResource?: string; oauthIssuer?: string }) => {
       const deps = getDepsF();
 
       let daemonUrl: string;
@@ -68,8 +77,19 @@ can't answer, the request is refused.`)
         process.exitCode = 1;
         return;
       }
+      if ((opts.oauthResource === undefined) !== (opts.oauthIssuer === undefined)) {
+        console.error("--oauth-resource and --oauth-issuer go together: give both, or neither");
+        process.exitCode = 1;
+        return;
+      }
+      const oauth = opts.oauthResource !== undefined && opts.oauthIssuer !== undefined ? { resource: opts.oauthResource, issuer: opts.oauthIssuer } : undefined;
+      if (oauth && !(opts.http && opts.cloudGrants)) {
+        console.error("--oauth-resource and --oauth-issuer need --http --cloud-grants");
+        process.exitCode = 1;
+        return;
+      }
       if (opts.http) {
-        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.cloudGrants, opts.cloudGrantHeaderFile);
+        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.cloudGrants, opts.cloudGrantHeaderFile, oauth);
         return;
       }
       const client = deps.clientFactory(daemonUrl);
@@ -145,7 +165,8 @@ can't answer, the request is refused.`)
   return cmd;
 }
 
-async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, cloudHeaderFile?: string): Promise<void> {
+async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, cloudHeaderFile?: string,
+  oauth?: { resource: string; issuer: string }): Promise<void> {
   const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(bind);
   if (!match) {
     console.error(`--bind takes host:port (for example 127.0.0.1:7437 or [::1]:7437), not ${bind}`);
@@ -158,7 +179,7 @@ async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, 
   try {
     const header = cloudHeaderFile ? readCloudGrantHeader(cloudHeaderFile) : undefined;
     served = await startMcpHttpServer({ daemonUrl, host, port: Number(match[2]), tokenFile,
-      ...(cloudGrants ? { cloudGrants: { url: cloudGrants, ...(header ? { header } : {}) } } : {}) });
+      ...(cloudGrants ? { cloudGrants: { url: cloudGrants, ...(header ? { header } : {}) } } : {}), ...(oauth ? { oauth } : {}) });
   } catch (err) {
     console.error(err instanceof McpHttpConfigError ? err.message : `Can't serve on ${bind}: ${(err as Error).message}`);
     process.exitCode = 1;
@@ -170,6 +191,7 @@ async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, 
     : served.authenticated
     ? `OpenRig MCP over HTTP at ${served.url}: each request needs a bearer credential from ${tokenFile}.`
     : `OpenRig MCP over HTTP at ${served.url}: no grants, so loopback only, acting as ${seat || "no seat"}, declared and not authenticated. Add a grant (rig mcp token add) before reaching it through a tunnel or proxy.`);
+  if (oauth) console.error(`OAuth discovery names ${oauth.resource}, issued by ${oauth.issuer}.`);
   await new Promise<void>((resolve) => {
     process.once("SIGINT", resolve);
     process.once("SIGTERM", resolve);
