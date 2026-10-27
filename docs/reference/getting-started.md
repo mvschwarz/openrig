@@ -331,6 +331,16 @@ every seat while those seats still run the sessions it started, reports that
 restore's outcome instead of starting another. Explicitly repeating the saved
 `--non-interruptive` or `--no-non-interruptive` choice also joins that restore.
 
+`rig start --last` restores a rig unless every seat it launched was stopped on
+purpose with `rig down` or `rig seat stop`. A rig whose stop was never recorded
+counts as last running: one stopped with OpenRig older than 0.6.12, or one whose
+seats exited or were lost without `rig down`. So does a rig with no snapshot
+whose saved state can be restored. To keep such a rig down, run `rig down <rig>`
+once, by rig id when names are shared; it records the stop, and `--last` then
+leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
+(`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
+bring it back with `rig up kernel --existing`.
+
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact
 sessions startup launched. Other seats keep running. An operator's conversation

@@ -191,6 +191,13 @@ Examples:
 When the daemon is restoring a kernel a reboot left down, rig start goes on to
 your other rigs. Exit 0 then does not mean the kernel is ready (check rig
 status); a restore that returned without a ready kernel exits 1.
+
+--last restores a rig unless every seat it launched was stopped on purpose. A
+rig stopped with OpenRig older than 0.6.12, or whose seats exited or were lost
+without rig down, counts as last running: run rig down <rig> once (its id when
+names are shared) and --last keeps it down. --last never selects the kernel;
+under --no-kernel its automatic restore is skipped too, so bring it back with
+rig up kernel --existing.
 `);
   const getDepsF = (): StartDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
