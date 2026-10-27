@@ -18,6 +18,7 @@ import {
   buildInternalLeakMessage,
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
+import { LEAK_GUARD_RULES_ENV, leakGuardRulesPath } from "./leak-guard-rules.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = "Genericize the content, cite its public home, or re-home it to the internal pack root.";
@@ -136,7 +137,7 @@ function parseArguments(argv) {
   return {
     repo,
     packageRoot,
-    rules: resolve(values.rules ?? join(repo, "scripts/internal-tokens.generated.json")),
+    rules: values.rules ? resolve(values.rules) : leakGuardRulesPath() ?? invalidRules(),
     review: resolve(values.review),
     receipt: resolve(values.receipt),
     surfaceManifest: resolve(values["surface-manifest"] ?? join(packageRoot, "daemon/substance-surfaces.json")),
@@ -181,6 +182,11 @@ function partitionPackageArtifacts(artifactFiles) {
     target.push(path);
   }
   return { content, derived };
+}
+
+/** The release gate checks the leak guard's term lists, so it needs their file. */
+function invalidRules() {
+  throw new Error(`--rules <file> or ${LEAK_GUARD_RULES_ENV} is required: the substance gate checks the leak guard's term lists`);
 }
 
 function selectDerivedRules(rules) {

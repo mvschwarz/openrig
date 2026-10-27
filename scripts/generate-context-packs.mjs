@@ -31,6 +31,7 @@ import { parse as parseYaml } from "yaml";
 // two never drift (r1/r2 HIGH-1: a narrower rule dropped referenced helper assets).
 import { EXCLUDES as MIRROR_EXCLUDES, shipSetFromMembership } from "./mirror-skills.mjs";
 import { scanInternalLeaks, buildInternalLeakMessage } from "./internal-leak-scanner.mjs";
+import { readTermRules } from "./leak-guard-rules.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..");
@@ -51,15 +52,11 @@ const STATIC_SOURCE = process.env.OPENRIG_STATIC_PACKS_SOURCE
   ? path.resolve(process.env.OPENRIG_STATIC_PACKS_SOURCE)
   : path.join(REPO, "packages/daemon/context-packs-src");
 
-// Static pack content is scanned with the FULL committed leak authority —
-// scripts/internal-tokens.generated.json, the same generated policy the public
-// mirror flow consumes (charged terms, internal path prefixes, seat/rig and
-// host identities, internal path globs, allow-context exceptions). One
-// authority, never a local subset: a narrowed local list false-greens exactly
-// the internal paths it omits (review50-r2 BLOCKING-2).
-const STATIC_LEAK_RULES = JSON.parse(
-  fs.readFileSync(path.join(REPO, "scripts/internal-tokens.generated.json"), "utf8"),
-);
+// Static pack content is scanned with the leak guard's full term lists, the same
+// lists the public mirror flow consumes: one authority, never a local subset, since a
+// narrowed list false-greens exactly the paths it omits. They come from the local
+// file OPENRIG_LEAK_GUARD_RULES names; without one the lists are empty.
+const STATIC_LEAK_RULES = readTermRules();
 
 // Reuse the DAEMON's manifest parser (the single authority; the entry-shape
 // ruling forbids a second parser). It lives in compiled dist, which the package

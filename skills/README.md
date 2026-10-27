@@ -68,8 +68,8 @@ generated copy; edit the home and re-run the script before commit.
 
 A home must already be publishable: the script refuses to regenerate when a
 home holds text or files that the public copies would drop, such as an
-internal fence, a frontmatter key listed in
-`scripts/internal-tokens.generated.json`, a `feedback.md`, or an `evals/`
+internal fence, a frontmatter key the publishing rules drop
+(`scripts/leak-guard-rules.mjs`), a `feedback.md`, or an `evals/`
 folder. A skill change from anywhere else comes in as a normal pull request
 that edits its home.
 

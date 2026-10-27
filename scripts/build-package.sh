@@ -94,10 +94,10 @@ if [ -d "$DAEMON_DIR/specs" ]; then
   # OPR.0.5.6.12 LP-7 — the specs tree is copied wholesale into the npm
   # artifact, so scan the actual filesystem input (including untracked build
   # inputs) before the copy. Path-safety and manifest validation solve other
-  # problems; this is the public-substance refusal floor.
+  # problems; this is the public-substance refusal floor. Its term lists come from
+  # the local file OPENRIG_LEAK_GUARD_RULES names, when set.
   node "$REPO_ROOT/scripts/check-internal-leak-guard.mjs" \
     --repo "$REPO_ROOT" \
-    --rules "$REPO_ROOT/scripts/internal-tokens.generated.json" \
     --mode tree \
     --tree "$DAEMON_DIR/specs"
   cp -r "$DAEMON_DIR/specs" "$CLI_DIR/daemon/specs"
