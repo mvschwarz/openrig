@@ -23,6 +23,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, deriveCrossHostSuccessorId, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
@@ -408,6 +409,45 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(sent).toEqual(["late@r"]);
     expect(repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^unroutable:/);
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
+  });
+
+  // With the durable wake intents in place (the production path), the re-send goes through the row's own intent: it's
+  // claimed and settled, so a later startup drain doesn't wake the seat a second time.
+  async function lateSeatWithOutbox() {
+    db.prepare("INSERT INTO rigs(id,name) VALUES ('fixture-rig','r')").run();
+    db.prepare("INSERT INTO nodes(id,rig_id,logical_id,runtime,profile) VALUES ('late-node','fixture-rig','late','codex','none')").run();
+    const sent: string[] = [];
+    repo = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+      transport: { send: async (destination) => { sent.push(destination); return { ok: true, verified: true }; } },
+    });
+    const outbox = new OutboxHandler(db);
+    repo.attachOutbox(outbox);
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "late@r", body: "work" });
+    expect(row.lastNudgeResult).toMatch(/^unroutable:/);
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("failed");
+    db.prepare("INSERT INTO bindings(id,node_id,tmux_session) VALUES ('late-binding','late-node','late@r')").run();
+    return { sent, outbox, row };
+  }
+
+  it("re-sends through the row's wake intent: the intent reads delivered, and a later drain sends nothing", async () => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    await runSweep();
+    expect(sent).toEqual(["late@r"]);
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("delivered");
+    expect(repo.getById(row.qitemId)!.lastNudgeResult).not.toMatch(/^unroutable:/);
+    expect(await findingsFor(row.qitemId)).toHaveLength(0);
+    await repo.drainPendingWakeIntents();
+    expect(sent).toEqual(["late@r"]);
+  });
+
+  it.each(["sending", "delivered"])("doesn't send again when the row's wake intent is already %s", async (state) => {
+    const { sent, outbox, row } = await lateSeatWithOutbox();
+    db.prepare("UPDATE outbox_entries SET delivery_state = ? WHERE outbox_id = ?").run(state, `wake-intent-${row.qitemId}`);
+    await runSweep();
+    expect(sent).toEqual([]);
+    expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe(state);
   });
 
   // With no live recovery seat, the finding is still created (it's owed work) to the missing session, and says so.
