@@ -351,7 +351,7 @@ describe("send --host (http branch)", () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--wait-for-idle", "30"], { from: "user" });
-    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000 + 30_000);
+    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000 + 60_000);
     expect((h.calls[0]!.body as Record<string, unknown>).waitForIdleMs).toBe(30_000);
   });
 
@@ -359,14 +359,14 @@ describe("send --host (http branch)", () => {
     const h = mockClient(() => ({ status: 200, data: { ok: true } }));
     const cmd = sendCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"], { from: "user" });
-    expect(h.calls.map((c) => [(c.body as Record<string, unknown>).waitForIdleMs, c.options?.timeoutMs])).toEqual([[400_000, 400_000 + 30_000]]);
+    expect(h.calls.map((c) => [(c.body as Record<string, unknown>).waitForIdleMs, c.options?.timeoutMs])).toEqual([[400_000, 400_000 + 60_000]]);
   });
 
-  it("a cross-host send waits 30 s for the remote to deliver, not the 5 s read default", async () => {
+  it("a cross-host send waits 60 s for the remote to deliver, not the 5 s read default", async () => {
     const h = mockClient(() => ({ status: 200, data: {} }));
     const cmd = sendCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello"], { from: "user" });
-    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
+    expect(h.calls[0]!.options?.timeoutMs).toBe(60_000);
   });
 
   it("a remote that delivers after more than 5 s reports the send, not a failure", { timeout: 20_000 }, async () => {
@@ -414,7 +414,10 @@ describe("send --host (http branch)", () => {
     const err = captured.stderrLines.join("\n");
     expect(err).toContain("cross-host (host=vps-b, http://vps-b:7433): http remote-outcome-unknown:");
     expect(err).toContain("Delivery UNCONFIRMED — the remote daemon may have received and delivered the message.");
-    expect(err).toContain("Check the target before any resend: rig capture dev-impl@my-rig --host vps-b. A resend without checking risks a duplicate.");
+    expect(err).toContain("rig capture dev-impl@my-rig --host vps-b");
+    expect(err).toContain("off-screen");
+    expect(err).toContain("does not prove non-delivery");
+    expect(err).toContain("duplicate");
     expect(err).not.toContain("remote-daemon-unreachable");
     expect(captured.stdoutLines).not.toContain("Sent to dev-impl@my-rig");
     expect(process.exitCode).toBe(1);
@@ -438,7 +441,7 @@ describe("send --host (http branch)", () => {
     await cmd.parseAsync(["--host", "vps-b", "dev-impl@my-rig", "hello", "--json"], { from: "user" });
     const parsed = JSON.parse(captured.stdoutLines[0]!) as Record<string, any>;
     expect(parsed.result).toMatchObject({ ok: false, failedStep: "remote-outcome-unknown", outcomeUnknown: true });
-    expect(parsed.error.action).toContain("Check the target before any resend");
+    expect(parsed.error.action).toContain("does not prove non-delivery");
     expect(process.exitCode).toBe(1);
   });
 
@@ -721,7 +724,7 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     const h = mockClient(() => ({ status: 200, data: { results: [], sent: 0, total: 0, failed: 0 } }));
     const cmd = broadcastCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "msg"], { from: "user" });
-    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
+    expect(h.calls[0]!.options?.timeoutMs).toBe(60_000);
   });
 
   it("the text positional is NEVER sugar-parsed: a message containing a@b@vps-b broadcasts locally intact when no host is set", async () => {
