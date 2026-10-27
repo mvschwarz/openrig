@@ -27,7 +27,7 @@ describe("served seat attention across the rig, CLI and TUI", () => {
     { name: "failed startup survives observed clear", signal: false, hook: "idle", cause: "failed", expected: true },
     { name: "held seat survives observed clear", signal: false, hook: "idle", cause: "held", expected: true },
     { name: "recorded error survives observed clear", signal: false, hook: "idle", cause: "error", expected: true },
-    // A Codex seat at an approval prompt that no hook reports: only the cached pane reading sees it (ring 2, a test VPS).
+    // A Codex seat at an approval prompt that no hook reports: only the cached pane reading sees it (ring 2, ovh07).
     { name: "a prompt only the pane reading sees", signal: null, hook: null, cause: "none", pane: true, expected: true },
     { name: "the pane reading after a stale hook", signal: null, hook: "unknown", cause: "none", pane: true, expected: true },
     { name: "after a daemon restart, with no arbitrated state yet", signal: null, hook: null, cause: "none", pane: true, restart: true, expected: true },

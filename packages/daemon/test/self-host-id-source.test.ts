@@ -10,8 +10,8 @@ import { deriveSelfHostIdSource } from "../src/domain/seat-identity-reconciler.j
 
 describe("deriveSelfHostIdSource", () => {
   it("reports named when the configured host.name IS the live id", () => {
-    expect(deriveSelfHostIdSource("self-vm", "self-vm")).toBe("named");
-    expect(deriveSelfHostIdSource("self-vm", "  self-vm  ")).toBe("named");
+    expect(deriveSelfHostIdSource("mm2-openrig1", "mm2-openrig1")).toBe("named");
+    expect(deriveSelfHostIdSource("mm2-openrig1", "  mm2-openrig1  ")).toBe("named");
   });
 
   it("reports generated when nobody named the host and the id carries the fallback shape", () => {
@@ -23,7 +23,7 @@ describe("deriveSelfHostIdSource", () => {
   // afterwards (a durable identity is never silently re-keyed) and warns. From then on the name and
   // the id disagree — that machine WAS named, so `generated` would be a false claim about it.
   it("reports indeterminate when a configured name disagrees with the live id", () => {
-    expect(deriveSelfHostIdSource("host-84c37990", "self-vm")).toBe("indeterminate");
+    expect(deriveSelfHostIdSource("host-84c37990", "mm2-openrig1")).toBe("indeterminate");
   });
 
   // THE REAL PATH, and the case the first cut got wrong. SettingsStore DEFAULTS host.name to
@@ -49,8 +49,8 @@ describe("deriveSelfHostIdSource", () => {
   });
 
   it("reports nothing at all when there is no id yet (pre-boot-reconcile)", () => {
-    expect(deriveSelfHostIdSource(null, "self-vm")).toBeNull();
-    expect(deriveSelfHostIdSource("", "self-vm")).toBeNull();
+    expect(deriveSelfHostIdSource(null, "mm2-openrig1")).toBeNull();
+    expect(deriveSelfHostIdSource("", "mm2-openrig1")).toBeNull();
     expect(deriveSelfHostIdSource(undefined, undefined)).toBeNull();
   });
 });

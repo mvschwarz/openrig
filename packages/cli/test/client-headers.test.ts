@@ -114,7 +114,7 @@ describe("DaemonClient sender-identity header (P18)", () => {
   it("carries an authenticated caller's seat instead of the process env when the client is built for that caller", () => {
     process.env.OPENRIG_SESSION_NAME = "env-seat@rig";
     expect(senderIdentityHeaders(undefined, "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team" });
-    expect(senderIdentityHeaders("self-vm", "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team@self-vm" });
+    expect(senderIdentityHeaders("mm2-openrig1", "alice@team")).toEqual({ [SENDER_IDENTITY_HEADER]: "alice@team@mm2-openrig1" });
   });
 
   it("emits NO header when the seat env is absent (the daemon refuses; the CLI never fabricates)", () => {
@@ -180,7 +180,7 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
 
   it("2-part session + originSelfHostId ⇒ composes the ORIGIN triple member@rig@selfHostId", () => {
     process.env.OPENRIG_SESSION_NAME = "dev50@v-rig";
-    expect(senderIdentityHeaders("self-vm")).toEqual({ [SENDER_IDENTITY_HEADER]: "dev50@v-rig@self-vm" });
+    expect(senderIdentityHeaders("mm2-openrig1")).toEqual({ [SENDER_IDENTITY_HEADER]: "dev50@v-rig@mm2-openrig1" });
   });
 
   it("pin 6 — an already-3-part origin is preserved VERBATIM, never re-stamped with this host", () => {
@@ -201,7 +201,7 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
   it("no session ⇒ NO header regardless of originSelfHostId (the daemon refuses; CLI never fabricates)", () => {
     delete process.env.OPENRIG_SESSION_NAME;
     delete process.env.RIGGED_SESSION_NAME;
-    expect(senderIdentityHeaders("self-vm")).toEqual({});
+    expect(senderIdentityHeaders("mm2-openrig1")).toEqual({});
   });
 
   it("pin 5 (fail-open, whole resolution) — resolveOriginSelfHostId SWALLOWS a throwing local probe ⇒ undefined; a remote op NEVER depends on local daemon health", async () => {
@@ -227,10 +227,10 @@ describe("A4 — origin-triple carry (senderIdentityHeaders + remoteDaemonClient
         return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
       }) as unknown as typeof fetch,
     });
-    const client = remoteDaemonClient(factory, "http://vps-b:7433", "self-vm");
-    expect(client.originSelfHostId).toBe("self-vm");
+    const client = remoteDaemonClient(factory, "http://vps-b:7433", "mm2-openrig1");
+    expect(client.originSelfHostId).toBe("mm2-openrig1");
     await client.post("/api/transport/broadcast", { text: "hi" });
-    expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig@self-vm"); // ORIGIN triple on the wire
+    expect(box.headers[SENDER_IDENTITY_HEADER]).toBe("dev50@v-rig@mm2-openrig1"); // ORIGIN triple on the wire
   });
 
   it("a LOCAL client (not built via remoteDaemonClient) stamps 2-part on the wire — the scope stays narrow", async () => {

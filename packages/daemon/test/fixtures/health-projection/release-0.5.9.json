@@ -113,7 +113,7 @@
     },
     "signedQuiescence": {
       "origin": "release-0.5.9-recorded-counterexample",
-      "scope": { "type": "instance", "instanceId": "instance-a" },
+      "scope": { "type": "instance", "instanceId": "openrig-build-vm" },
       "window": { "startedAt": "2026-09-04T05:10:58Z", "endedAt": null },
       "authority": {
         "receiptId": "r059-s05-f82397698-signed-quiescence",

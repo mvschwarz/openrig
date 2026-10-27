@@ -17,9 +17,9 @@ describe("wrapSendBody — bare-as-received sender", () => {
   });
 
   it("a boundary-constructed ORIGIN triple renders verbatim", () => {
-    const out = wrapSendBody(`${SENDER}@self-vm`, "guard@my-rig", "hi");
-    expect(out).toContain(`From: ${SENDER}@self-vm`);
-    expect(out).toContain(`\u21a9 Reply: rig send ${SENDER}@self-vm "..."`);
+    const out = wrapSendBody(`${SENDER}@mm2-openrig1`, "guard@my-rig", "hi");
+    expect(out).toContain(`From: ${SENDER}@mm2-openrig1`);
+    expect(out).toContain(`\u21a9 Reply: rig send ${SENDER}@mm2-openrig1 "..."`);
   });
 
   it("the unknown-sender fallback is never suffixed", () => {

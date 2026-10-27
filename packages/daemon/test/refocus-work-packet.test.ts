@@ -168,7 +168,7 @@ describe("currentParkContinuation — the held row's recorded plan, bounded", ()
   }
 
   it("reads the park's continuation past the daemon's later blocked-state transitions", () => {
-    // The shape observed on a real row: the park, then the daemon's own episode note.
+    // The shape observed on a real ovh07 row: the park, then the daemon's own episode note.
     expect(log([
       ["in-progress", "claimed"],
       ["blocked", "continuation: resume the build"],

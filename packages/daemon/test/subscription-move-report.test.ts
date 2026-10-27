@@ -78,7 +78,7 @@ describe("subscription move report", () => {
   it("doesn't treat labels, home paths or account names as credentials", () => {
     for (const value of [
       "/home/ubuntu/codexhomes/primaryaccountsharedbybuildmachines/sessions",
-      "/Users/you/.openrig-second/codex-home",
+      "/Users/person/.openrig-build-vm-2d5beac5/codex-home",
       "two@example.com",
       "codex-1",
       "Account: Plus (two@example.com)",

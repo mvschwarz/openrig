@@ -27,7 +27,7 @@ function multiRigSnapshot(): FleetSnapshot {
   return {
     hosts: [{
       id: "local",
-      name: "self-vm",
+      name: "mm2-openrig1",
       reachable: true,
       rigs: [
         {
@@ -91,7 +91,7 @@ function multiRigSnapshot(): FleetSnapshot {
 
 function openInstance(snap: FleetSnapshot) {
   const view = createViewState({ instanceId: "tui-process-7", getSnapshot: () => snap });
-  const root = computeExplorerRows(view.get(), snap).find((row) => row.key === "host:self-vm");
+  const root = computeExplorerRows(view.get(), snap).find((row) => row.key === "host:mm2-openrig1");
   expect(root).toBeDefined();
   view.dispatch(root!.action);
   return view;
@@ -132,7 +132,7 @@ describe("S12 instance mission control", () => {
       view.dispatch({ type: "content-scroll", delta: 1 });
     }
     const whole = renderScreen(view.get(), snap, { cols, rows: 120, nowMs: 0, colorMode: "none" }).lines.join("\n");
-    expect(whole).toContain("self-vm");
+    expect(whole).toContain("mm2-openrig1");
     expect(whole).toMatch(/RIG\s+POD\s+SEAT/);
     expect(whole).not.toMatch(/── RIG (?:build|docs|empty)/);
     expect(whole).toMatch(/build\s+dev\s+/);
@@ -173,8 +173,8 @@ describe("S12 instance mission control", () => {
   it("uses the same actions for root, tabs, rig rows, seats, and transition targets", () => {
     const snap = multiRigSnapshot();
     const byCommand = createViewState({ instanceId: "cmd", getSnapshot: () => snap });
-    byCommand.dispatch(parseCommand("host self-vm"));
-    expect(byCommand.get().drill).toEqual([{ kind: "host", name: "self-vm" }]);
+    byCommand.dispatch(parseCommand("host mm2-openrig1"));
+    expect(byCommand.get().drill).toEqual([{ kind: "host", name: "mm2-openrig1" }]);
 
     const bySurface = openInstance(snap);
     let screen = renderScreen(bySurface.get(), snap, { cols: 160, rows: 90 });
@@ -264,7 +264,7 @@ describe("S12 view-aware hydration", () => {
       const route = String(url).replace("http://x", "");
       seen.push(route);
       const responses: Record<string, unknown> = {
-        "/healthz": { selfHostId: "self-vm" },
+        "/healthz": { selfHostId: "mm2-openrig1" },
         "/api/queue/attention-aggregate": { hosts: [{ hostId: "local", status: "ok" }] },
         "/api/rigs/summary": [
           { id: "r-a", name: "build", lifecycleState: "running" },
@@ -292,9 +292,9 @@ describe("S12 view-aware hydration", () => {
     const snap = await hydrateSnapshot(client, new Map(), null, null, null, {
       section: "topology",
       viewTab: "table",
-      drill: [{ kind: "host", name: "self-vm" }],
+      drill: [{ kind: "host", name: "mm2-openrig1" }],
     });
-    expect(snap.hosts[0]).toMatchObject({ id: "local", name: "self-vm" });
+    expect(snap.hosts[0]).toMatchObject({ id: "local", name: "mm2-openrig1" });
     expect(seen.filter((route) => route.includes("recent-transitions"))).toEqual([
       "/api/queue/recent-transitions?scope=instance&limit=20",
     ]);

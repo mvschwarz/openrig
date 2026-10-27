@@ -21,7 +21,7 @@ function boundRegistry(): { ok: true; registry: HostRegistry } {
     ok: true,
     registry: {
       hosts: [{
-        id: "remote-host",
+        id: "mm2-host",
         transport: "http",
         url: "http://x:7433",
         hostId: "host-84c37990",
@@ -34,7 +34,7 @@ function boundRegistry(): { ok: true; registry: HostRegistry } {
 function unboundRegistry(): { ok: true; registry: HostRegistry } {
   return {
     ok: true,
-    registry: { hosts: [{ id: "remote-host", transport: "http", url: "http://x:7433" }] },
+    registry: { hosts: [{ id: "mm2-host", transport: "http", url: "http://x:7433" }] },
   };
 }
 
@@ -46,16 +46,16 @@ describe("cross-host target resolution — alias -> id -> transport", () => {
     expect(r.target).toBe("pm@some-rig");
     // Normalized to the ALIAS: the human handle is the canonical registry key, and everything
     // downstream that compares against `h.id` keeps working unchanged.
-    expect(r.sugarHost).toBe("remote-host");
+    expect(r.sugarHost).toBe("mm2-host");
     expect(r.hint).toBeUndefined();
   });
 
   it("still resolves when the operator types the human alias", () => {
-    const r = resolveCrossHostTarget("pm@some-rig@remote-host", undefined, boundRegistry, undefined);
+    const r = resolveCrossHostTarget("pm@some-rig@mm2-host", undefined, boundRegistry, undefined);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.target).toBe("pm@some-rig");
-    expect(r.sugarHost).toBe("remote-host");
+    expect(r.sugarHost).toBe("mm2-host");
   });
 
   // The unbound entry is every entry that exists today. Migration is lazy and non-destructive, so
@@ -72,11 +72,11 @@ describe("cross-host target resolution — alias -> id -> transport", () => {
   // Two spellings of ONE host. An operator who pastes back the reply hint we printed them AND
   // passes --host with the human alias is naming the same machine twice, not two machines.
   it("accepts --host alias beside a target suffix that is the same entry's join key", () => {
-    const r = resolveCrossHostTarget("pm@some-rig@host-84c37990", "remote-host", boundRegistry, undefined);
+    const r = resolveCrossHostTarget("pm@some-rig@host-84c37990", "mm2-host", boundRegistry, undefined);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.target).toBe("pm@some-rig");
-    expect(r.sugarHost).toBe("remote-host");
+    expect(r.sugarHost).toBe("mm2-host");
   });
 
   it("still rejects --host naming a genuinely DIFFERENT registered host", () => {
@@ -84,7 +84,7 @@ describe("cross-host target resolution — alias -> id -> transport", () => {
       ok: true as const,
       registry: {
         hosts: [
-          { id: "remote-host", transport: "http" as const, url: "http://x:7433", hostId: "host-84c37990" },
+          { id: "mm2-host", transport: "http" as const, url: "http://x:7433", hostId: "host-84c37990" },
           { id: "other-host", transport: "http" as const, url: "http://y:7433", hostId: "host-deadbeef" },
         ],
       },

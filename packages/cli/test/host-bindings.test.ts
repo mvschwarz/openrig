@@ -26,10 +26,10 @@ const fixedNow = () => new Date("2026-08-21T02:00:00.000Z");
 describe("recordHostObservation — TOFU + loud-conflict", () => {
   it("first contact binds silently and persists (TOFU)", () => {
     const path = tmpPath();
-    const out = recordHostObservation({ alias: "remote-host", observedHostId: "host-84c37990", now: fixedNow, path });
+    const out = recordHostObservation({ alias: "mm2-host", observedHostId: "host-84c37990", now: fixedNow, path });
     expect(out.outcome).toBe("bound");
     const loaded = loadHostBindings(path);
-    expect(loaded.bindings["remote-host"]).toEqual({
+    expect(loaded.bindings["mm2-host"]).toEqual({
       hostId: "host-84c37990",
       firstObservedAt: "2026-08-21T02:00:00.000Z",
       lastObservedAt: "2026-08-21T02:00:00.000Z",
@@ -38,25 +38,25 @@ describe("recordHostObservation — TOFU + loud-conflict", () => {
 
   it("re-observing the same id confirms and refreshes lastObservedAt only", () => {
     const path = tmpPath();
-    recordHostObservation({ alias: "remote-host", observedHostId: "host-84c37990", now: fixedNow, path });
+    recordHostObservation({ alias: "mm2-host", observedHostId: "host-84c37990", now: fixedNow, path });
     const later = () => new Date("2026-08-22T03:00:00.000Z");
-    const out = recordHostObservation({ alias: "remote-host", observedHostId: "host-84c37990", now: later, path });
+    const out = recordHostObservation({ alias: "mm2-host", observedHostId: "host-84c37990", now: later, path });
     expect(out.outcome).toBe("confirmed");
-    const b = loadHostBindings(path).bindings["remote-host"]!;
+    const b = loadHostBindings(path).bindings["mm2-host"]!;
     expect(b.firstObservedAt).toBe("2026-08-21T02:00:00.000Z");
     expect(b.lastObservedAt).toBe("2026-08-22T03:00:00.000Z");
   });
 
   it("a CONTRADICTING observation is recorded and the stored binding is NEVER overwritten", () => {
     const path = tmpPath();
-    recordHostObservation({ alias: "remote-host", observedHostId: "host-84c37990", now: fixedNow, path });
-    const out = recordHostObservation({ alias: "remote-host", observedHostId: "host-deadbeef", now: fixedNow, path });
+    recordHostObservation({ alias: "mm2-host", observedHostId: "host-84c37990", now: fixedNow, path });
+    const out = recordHostObservation({ alias: "mm2-host", observedHostId: "host-deadbeef", now: fixedNow, path });
     expect(out.outcome).toBe("conflict");
-    const b = loadHostBindings(path).bindings["remote-host"]!;
+    const b = loadHostBindings(path).bindings["mm2-host"]!;
     expect(b.hostId).toBe("host-84c37990"); // the silent flip is the one forbidden move
     expect(b.conflict).toEqual({ hostId: "host-deadbeef", observedAt: "2026-08-21T02:00:00.000Z" });
-    expect(describeBindingConflict("remote-host", b)).toContain("host-84c37990");
-    expect(describeBindingConflict("remote-host", b)).toContain("host-deadbeef");
+    expect(describeBindingConflict("mm2-host", b)).toContain("host-84c37990");
+    expect(describeBindingConflict("mm2-host", b)).toContain("host-deadbeef");
   });
 
   it("re-observing the ORIGINAL id after a conflict keeps the conflict visible (flapping is worse)", () => {
@@ -98,20 +98,20 @@ describe("loadHostBindings — fail-open by contract", () => {
 describe("resolveHost — learned bindings join the match set", () => {
   const registry: HostRegistry = {
     hosts: [
-      { id: "remote-host", transport: "http", url: "http://x:7433" },
+      { id: "mm2-host", transport: "http", url: "http://x:7433" },
       { id: "declared", transport: "http", url: "http://y:7433", hostId: "host-declared" },
     ],
   };
 
   it("a suffix equal to a LEARNED self-id resolves the alias it was learned for", () => {
-    const res = resolveHost(registry, "host-84c37990", { "remote-host": { hostId: "host-84c37990" } });
+    const res = resolveHost(registry, "host-84c37990", { "mm2-host": { hostId: "host-84c37990" } });
     expect(res.ok).toBe(true);
-    if (res.ok) expect(res.host.id).toBe("remote-host");
+    if (res.ok) expect(res.host.id).toBe("mm2-host");
   });
 
   it("registry id and declared hostId outrank a learned binding", () => {
     // a learned binding claiming the DECLARED id for another alias must not shadow the declaration
-    const res = resolveHost(registry, "host-declared", { "remote-host": { hostId: "host-declared" } });
+    const res = resolveHost(registry, "host-declared", { "mm2-host": { hostId: "host-declared" } });
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.host.id).toBe("declared");
   });
@@ -124,22 +124,22 @@ describe("resolveHost — learned bindings join the match set", () => {
 describe("resolveCrossHostTarget — the lived reply-hint scenario via the sidecar", () => {
   const registryLoader = () => ({
     ok: true as const,
-    registry: { hosts: [{ id: "remote-host", transport: "http" as const, url: "http://x:7433" }] },
+    registry: { hosts: [{ id: "mm2-host", transport: "http" as const, url: "http://x:7433" }] },
   });
 
   it("a pasted reply hint resolves through the LEARNED binding and normalizes to the alias", () => {
     const out = resolveCrossHostTarget("pm@some-rig@host-84c37990", undefined, registryLoader, undefined, () => ({
       version: 1,
-      bindings: { "remote-host": { hostId: "host-84c37990", firstObservedAt: "x", lastObservedAt: "x" } },
+      bindings: { "mm2-host": { hostId: "host-84c37990", firstObservedAt: "x", lastObservedAt: "x" } },
     }));
-    expect(out).toEqual({ ok: true, target: "pm@some-rig", sugarHost: "remote-host", hint: undefined });
+    expect(out).toEqual({ ok: true, target: "pm@some-rig", sugarHost: "mm2-host", hint: undefined });
   });
 
   it("resolution through an entry with a recorded contradiction carries a loud warning naming both ids", () => {
     const out = resolveCrossHostTarget("pm@some-rig@host-84c37990", undefined, registryLoader, undefined, () => ({
       version: 1,
       bindings: {
-        "remote-host": {
+        "mm2-host": {
           hostId: "host-84c37990",
           firstObservedAt: "x",
           lastObservedAt: "x",
@@ -168,7 +168,7 @@ describe("resolveCrossHostTarget — the lived reply-hint scenario via the sidec
 });
 
 describe("doctorLegs — Source-1 learning from the healthz body already in hand", () => {
-  const anonHost = { id: "remote-host", transport: "http", url: "http://x:7433" } as const;
+  const anonHost = { id: "mm2-host", transport: "http", url: "http://x:7433" } as const;
   const baseDeps = {
     run: async () => ({ ok: true as const, stdout: "", sshStderr: "", failedStep: null }),
     tcpProbe: async () => "open" as const,
@@ -185,7 +185,7 @@ describe("doctorLegs — Source-1 learning from the healthz body already in hand
         return { outcome: "bound", binding: { hostId: id, firstObservedAt: "x", lastObservedAt: "x" } };
       },
     } as never);
-    expect(calls).toEqual([["remote-host", "host-84c37990"]]);
+    expect(calls).toEqual([["mm2-host", "host-84c37990"]]);
     const row = rows.find((r) => r.step === "host-identity-binding");
     expect(row).toMatchObject({ status: "pass" });
     expect(row!.detail).toContain("first contact");
@@ -316,7 +316,7 @@ describe("F2 — concurrency guard: conflict records survive concurrent writers"
 describe("sidecar file hygiene", () => {
   it("the write is whole-file JSON a human can read and delete (the disposable contract)", () => {
     const path = tmpPath();
-    recordHostObservation({ alias: "remote-host", observedHostId: "host-84c37990", now: fixedNow, path });
+    recordHostObservation({ alias: "mm2-host", observedHostId: "host-84c37990", now: fixedNow, path });
     const raw = readFileSync(path, "utf-8");
     expect(raw.endsWith("\n")).toBe(true);
     expect(JSON.parse(raw).version).toBe(1);

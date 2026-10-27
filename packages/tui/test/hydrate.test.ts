@@ -12,7 +12,7 @@ import { rowStatusGlyph, statusGlyph } from "../src/topology/glyphs.js";
 // strings — fixture realism is the point (a text-only stub would false-green).
 
 const FIXTURES: Record<string, unknown> = {
-  "/healthz": { ok: true, selfHostId: "self-vm" },
+  "/healthz": { ok: true, selfHostId: "mm2-openrig1" },
   "/api/hosts": { ownName: "localhost", selected: "local", hosts: [] },
   "/api/health?limit=200": {
     schema: "openrig.health-list/v0alpha1",
@@ -130,7 +130,7 @@ const FIXTURES: Record<string, unknown> = {
     needsYou: {
       items: [
         { source: "agent", identity: "qitem-2026080201", summary: "approve slice 11 proof", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:40:00.000Z", priority: "high", tier: "human-gate", evidenceRef: "proof/qa.md", unblocks: null, qitemId: "qitem-2026080201", destinationSession: "human@kernel", derived: null, hostId: "local" },
-        { source: "agent", identity: "qitem-remote", summary: "remote founder gate", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:41:00.000Z", priority: "high", tier: "human-gate", evidenceRef: null, unblocks: null, qitemId: "qitem-remote", destinationSession: "human@kernel", derived: null, hostId: "remote-host" },
+        { source: "agent", identity: "qitem-remote", summary: "remote founder gate", leg: "human-routed", where: "human@kernel", ageIso: "2026-08-02T08:41:00.000Z", priority: "high", tier: "human-gate", evidenceRef: null, unblocks: null, qitemId: "qitem-remote", destinationSession: "human@kernel", derived: null, hostId: "mm2-host" },
         { source: "derived", identity: "dev-impl@myrig|stuck|2026-08-02T08:43:00.000Z", summary: "impl looks stuck", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "idle 47m >= 30m default · holds 2", threshold: "idle-with-work >= 30m" }, hostId: "local" },
         { source: "derived", identity: "dev-qa@myrig|too-long-in-state|2026-08-02T05:00:00.000Z", summary: "qa has not transitioned in 180m", leg: "stuck", where: "rig", ageIso: null, priority: null, tier: null, evidenceRef: null, unblocks: null, qitemId: null, destinationSession: null, derived: { kind: "stuck", evidence: "no transition for 180m >= 120m default · holds 2", threshold: "too-long-in-state >= 120m" }, hostId: "local" },
       ],
@@ -138,7 +138,7 @@ const FIXTURES: Record<string, unknown> = {
     },
     agents: { scope: "rig", rows: [], provenance: "computed", coordinationHealth: null },
     settled: [], settledProvenance: "computed", composedAt: "2026-08-02T09:30:00.000Z",
-    hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }, { hostId: "remote-host", status: { hostId: "remote-host", status: "ok" } }],
+    hosts: [{ hostId: "local", status: { hostId: "local", status: "ok" } }, { hostId: "mm2-host", status: { hostId: "mm2-host", status: "ok" } }],
   },
   "/api/stream/list?limit=5&direction=latest": [
     { streamItemId: "si-1", tsEmitted: "2026-08-02T10:00:00.000Z", streamSortKey: "k1", sourceSession: "dev-guard@myrig", body: "gate cleared: slice-11", format: "text", hintType: null, hintUrgency: null, hintDestination: null, hintTags: null, interrupt: false, archivedAt: null },
@@ -147,7 +147,7 @@ const FIXTURES: Record<string, unknown> = {
     items: [],
     hosts: [
       { hostId: "local", status: "ok" },
-      { hostId: "remote-host", status: "unreachable", error: "read timed out after 5000ms", failedStep: "remote-daemon-unreachable" },
+      { hostId: "mm2-host", status: "unreachable", error: "read timed out after 5000ms", failedStep: "remote-daemon-unreachable" },
     ],
   },
   // PULSE exception joins (increment 2) — default empty; per-test responses override
@@ -244,7 +244,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const agent = myrig(snap).pods[0]!.agents[0]!;
     expect(agent.status).toBe("needs_input");
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
-    view.dispatch({ type: "drill", resource: "agent", name: agent.name, target: { host: "self-vm", rig: "myrig" } });
+    view.dispatch({ type: "drill", resource: "agent", name: agent.name, target: { host: "mm2-openrig1", rig: "myrig" } });
     expect(renderScreen(view.get(), snap, { cols: 180, rows: 60 }).lines.join("\n")).toContain(`needs-input evidence ${label}`);
   });
   it("leaves health unassessed when a focused view skips the projection read", async () => {
@@ -264,11 +264,11 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
   // The focused views that render the HEALTH summary line must hydrate the projection they read.
   const focusedHealthViews = [
-    ["instance Table", { resource: "host", name: "self-vm" }, "table"],
-    ["rig Table", { resource: "rig", name: "myrig", target: { host: "self-vm" } }, "table"],
-    ["rig Overview", { resource: "rig", name: "myrig", target: { host: "self-vm" } }, "overview"],
-    ["pod Table", { resource: "pod", name: "dev", target: { host: "self-vm", rig: "myrig" } }, "table"],
-    ["pod Overview", { resource: "pod", name: "dev", target: { host: "self-vm", rig: "myrig" } }, "overview"],
+    ["instance Table", { resource: "host", name: "mm2-openrig1" }, "table"],
+    ["rig Table", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "table"],
+    ["rig Overview", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "overview"],
+    ["pod Table", { resource: "pod", name: "dev", target: { host: "mm2-openrig1", rig: "myrig" } }, "table"],
+    ["pod Overview", { resource: "pod", name: "dev", target: { host: "mm2-openrig1", rig: "myrig" } }, "overview"],
   ] as const;
   it.each(focusedHealthViews)("loads health for the focused %s so its summary reports the served findings", async (_label, drill, tab) => {
     const calls: string[] = [];
@@ -299,7 +299,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const { section, viewTab, drill: segments } = view.get();
     const snap = await hydrateSnapshot(fixtureClient({ "/api/health?limit=200": { status: 503 } }, {}, calls), undefined, undefined, undefined, segments.find((part) => part.kind === "rig")?.name, { section, viewTab, drill: segments });
     expect(calls.filter(route => route === "/api/health?limit=200")).toEqual(["/api/health?limit=200"]);
-    expect(snap.controlPlane).toMatchObject({ ok: true, selfHostId: "self-vm" });
+    expect(snap.controlPlane).toMatchObject({ ok: true, selfHostId: "mm2-openrig1" });
     expect(snap.health).toMatchObject({ availability: "unavailable", records: [] });
     expect(snap.readErrors.join("\n")).toMatch(/health-findings:.*503/);
     const text = renderScreen(view.get(), snap, { cols: 220, rows: 60 }).lines.join("\n");
@@ -309,10 +309,10 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
   // Views that do not render the summary stay lazy: no health request, nothing to assess.
   it.each([
-    ["instance Overview", { resource: "host", name: "self-vm" }, "overview"],
-    ["instance Graph", { resource: "host", name: "self-vm" }, "graph"],
-    ["rig Graph", { resource: "rig", name: "myrig", target: { host: "self-vm" } }, "graph"],
-    ["rig Recent", { resource: "rig", name: "myrig", target: { host: "self-vm" } }, "recent"],
+    ["instance Overview", { resource: "host", name: "mm2-openrig1" }, "overview"],
+    ["instance Graph", { resource: "host", name: "mm2-openrig1" }, "graph"],
+    ["rig Graph", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "graph"],
+    ["rig Recent", { resource: "rig", name: "myrig", target: { host: "mm2-openrig1" } }, "recent"],
   ] as const)("does not read health for the focused %s", async (_label, drill, tab) => {
     const calls: string[] = [];
     const full = await hydrateSnapshot(fixtureClient());
@@ -399,12 +399,12 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   it("composes host-down AND rig-down BESIDE the items, never into the item shape (PIN 3)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.hostsDown).toEqual([
-      { hostId: "remote-host", status: "unreachable", error: "read timed out after 5000ms" },
+      { hostId: "mm2-host", status: "unreachable", error: "read timed out after 5000ms" },
       { hostId: "rig:downrig", status: "recoverable (down)", error: "0/2 seats running" },
     ]);
-    expect(snap.needs.some((n) => n.target === "remote-host" || n.target.includes("downrig"))).toBe(false);
+    expect(snap.needs.some((n) => n.target === "mm2-host" || n.target.includes("downrig"))).toBe(false);
     // and the unreachable host appears in topology with honest reachability
-    expect(snap.hosts.find((h) => h.name === "remote-host")?.reachable).toBe(false);
+    expect(snap.hosts.find((h) => h.name === "mm2-host")?.reachable).toBe(false);
     // the non-running rig carries its served lifecycleState verbatim (QA blocker 3)
     expect(snap.hosts.find((h) => h.id === "local")?.rigs.find((r) => r.name === "downrig")?.lifecycleState).toBe("recoverable");
   });
@@ -458,7 +458,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.humanQueueProbed).toBe(true);
     expect(snap.needs.filter((item) => item.source === "agent")).toEqual([
       { source: "agent", kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local", qitemId: "qitem-2026080201", evidenceRef: "proof/qa.md", unblocks: null },
-      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "remote-host", qitemId: "qitem-remote", evidenceRef: null, unblocks: null },
+      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host", qitemId: "qitem-remote", evidenceRef: null, unblocks: null },
     ]);
   });
 
@@ -515,7 +515,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
         needsYou: { items: [] },
         hosts: [
           { hostId: "local", status: { hostId: "local", status: "ok" } },
-          { hostId: "remote-host", status: { hostId: "remote-host", status: "unreachable" } },
+          { hostId: "mm2-host", status: { hostId: "mm2-host", status: "unreachable" } },
         ],
       },
     }));
@@ -885,7 +885,7 @@ describe("S05 authored source and observed consumers", () => {
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/specs/library/a1/review": { ...(FIXTURES["/api/specs/library/a1/review"] as object), raw: "name: myrig\ndescription: Build and review software" } }));
     const rig = snap.specs.find((s) => s.name === "myrig")!;
     expect(rig.description).toBe("Build and review software");
-    expect(rig.consumers).toContainEqual(expect.objectContaining({ rig: "myrig", host: "self-vm" }));
+    expect(rig.consumers).toContainEqual(expect.objectContaining({ rig: "myrig", host: "mm2-openrig1" }));
     const agent = snap.specs.find((s) => s.name === "implementer")!;
     expect(agent.consumers).toEqual([expect.objectContaining({ agent: "dev.impl", rig: "myrig", runtime: "claude-code" })]);
     const view = createViewState({ instanceId: "proof", getSnapshot: () => snap });
@@ -895,7 +895,7 @@ describe("S05 authored source and observed consumers", () => {
     view.dispatch({ type: "layout", contentMaxOffset: 60, contentTargetCount: 2 });
     view.dispatch({ type: "content-scroll", delta: 6 });
     const origin = view.get();
-    view.dispatch({ type: "drill", resource: "agent", name: "dev.impl", target: { host: "self-vm", rig: "myrig" } });
+    view.dispatch({ type: "drill", resource: "agent", name: "dev.impl", target: { host: "mm2-openrig1", rig: "myrig" } });
     expect(view.get().lastError).toBeNull();
     expect(view.get().filter).toBe("");
     view.dispatch({ type: "back" });
