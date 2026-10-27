@@ -1,6 +1,7 @@
-// A Cloud caller seat created the way an operator creates one without a launch (`rig import --materialize-only`), served by
-// the built `rig mcp serve --http --cloud-grants` on a real private daemon: initialize, tools/list and a create/show round
-// trip as that seat, recorded with the grant's principal. The seat check only reads: no session, no occupant.
+// An external caller's seat created the way an operator creates one without a launch (`rig import --materialize-only`),
+// served by the built `rig mcp serve --http --grant-service` on a real private daemon: initialize, tools/list and a
+// create/show round trip as that seat, recorded with the grant's principal. The seat check only reads: no session, no
+// occupant.
 import { afterEach, expect, it } from "vitest";
 import fs from "node:fs";
 import http from "node:http";
@@ -26,7 +27,7 @@ afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close().catch(() => {});
 });
 
-it("serves a materialized, never-launched caller seat over Cloud grants on a real daemon, and the check starts nothing", async () => {
+it("serves a materialized, never-launched caller seat over a grant service on a real daemon, and the check starts nothing", async () => {
   const scaffold = prepareHermeticEnv({ baseEnv: { PATH: process.env.PATH, TERM: "xterm-256color" } });
   const daemon = await spawnScenarioDaemon(scaffold, { rigBin });
   closers.push(() => daemon.stop());
@@ -35,7 +36,7 @@ it("serves a materialized, never-launched caller seat over Cloud grants on a rea
   const spec = path.join(scaffold.root, `${RIG}.yaml`);
   const member = (id: string) => [`      - id: ${id}`, '        agent_ref: "builtin:terminal"', "        profile: none", "        runtime: terminal", `        cwd: ${scaffold.root}`];
   fs.writeFileSync(spec, [`version: "0.2"`, `name: ${RIG}`, "pods:",
-    "  - id: cus-vvmaexample01", "    label: Customer", "    members:", ...member("caller"), "    edges: []",
+    "  - id: cus-vvmaexample01", "    label: Caller", "    members:", ...member("caller"), "    edges: []",
     "  - id: workshop", "    label: Workshop", "    members:", ...member("lead"), "    edges: []", "edges: []", ""].join("\n"));
   const imported = await runRig(["import", spec, "--materialize-only"], daemon.readEnv, rigBin);
   expect(imported.code, imported.stdout + imported.stderr).toBe(0);
@@ -54,17 +55,17 @@ it("serves a materialized, never-launched caller seat over Cloud grants on a rea
   // A grant authority answering for this daemon's own instance id.
   const instance = ((await (await fetch(`${daemon.baseUrl}/healthz`)).json()) as { selfHostId: string }).selfHostId;
   let seat = CALLER;
-  const cloud = http.createServer((req, res) => {
+  const service = http.createServer((req, res) => {
     req.resume().on("end", () => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({
-      schema: "openrig.cloud.grant/v1", status: "active",
-      principal: { id: "cus_VVMAexample01", kind: "cloud_customer" },
+      schema: "openrig.grant/v1", status: "active",
+      principal: { id: "cus_VVMAexample01", kind: "external_caller" },
       grant: { id: "8977f2dc0000aaaa1111bbbb", version: 6, expires_at: null, revocation: "per_request" },
       environment: { id: RIG, core_instance: instance, lead: LEAD },
       seat, rigs: [RIG], artifact_roots: [], access_class: "work", objects: { queue: ["create", "show", "list"] },
     })));
   });
-  await new Promise<void>((resolve) => cloud.listen(0, "127.0.0.1", resolve));
-  closers.push(() => new Promise<void>((resolve) => cloud.close(() => resolve())));
+  await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+  closers.push(() => new Promise<void>((resolve) => service.close(() => resolve())));
 
   // The built server, as an operator starts it, beside this daemon (its database proves the daemon is this host's).
   const port = await findFreePort();
@@ -72,7 +73,7 @@ it("serves a materialized, never-launched caller seat over Cloud grants on a rea
   for (const [name, value] of Object.entries({ ...daemon.readEnv, OPENRIG_DB: dbPath })) if (value !== undefined) env[name] = value;
   let log = "";
   const server: ChildProcess = spawn(process.execPath, [rigBin, "mcp", "serve", "--http", "--bind", `127.0.0.1:${port}`,
-    "--cloud-grants", `http://127.0.0.1:${(cloud.address() as AddressInfo).port}/api/connector/v1/grant`], { env, stdio: ["ignore", "pipe", "pipe"] });
+    "--grant-service", `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`], { env, stdio: ["ignore", "pipe", "pipe"] });
   server.stdout?.on("data", (chunk) => { log += chunk; });
   server.stderr?.on("data", (chunk) => { log += chunk; });
   closers.push(async () => { server.kill("SIGTERM"); });
@@ -87,7 +88,7 @@ it("serves a materialized, never-launched caller seat over Cloud grants on a rea
   expect(first, log).toBeDefined();
   expect([first!.status, first!.status === 200 ? "served" : await first!.text()], log).toEqual([200, "served"]);
 
-  const client = new Client({ name: "cloud-customer", version: "1.0.0" });
+  const client = new Client({ name: "grant-service-caller", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${KEY}` } } }));
   closers.push(() => client.close());
   const call = async (name: string, args: Record<string, unknown>) => {
@@ -106,7 +107,7 @@ it("serves a materialized, never-launched caller seat over Cloud grants on a rea
     expect(db.prepare("SELECT source_session AS source, destination_session AS destination FROM queue_items WHERE qitem_id = ?").get(created.qitemId))
       .toEqual({ source: CALLER, destination: LEAD });
     expect(db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(created.qitemId))
-      .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "cloud", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
+      .toEqual({ p: "principal:v1", who: JSON.stringify({ source: "grant-service", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 }) });
   } finally { db.close(); }
   // Read only: still the two created nodes, and no session for either.
   expect(census()).toEqual(before);

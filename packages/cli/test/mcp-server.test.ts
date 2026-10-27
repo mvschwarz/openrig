@@ -542,18 +542,18 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  it("doesn't give a Cloud customer's connection the member workflow or its authority, only the shared lines", async () => {
+  it("doesn't give an external caller's connection the member workflow or its authority, only the shared lines", async () => {
     const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
-      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, customer: { objects: { queue: ["create", "show", "list"] } } } });
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"] } } } });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const customer = new Client({ name: "customer-client", version: "1.0.0" });
+    const external = new Client({ name: "external-client", version: "1.0.0" });
     await server.connect(serverTransport);
-    await customer.connect(clientTransport);
-    const instructions = customer.getInstructions() ?? "";
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
     expect(instructions).toContain("reserved for a person");
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
-    await customer.close();
+    await external.close();
     await server.close();
   });
 
@@ -1028,7 +1028,7 @@ describe("MCP Server", () => {
       await cleanup();
     });
 
-    it("rig_queue_create drops OpenRig's provenance tags only from a Cloud customer's create and revision; other callers' pass as sent", async () => {
+    it("rig_queue_create drops OpenRig's provenance tags only from an external caller's create and revision; other callers' pass as sent", async () => {
       const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate"];
       const tagsSent = async (access?: McpAccess, revises?: string) => {
         const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
@@ -1045,14 +1045,14 @@ describe("MCP Server", () => {
         return (postFn.mock.calls[0] as unknown as [string, Record<string, unknown>])[1].tags;
       };
       const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
-      const customer: McpAccess = { ...work, principal: "cus_A1", customer: { objects: { queue: ["create", "show", "list"] } } };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
       expect(await tagsSent()).toEqual(sent);
       expect(await tagsSent(work)).toEqual(sent);
-      expect(await tagsSent(customer)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
-      expect(await tagsSent(customer, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+      expect(await tagsSent(external)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+      expect(await tagsSent(external, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
     });
 
-    it("rig_queue_create: a Cloud customer hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {
+    it("rig_queue_create: an external caller hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {
       const created = async (access: McpAccess, destination: string, revises?: string) => {
         const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
         const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
@@ -1067,13 +1067,13 @@ describe("MCP Server", () => {
         return { posted: postFn.mock.calls.length, refused: (result.structuredContent as { code?: string } | undefined)?.code === "out_of_scope" };
       };
       const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
-      const customer: McpAccess = { ...work, principal: "cus_A1", customer: { objects: { queue: ["create", "show", "list"] } } };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
       for (const destination of ["cus-a1-caller@team", "cus-b2-caller@team"]) {
-        expect(await created(customer, destination)).toEqual({ posted: 0, refused: true });
-        expect(await created(customer, destination, "qitem-0")).toEqual({ posted: 0, refused: true });
+        expect(await created(external, destination)).toEqual({ posted: 0, refused: true });
+        expect(await created(external, destination, "qitem-0")).toEqual({ posted: 0, refused: true });
         expect(await created(work, destination)).toEqual({ posted: 1, refused: false });
       }
-      expect(await created(customer, "lead@team")).toEqual({ posted: 1, refused: false });
+      expect(await created(external, "lead@team")).toEqual({ posted: 1, refused: false });
     });
 
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {

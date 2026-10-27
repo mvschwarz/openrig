@@ -176,7 +176,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const bob = await grant("bob");
     const served = await listen();
     // A caller's own X-OpenRig-Principal goes no further than this server: the daemon hears the grant's principal.
-    const forged = { "X-OpenRig-Principal": JSON.stringify({ source: "cloud", id: "mallory", grant: "g", version: 1 }) };
+    const forged = { "X-OpenRig-Principal": JSON.stringify({ source: "grant-service", id: "mallory", grant: "g", version: 1 }) };
     const caller = async (token: string) => {
       const client = new Client({ name: "principal-test", version: "1.0.0" });
       await client.connect(new StreamableHTTPClientTransport(new URL(served.url), { requestInit: { headers: { Authorization: `Bearer ${token}`, ...forged } } }));
