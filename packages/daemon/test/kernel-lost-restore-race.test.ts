@@ -58,9 +58,9 @@ describe("real automatic kernel restore and manual-up race", () => {
       .run(node.id, "[]", "[]", "[]", "claude-code");
     if (mode !== "auto-rehydrate") snapshotCapture.captureSnapshot(rig.id, "manual");
     live.clear();
-    await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id);
+    const detachedAtStart = new Set((await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id)).detachedSessionIds);
     let automatic!: Promise<{ errors: string[] }>;
-    const boot = () => bootKernelIfNeeded({ rigRepo, sessionRegistry, eventBus, bootstrapOrchestrator: setup.bootstrapOrchestrator,
+    const boot = () => bootKernelIfNeeded({ rigRepo, sessionRegistry, eventBus, bootstrapOrchestrator: setup.bootstrapOrchestrator, detachedAtStart,
       specsDir: "/tmp", cwdOverride: "/tmp", degradedTimeoutMs: 0, probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }), log: () => {},
       restoreLostKernel: rigId => automatic = restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator,
         runtimeAdapters: { "claude-code": adapter } as never }, rigId, () => true),

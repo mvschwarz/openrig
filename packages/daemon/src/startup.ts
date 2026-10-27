@@ -789,11 +789,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   let reconcileDetached = 0;
   let reconcileUnseen = 0;
   let reconcileErrors = 0;
+  // Kernel boot restores a kernel only when this reconcile is what found it down.
+  const detachedAtStart = new Set<string>();
   for (const rig of rigs) {
     try {
       const result = await reconciler.reconcile(rig.id);
       reconcileChecked += result.checked;
       reconcileDetached += result.detached;
+      for (const id of result.detachedSessionIds) detachedAtStart.add(id);
       reconcileUnseen += result.unseen.length;
       reconcileErrors += result.errors.length;
       for (const u of result.unseen) {
@@ -1220,6 +1223,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // Synchronous, so the restore is registered before any request can ask for the same one.
       restoreLostKernel: (rigId) =>
         restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator, runtimeAdapters: runtimeAdaptersMap, tmuxAdapter }, rigId, (p) => fs.existsSync(p)),
+      detachedAtStart,
     });
     try {
       // eslint-disable-next-line no-console

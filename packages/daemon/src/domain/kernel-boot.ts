@@ -66,6 +66,9 @@ export interface KernelBootDeps {
    *  kernel a reboot or crash left down (see `classifyManagedKernel`); resolves to the errors that
    *  kept it from restoring, if any. Without it, an existing kernel is skipped as before. */
   restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>;
+  /** The sessions this start's reconcile marked detached. Only a kernel it found down is restored; one already detached
+   *  before this start stays down. */
+  detachedAtStart?: ReadonlySet<string>;
 }
 
 /** Entry point. Idempotent: safe to call on every daemon startup.
@@ -104,7 +107,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   // (e.g., from a prior boot or operator-migrated substrate kernel),
   // the builtin path stays out of the way.
   if (kernelAlreadyManaged(deps.rigRepo)) {
-    const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry);
+    const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry, deps.detachedAtStart);
     if (managed.kind === "lost" && deps.restoreLostKernel) {
       // Startup reconcile found none of its seats running and marked them detached: a reboot or
       // crash took it down, not `rig down` (which marks them exited). Bring it back as it was.
@@ -183,7 +186,8 @@ export type ManagedKernel =
  *  - stopped: some seat was stopped on purpose (`rig down kernel` or a seat stop marks it exited);
  *  - unknown: anything else, including more than one current kernel rig or a seat with no session.
  *  Only `lost` is restored, so a deliberate stop survives daemon restarts. */
-export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry): ManagedKernel {
+export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry,
+  detachedAtStart: ReadonlySet<string> = new Set()): ManagedKernel {
   try {
     const rigs = rigRepo.findUnarchivedRigsByName("kernel");
     if (rigs.length !== 1) return { kind: "unknown" };
