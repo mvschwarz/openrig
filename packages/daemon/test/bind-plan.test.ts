@@ -15,9 +15,9 @@ describe("S20 — resolveBindPlan: routing env is never bind intent", () => {
   });
 
   it("dedicated intent takes the explicit single-bind branch (the operator's channel, byte-uninjectable by managed env)", () => {
-    const plan = resolveBindPlan({ bindHostEnv: "100.95.124.51", routingHostEnv: "127.0.0.1", tailscaleIp: "100.95.124.51" });
+    const plan = resolveBindPlan({ bindHostEnv: "100.88.0.20", routingHostEnv: "127.0.0.1", tailscaleIp: "100.88.0.20" });
     expect(plan.mode).toBe("explicit");
-    expect(plan.hosts).toEqual(["100.95.124.51"]);
+    expect(plan.hosts).toEqual(["100.88.0.20"]);
     expect(plan.ignoredRoutingHost).toBeUndefined(); // intent declared — nothing ignored
   });
 

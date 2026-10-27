@@ -121,7 +121,7 @@ function refusal(t: Target): Error {
       (isDaemon ? " (the canonical OpenRig daemon port)" : nonLoopback ? " (a NON-LOOPBACK / cross-machine target)" : "") +
       " — a cli test made a REAL request to a target that is neither a loopback-ephemeral fixture nor registered. " +
       (nonLoopback
-        ? "Non-loopback is refused unconditionally (a test must not cross a machine boundary — hosts.yaml names a real remote at 100.95.124.51)."
+        ? "Non-loopback is refused unconditionally (a test must not cross a machine boundary)."
         : "Loopback on a well-known/canonical port is a request-layer leak to the daemon (a hardcoded :7433 literal, a mocked URL getter + un-mocked client, or a production default constant). Inject a mock client, use an in-process fixture (server.listen(0) → ephemeral, permitted), or register a fixed-low-port fixture with allowFetchTarget(url)."),
   );
 }

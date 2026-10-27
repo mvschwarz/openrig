@@ -89,7 +89,7 @@ describe("MissionControlNotificationDispatcher (PL-005 Phase B)", () => {
       db,
       eventBus: bus,
       adapter,
-      missionControlBaseUrl: "http://100.95.124.51:18437",
+      missionControlBaseUrl: "http://192.0.2.10:18437",
     });
     dispatcher.start();
 
@@ -104,7 +104,7 @@ describe("MissionControlNotificationDispatcher (PL-005 Phase B)", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(adapter.calls[0]!.qitemRef).toBe(
-      `http://100.95.124.51:18437/mission-control?view=human-gate&qitem=${encodeURIComponent(created.qitemId)}`,
+      `http://192.0.2.10:18437/mission-control?view=human-gate&qitem=${encodeURIComponent(created.qitemId)}`,
     );
   });
 

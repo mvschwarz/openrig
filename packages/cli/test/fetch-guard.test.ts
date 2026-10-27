@@ -41,7 +41,7 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
   });
 
   it("REFUSES a NON-LOOPBACK target (the machine-boundary arm — hosts.yaml's real remote)", async () => {
-    await expect(fetch("http://100.95.124.51:7433/api/x")).rejects.toThrow(/FETCH GUARD|non-loopback/i);
+    await expect(fetch("http://192.0.2.10:7433/api/x")).rejects.toThrow(/FETCH GUARD|non-loopback/i);
   });
 
   it("FAILS CLOSED on a loopback WELL-KNOWN/low port (< ephemeral) that is not registered", async () => {
