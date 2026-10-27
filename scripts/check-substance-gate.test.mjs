@@ -420,10 +420,9 @@ function writeGateHarness(root, source, invocationPath) {
   mkdirSync(root, { recursive: true });
   const gate = join(root, "check-substance-gate.mjs");
   writeFileSync(gate, source);
-  writeFileSync(
-    join(root, "internal-leak-scanner.mjs"),
-    readFileSync(resolve("scripts/internal-leak-scanner.mjs")),
-  );
+  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs"]) {
+    writeFileSync(join(root, module), readFileSync(resolve("scripts", module)));
+  }
   writeFileSync(join(root, "check-internal-leak-guard.mjs"), [
     "import { readFileSync, writeFileSync } from \"node:fs\";",
     `const invocationPath = ${JSON.stringify(invocationPath)};`,
