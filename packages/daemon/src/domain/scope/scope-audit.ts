@@ -422,7 +422,7 @@ export function classifyScopeItem(input: ScopeAuditInput): ScopeAuditResult {
       });
     }
 
-    // PM dogfood #1 (qitem-20260720015700-630eef64) — per-SECTION source
+    // PM dogfood #1 — per-SECTION source
     // selection, decided independently for `## Mini-requirements` and
     // `## Proof contract`: an authored PRD section is canonical, but a
     // PRESENT-and-PRISTINE scaffold-only PRD section yields to an authored
