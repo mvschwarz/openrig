@@ -12,7 +12,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { hostedWakeFor, parseRoster, type RosterWake } from "../src/domain/rosters.js";
+import { hostedWakeFor, isHostedMemberAt, parseRoster, type RosterWake } from "../src/domain/rosters.js";
 import { ringHostedWake } from "../src/domain/hosted-wake.js";
 import { OutboxHandler, WAKE_INTENT_PREFIX } from "../src/domain/outbox-handler.js";
 import { createStuckSweepStatus, runStuckSweep, STUCK_SWEEP_FINDING_TAG } from "../src/domain/queue-stuck-sweep.js";
@@ -98,6 +98,7 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
       loadHumanRegistry: () => ({ ok: true, entities: [] }),
       transport: { send: async () => { typed += 1; return { ok: true, verified: true }; } },
       hostedWake: (destination) => destination === "grok@lab" ? trigger : null,
+      isHostedMember: (destination) => destination === "grok@lab",
     });
     expect(repo.classifyDestinationOf("grok@lab")).toEqual({ class: "hosted", wake: declared });
     // The create's own wake rings it (this repository has no outbox, so the wake runs inline).
@@ -110,9 +111,15 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     repo.claim({ qitemId: row.qitemId, destinationSession: "grok@lab" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "in-progress", lastNudgeResult: expect.stringMatching(/^wake-accepted:/) });
 
-    // A hosted member with no trigger stays unroutable, so its person is told (step 1, unchanged).
+    // A hosted member with no trigger stays unroutable, so its person is told (step 1, unchanged). The member reads this
+    // teaching too: it says how the member gets work, not to fix the address or register a person.
     trigger = null;
-    expect(repo.classifyDestinationOf("grok@lab").class).toBe("unroutable");
+    const noTrigger = repo.classifyDestinationOf("grok@lab");
+    expect(noTrigger).toEqual({ class: "unroutable", teaching: "unroutable: 'grok@lab' is a hosted member with no wake trigger, "
+      + "so nothing can push work to it. It reads the queue when its owner next starts a session." });
+    // An address no roster lists keeps the general teaching.
+    expect(repo.classifyDestinationOf("nobody@lab")).toMatchObject({ class: "unroutable",
+      teaching: expect.stringContaining("Fix the address, or register the human with `rig gateway human add`.") });
     db.close();
   });
 
@@ -277,6 +284,14 @@ describe("a hosted member with a webhook trigger is rung when work lands for it"
     expect(hostedWakeFor("grok@lab", dir, "h2")).toBeNull();
     expect(hostedWakeFor("grok@lab", dir, null)).toBeNull();
     expect(hostedWakeFor("other@lab", dir, "h1")).toBeNull(); // not hosted
+    // Listed as hosted, trigger or not, on this host only.
+    expect(isHostedMemberAt("grok@lab", dir, "h1")).toBe(true);
+    writeFileSync(join(dir, "lab.json"), JSON.stringify({ ...roster, members: [{ ...roster.members[0], wake: undefined }, roster.members[1]] }));
+    expect(hostedWakeFor("grok@lab", dir, "h1")).toBeNull();
+    expect(isHostedMemberAt("grok@lab", dir, "h1")).toBe(true);
+    expect(isHostedMemberAt("grok@lab", dir, "h2")).toBe(false);
+    expect(isHostedMemberAt("grok@lab", dir, null)).toBe(false);
+    expect(isHostedMemberAt("other@lab", dir, "h1")).toBe(false);
     expect(() => parseRoster({ ...roster, members: [{ ...roster.members[0], wake: { webhook: { url: "https://example.invalid" } } }] }))
       .toThrow("A member's wake needs webhook.url_ref");
   });

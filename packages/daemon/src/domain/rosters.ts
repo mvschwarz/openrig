@@ -102,3 +102,10 @@ export function hostedWakeFor(destination: string, folder: string, selfHostId: s
   }
   return null;
 }
+
+/** Whether a roster on this host lists this address as a hosted member, with or without a trigger. */
+export function isHostedMemberAt(destination: string, folder: string, selfHostId: string | null): boolean {
+  if (!selfHostId) return false;
+  return readRosters(folder).rosters.some((roster) =>
+    roster.members.some((m) => m.hosted === true && m.seat === destination && m.host === selfHostId));
+}

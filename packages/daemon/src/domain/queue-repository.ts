@@ -22,7 +22,7 @@ import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
-import { hostedWakeFor, type RosterWake } from "./rosters.js";
+import { hostedWakeFor, isHostedMemberAt, type RosterWake } from "./rosters.js";
 import { ringHostedWake } from "./hosted-wake.js";
 import { effectiveGateRoles } from "./gate-predicate.js";
 import {
@@ -566,6 +566,17 @@ function defaultHostedWake(destination: string): RosterWake | null {
   }
 }
 
+/** Whether the authored rosters on this host list this address as a hosted member, trigger or not. False when they
+ *  can't be read: the address then gets the general unroutable teaching. */
+function defaultIsHostedMember(destination: string): boolean {
+  try {
+    const root = new SettingsStore().resolveOne("workspace.root").value;
+    return typeof root === "string" && !!root && isHostedMemberAt(destination, join(root, "rosters"), getSelfHostId());
+  } catch {
+    return false;
+  }
+}
+
 export class QueueRepositoryError extends Error {
   readonly code: string;
   readonly meta: Record<string, unknown> | undefined;
@@ -938,6 +949,8 @@ export class QueueRepository {
   private readonly sharedChannelsFn: () => ReadonlyArray<{ address: string }>;
   /** A hosted member's trigger, from the authored rosters on this host. */
   private readonly hostedWakeFn: (destination: string) => RosterWake | null;
+  /** Whether the rosters list an address as a hosted member, trigger or not. */
+  private readonly hostedMemberFn: (destination: string) => boolean;
   private readonly hostedWakeFetch: typeof fetch | undefined;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
    *  workflow domain's is-live-frontier-packet predicate. */
@@ -981,6 +994,7 @@ export class QueueRepository {
       loadHumanRegistry?: () => LoadResult;
       sharedChannels?: () => ReadonlyArray<{ address: string }>;
       hostedWake?: (destination: string) => RosterWake | null;
+      isHostedMember?: (destination: string) => boolean;
       hostedWakeFetch?: typeof fetch;
     }
   ) {
@@ -997,6 +1011,7 @@ export class QueueRepository {
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.sharedChannelsFn = opts?.sharedChannels ?? (() => sharedChannelAddresses());
     this.hostedWakeFn = opts?.hostedWake ?? defaultHostedWake;
+    this.hostedMemberFn = opts?.isHostedMember ?? defaultIsHostedMember;
     this.hostedWakeFetch = opts?.hostedWakeFetch;
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
@@ -4356,6 +4371,7 @@ export class QueueRepository {
       })(),
       hasTerminalTransport: (dest) => this.hasTerminalTransport(dest),
       hostedWake: (dest) => this.hostedWakeFn(dest),
+      isHostedMember: (dest) => this.hostedMemberFn(dest),
     });
   }
 
