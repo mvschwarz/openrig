@@ -54,7 +54,7 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     expect(resolveRecordedIdentity(request({ ...direct, "X-OpenRig-Principal": CLOUD }, "::1"), attributed).identityPrincipal).toBe(CLOUD);
 
     const unchanged: Array<[string, Context, { provenance: "transport:v1" | "claimed:v1" | "origin-unknown:v1" }, string]> = [
-      ["a remote peer", request(direct, "100.95.124.51"), attributed, "transport:v1"],
+      ["a remote peer", request(direct, "192.0.2.10"), attributed, "transport:v1"],
       ["no socket", request(direct, null), attributed, "transport:v1"],
       ["a relayed hop", request({ ...direct, "X-OpenRig-Relay": "host-b", "X-OpenRig-Provenance": "transport:v1" }), attributed, "relay:v1"],
       ["an unknown origin", request({ ...direct, "X-OpenRig-Origin-Unknown": "true" }), { provenance: "origin-unknown:v1" }, "origin-unknown:v1"],
