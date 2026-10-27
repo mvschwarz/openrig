@@ -23,7 +23,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--port <port>", "Daemon port override")
     .option("--http", "Serve over Streamable HTTP at /mcp instead of stdio")
     .option("--bind <host:port>", "With --http: where to listen (default 127.0.0.1:7437). Beyond loopback needs a grant (rig mcp token add)")
-    .option("--cloud-grants <url>", "With --http: check each request's key with OpenRig Cloud's grant endpoint instead of the token file")
+    .option("--cloud-grants <url>", "With --http: check each request's key with the grant service at this URL instead of the token file")
     .option("--cloud-grant-header-file <path>", "With --cloud-grants: a file holding one 'Name: value' header to send with each grant request")
     .addHelpText("after", `
 Both MCP protocol revisions are served, over stdio and --http alike: clients on 2026-07-28 (which may start with
@@ -36,10 +36,10 @@ through a tunnel or proxy: they arrive on loopback too. If the token file then g
 request is refused; serving unauthenticated again takes a restart with no token file. TLS comes from the tunnel or
 proxy, not from this server.
 
-With --cloud-grants, every request needs an OpenRig Cloud customer key, checked with Cloud on each request for this
-daemon's instance (its self id); the token file isn't read. A customer acts as the seat its grant names, which must
-already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If Cloud
-can't answer, the request is refused.`)
+With --cloud-grants, every request needs a key the grant service issued, checked with that service on each request
+for this daemon's instance (its self id); the token file isn't read. A caller acts as the seat its grant names, which
+must already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If
+the grant service can't answer, the request is refused.`)
     .action(async (opts: { port?: string; http?: boolean; bind?: string; cloudGrants?: string; cloudGrantHeaderFile?: string }) => {
       const deps = getDepsF();
 
@@ -166,7 +166,7 @@ async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, 
   }
   const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
   console.error(cloudGrants
-    ? `OpenRig MCP over HTTP at ${served.url}: each request needs an OpenRig Cloud customer key, checked with ${cloudGrants}.`
+    ? `OpenRig MCP over HTTP at ${served.url}: each request needs a key from the grant service, checked with ${cloudGrants}.`
     : served.authenticated
     ? `OpenRig MCP over HTTP at ${served.url}: each request needs a bearer credential from ${tokenFile}.`
     : `OpenRig MCP over HTTP at ${served.url}: no grants, so loopback only, acting as ${seat || "no seat"}, declared and not authenticated. Add a grant (rig mcp token add) before reaching it through a tunnel or proxy.`);
