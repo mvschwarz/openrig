@@ -60,12 +60,12 @@ describe("the daemon's tmux server", () => {
     const resolveHost = () => ({ id: "box", transport: "ssh" as const, target: "box.example" });
     const plain = composeView("v", [local, remote], { resolveHost });
     expect(plain.opened.map((p) => p.recoveryCommand)).toEqual([
-      "tmux attach -t 'dev-review@starter'",
-      "ssh 'box.example' 'tmux attach -t '\"'\"'dev-build@starter'\"'\"''",
+      "tmux attach -f ignore-size -t 'dev-review@starter'",
+      "ssh 'box.example' 'tmux attach -f ignore-size -t '\"'\"'dev-build@starter'\"'\"''",
     ]);
     const onServer = composeView("v", [local, remote], { resolveHost, localTmux: "/usr/bin/tmux", localTmuxServer: ["-L", "person"] });
     expect(onServer.opened.map((p) => p.recoveryCommand)).toEqual([
-      "'/usr/bin/tmux' -L 'person' attach -t 'dev-review@starter'",
+      "'/usr/bin/tmux' -L 'person' attach -f ignore-size -t 'dev-review@starter'",
       plain.opened[1]!.recoveryCommand,
     ]);
   });

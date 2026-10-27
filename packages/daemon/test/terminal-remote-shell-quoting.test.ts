@@ -25,7 +25,7 @@ it("keeps remote session names intact through both POSIX shell boundaries", () =
           env: { PATH: `${bin}:/usr/bin:/bin`, OPR_ARGS: argsFile },
         });
         expect(readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual([
-          `=${session}:`, "attach", ...(readOnly ? ["-r"] : []), "-t", "session-id",
+          `=${session}:`, "attach", ...(readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", "session-id",
         ]);
       }
     }

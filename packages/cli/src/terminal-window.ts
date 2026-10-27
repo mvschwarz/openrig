@@ -226,7 +226,8 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
       if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
       // Compare the composer's exact command, including session aliases and read-only mode.
       // SSH/custom commands cannot be confirmed from this local client inventory.
-      clients.set(pid, ["tmux", quote(tmux)].map(binary => `${binary} attach ${readOnly === "1" ? "-r " : ""}-t ${quote(session)}`));
+      const flags = readOnly === "1" ? ["-r "] : ["", "-f ignore-size "];
+      clients.set(pid, ["tmux", quote(tmux)].flatMap(binary => flags.map(flag => `${binary} attach ${flag}-t ${quote(session)}`)));
     }
     const used = new Set<string>();
     for (const [index, page] of pages.entries()) {
