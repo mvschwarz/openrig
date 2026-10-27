@@ -93,7 +93,9 @@ describe("stable task-following workspace", () => {
   });
   it("incomplete membership and failed provider reads keep the entire previous view", async () => {
     const f = fixture(); await f.follow(); const count = f.calls.length;
-    expect(await f.follow([], {}, false)).toMatchObject({ ok: false, opened: ["a", "b", "c"], following: { state: "retained" } });
+    const failed = await f.follow([], {}, false);
+    expect(failed).toMatchObject({ ok: false, opened: ["a", "b", "c"], following: { state: "retained" } });
+    expect(failed.following!.events.at(-1)).toContain("membership is incomplete");
     expect(f.calls.length).toBe(count);
     f.failReads(); expect(await f.follow([])).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
     expect(f.calls.some(c => c[1] === "close")).toBe(false);

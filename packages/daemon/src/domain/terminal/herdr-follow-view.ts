@@ -58,7 +58,9 @@ export class HerdrFollowView {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const temporary = `${file}.${randomUUID()}.tmp`;
       writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600 }); renameSync(temporary, file);
-      writeFileSync(log, state!.events.join("\n") + "\n", { mode: 0o600 });
+      const lines = state!.events.join("\n") + "\n";
+      let previous = ""; try { previous = readFileSync(log, "utf8"); } catch { /* initial own strip */ }
+      if (previous !== lines) writeFileSync(log, lines, { mode: 0o600 });
     };
     const notice = (line: string) => {
       if (state!.events.at(-1) !== line) state!.events = [...state!.events, line].slice(-60);
@@ -71,7 +73,10 @@ export class HerdrFollowView {
         state = saved;
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (!controls.enabled) return result(true, "disabled"); // Keep the fixed canvas exactly as it is.
-      if (!view?.task?.complete) return result(false, "retained", "Task membership is incomplete; keeping the previous view.");
+      if (!view?.task?.complete) {
+        if (state) { notice("Task membership is incomplete; keeping the previous view."); save(); }
+        return result(false, "retained", "Task membership is incomplete; keeping the previous view.");
+      }
       if ((this.deps.platform ?? process.platform) !== "linux") throw new Error("Following is qualified on Linux Herdr 0.9.5/protocol 22 only.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
       if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.deps.socketPath) {
@@ -229,7 +234,12 @@ export class HerdrFollowView {
         ...(plan.retained.find(r => r.key === t.key) ? { reason: plan.retained.find(r => r.key === t.key)!.reason } : {}) }));
       return answer;
     } catch (error) {
-      return result(false, "retained", error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      if (state) {
+        notice(`Keeping the previous view: ${message.slice(0, 800)}`);
+        try { save(); } catch { /* Report the original failure; preserve prior provider effects. */ }
+      }
+      return result(false, "retained", message);
     }
   }
 }
