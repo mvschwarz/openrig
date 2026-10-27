@@ -189,6 +189,36 @@ function cloudGrantUrl(url: string): URL {
   return parsed;
 }
 
+/** OAuth discovery (RFC 9728) for a server whose keys a grant service checks: the one metadata document, where it's
+ *  served, and the 401 challenge that points at it. */
+type OAuthDiscovery = { path: string; document: Record<string, unknown>; challenge: string };
+
+/** The resource clients reach this server as and the authorization server that issues its keys, served exactly as
+ *  configured. Each must be https with no userinfo, query or fragment, written as a URL writes it (a lowercase host, no
+ *  default port), so nothing is normalized on the way out; the resource's path ends in /mcp. Its metadata is at the
+ *  path-inserted address, and nowhere else. */
+function oauthDiscovery(oauth: { resource: string; issuer: string }): OAuthDiscovery {
+  const exact = (flag: string, value: string): URL => {
+    let url: URL | undefined;
+    try { url = new URL(value); } catch { /* refused below */ }
+    // A bare origin is written without the slash a URL adds. An empty query or fragment shows only in the text.
+    const written = url !== undefined && (url.href === value || (url.pathname === "/" && url.href === `${value}/`));
+    if (!url || !written || url.protocol !== "https:" || url.username || url.password || /[?#]/.test(value)) {
+      throw new McpHttpConfigError(`${flag} takes an https URL with no userinfo, query or fragment, written as a URL writes it (a lowercase host, no default port), not ${value}`);
+    }
+    return url;
+  };
+  const resource = exact("--oauth-resource", oauth.resource);
+  exact("--oauth-issuer", oauth.issuer);
+  if (!resource.pathname.endsWith("/mcp")) throw new McpHttpConfigError(`--oauth-resource's path must end in /mcp, not ${oauth.resource}`);
+  const path = `/.well-known/oauth-protected-resource${resource.pathname}`;
+  return {
+    path,
+    document: { resource: oauth.resource, authorization_servers: [oauth.issuer], scopes_supported: ["openrig.work"], bearer_methods_supported: ["header"] },
+    challenge: `Bearer realm="openrig", resource_metadata="${resource.origin}${path}"`,
+  };
+}
+
 type Refusal = { status: number; error: string; message: string; log?: string };
 const unauthenticated = (message: string): Refusal => ({ status: 401, error: "unauthenticated", message });
 const NOT_VALID_HERE = "This credential isn't valid here: it's unknown or was revoked.";
@@ -278,6 +308,9 @@ export type McpHttpOptions = {
   clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
   /** Grants come from OpenRig Cloud instead of the token file, which is then never read. */
   cloudGrants?: CloudGrantOptions;
+  /** With cloudGrants: OAuth discovery for clients that sign in with OAuth. The public resource this server is reached as
+   *  and the authorization server that issues its keys, both served exactly as given. */
+  oauth?: { resource: string; issuer: string };
   /** How often one seat's call is recorded (default 60 s). */
   presenceIntervalMs?: number;
 };
@@ -304,6 +337,9 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   const loopback = isLoopbackHost(opts.host);
   const cloud = opts.cloudGrants;
   const cloudUrl = cloud ? cloudGrantUrl(cloud.url) : undefined;
+  // The metadata describes the keys a grant service checks, so it's served only with one.
+  if (opts.oauth && !cloud) throw new McpHttpConfigError("--oauth-resource and --oauth-issuer need --cloud-grants");
+  const discovery = opts.oauth ? oauthDiscovery(opts.oauth) : undefined;
   const configured = cloud !== undefined || readGrants(opts.tokenFile) !== null;
   if (!loopback && !configured) {
     throw new McpHttpConfigError(`Serving on ${opts.host} needs authentication: add a grant with rig mcp token add, then start again. With no grants, the server stays on loopback.`);
@@ -329,10 +365,13 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     } catch { /* Unknown: refused below, and asked again on the next request. */ }
     return instance;
   };
-  const refuse = (res: http.ServerResponse, refusal: Refusal): void => {
+  // A 401 names the realm. With OAuth discovery it also points at the metadata, and says invalid_token when a bearer
+  // credential was presented and refused (RFC 6750 §3); a request with none gets no error.
+  const refuse = (res: http.ServerResponse, refusal: Refusal, presented = false): void => {
     // The detail stays in this server's log: the reply goes to a caller not yet authenticated.
     if (refusal.log) console.error(`rig mcp serve --http: ${refusal.log}`);
-    reply(res, refusal.status, { error: refusal.error, message: refusal.message }, refusal.status === 401 ? { "WWW-Authenticate": 'Bearer realm="openrig"' } : {});
+    const challenge = !discovery ? 'Bearer realm="openrig"' : `${discovery.challenge}${presented ? ', error="invalid_token"' : ""}`;
+    reply(res, refusal.status, { error: refusal.error, message: refusal.message }, refusal.status === 401 ? { "WWW-Authenticate": challenge } : {});
   };
   // One handler for both protocol revisions: a request carrying 2026-07-28's per-request envelope is served as that
   // revision, anything else (initialize and the rest of 2025) statelessly as before. Each request gets a fresh server for
@@ -374,7 +413,13 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
   };
 
   const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-    if (new URL(req.url ?? "/", "http://localhost").pathname !== "/mcp") {
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    // The OAuth metadata is static and public: served before any credential or grant-service call, whatever the Host.
+    if (discovery && req.method === "GET" && pathname === discovery.path) {
+      reply(res, 200, discovery.document);
+      return;
+    }
+    if (pathname !== "/mcp") {
       reply(res, 404, { error: "not_found", message: "The MCP endpoint is /mcp." });
       return;
     }
@@ -384,7 +429,7 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     let authenticated = false;
     if (cloud) {
       const caller = await cloudRequestCaller(req);
-      if (!("seat" in caller)) { refuse(res, caller); return; }
+      if (!("seat" in caller)) { refuse(res, caller, bearer(req) !== undefined); return; }
       ({ access, seat, principal } = caller);
       authenticated = true;
     } else {
