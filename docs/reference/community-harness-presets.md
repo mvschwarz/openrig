@@ -283,8 +283,9 @@ source. The seat's setup does two things.
    > work on, parks it and waits. When you wait on CI or a long job, park the row with `rig queue block <id> --on
    > external:<what> --wake-after <duration> --continuation "<what resumes>"`.
 
-   - A community preset with `first_input: true` carries it in the seat's first startup text file (see "Pass the first
-     startup input at launch" above).
+   - A community preset with `first_input: true` carries it in the seat's first input when the file is declared with
+     `delivery_hint: send_text` (see "Pass the first startup input at launch" above). A `.md` file left at the `auto` hint
+     counts as guidance, which a community seat doesn't take.
    - A plain terminal seat can pass it as Pi's initial message in the command its startup runs. Check `pi --help` for that
      argument in your Pi version.
    - `first_input` carries text, not files: it doesn't install the skills.
