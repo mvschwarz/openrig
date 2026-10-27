@@ -25,8 +25,8 @@ export interface QueueTransition {
   /** P21 §4 era-stamp: how actorSession was established. `transport:v1` = derived from the
    *  transport chokepoint; null/absent = claimed-era (pre-verification), never re-labeled. */
   identityProvenance: string | null;
-  /** With `principal:v1`: the caller the local MCP adapter checked a grant for (JSON: source, id, and for a Cloud
-   *  grant its id and version). Null on every other row. */
+  /** With `principal:v1`: the caller the local MCP adapter checked a grant for (JSON: source, id, and for a
+   *  grant-service grant its id and version). Null on every other row. */
   identityPrincipal: string | null;
   ownerNotificationKind: string | null;
   ownerNotificationLevel: OwnerNotificationLevel;

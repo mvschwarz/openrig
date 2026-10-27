@@ -213,8 +213,8 @@ export function resolveRecordedProvenance(
 
 /**
  * The principal an MCP HTTP adapter's per-request client carries: the caller whose grant the adapter checked, a token-file
- * grant by its name or an OpenRig Cloud grant by its principal id with its grant id and version. Attribution supplied by
- * that trusted local adapter, not daemon authentication, and never a credential.
+ * grant by its name or an external grant service's grant by its principal id with its grant id and version. Attribution
+ * supplied by that trusted local adapter, not daemon authentication, and never a credential.
  */
 export const IDENTITY_PRINCIPAL_HEADER = "x-openrig-principal";
 
@@ -232,7 +232,7 @@ export function parseIdentityPrincipal(raw: string | undefined): string | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const { source, id, grant, version, ...rest } = value as Record<string, unknown>;
   const text = (v: unknown, max: number): v is string => typeof v === "string" && v.trim() !== "" && v.length <= max;
-  if (Object.keys(rest).length > 0 || (source !== "file" && source !== "cloud") || !text(id, 200)) return null;
+  if (Object.keys(rest).length > 0 || (source !== "file" && source !== "grant-service") || !text(id, 200)) return null;
   if (grant !== undefined && !text(grant, 200)) return null;
   if (version !== undefined && !(typeof version === "number" && Number.isFinite(version)) && !text(version, 64)) return null;
   return JSON.stringify({ source, id, ...(grant !== undefined ? { grant } : {}), ...(version !== undefined ? { version } : {}) });

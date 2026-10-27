@@ -154,8 +154,8 @@ interface DaemonClientOptions {
   /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
   sessionName?: string;
   /** With sessionName: the caller whose grant the MCP adapter checked, sent as X-OpenRig-Principal (JSON of its source,
-   *  id and, for a Cloud grant, grant id and version; never a credential). */
-  principal?: { source: "file" | "cloud"; id: string; grant?: string; version?: number | string };
+   *  id and, for a grant-service grant, grant id and version; never a credential). */
+  principal?: { source: "file" | "grant-service"; id: string; grant?: string; version?: number | string };
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
