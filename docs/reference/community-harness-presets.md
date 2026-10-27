@@ -228,6 +228,49 @@ OpenRig records `node.startup_first_input_passed` with the path and `submission:
 
 Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.
 
+## Interactive Pi in a terminal seat: the coordination skills
+
+This is for a seat that runs interactive `pi` from a `runtime: terminal` member's startup, or from a community preset's
+launcher. It isn't for a managed `runtime: pi` seat, which already copies its selected skill directories into the seat's own
+Pi agent directory (`$OPENRIG_HOME/state/pi/<session>/agent/skills/`), or for Workshop, whose Pi profiles carry pinned skill
+copies (openrig-world's `PI-SKILLS.md`).
+
+OpenRig installs no skills for a terminal or community seat: it skips their resources and startup files, and `rig skill
+loadout` covers Claude Code and Codex only. Without the coordination skills, the agent there doesn't know the queue's habits,
+such as parking a row that waits on CI instead of leaving it in progress, or handing work on so the next row names its
+source. The seat's setup does two things.
+
+1. **Make the released skills readable.** The installed OpenRig's own plugin carries them, matching the installed release:
+   `rig plugin list` shows `openrig-core` and its path (usually `$OPENRIG_HOME/plugins/openrig-core`), and the skills are in
+   its `skills/` folder. Copy whole skill directories, keeping their helper files and modes, into the `skills/` folder of the
+   Pi agent directory that seat uses (`PI_CODING_AGENT_DIR`, or `~/.pi/agent` by default). At least `queue-handoff`:
+
+   ```bash
+   CORE="$(rig plugin list | awk '$1 == "openrig-core" {print $NF}')"
+   PI_AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+   mkdir -p "$PI_AGENT_DIR/skills"
+   cp -Rp "$CORE/skills/queue-handoff" "$PI_AGENT_DIR/skills/"
+   ```
+
+   Copy again after each OpenRig upgrade: a copy doesn't follow the plugin.
+2. **Point the agent at it when it starts.** Don't count on Pi finding the skill by itself; name it in the seat's first turn.
+   For example:
+
+   > Before you work your queue, read `<Pi agent directory>/skills/queue-handoff/SKILL.md` in full: it's how this team hands
+   > work on, parks it and waits. When you wait on CI or a long job, park the row with `rig queue block <id> --on
+   > external:<what> --wake-after <duration> --continuation "<what resumes>"`.
+
+   - A community preset with `first_input: true` carries it in the seat's first startup text file (see "Pass the first
+     startup input at launch" above).
+   - A plain terminal seat can pass it as Pi's initial message in the command its startup runs. Check `pi --help` for that
+     argument in your Pi version.
+   - `first_input` carries text, not files: it doesn't install the skills.
+
+**What this shows, and what it doesn't.** A copied folder and a startup line put the text in front of the agent. They don't
+show that Pi discovered the skill by itself, or that the agent follows it. Check those separately: that the agent read the
+whole file (its tool trace), and what its rows record, such as a CI wait parked on `external:` with a wake, and a handoff
+made with `handoff-and-complete`, whose next row names it as its source.
+
 ## Write your own
 
 Start from the example closest to your harness, and change it. First check that the harness answers a prompt on its own
