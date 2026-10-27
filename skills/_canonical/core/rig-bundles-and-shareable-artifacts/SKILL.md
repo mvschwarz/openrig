@@ -68,6 +68,17 @@ structurally distinct.
 3. **A bundle declares topology but omits proof expectations or workflow mode.** Topology alone doesn't tell users what "working as advertised" means.
 4. **Users cannot inspect what a bundle will create before installing it.** `rig bundle inspect` must show what will be created without side effects.
 
+## From an exported team to a submission
+
+`rig export <rig> -o <folder>/rig.yaml` writes the spec, not a README,
+so an exported team has none of its own. Before you bundle or submit
+it, add a `README.md` to the folder, declare it in `rig.yaml` as
+`docs: [{ path: README.md }]`, and run `rig bundle check <folder>`
+until it reports no findings. The openrig.dev/rigs registry check runs
+the same check on the folder at the submitted ref, and any finding
+fails it. The full walk-through is the publishing guide,
+`publishing-a-rig-bundle.md` in `$OPENRIG_HOME/reference/`.
+
 ## Proof standard
 
 Proof should:
