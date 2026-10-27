@@ -9,7 +9,6 @@ limits:
   - resume not declared until reopening a named session, and a missing one, have been checked with a real Pi
   - a wake can land in a half-typed draft in Pi's editor; whether OpenRig can read Pi's editor for draft-aware delivery is unchecked
   - Pi dialogs OpenRig doesn't recognize, such as custom extension UIs, can be typed into
-  - a first input starting with @ or / isn't passed, since Pi would read it as a file or a command; the launch stops instead
   - only the listed openrig-core skills are copied into the seat's Pi agent folder; no guidance or startup files are placed
 names_conversation: true
 first_input: true

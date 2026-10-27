@@ -25,6 +25,13 @@ function addSession(sessions: string, id: string, fileId = id, stamp = "2026-10-
   return file;
 }
 
+// Another conversation's header that carries the requested id only nested inside it: Pi would open that other conversation.
+function addNestedIdSession(sessions: string, id: string) {
+  mkdirSync(sessions, { recursive: true });
+  writeFileSync(join(sessions, `2026-10-27T14-13-00-123Z_${id}.jsonl`),
+    `{"type":"session","version":3,"id":"openrig-other-0000ffff","meta":{"type":"session","id":"${id}"},"cwd":"/work"}\n`);
+}
+
 // `setup` prepares the seat's folders and returns the launch's variables.
 function run(setup: (dir: string) => Record<string, string>) {
   const dir = mkdtempSync(join(tmpdir(), "pi-tui-example-")); dirs.push(dir);
@@ -64,16 +71,6 @@ describe("the documented interactive-Pi launcher and preset", () => {
     expect(args).toEqual(["--session-dir", sessions, "--session-id", NAME]);
   });
 
-  it.each(["@notes.md says hello", "/compact now"])("stops a first input Pi wouldn't take as plain text (%s), and starts nothing", (text) => {
-    const { args, exit, stderr } = run(dir => {
-      const file = join(dir, "first.txt"); writeFileSync(file, text);
-      return { OPENRIG_CONVERSATION: NAME, OPENRIG_FIRST_INPUT: file };
-    });
-    expect(args).toBeNull();
-    expect(exit).toBe(2);
-    expect(stderr).toContain("starts with @ or /");
-  });
-
   it("reopens the one session file whose header has that id, not one whose file name only ends with it", () => {
     let file = "";
     const { args, sessions } = run(dir => {
@@ -89,6 +86,7 @@ describe("the documented interactive-Pi launcher and preset", () => {
     ["missing", (_: string) => {}],
     ["never written to (empty)", (sessions: string) => { mkdirSync(sessions, { recursive: true }); writeFileSync(join(sessions, `2026-10-27T14-13-00-123Z_${NAME}.jsonl`), ""); }],
     ["held by another id's header", (sessions: string) => { addSession(sessions, "openrig-other-0000ffff", NAME); }],
+    ["held by another id's header that nests this id", (sessions: string) => { addNestedIdSession(sessions, NAME); }],
     ["ambiguous (two files)", (sessions: string) => { addSession(sessions, NAME); addSession(sessions, NAME, NAME, "2026-10-27T15-00-00-000Z"); }],
   ])("starts nothing when the session is %s", (_label, prepare) => {
     const { args, exit, stderr } = run(dir => { prepare(seatFolders(dir).sessions); return { OPENRIG_RESUME_REF: NAME }; });
@@ -108,6 +106,13 @@ describe("the documented interactive-Pi launcher and preset", () => {
     const { agentDir } = run(dir => { own = join(dir, "own-agent"); return { OPENRIG_CONVERSATION: NAME, PI_CODING_AGENT_DIR: own }; });
     expect(agentDir).toBe(own);
     expect(existsSync(join(own, "skills", "queue-handoff", "SKILL.md"))).toBe(true);
+  });
+
+  it("expands a leading ~ in that folder as Pi does, so the skills land where Pi looks", () => {
+    let dirOf = "";
+    const { agentDir } = run(dir => { dirOf = dir; return { OPENRIG_CONVERSATION: NAME, HOME: dir, PI_CODING_AGENT_DIR: "~/own-agent" }; });
+    expect(agentDir).toBe(join(dirOf, "own-agent"));
+    expect(existsSync(join(dirOf, "own-agent", "skills", "queue-handoff", "SKILL.md"))).toBe(true);
   });
 
   it("declares a named conversation and first input, and no resume until a real Pi has checked it", () => {

@@ -231,7 +231,6 @@ queue wakes don't reach. Whether Pi then takes a wake and acts on it hasn't been
   - With the seat's [typing guard](seat-delivery.md) at its default, a wake can land in a person's half-typed draft.
     Whether OpenRig can read Pi's editor for draft-aware delivery is unchecked.
   - Pi dialogs OpenRig doesn't recognize, such as custom extension UIs, can be typed into.
-  - A first input starting with `@` or `/` stops the launch, since Pi would read it as a file or a command.
 - **Give the seat a model** before its first start: its provider key in its environment, or its login and settings in its
   agent folder.
 

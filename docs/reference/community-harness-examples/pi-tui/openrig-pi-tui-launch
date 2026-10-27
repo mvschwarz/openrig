@@ -17,6 +17,11 @@ sessions="$state/sessions"
 # don't share settings and a person's ~/.pi/agent isn't touched. Give the seat its provider key in its environment, or its
 # login and settings in this folder, before its first start.
 PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$state/agent}"
+# Pi expands a leading ~ in this folder; do the same, so the skills land where Pi looks.
+case "$PI_CODING_AGENT_DIR" in
+  "~") PI_CODING_AGENT_DIR="$HOME" ;;
+  "~/"*) PI_CODING_AGENT_DIR="$HOME/${PI_CODING_AGENT_DIR#"~/"}" ;;
+esac
 export PI_CODING_AGENT_DIR
 mkdir -p "$PI_CODING_AGENT_DIR/skills" "$sessions"
 
@@ -44,19 +49,13 @@ valid_id() {
   esac
 }
 
-# The first input goes over as Pi's first prompt, byte for byte, after `--`. Pi reads an argument starting with @ as a file
-# even there, and may run one starting with / as a command, so such a first input stops the launch instead of changing.
+# The first input goes over as Pi's first prompt, byte for byte, after `--`. OpenRig's starts with its identity-context
+# line; Pi would read one starting with @ as a file even after `--`, and may run one starting with / as a command.
 set --
 if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
   first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
   first_input="${first_input%.}"
-  case "$first_input" in
-    "") ;;
-    @* | /*)
-      echo "openrig-pi-tui-launch: the first input starts with @ or /, which Pi wouldn't take as plain text; starting nothing" >&2
-      exit 2 ;;
-    *) set -- -- "$first_input" ;;
-  esac
+  if [ -n "$first_input" ]; then set -- -- "$first_input"; fi
 fi
 
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
@@ -65,15 +64,24 @@ if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
     echo "openrig-pi-tui-launch: '$id' isn't a Pi session id; starting nothing" >&2
     exit 2
   fi
-  # Pi names a session file <time>_<id>.jsonl, but the file's first line, its header, is what says which session it is.
-  # Pi writes the file only once the conversation has a message, so a session that never got one can't be reopened.
+  # Pi names a session file <time>_<id>.jsonl, but the file's first line, its header, is what says which session it is:
+  # its top-level type and id, read as JSON as Pi reads it. Pi writes the file only once the conversation has a message, so
+  # a session that never got one can't be reopened. Pi runs on Node, so node reads the header.
+  node="${OPENRIG_PI_NODE:-node}"
+  if ! command -v "$node" >/dev/null 2>&1; then
+    echo "openrig-pi-tui-launch: $node isn't on PATH to read Pi's session headers; starting nothing" >&2
+    exit 1
+  fi
   found="" count=0
   for file in "$sessions"/*_"$id".jsonl; do
     [ -s "$file" ] || continue
-    header=$(head -n 1 "$file")
-    case "$header" in
-      *'"type":"session"'*'"id":"'"$id"'"'*) found="$file" count=$((count + 1)) ;;
-    esac
+    if head -n 1 "$file" | "$node" -e '
+      let text = ""; process.stdin.on("data", c => { text += c; }).on("end", () => {
+        try { const h = JSON.parse(text); process.exit(h && h.type === "session" && h.id === process.argv[1] ? 0 : 1); }
+        catch { process.exit(1); }
+      });' "$id"; then
+      found="$file" count=$((count + 1))
+    fi
   done
   if [ "$count" -ne 1 ]; then
     echo "openrig-pi-tui-launch: expected one Pi session $id in $sessions, found $count; starting nothing" >&2
