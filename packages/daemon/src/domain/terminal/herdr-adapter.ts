@@ -145,18 +145,22 @@ export async function exitedSeats(
     if (key === "") continue; // never attributed; the note above says so
     perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
   }
-  // Exact prefix labels are not ambiguous when every matched seat is listed in full.
+  // Count each listed pane once: prefer its exact label, otherwise an unambiguous truncation.
   const exactLiveLabels = new Set(liveLabels.map(normalLabel));
-  for (const liveLabel of liveLabels) {
-    const matches = pagePanes.filter(pane => labelMatches(liveLabel, pane.label));
-    if (new Set(matches.map(pane => normalLabel(pane.label))).size > 1
-      && !matches.every(pane => exactLiveLabels.has(normalLabel(pane.label)))) unconfirmed(matches);
+  const liveMatches = liveLabels.map(liveLabel => {
+    const exact = normalLabel(liveLabel);
+    return perLabel.has(exact) ? [exact] : [...perLabel.keys()].filter(label => labelMatches(liveLabel, label));
+  });
+  for (const matches of liveMatches) {
+    if (matches.length > 1 && !matches.every(label => exactLiveLabels.has(label))) {
+      unconfirmed(matches.flatMap(label => perLabel.get(label)!));
+    }
   }
   const shared: string[] = [];
   for (const [label, seats] of perLabel) {
-    const alive = liveLabels.filter((l) => labelMatches(l, label)).length;
+    const alive = liveMatches.filter(matches => matches.length === 1 && matches[0] === label).length;
     if (seats.length === 1) {
-      if (alive === 0) gone.add(seats[0]!.seat);
+      if (alive === 0 && !unknown.has(seats[0]!.seat)) gone.add(seats[0]!.seat);
     } else if (alive < seats.length) {
       shared.push(label);
       unconfirmed(seats);

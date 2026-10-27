@@ -239,6 +239,27 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(methods).toContain("tab.focus");
   });
 
+  it.each([
+    { name: "a duplicate pane missing", labels: ["ops", "ops-qa", ""] },
+    { name: "an ambiguous extra pane", labels: ["ops", "ops-qa", "op…", ""] },
+  ])("counts each pane once with exact prefixes and shared labels: $name", async ({ labels }) => {
+    const { adapter } = herdrOpening(() => listed(...labels));
+    const res = await adapter.openView(viewOf(pane("a", "ops"), pane("b", "ops-qa"), pane("c", "ops-qa")));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a"]);
+    expect(res.degraded).toEqual(["b", "c"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
+    expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+    expect(res.notes?.join(" ")).toContain('Several seats share that label, so their panes are unconfirmed.');
+  });
+
+  it("counts separate unambiguous truncated panes for a shared label", async () => {
+    const { adapter } = herdrOpening(() => listed("ops-q…", "ops-q…", "other", ""));
+    const res = await adapter.openView(viewOf(pane("a", "ops-qa"), pane("b", "ops-qa"), pane("c", "other")));
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes).toBeUndefined();
+  });
+
   it("one truncated label cannot confirm two differently labelled seats", async () => {
     const { adapter } = herdrOpening(() => listed("pod.a…", "other"));
     const res = await adapter.openView(viewOf(pane("a", "pod.alpha"), pane("b", "pod.alpine"), pane("c", "other")));
