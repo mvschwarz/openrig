@@ -111,7 +111,7 @@ export function wrapSendBody(
  * fact / consequence / action shape (`daemon-lifecycle.ts:61-73`).
  *
  * Deliberately NOT `daemonNotRunningError()`: that helper's text ("Daemon not
- * running." + restart advice) is the probe-derived claim qitem-c113bd41
+ * running." + restart advice) is the probe-derived claim that was
  * removed. The SHAPE is reused; the TEXT is not.
  *
  * A connection error can follow delivery; only positive no-connect evidence
@@ -169,7 +169,7 @@ export function refuseEmptyMessage(body: string, verb: "send" | "broadcast", jso
   return true;
 }
 
-/** qitem-c113bd41 — the LOCAL send target. The status probe is advisory,
+/** The LOCAL send target. The status probe is advisory,
  *  never authoritative: a busy/wedged daemon fails the probe while the
  *  transport would succeed (the false-daemon-down incident). Resolution:
  *  the configured env alias FIRST (exact string, custom port preserved;
@@ -482,7 +482,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         return;
       }
 
-      // qitem-c113bd41 — the status probe is ADVISORY (target discovery
+      // The status probe is ADVISORY (target discovery
       // only); the actual transport is authoritative. A probe-timeout or
       // running/unhealthy verdict no longer refuses the send. ff13bcdf —
       // the resolver takes that probe lazily, and skips it entirely when an
@@ -1019,7 +1019,7 @@ async function runFanOutSend(params: {
 }): Promise<void> {
   const { toList, pod, rig, message, opts, deps, seatSender } = params;
 
-  // qitem-c113bd41 — same advisory-probe/transport-authoritative contract
+  // The same advisory-probe/transport-authoritative contract
   // as the single-seat path, including ff13bcdf's lazy probe (see
   // resolveLocalDaemonUrl).
   const client = deps.clientFactory(await resolveLocalDaemonUrl(deps));

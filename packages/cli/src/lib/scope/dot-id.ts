@@ -1,5 +1,5 @@
-// release-0.3.2 slice 12 — dot-ID grammar per
-// `openrig-work/conventions/scope-and-versioning/README.md` §1.
+// release-0.3.2 slice 12 — dot-ID grammar per the scope-and-versioning
+// convention, §1.
 //
 // Grammar (v0 single-project):
 //   project  = <PFX>            (2-3 letter; v0 hardcodes "OPR")
