@@ -724,7 +724,7 @@ describe("broadcast --host (net-new, CLI-direct POST)", () => {
     const h = mockClient(() => ({ status: 200, data: { results: [], sent: 0, total: 0, failed: 0 } }));
     const cmd = broadcastCommand(httpDeps(h));
     await cmd.parseAsync(["--host", "vps-b", "msg"], { from: "user" });
-    expect(h.calls[0]!.options?.timeoutMs).toBe(60_000);
+    expect(h.calls[0]!.options?.timeoutMs).toBe(30_000);
   });
 
   it("the text positional is NEVER sugar-parsed: a message containing a@b@vps-b broadcasts locally intact when no host is set", async () => {

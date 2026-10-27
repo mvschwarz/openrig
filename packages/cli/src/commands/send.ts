@@ -14,12 +14,12 @@ import { resolveSenderSession, SENDER_FALLBACK } from "../sender-identity.js";
 import { COMPOSER_PROMPT_CLASS } from "@openrig/daemon/composer-prompts";
 import { resolveContextRef, walkSizedWarning } from "../context-resolve.js";
 
-const WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS = 5_000;
-// A cross-host send waits for the remote to deliver, and the remote has no fixed deadline of its own (its tmux
-// calls run without a timeout), so no client budget is exact. This one sits well above a normal send, and above
-// fetch's 10 s connect timeout, so a host that never accepts the connection still reads as unreachable. A send
-// that outlasts it reads as unconfirmed, never as failed.
-const CROSS_HOST_SEND_TIMEOUT_MS = 30_000;
+// The reply follows the guarded paste/Enter (and optional verification), not acceptance of the request.
+// Successful sends can exceed the ordinary client's 5 s read budget. Keep a finite response wait on both
+// local and remote paths; a longer send or lost response remains unconfirmed and is never retried here.
+const SEND_RESPONSE_TIMEOUT_MS = 60_000;
+const UNCONFIRMED_SEND_GUIDANCE = "A busy agent may hold delivered input off-screen, so absence from a pane capture does not prove non-delivery. " +
+  "Wait for recipient acknowledgment or reconcile with the recipient before resending; another send or queue item risks duplicate work.";
 
 /** The shared composer glyph set (Claude `❯`, Codex `›`, Codex 0.153 `»`) from the daemon's
  * composer-prompts surface, so the CLI staged check can never disagree with the daemon guard. */
@@ -140,8 +140,7 @@ function printTransportFailure(err: DaemonConnectionError, opts?: { json?: boole
     ? "Delivery UNCONFIRMED — the daemon may have received and delivered the message."
     : "The message was not sent.";
   const action = outcomeUnknown
-    ? "Reconcile by EFFECT before any resend: check the pane/target for the message (rig capture <session>). " +
-      "A resend without checking risks a duplicate. Then 'rig daemon status' for the probe picture."
+    ? "Reconcile by EFFECT before any resend: check the target (rig capture <session>). " + UNCONFIRMED_SEND_GUIDANCE
     : "Inspect the configured target with 'rig status'; a failed health probe does not prove the daemon is stopped. " +
       "If the target is wrong, check OPENRIG_URL / RIGGED_URL or daemon.host + daemon.port. " +
       "If the daemon is confirmed stopped, run 'rig daemon start'.";
@@ -283,7 +282,11 @@ determined (unknown / missing / stale telemetry) the send PROCEEDS with an
 advisory note — telemetry is advisory, not authority over whether agents can
 communicate. Use --wait-for-idle to send only after explicit idle evidence. Use
 --verify to confirm the message appeared in the pane only; it is not agent
-acknowledgement. With transport.verify_input_box on, a Claude Code or Codex send
+acknowledgement. Local and HTTP sends wait up to 60 s for the response, plus any
+--wait-for-idle duration. A timeout or missing pane text does not prove the
+message was not delivered: a busy agent can hold input off-screen. Reconcile
+with the recipient before resending or filing the same work as a queue item.
+With transport.verify_input_box on, a Claude Code or Codex send
 reads verified only when the seat was proven idle before the paste (its screen
 matched an idle layout recorded from Claude Code 2.1.296 or Codex 0.160.0; a
 screen that names another version reads unconfirmed, and a matching layout that
@@ -880,7 +883,7 @@ async function runCrossHostSend(
  * sender verbatim — honest provenance; unknown on the remote it degrades to
  * the shipped non-blocking advisory, never a refusal. `--verify` prints the
  * REMOTE route's verified/outcome verbatim (remote-authoritative, never
- * locally synthesized). Deadline: CROSS_HOST_SEND_TIMEOUT_MS, plus waitForIdleMs
+ * locally synthesized). Deadline: SEND_RESPONSE_TIMEOUT_MS, plus waitForIdleMs
  * when --wait-for-idle. A send that may have arrived reads as unconfirmed.
  *
  * Auth posture (named, v0): runRemoteHttpOp presents the REGISTRY bearer
@@ -918,7 +921,7 @@ async function runHttpHostSend(
     session, text: outboundText, exactText: raw ? undefined : text, verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, typeWithoutChecking: opts.typeWithoutChecking, reason: opts.reason, actorSession: senderSession ?? null,
     ...(opts.urgent ? { urgent: true } : {}),
-  }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
+  }, deps, { timeoutMs: (waitForIdleMs ?? 0) + SEND_RESPONSE_TIMEOUT_MS });
 
   // A send that may have reached the remote is unconfirmed, not unreachable: it may have been delivered, and a
   // resend without checking risks a duplicate.
@@ -926,7 +929,7 @@ async function runHttpHostSend(
   const shown = unconfirmed ? { ...result, failedStep: "remote-outcome-unknown" as const } : result;
   const unconfirmedGuidance = {
     consequence: "Delivery UNCONFIRMED — the remote daemon may have received and delivered the message.",
-    action: `Check the target before any resend: rig capture ${session} --host ${host.id}. A resend without checking risks a duplicate.`,
+    action: `Check the target before any resend: rig capture ${session} --host ${host.id}. ${UNCONFIRMED_SEND_GUIDANCE}`,
   };
 
   if (opts.json) {
@@ -1162,18 +1165,11 @@ function parseWaitForIdleMs(value: string | undefined): number | undefined | nul
   return Math.ceil(seconds * 1000);
 }
 
-function waitForIdleRequestOptions(waitForIdleMs: number | undefined): { timeoutMs: number } | undefined {
-  if (waitForIdleMs === undefined) return undefined;
-  return { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS };
-}
-
-function transportRequestOptions(waitForIdleMs?: number): { timeoutMs?: number; headers?: Record<string, string> } | undefined {
-  const waitOptions = waitForIdleRequestOptions(waitForIdleMs);
+function transportRequestOptions(waitForIdleMs?: number): { timeoutMs: number; headers?: Record<string, string> } {
   const headers = terminalAuthHeaders();
   const hasHeaders = Object.keys(headers).length > 0;
-  if (!waitOptions && !hasHeaders) return undefined;
   return {
-    ...(waitOptions ?? {}),
+    timeoutMs: (waitForIdleMs ?? 0) + SEND_RESPONSE_TIMEOUT_MS,
     ...(hasHeaders ? { headers } : {}),
   };
 }
