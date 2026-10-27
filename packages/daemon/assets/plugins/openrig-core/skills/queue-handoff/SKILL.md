@@ -31,7 +31,11 @@ without an owner.
   receiver gets a wake-ping plus the durable queue item.
 - **Blocked on another agent's work.** Use `rig queue block <id> --on <child>`
   (or `rig queue update <id> --state blocked --blocked-on <child>`). The item
-  stays active and returns to pending when its blocker completes.
+  stays active and returns to pending when its blocker completes. Waiting on
+  something outside the queue, such as CI or a long job? Park the row:
+  `rig queue block <id> --on external:<what> --wake-after <duration>
+  --continuation "<what resumes>"`. It stays yours and reads parked, not
+  stalled, and the timer wakes you.
 - **Escalating to the human.** Make the escalation a durable attention
   item, not just a chat message.
 
