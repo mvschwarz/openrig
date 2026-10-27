@@ -214,6 +214,29 @@ CLI.
 
 Copy both and maintain them as your own.
 
+## An example: Pi's terminal UI
+
+[`community-harness-examples/pi-tui/`](community-harness-examples/pi-tui/) has a preset and a small launcher that run Pi's
+own terminal UI as a community harness. `pi` is the built-in managed Pi runtime, so the preset is named `pi-tui`. OpenRig
+delivers to this seat as to any community seat (the Delivery row above), not as to a plain `runtime: terminal` seat, which
+queue wakes don't reach. Whether Pi then takes a wake and acts on it hasn't been checked.
+- **The launcher:** each seat gets its own Pi agent folder (`$OPENRIG_HOME/state/pi-tui/<node>/agent`, unless
+  `PI_CODING_AGENT_DIR` is set) and its own session folder. At each launch it copies the installed `openrig-core` skills
+  it's given (`queue-handoff` by default) into that agent folder. A new launch starts `pi --session-id <the name OpenRig
+  gave>` and passes the first input as Pi's first prompt, byte for byte.
+- **Resume isn't declared.** The launcher can reopen a named session: it opens the one session file whose header has that
+  id, and starts nothing when there isn't exactly one, because Pi's own `--session-id` creates a session for an id it
+  doesn't find. Declare `resume: true` only after a real Pi has reopened a named session and refused a missing one.
+- **Its limits:** it's written for Pi 1.4.0 from Pi's source and hasn't been checked with a real Pi.
+  - With the seat's [typing guard](seat-delivery.md) at its default, a wake can land in a person's half-typed draft.
+    Whether OpenRig can read Pi's editor for draft-aware delivery is unchecked.
+  - Pi dialogs OpenRig doesn't recognize, such as custom extension UIs, can be typed into.
+  - A first input starting with `@` or `/` stops the launch, since Pi would read it as a file or a command.
+- **Give the seat a model** before its first start: its provider key in its environment, or its login and settings in its
+  agent folder.
+
+Copy both and maintain them as your own.
+
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
 module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted` or `first_input` is refused by an older
 OpenRig that doesn't know the field.
@@ -233,7 +256,8 @@ Presets without `first_input` and built-in runtimes keep their existing behavior
 This is for a seat that runs interactive `pi` from a `runtime: terminal` member's startup, or from a community preset's
 launcher. It isn't for a managed `runtime: pi` seat, which already copies its selected skill directories into the seat's own
 Pi agent directory (`$OPENRIG_HOME/state/pi/<session>/agent/skills/`), or for Workshop, whose Pi profiles carry pinned skill
-copies (openrig-world's `PI-SKILLS.md`).
+copies (openrig-world's `PI-SKILLS.md`). The [`pi-tui` example](#an-example-pis-terminal-ui) above does step 1 for its
+seats in its launcher.
 
 OpenRig installs no skills for a terminal or community seat: it skips their resources and startup files, and `rig skill
 loadout` covers Claude Code and Codex only. Without the coordination skills, the agent there doesn't know the queue's habits,
