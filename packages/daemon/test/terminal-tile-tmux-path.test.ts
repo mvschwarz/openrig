@@ -240,16 +240,38 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
   });
 
   it.each([
+    { name: "one short pane", labels: ["ops"] },
+    { name: "two short panes", labels: ["ops", "ops"] },
+  ])("does not call a candidate exited when its label may be truncated: $name", async ({ labels }) => {
+    const { adapter } = herdrOpening(() => listed(...labels));
+    const res = await adapter.openView(viewOf(pane("a", "ops"), pane("b", "ops-qa")));
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual(["a", "b"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
+  });
+
+  it.each([
     { name: "a duplicate pane missing", labels: ["ops", "ops-qa", ""] },
     { name: "an ambiguous extra pane", labels: ["ops", "ops-qa", "op…", ""] },
   ])("counts each pane once with exact prefixes and shared labels: $name", async ({ labels }) => {
     const { adapter } = herdrOpening(() => listed(...labels));
     const res = await adapter.openView(viewOf(pane("a", "ops"), pane("b", "ops-qa"), pane("c", "ops-qa")));
-    expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a"]);
-    expect(res.degraded).toEqual(["b", "c"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
+    // The short pane could also be the missing duplicate's truncation: no candidate is certain.
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual(["a", "b", "c"].map(seat => ({ seat, host: "herdr", code: "pane_unconfirmed", reason: HERDR_PANES_UNCONFIRMED_NOTE })));
     expect(res.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
     expect(res.notes?.join(" ")).toContain('Several seats share that label, so their panes are unconfirmed.');
+  });
+
+  it("confirms overlapping labels when exact counts account for every shared seat", async () => {
+    const { adapter } = herdrOpening(() => listed("ops", "ops-qa", "ops-qa", ""));
+    const res = await adapter.openView(viewOf(pane("a", "ops"), pane("b", "ops-qa"), pane("c", "ops-qa")));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes).toBeUndefined();
   });
 
   it("counts separate unambiguous truncated panes for a shared label", async () => {

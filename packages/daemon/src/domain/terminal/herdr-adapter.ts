@@ -145,20 +145,23 @@ export async function exitedSeats(
     if (key === "") continue; // never attributed; the note above says so
     perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
   }
-  // Count each listed pane once: prefer its exact label, otherwise an unambiguous truncation.
-  const exactLiveLabels = new Set(liveLabels.map(normalLabel));
-  const liveMatches = liveLabels.map(liveLabel => {
+  // A short label may be another seat's truncated label, even when it is exact for one seat.
+  // Resolve overlapping candidates only when exact occurrences account for every candidate seat.
+  const exactLiveCounts = new Map<string, number>();
+  for (const liveLabel of liveLabels) {
     const exact = normalLabel(liveLabel);
-    return perLabel.has(exact) ? [exact] : [...perLabel.keys()].filter(label => labelMatches(liveLabel, label));
-  });
+    exactLiveCounts.set(exact, (exactLiveCounts.get(exact) ?? 0) + 1);
+  }
+  const liveMatches = liveLabels.map(liveLabel => [...perLabel.keys()].filter(label => labelMatches(liveLabel, label)));
   for (const matches of liveMatches) {
-    if (matches.length > 1 && !matches.every(label => exactLiveLabels.has(label))) {
+    if (matches.length > 1 && !matches.every(label => exactLiveCounts.get(label) === perLabel.get(label)!.length)) {
       unconfirmed(matches.flatMap(label => perLabel.get(label)!));
     }
   }
   const shared: string[] = [];
   for (const [label, seats] of perLabel) {
-    const alive = liveMatches.filter(matches => matches.length === 1 && matches[0] === label).length;
+    const alive = liveLabels.filter((liveLabel, index) => normalLabel(liveLabel) === label
+      || (liveMatches[index]!.length === 1 && liveMatches[index]![0] === label)).length;
     if (seats.length === 1) {
       if (alive === 0 && !unknown.has(seats[0]!.seat)) gone.add(seats[0]!.seat);
     } else if (alive < seats.length) {
