@@ -1,4 +1,6 @@
 import type { HerdrViewer, ViewerKey, ViewerResult } from "./herdr-viewer.js";
+import type { HerdrFollowView } from "./herdr-follow-view.js";
+import type { FollowControls } from "./terminal-follow-policy.js";
 // OPR.0.4.6.02 C2+FB4 — the herdr TerminalProvider (the proof-gated primary
 // provider). Arm's-length AGPL: it drives the installed herdr's local control
 // SOCKET through the injected `HerdrTransport` (see herdr-transport.ts) and
@@ -298,6 +300,7 @@ export function extractWorkspaceId(result: HerdrResult): string | null {
 }
 
 export interface HerdrAdapterDeps {
+  following?: HerdrFollowView;
   viewer?: HerdrViewer;
   transportFactory: HerdrTransportFactory;
   launch?: ProviderStatus["launch"];
@@ -466,6 +469,12 @@ export class HerdrAdapter implements TerminalProvider {
   }
   async lookupViewer(key: ViewerKey, pane: ComposedPane): Promise<ViewerResult> {
     return this.deps.viewer?.lookup(key, pane) ?? { ok: false, code: "viewer_not_provisioned", error: "No qualified viewer mapping." };
+  }
+
+  async followView(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>): Promise<OpenViewResult> {
+    return this.deps.following?.follow(viewId, view, controls, stillCurrent)
+      ?? { provider: "herdr", ok: false, opened: [], absent: [], degraded: [], pages: 0,
+        code: "follow_unsupported", error: "This endpoint has no qualified following allocator." };
   }
 
   async openView(view: ComposedView): Promise<OpenViewResult> {

@@ -17,16 +17,24 @@
 // exit 0 unless the daemon is unreachable.
 
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
 
 export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
+export interface FollowControls {
+  enabled: boolean; maxTiles?: number; graceMs?: number; focusRetentionMs?: number;
+  pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[]; suppressionMs?: number;
+}
 
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
 export interface OpenViewResult {
+  workspaceId?: string;
+  following?: { id: string; enabled: boolean; state: "following" | "empty" | "retained" | "disabled";
+    maxTiles: number; tiles: Array<{ key: string; seat: string; departedAt?: number; reason?: string }>;
+    events: string[]; overflow: Array<{ key: string; seat: string; reason: string }>; nextAt?: number };
   provider: string;
   session?: string;
   ok: boolean;
@@ -81,6 +89,11 @@ function humanOpen(r: OpenViewResult): string {
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
   if (r.space) lines.push(`  ${r.provider} session: ${JSON.stringify(r.space.label)} (${r.space.id}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
+  if (r.following) {
+    lines.push(`  Following: ${r.following.state}; tile limit ${r.following.maxTiles}.`);
+    for (const tile of r.following.tiles) if (tile.reason) lines.push(`  ${tile.seat}: ${tile.reason}`);
+    for (const hidden of r.following.overflow) lines.push(`  ${hidden.seat}: ${hidden.reason}`);
+  }
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
   for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
@@ -95,7 +108,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
   } else {
     console.log(humanOpen(r));
   }
-  if (status >= 400 || (r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
+  if (status >= 400 || (r.following ? !r.ok : r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }
@@ -119,15 +132,31 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
+    .option("--follow", "Keep one qitem:<id> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
+    .option("--no-follow", "Stop following and keep the existing workspace and tiles as a fixed layout")
+    .option("--max-tiles <count>", "Following tile limit, 1–256; explicitly raise it to show more members", Number)
+    .option("--pin <seats...>", "Retain these following tiles after they leave the task")
+    .option("--unpin <seats...>", "Remove pins from these following tiles")
+    .option("--suppress <seats...>", "Temporarily hide these following tiles; agents keep running")
+    .option("--unsuppress <seats...>", "Show these following members again")
+    .option("--suppression-ms <ms>", "Suppression duration, default 60000, at most 86400000", Number)
+    .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
+    .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
+    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string;
+      follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
+      suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
       const session = opts.session?.trim();
+      const { maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } = opts;
+      const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
+      const following: FollowControls | undefined = opts.follow !== undefined || hasControls
+        ? { enabled: opts.follow !== false, maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } : undefined;
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
-        if (opts.window || !opts.provider) {
-          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan, session);
+        if (following?.enabled !== false && (opts.window || !opts.provider)) {
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan, session, following);
           printOpen(opts.json ?? false, result, 200);
           return;
         }
@@ -143,7 +172,8 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           expectedPlan = preview.data.planId;
         }
         const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(session !== undefined ? { session } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}) };
-        const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+        const res = await client.post<OpenViewResult>(following ? "/api/terminal/follow" : "/api/terminal/open",
+          { ...body, ...following }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, ...(following ? { headers: terminalAuthHeaders() } : {}) });
         if (session !== undefined && res.status < 400 && res.data?.session !== session) {
           printResult(opts.json ?? false, { ...res.data, ok: false, code: "terminal_session_unconfirmed",
             error: "The open response did not confirm the requested Herdr session. Its outcome is unknown; inspect that session before retrying." }, 409); return;

@@ -1,6 +1,10 @@
 import { tileAttachArgv } from "./tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
+import { TerminalFollowing, type FollowingSelector } from "./terminal-following.js";
+import type { FollowControls } from "./terminal-follow-policy.js";
+import type { EventBus } from "../event-bus.js";
+import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 // OPR.0.4.6.02 C3 — the TerminalService orchestrator.
 //
 // ONE daemon-side composer for EVERY view kind (arch R1 / guard b1): the
@@ -91,6 +95,7 @@ export interface TerminalPreview {
 
 /** The `rig terminal views` payload: saved views + the live rig names you can open. */
 export interface ListViewsResult {
+  following?: ReturnType<TerminalFollowing["list"]>;
   saved: SavedView[];
   /** Rig names openable as per-rig derived views (live from the inventory). */
   rigs: string[];
@@ -105,6 +110,7 @@ export interface ProviderStatusReport {
 }
 
 export interface TerminalStatusResult {
+  following?: ReturnType<TerminalFollowing["list"]>;
   providers: ProviderStatusReport[];
   session?: string;
   error?: string;
@@ -112,6 +118,8 @@ export interface TerminalStatusResult {
 }
 
 export interface TerminalServiceDeps {
+  eventBus?: Pick<EventBus, "subscribe">;
+  followingStatePath?: string;
   /** Resolve a provider name to its adapter, or null for an unknown name. */
   resolveProvider(name: string): TerminalProvider | null;
   /** Resolve an explicit session without altering the default provider instance. */
@@ -171,8 +179,52 @@ type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
   private localTmux?: Promise<string | undefined>;
+  private following?: TerminalFollowing;
 
-  constructor(private readonly deps: TerminalServiceDeps) {}
+  constructor(private readonly deps: TerminalServiceDeps) {
+    if (deps.eventBus) this.following = new TerminalFollowing(
+      deps.followingStatePath ?? getDefaultOpenRigPath("private/terminal-following/selectors.json"), deps.eventBus,
+      (selector, controls) => this.renderFollowing(selector, controls));
+  }
+
+  async stop(): Promise<void> { await this.following?.stop(); }
+
+  async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
+    if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
+    if (!req.view.startsWith("qitem:")) return errorResult("herdr", "follow_view_required", "Follow requires qitem:<id>, whose membership has an authoritative completeness signal.");
+    const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
+    if ("ok" in selected) return selected;
+    if (selected.name !== "herdr" || !selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "Follow is supported by the qualified Herdr provider only.");
+    if (req.expectedPlan !== undefined) {
+      const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
+      if ("code" in composed) return errorResult(selected.name, composed.code, composed.error);
+      if (req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
+    }
+    const { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs } = req;
+    return this.following.open({ view: req.view, provider: "herdr", ...(selected.session !== undefined ? { session: selected.session } : {}) },
+      { enabled, maxTiles, graceMs, focusRetentionMs, pin, unpin, suppress, unsuppress, suppressionMs });
+  }
+
+  private async renderFollowing(selector: FollowingSelector, controls: FollowControls): Promise<OpenViewResult> {
+    const selected = this.selectProvider(selector);
+    if ("ok" in selected) return selected;
+    if (!selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "This provider cannot follow a task.");
+    let composed: ComposedView | null = null;
+    try {
+      const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
+      if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p)) };
+    } catch { /* Unreadable membership is supplied as unknown, never empty. */ }
+    const plan = composed && this.planId(selected.name, composed, selected.session);
+    const stillCurrent = async () => {
+      if (!composed?.task?.complete || !plan) return false;
+      const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
+      return !("code" in current) && current.task?.complete === true && this.planId(selected.name,
+        { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
+    };
+    const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent);
+    return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
+      ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
+  }
 
   private selectProvider(req: Pick<OpenViewRequest, "provider" | "session">): {
     name: string; provider: TerminalProvider; session?: string;
@@ -346,6 +398,7 @@ export class TerminalService {
   /** List saved views + the rig names openable as derived views. */
   async listViews(detail = false): Promise<ListViewsResult> {
     const result: ListViewsResult = {
+      following: this.following?.list() ?? [],
       saved: this.deps.viewsStore.list(),
       rigs: await this.deps.listRigNames(),
     };
@@ -379,7 +432,7 @@ export class TerminalService {
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
-      return { session: selected.session, providers: [{ name: selected.name,
+      return { following: this.following?.list() ?? [], session: selected.session, providers: [{ name: selected.name,
         status: await selected.provider.status(), liveness: await selected.provider.liveness() }] };
     }
     const names: string[] = providerName ? [providerName] : ["herdr", "cmux", "rex"];
@@ -395,7 +448,7 @@ export class TerminalService {
       }
       return { name, status: await p.status(), liveness: await p.liveness() };
     }));
-    return { providers };
+    return { providers, following: this.following?.list() ?? [] };
   }
 
   /** Resolve a view argument into composer-ready members (precedence in the file header). */

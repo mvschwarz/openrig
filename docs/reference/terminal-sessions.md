@@ -198,6 +198,61 @@ Preview is read-only. A member without owned viewer provenance is
 mapping. An explicit open retains the provider's existing workspace behavior;
 it does not continuously reconcile the view or change an agent's lifecycle.
 
+## Following one task
+
+`rig terminal open qitem:<id> --follow` keeps one workspace following the
+task's current obligation owners. A joining member gets a verified local
+viewer tile without taking focus. A departing member loses only its viewer,
+after a grace period; the agent and its conversation keep running. The
+explanation strip names joins, departures, unavailable terminals and limits.
+The first workspace on an empty provider may become focused.
+
+This increment supports the qualified **Linux Herdr 0.9.5/protocol 22**
+endpoint. Other platforms/providers and other selector kinds retain ordinary
+one-shot open. Use `--provider herdr --json` to operate without opening a
+desktop window, and `--session <name>` to select that endpoint. Opening a tile
+can change the agent's terminal size; `ignore-size` does not guarantee isolation.
+
+```bash
+rig terminal open qitem:example --follow --provider herdr --json
+rig terminal open qitem:example --follow --provider herdr --pin reviewer@team
+rig terminal open qitem:example --follow --provider herdr --max-tiles 12
+rig terminal open qitem:example --follow --provider herdr --suppress reviewer@team --suppression-ms 60000
+rig terminal open qitem:example --no-follow
+```
+
+`--unpin` and `--unsuppress` reverse those presentation choices. The default
+cap is eight tiles; explicitly raising `--max-tiles` overrides it. Pins and
+retained input can exceed the cap rather than being evicted. Disabling removes
+the saved following selector and keeps the existing layout intact.
+
+The default departure grace is four seconds (`--grace-ms`). A focused leaver
+gets another twelve seconds for reading (`--focus-retention-ms`); before its
+tile closes, focus moves to a verified surviving member, or to the explanation
+strip when none remains. Typed or unconfirmed input keeps the tile, labeled
+as no longer participating. Explicit suppression also retains a typed draft.
+Later Core activity/membership events or an explicit repeat of the follow
+command can reconsider it; input is not polled. Draft text is never saved.
+
+Following consumes Core events and one-shot retention/suppression deadlines,
+not repeated CLI membership queries. Complete empty membership drains the
+tiles and preserves the workspace. An incomplete source, failed provider read
+or changed pane/terminal generation retains the previous view and reports
+the uncertainty. It never authorizes a blind workspace rebuild or close.
+`rig terminal views --json` and `rig terminal status --json` include the saved
+selectors and latest following status. Selectors and owned viewer provenance
+survive daemon restarts; task membership is always re-derived.
+
+The owner-authorized HTTP operation is `POST /api/terminal/follow` with
+`{view:"qitem:<id>",provider:"herdr",session?,enabled:true,maxTiles?,pin?,unpin?,
+suppress?,unsuppress?,suppressionMs?,graceMs?,focusRetentionMs?,expectedPlan?}`.
+Seat controls are arrays of names from the current/retained view. It uses the
+existing terminal bearer boundary, like ensure-viewer. The response includes
+the stable `workspaceId`, normal open partitions, `viewDescriptor`, and
+`following:{id,enabled,state,maxTiles,tiles,events,overflow,nextAt?}`. Presentation
+provenance grants no membership or input authority. This is a local native
+viewer operation; browser input and remote-host provisioning are separate.
+
 ## Ensuring an owner viewer
 
 The owner-facing HTTP operation `POST /api/terminal/viewer/ensure` accepts

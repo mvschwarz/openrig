@@ -3,11 +3,12 @@ import path from "node:path";
 import { HerdrAdapter } from "./herdr-adapter.js";
 import { createHerdrSocketRpc, createHerdrSocketTransport, resolveHerdrSocketPath } from "./herdr-transport.js";
 import type { ProviderStatus } from "./terminal-provider.js";
+import { HerdrFollowView, type ReadFollowInput } from "./herdr-follow-view.js";
 
 /** Keep the daemon's configured endpoint while selecting explicit sessions per
  * request. No request mutates process.env or another request's transport.
  */
-export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env) {
+export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env, input?: ReadFollowInput) {
   const defaultSocket = resolveHerdrSocketPath(env);
   const base = path.dirname(resolveHerdrSocketPath({}));
   let launch = 0;
@@ -17,12 +18,15 @@ export function createHerdrProviders(env: NodeJS.ProcessEnv = process.env) {
     if (!selected) { selected = new HerdrViewer(endpoint.socketPath, createHerdrViewerRun(endpoint.session)); viewers.set(endpoint.socketPath, selected); }
     return selected;
   };
-  const make = (endpoint: NonNullable<ProviderStatus["launch"]>) => new HerdrAdapter({
-    transportFactory: createHerdrSocketTransport(createHerdrSocketRpc(endpoint.socketPath)),
+  const make = (endpoint: NonNullable<ProviderStatus["launch"]>) => {
+    const transportFactory = createHerdrSocketTransport(createHerdrSocketRpc(endpoint.socketPath));
+    return new HerdrAdapter({
+    transportFactory,
+    following: new HerdrFollowView({ socketPath: endpoint.socketPath, run: createHerdrViewerRun(endpoint.session), transport: transportFactory(), input }),
     launch: endpoint,
     viewer: viewer(endpoint),
     newLaunchToken: () => `l${++launch}`,
-  });
+  }); };
   const sessions = new Map<string, HerdrAdapter>();
   return {
     defaultProvider: make({ socketPath: defaultSocket, ...(env.HERDR_SESSION ? { session: env.HERDR_SESSION } : {}) }),

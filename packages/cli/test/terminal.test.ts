@@ -46,6 +46,26 @@ function makeDeps(opts?: { routes?: Record<string, StubResponse> }): {
   };
 }
 
+describe("task-following controls", () => {
+  beforeEach(() => { process.exitCode = 0; vi.spyOn(console, "log").mockImplementation(() => {}); });
+  const body = { provider: "herdr", ok: true, opened: [], absent: [], degraded: [], pages: 1,
+    following: { id: "stable", enabled: true, state: "empty", maxTiles: 4, tiles: [], events: [], overflow: [] } };
+  it("posts one owner operation with explicit follow controls and accepts a complete empty view", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/follow": { status: 200, data: body } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "qitem:task", "--provider", "herdr", "--follow", "--max-tiles", "4", "--pin", "a@team", "--json"]);
+    expect(calls).toEqual([{ method: "POST", path: "/api/terminal/follow", body: { view: "qitem:task", provider: "herdr", enabled: true,
+      maxTiles: 4, pin: ["a@team"], unpin: undefined, suppress: undefined, unsuppress: undefined, suppressionMs: undefined, graceMs: undefined, focusRetentionMs: undefined } }]);
+    expect(process.exitCode).toBe(0);
+  });
+  it("disables without opening a desktop or creating a replacement workspace", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/follow": { status: 200, data: { ...body, following: { ...body.following, enabled: false, state: "disabled" } } } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "qitem:task", "--no-follow", "--json"]);
+    expect(calls).toHaveLength(1); expect(calls[0]).toMatchObject({ path: "/api/terminal/follow", body: { enabled: false } });
+  });
+});
+
 const opened = (seats: string[], extra: Record<string, unknown> = {}) => ({
   provider: "herdr", ok: seats.length > 0, opened: seats, absent: [], degraded: [], pages: 1, ...extra,
 });

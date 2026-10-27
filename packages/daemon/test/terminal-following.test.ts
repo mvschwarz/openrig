@@ -1,0 +1,59 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { TerminalFollowing } from "../src/domain/terminal/terminal-following.js";
+import type { FollowingSelector } from "../src/domain/terminal/terminal-following.js";
+import type { FollowControls } from "../src/domain/terminal/terminal-follow-policy.js";
+import type { EventBus } from "../src/domain/event-bus.js";
+import type { OpenViewResult } from "../src/domain/terminal/terminal-provider.js";
+
+const roots: string[] = [], services: TerminalFollowing[] = [];
+afterEach(async () => { for (const service of services.splice(0)) await service.stop(); vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+const selector = { view: "qitem:task", provider: "herdr" as const };
+const answer = (): OpenViewResult => ({ provider: "herdr", ok: true, opened: ["a"], absent: [], degraded: [], pages: 1,
+  following: { id: "same", enabled: true, state: "following", maxTiles: 8, tiles: [], events: [], overflow: [] } });
+function fixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "following-controller-")); roots.push(root);
+  let callback: Parameters<EventBus["subscribe"]>[0] = () => {};
+  const unsubscribe = vi.fn(), render = vi.fn(async (_selector: FollowingSelector, _controls: FollowControls) => answer());
+  const bus = { subscribe: (cb: typeof callback) => { callback = cb; return unsubscribe; } };
+  const file = path.join(root, "selectors.json");
+  const create = () => { const service = new TerminalFollowing(file, bus, render); services.push(service); return service; };
+  const emit = (type: string) => callback({ type } as Parameters<typeof callback>[0]);
+  return { create, emit, render, unsubscribe };
+}
+describe("Core-event terminal following", () => {
+  it("coalesces membership events and never polls between events", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    await service.open(selector, { enabled: true });
+    for (let i = 0; i < 50; i++) f.emit("queue.updated");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.render).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(600000);
+    expect(f.render).toHaveBeenCalledTimes(2);
+  });
+  it("one-shot deadlines resume retention without replaying pin/suppress commands", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    f.render.mockResolvedValueOnce({ ...answer(), following: { ...answer().following!, nextAt: Date.now() + 4000 } });
+    await service.open(selector, { enabled: true, suppress: ["a"] });
+    await vi.advanceTimersByTimeAsync(4100);
+    expect(f.render.mock.calls[1]).toEqual([selector, { enabled: true }]);
+    await vi.advanceTimersByTimeAsync(600000); expect(f.render).toHaveBeenCalledTimes(2);
+  });
+  it("restores selectors from disk, derives current membership, and stops cleanly", async () => {
+    vi.useFakeTimers(); const f = fixture(), first = f.create();
+    await first.open(selector, { enabled: true }); await first.stop();
+    const restored = f.create(); await vi.advanceTimersByTimeAsync(100);
+    expect(f.render).toHaveBeenCalledTimes(2);
+    await restored.stop(); f.emit("queue.created"); await vi.advanceTimersByTimeAsync(1000);
+    expect(f.render).toHaveBeenCalledTimes(2); expect(f.unsubscribe).toHaveBeenCalled();
+  });
+  it("disable retains the fixed view and removes its automatic selector", async () => {
+    vi.useFakeTimers(); const f = fixture(), service = f.create();
+    await service.open(selector, { enabled: true }); await service.open(selector, { enabled: false });
+    expect(service.list()).toEqual([]);
+    f.emit("node.updated"); await vi.advanceTimersByTimeAsync(10000);
+    expect(f.render).toHaveBeenCalledTimes(2);
+  });
+});

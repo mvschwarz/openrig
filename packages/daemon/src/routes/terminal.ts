@@ -21,6 +21,25 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 
 import { Hono } from "hono";
 import type { TerminalService } from "../domain/terminal/terminal-service.js";
+import type { FollowControls } from "../domain/terminal/terminal-follow-policy.js";
+
+function readFollowControls(raw: Record<string, unknown>): FollowControls | { error: string } {
+  if (typeof raw.enabled !== "boolean") return { error: "enabled must be true or false." };
+  const controls: FollowControls = { enabled: raw.enabled };
+  for (const [name, maximum] of [["maxTiles", 256], ["graceMs", 60000], ["focusRetentionMs", 300000], ["suppressionMs", 86400000]] as const) {
+    const value = raw[name];
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || (value as number) < (name === "maxTiles" ? 1 : 0) || (value as number) > maximum) return { error: `${name} is outside its supported range.` };
+    controls[name] = value as number;
+  }
+  for (const name of ["pin", "unpin", "suppress", "unsuppress"] as const) {
+    const value = raw[name];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || value.length > 256 || value.some(seat => typeof seat !== "string" || !seat.trim() || seat.length > 256 || /[\x00-\x1f\x7f]/.test(seat))) return { error: `${name} must be an array of seat names.` };
+    controls[name] = value as string[];
+  }
+  return controls;
+}
 
 function getService(c: { get(key: string): unknown }): TerminalService | null {
   return (c.get("terminalService" as never) as TerminalService | undefined) ?? null;
@@ -52,6 +71,20 @@ function readOpenBody(raw: unknown): { provider?: string; session?: string; view
 /** The canonical, non-rig-scoped terminal route family. Mounted at `/api/terminal`. */
 export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
   const app = new Hono();
+
+  // Following provisions writable local viewers under the same owner boundary
+  // as ensure-viewer. Existing one-shot open keeps its current route posture.
+  app.post("/follow", authBearerTokenMiddleware({ expectedToken: opts?.bearerToken ?? null }), async c => {
+    const svc = getService(c);
+    if (!svc) return c.json({ ok: false, code: "terminal_service_unavailable" }, 503);
+    const raw = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    if (!raw || Array.isArray(raw) || typeof raw !== "object") return c.json({ ok: false, code: "body_invalid" }, 400);
+    const parsed = readOpenBody(raw);
+    const controls = readFollowControls(raw);
+    if ("error" in parsed || "error" in controls) return c.json({ ok: false, code: "body_invalid", error: "error" in parsed ? parsed.error : (controls as { error: string }).error }, 400);
+    const result = await svc.followView({ ...parsed, view: parsed.view ?? "", ...controls });
+    return c.json(result, statusForOpen(result.ok, result.code));
+  });
 
   app.post("/open", async (c) => {
     const svc = getService(c);

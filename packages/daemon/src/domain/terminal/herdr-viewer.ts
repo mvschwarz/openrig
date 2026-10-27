@@ -13,7 +13,9 @@ export type ViewerResult = { ok: true; viewer: ViewerMapping; created: boolean }
   | { ok: false; code: string; error: string };
 export type InspectViewerSeat = (argv: string[]) => Promise<{ sessionId: string; nodeId: string }>;
 export type HerdrViewerRun = (argv: string[]) => Promise<string>;
-interface Pane { workspace_id: string; pane_id: string; terminal_id: string; cwd: string }
+export type CreateViewerPane = (cwd: string, label: string) => Promise<string>;
+export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id: string; cwd: string; focused?: boolean }
+type Pane = ViewerPane;
 interface Entry {
   cwd: string; label: string; command: string; argv: string[]; readOnly: boolean;
   phase: "creating" | "created" | "starting"; pane?: Pane;
@@ -54,6 +56,24 @@ function pane(raw: unknown): Pane | null {
   return ["workspace_id", "pane_id", "terminal_id", "cwd"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
 }
 
+/** Complete endpoint-wide attribution; mutable labels are never ownership. */
+export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string): Promise<Pane[]> {
+  const listed = body(await run(["workspace", "list", "--json"]));
+  if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
+  const found: Pane[] = [];
+  for (const workspace of listed.workspaces as Array<Record<string, unknown>>) {
+    if (!workspace || typeof workspace.workspace_id !== "string" || !workspace.workspace_id) throw new Error("Viewer workspace enumeration is incomplete.");
+    const listedPanes = body(await run(["pane", "list", "--workspace", workspace.workspace_id]));
+    if (!Array.isArray(listedPanes.panes)) throw new Error("Viewer pane enumeration is unreadable.");
+    for (const raw of listedPanes.panes) {
+      const candidate = pane(raw);
+      if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
+      if (candidate.cwd === cwd) found.push(candidate);
+    }
+  }
+  return found;
+}
+
 /** One owned viewer per seat/endpoint. The journal is presentation provenance,
  * not task membership. It is written BEFORE each possible effect so neither a
  * lost reply nor a daemon restart authorizes a second create/run. Labels alone
@@ -66,9 +86,9 @@ export class HerdrViewer {
     private readonly platform = process.platform, private readonly root = getDefaultOpenRigPath("private/terminal-viewers"),
     private readonly inspect: InspectViewerSeat = inspectSeat) {}
 
-  ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true): Promise<ViewerResult> {
+  ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     // ponytail: one endpoint queue; per-seat locks if creation throughput needs it.
-    const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent));
+    const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent, createPane));
     this.pending = result.then(() => {}, () => {});
     return result;
   }
@@ -77,24 +97,9 @@ export class HerdrViewer {
     this.pending = result.then(() => {}, () => {}); return result;
   }
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
-    const listed = body(await this.run(["workspace", "list", "--json"]));
-    if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
-    const found: Pane[] = [];
-    for (const workspace of listed.workspaces as Array<Record<string, unknown>>) {
-      if (!workspace || typeof workspace.workspace_id !== "string" || !workspace.workspace_id) throw new Error("Viewer workspace enumeration is incomplete.");
-      // Labels are mutable. Only a complete endpoint-wide private-cwd scan
-      // can prove absence, including panes moved to another workspace.
-      const listedPanes = body(await this.run(["pane", "list", "--workspace", workspace.workspace_id]));
-      if (!Array.isArray(listedPanes.panes)) throw new Error("Viewer pane enumeration is unreadable.");
-      for (const raw of listedPanes.panes) {
-        const candidate = pane(raw);
-        if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
-        if (candidate.cwd === entry.cwd) found.push(candidate);
-      }
-    }
-    return found;
+    return findAttributedViewerPanes(this.run, entry.cwd);
   }
-  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true): Promise<ViewerResult> {
+  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     try {
       if (this.platform !== "linux") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer is qualified on Linux Herdr 0.9.5/protocol 22 only." };
       const status = body(await this.run(["status", "server", "--json"]));
@@ -133,7 +138,8 @@ export class HerdrViewer {
         entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating" };
         journal.entries[id] = entry; save();
         // No retry here. A timeout is reconciled by enumeration on the next request.
-        const reply = body(await this.run(["workspace", "create", "--cwd", cwd, "--label", entry.label, "--no-focus"]));
+        const reply = body(await (createPane ? createPane(cwd, entry.label)
+          : this.run(["workspace", "create", "--cwd", cwd, "--label", entry.label, "--no-focus"])));
         const made = pane(reply.root_pane);
         if (!made || made.cwd !== cwd) return unavailable("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
         entry.pane = made; entry.phase = "created"; save(); created = true;
@@ -193,4 +199,35 @@ export class HerdrViewer {
       return unavailable(`Viewer effect is unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  /** A follow view may forget a tile it closed only after endpoint-wide
+   * enumeration proves its attributed pane is absent. Never closes a pane. */
+  forgetClosed(key: ViewerKey, expected: ViewerMapping): Promise<boolean> {
+    const result = this.pending.then(async () => {
+      try {
+        const status = body(await this.run(["status", "server", "--json"]));
+        if (this.platform !== "linux" || status.version !== "0.9.5" || status.protocol !== 22
+          || status.running !== true || status.socket !== this.socketPath) return false;
+        const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
+        const file = path.join(this.root, `${endpoint}.json`);
+        const journal = JSON.parse(readFileSync(file, "utf8")) as Journal;
+        if (journal.version !== 1 || !journal.entries || typeof journal.entries !== "object" || Array.isArray(journal.entries)) return false;
+        const id = JSON.stringify([key.hostId, key.nodeId]);
+        const entry = journal.entries[id];
+        if (!entry?.pane || entry.pane.pane_id !== expected.paneId || entry.pane.terminal_id !== expected.terminalId
+          || entry.pane.workspace_id !== expected.workspaceId || !/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
+          || entry.cwd !== path.join(this.root, endpoint, entry.label.slice("openrig-viewer-".length))) return false;
+        if ((await this.ownedPanes(entry)).length !== 0) return false;
+        try { rmdirSync(entry.cwd); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
+        delete journal.entries[id];
+        const temporary = `${file}.${randomUUID()}.tmp`;
+        writeFileSync(temporary, JSON.stringify(journal) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+        return true;
+      } catch { return false; }
+    });
+    this.pending = result.then(() => {}, () => {});
+    return result;
+  }
 }
+
+export { body as readHerdrViewerBody, pane as parseHerdrViewerPane, inspectSeat as inspectViewerSeat };

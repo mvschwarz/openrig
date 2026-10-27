@@ -110,7 +110,7 @@ import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
-import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
+import { probeSessionActivity, SessionTransport, inspectComposerInput } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { hookOrPaneActivity, nodeSessionConfirmedMissing } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
@@ -2054,7 +2054,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
-    const { defaultProvider: herdrProvider, sessionProvider: herdrSessionProvider } = createHerdrProviders();
+    const { defaultProvider: herdrProvider, sessionProvider: herdrSessionProvider } = createHerdrProviders(process.env, async target => {
+      // Read-only native input observation. Never persist the captured text.
+      const session = target.attachArgv?.[4];
+      if (!session) return "unknown";
+      return inspectComposerInput(await tmuxAdapter.captureComposerSnapshot(session), target.runtime ?? null).state;
+    });
     const cmuxProvider = new CmuxProviderAdapter({
       cmuxAdapter,
       // One gridded workspace per composed page — the same grid machinery as
@@ -2068,6 +2073,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     };
 
     deps.terminalService = new TerminalService({
+      eventBus,
       resolveProvider: (name) => providerMap[name] ?? null,
       resolveSessionProvider: (name, session) => name === "herdr" ? herdrSessionProvider(session) : null,
       viewsStore: new TerminalViewsStore(),
