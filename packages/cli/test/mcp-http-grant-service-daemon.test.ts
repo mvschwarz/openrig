@@ -189,8 +189,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
         [() => [400, { schema: SCHEMA, status: "malformed" }], 503, "grant_authority_unavailable"],
         [() => [503, { schema: SCHEMA, status: "unavailable" }], 503, "grant_authority_unavailable"],
         [() => [200, active({ schema: "openrig.grant/v2" })], 503, "grant_authority_unavailable"],
-        // The schema's earlier name has no alias.
-        [() => [200, active({ schema: "openrig.cloud.grant/v1" })], 503, "grant_authority_unavailable"],
+        // No other name stands in for the schema, a retired one included.
+        [() => [200, active({ schema: "openrig.legacy.grant/v1" })], 503, "grant_authority_unavailable"],
         [() => [200, "<html>preview login</html>"], 503, "grant_authority_unavailable"],
         [() => [200, active({ environment: { id: "team-a", core_instance: "another-core" } })], 503, "grant_authority_unavailable"],
         [() => [200, active({ rigs: ["team-b"] })], 503, "grant_authority_unavailable"],

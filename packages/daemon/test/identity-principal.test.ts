@@ -73,8 +73,8 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     for (const bad of [
       "not json", "[]", "null", JSON.stringify({ source: "env", id: "x" }), JSON.stringify({ source: "file", id: "" }),
       JSON.stringify({ source: "file", id: "x", token: "orm_secret" }), JSON.stringify({ source: "grant-service", id: "x", grant: 5 }),
-      // The source's earlier name has no alias.
-      JSON.stringify({ source: "cloud", id: "x" }),
+      // No other name stands in for a source, a retired one included.
+      JSON.stringify({ source: "legacy-service", id: "x" }),
       JSON.stringify({ source: "file", id: "x".repeat(600) }),
     ]) expect(parseIdentityPrincipal(bad)).toBeNull();
     expect(parseIdentityPrincipal(JSON.stringify({ version: 6, grant: "g", id: "cus_x", source: "grant-service" })))
