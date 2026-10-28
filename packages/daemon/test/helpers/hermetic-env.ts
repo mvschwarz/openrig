@@ -27,6 +27,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
+import { shellQuote } from "../../src/adapters/shell-quote.js";
 
 /**
  * Inherited environment variables that redirect the CLI/daemon client at a
@@ -336,20 +337,14 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
 
   // Test-only command seam: every child `tmux` call gets one explicit private
   // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
+  // Exec directly so each terminal operation does not start another Node process.
   const originalPath = baseEnv.PATH ?? process.env.PATH ?? "";
   writeFileSync(
     tmuxWrapperPath,
-    `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const socketPath = ${JSON.stringify(tmuxSocketPath)};
-const originalPath = ${JSON.stringify(originalPath)};
-const env = { ...process.env, PATH: originalPath };
-const result = spawnSync("tmux", ["-S", socketPath, ...process.argv.slice(2)], { env, stdio: "inherit" });
-if (result.error) {
-  console.error(result.error.message);
-  process.exit(127);
-}
-process.exit(result.status ?? 1);
+    `#!/bin/sh
+PATH=${shellQuote(originalPath)}
+export PATH
+exec tmux -S ${shellQuote(tmuxSocketPath)} "$@"
 `,
     { mode: 0o755 },
   );
