@@ -655,6 +655,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     HOME: daemonHome,
     USER: process.env.USER,
     LOGNAME: process.env.LOGNAME,
+    // The SSH agent socket, so git over SSH works in a seat (#1159). The path isn't key material, but the socket lets
+    // the seat's coding agent use the keys loaded in ssh-agent. An empty value is left out like an unset one, so a
+    // socket only the seat's terminal has never takes its place.
+    SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK || undefined,
     CODEX_HOME: codexHome,
   };
   // OPR.0.4.6.02 S1 — ONE shared tmux option-defaults applier, injected into

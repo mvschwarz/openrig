@@ -95,9 +95,14 @@ const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "
 
 describe("S03 production managed capability selection", () => {
   it.skipIf(process.platform === "win32").each([
-    { USER: "fixture-user", LOGNAME: "fixture-login" },
-    { USER: "fixture-user" }, { LOGNAME: "fixture-login" }, {},
-  ])("forwards only supplied daemon user names through the actual startup channel: %j", async names => {
+    [{ USER: "fixture-user", LOGNAME: "fixture-login" }, {}],
+    [{ USER: "fixture-user" }, {}], [{ LOGNAME: "fixture-login" }, {}], [{}, {}],
+    // #1159: the daemon's own agent socket reaches the seat. A socket only the pane has stays out, also when the
+    // daemon's value is empty.
+    [{ SSH_AUTH_SOCK: "/fixture/agent.sock" }, {}],
+    [{}, { SSH_AUTH_SOCK: "/pane-only/agent.sock" }],
+    [{ SSH_AUTH_SOCK: "" }, { SSH_AUTH_SOCK: "/pane-only/agent.sock" }],
+  ] as [Record<string, string>, Record<string, string>][])("forwards only supplied daemon user names and agent socket through the actual startup channel: daemon %j, pane %j", async (names, pane) => {
     const f = fixture();
     // Execute the actual initializer, without starting a daemon or reading its env.
     const source = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
@@ -112,15 +117,16 @@ describe("S03 production managed capability selection", () => {
     });
     for (const key of Object.keys(f.env)) delete f.env[key];
     Object.assign(f.env, sessionEnv);
-    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','UNRELATED_VALUE'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
+    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','SSH_AUTH_SOCK','UNRELATED_VALUE'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     vi.mocked(execFile).mockImplementation(native.execFile);
     const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
     const child = native.execFileSync("/bin/sh", ["-c", prepared.command(["--permission-mode", "auto"])], {
       encoding: "utf8", timeout: 3000,
-      env: { ...sessionEnv, UNRELATED_VALUE: "not-forwarded" },
+      env: { ...sessionEnv, UNRELATED_VALUE: "not-forwarded", ...pane },
     });
-    expect(JSON.parse(child)).toEqual(names);
+    // An empty daemon value counts as unset.
+    expect(JSON.parse(child)).toEqual(Object.fromEntries(Object.entries(names).filter(([, value]) => value !== "")));
   });
   it.each([
     ["unset", undefined, "present"], ["relative", "./config", "present"],
@@ -231,7 +237,8 @@ else console.log(JSON.stringify(Object.fromEntries(['TMUX', 'TERM_PROGRAM', 'TER
   // Present in the pane on purpose: they must stay out. XDG_RUNTIME_DIR is where sd-bus, GDBus and libdbus look for the
   // session bus when DBUS_SESSION_BUS_ADDRESS is unset, so the pane's own pair stays out; only OpenRig's pair, with the
   // bus address that can't connect, is forwarded (#2030, below). The desktop names reach services (notifications,
-  // xdg-open) that nothing in the editor or paste path uses; SSH_AUTH_SOCK is a credential channel.
+  // xdg-open) that nothing in the editor or paste path uses. A socket only the pane has stays out; the daemon's own
+  // socket is forwarded through the session environment (#1159).
   const withheldNames = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "SSH_AUTH_SOCK", "TMUX", "TMUX_PANE"];
   const paneNames = [...sessionNames, "WAYLAND_DISPLAY", ...withheldNames];
   // A managed launch runs as a staged script under /bin/sh, which is dash on Debian and Ubuntu. Run the cases under dash too
