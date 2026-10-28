@@ -109,6 +109,14 @@ reaction on any other message, including a person's reply in the thread, is igno
 `reaction_added` event: add both under **OAuth & Permissions** and **Event Subscriptions**, then
 reinstall the app to the workspace.
 
+To have reactions ignored instead, run `rig slack setup --reactions off`. The agent that asked
+never hears of a reaction, including one still waiting to be retried, and a person answers an ask by
+typing a reply in its thread. Slack still sends the event and the manifest keeps it, so switching
+back with `--reactions route` needs no change to the app. Like any saved change, the setting reaches
+a running connector when it next rewires, which a daemon restart does (`rig daemon stop`, then
+`rig daemon start`). See [One channel per rig or seat](#one-channel-per-rig-or-seat-optional) for
+why disabling and re-enabling the connector isn't the same.
+
 The manifest also turns on **Interactivity**, so the human can answer a decision's structured
 questions by clicking a button (`rig queue create --human-questions-file`). In Socket Mode the
 clicks arrive over the same socket, so no request URL is needed. An app created from an older

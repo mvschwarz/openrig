@@ -603,8 +603,6 @@ export class InboundRouter {
    * dead-lettered and retried like a message.
    */
   async routeReaction(ev: SlackEvent, attempts = 0): Promise<{ status: InboundDisposition; reason?: string }> {
-    // With reactions off, a person's emoji stays in Slack and never becomes a row (#2233).
-    if (this.deps.reactions === "off") return { status: "ignored", reason: "reactions-off" };
     const r = await this.attemptReaction(ev);
     if (r.status !== "handler-failed") return r;
     this.deps.deadLetter.append(ev, attempts + 1);
@@ -613,6 +611,9 @@ export class InboundRouter {
   }
 
   private async attemptReaction(ev: SlackEvent): Promise<{ status: InboundDisposition; reason?: string }> {
+    // With reactions off, a person's emoji stays in Slack and never becomes a row (#2233). That holds on the retry too, so a
+    // reaction retained from before reactions were turned off is dropped as ignored.
+    if (this.deps.reactions === "off") return { status: "ignored", reason: "reactions-off" };
     const eventId = `reaction:${ev.item?.channel ?? "-"}:${ev.item?.ts ?? "-"}:${ev.user ?? "-"}:${ev.reaction ?? "-"}:${ev.event_ts ?? "-"}`;
     if (this.deps.seen.load().has(eventId)) return { status: "ignored", reason: "dup" };
     if (this.inflight.has(eventId)) return { status: "ignored", reason: "inflight" };
