@@ -72,9 +72,14 @@ describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server 
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
   });
 
-  it("reports the name tmux used when it changes one, such as a . in a rig name", async () => {
+  // Whether tmux changes a `.` depends on its version (3.5a writes `_`; the tmux CI runs keeps the `.`), so the CLI
+  // prints the name tmux reports, which is always the session tmux has.
+  it("reports the name tmux used for a rig name with a ., whichever form its version keeps", async () => {
     const out = path.join(dir, "argv-dot.json");
-    expect(start("release-0.7", out)).toBe("chatroom@release-0_7");
+    const reported = start("release-0.7", out);
+    expect(["chatroom@release-0.7", "chatroom@release-0_7"]).toContain(reported);
+    expect(execFileSync("tmux", ["-L", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"], { encoding: "utf8" }).split("\n"))
+      .toContain(reported);
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", "release-0.7"]), { timeout: 5000 });
   });
 });

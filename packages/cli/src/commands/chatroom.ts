@@ -9,9 +9,9 @@ import { execFileSync } from "node:child_process";
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
  *  reading as an option. tmux reads the `-s` value as a format, where `##` is one `#` and a run of `#` before `[` is a
- *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. tmux still changes
- *  some session names: `:` and `.` become `_`, and a backslash or a control character (newline, tab and others) is
- *  escaped. `-P -F` prints the name tmux used. */
+ *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. Some tmux versions
+ *  still change a session name (3.5a writes `_` for `:` and `.`, and escapes a backslash or a control character such
+ *  as a newline or tab), so `-P -F` prints the name tmux used. */
 export function chatroomWatchTmuxArgs(rig: string): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
   return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
