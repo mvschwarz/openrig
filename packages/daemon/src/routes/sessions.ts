@@ -105,7 +105,8 @@ sessionsRoutes.get("/", (c) => {
 nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const rigId = c.req.param("rigId")!;
   const deps = getDeps(c);
-  const rig = deps.rigRepo.getRig(rigId);
+  // Only existence is needed here; the inventory below builds the response.
+  const rig = deps.rigRepo.db.prepare("SELECT 1 FROM rigs WHERE id = ?").get(rigId);
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
 
   const refresh = c.req.query("refresh") === "true";
