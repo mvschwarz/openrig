@@ -779,7 +779,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         resolveChannel: index === 0
           ? opts.resolveChannel
           : (part) => firstAttemptChannel(opts, opts.attempted.load(), partId(0)) ?? opts.resolveChannel?.(part) ?? opts.channel,
-        onPostedRoot: index === 0 ? opts.onPostedRoot : undefined,
+        // #2234: a later part has the primary's thread, so this fires only when Slack posted it top-level because that root was
+        // deleted between parts. It then opens a root of its own for the same conversation, as a single part does.
+        onPostedRoot: opts.onPostedRoot,
         onPosted: (_part, messageTs, threadTs) => {
           if (index !== 0) return;
           if (messageTs === "reconciled") throw new Error("Primary reconciliation has no Slack timestamp; multipart delivery remains incomplete.");

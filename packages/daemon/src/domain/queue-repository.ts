@@ -18,7 +18,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
-import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
+import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -3967,7 +3967,14 @@ export class QueueRepository {
 
   private replyToFallbackFor(qitemId: string): string | null {
     const choice = this.replyToChoiceFor(qitemId);
-    return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
+    if (choice?.kind === "fallback") return describeReplyToFallback(choice);
+    // #2234: the choice threaded it, but Slack found the root gone and posted it top-level. Same trust rule as the choice.
+    for (const t of this.transitionLog.listForQitem(qitemId).reverse()) {
+      if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
+      const missing = parseReplyToThreadMissing(t.transitionNote ?? "");
+      if (missing) return `thread-missing (thread ${missing})`;
+    }
+    return null;
   }
 
   /** The parked query's obligation face: open rows to one destination, newest first, without the per-row

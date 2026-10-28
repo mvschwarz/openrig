@@ -41,7 +41,7 @@ import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./soc
 import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
-import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
+import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
@@ -613,9 +613,17 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         },
         // #2234: Slack posted a reply to this root as a new top-level message, so the root is gone. Its mapping is closed,
         // so later posts don't reuse it. A closed root still routes a reply to its seat.
-        onThreadMissing: (_p, threadTs, channel) => {
+        onThreadMissing: (p, threadTs, channel) => {
           threadMap.close(threadTs, channel);
           log(`thread ${threadTs} in ${channel} is gone: Slack posted the reply as a new message, so its mapping is closed`);
+          // A --reply-to update's receipt says where it actually went; the recorded choice stays, for retries.
+          if (threadReplyTo(p)) {
+            try {
+              opts.queueRepo.update({ qitemId: p.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToThreadMissing(threadTs) });
+            } catch (e) {
+              log(`reply-to placement for ${p.qitemId} not recorded: ${(e as Error).message}`);
+            }
+          }
         },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
