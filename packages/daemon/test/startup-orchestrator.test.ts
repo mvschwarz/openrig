@@ -1445,7 +1445,7 @@ describe("StartupOrchestrator", () => {
     } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });
 
-  it.each([[true, "vendor/model", 1], [false, "vendor/model", 0], [true, undefined, 0]])("records a model passed at launch only when the preset opts in (%s) and the seat declares one (%s)", async (opted, model, records) => {
+  it.each([[true, "vendor/model", true, 1], [false, "vendor/model", true, 0], [true, undefined, true, 0], [true, "vendor/model", false, 0]])("records a model passed at launch only when the preset opts in (%s), the seat declares one (%s) and the send is confirmed (%s)", async (opted, model, sent, records) => {
     const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "model-input-"));
     try {
       nodeFs.writeFileSync(nodePath.join(dir, "synth.yaml"), `format: 1\nname: synth\ncommand: synth\nmaintainer: Example\n${opted ? "passes_model: true\n" : ""}`);
@@ -1454,9 +1454,12 @@ describe("StartupOrchestrator", () => {
       const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => dir,
         launchResultRoot: () => nodePath.join(dir, "state", "launch-results"),
         tmux: { hasSession: async () => true, getPaneCommand: async () => "node",
-          sendShellCommand: vi.fn(async (_session: string, _command: string, beforeInput?: () => void) => { beforeInput?.(); return { ok: true as const }; }) } });
+          sendShellCommand: vi.fn(async (_session: string, _command: string, beforeInput?: () => void) => {
+            beforeInput?.();
+            return sent ? { ok: true as const } : { ok: false as const, message: "typed, then the pane went away" };
+          }) } });
       const result = await createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), ...(model ? { model } : {}) } }));
-      expect(result.ok).toBe(true);
+      expect(result.ok).toBe(sent);
       const rows = db.prepare("SELECT payload FROM events WHERE node_id=? AND type='node.startup_model_passed'").all(seed.nodeId) as { payload: string }[];
       expect(rows).toHaveLength(records);
       if (records) expect(JSON.parse(rows[0]!.payload)).toMatchObject({ model, resume: false });
