@@ -105,7 +105,7 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
 
 // Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
 // shows only the envelope's reply footer and an upward scroll indicator.
-function codexViewport(body: string, width: number, height: number): ComposerSnapshot {
+function codexViewport(body: string, width: number, height: number, renderedRows?: string[]): ComposerSnapshot {
   // rust-v0.164.0 uses this character-count label, not Claude's line-count label.
   if ([...body].length > 1000) return codexViewport(`[Pasted Content ${[...body].length} chars]`, width, height);
   if (!body) return { screen: ["• DONE", "", "  Worked for 4s • 20:24", "", "",
@@ -117,7 +117,9 @@ function codexViewport(body: string, width: number, height: number): ComposerSna
       '  fixture-driver@external --summary "<one line>" --body "..."',
       "  --verify", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", ""].join("\n"),
     cursor: { x: 10, y: 5, width, height }, inMode: false };
-  const rows = body.split("\n");
+  // The fullscreen composer scrolls input once padding/status/hint consume its cap.
+  const capacity = Math.min(height, Math.max(8, Math.floor(height * 2 / 3))) - 4;
+  const rows = (renderedRows ?? body.split("\n")).slice(-capacity);
   return { screen: ["Ready", "", `› ${rows[0]}`, ...rows.slice(1).map(row => `  ${row}`), "",
     "  GPT-6.1-Sol low · ~/project", "  ? for shortcuts", ""].join("\n"),
     cursor: { x: 2 + stringWidth(rows.at(-1)!), y: 1 + rows.length, width, height }, inMode: false };
@@ -170,6 +172,45 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(await f.send("native-wrap", text, f.options)).toMatchObject({ ok: true, sent: true });
     expect(f.submissions).toEqual([text]);
     expect(f.bodies.a).toBe("");
+  });
+
+  it("retains fourteen exact-width body lines before their insertion rows scroll the full envelope", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const body = "x".repeat(62);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", Array(14).fill(body).join("\n"));
+    expect([...text].length).toBeLessThan(1000);
+    const rows = text.split("\n").flatMap(row => row === body ? [row, ""] : [row]);
+    expect(rows).toHaveLength(33); // Native fullscreen cap is 30 rows, including chrome.
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 65, 45, f.bodies.a ? rows : undefined));
+    expect(await f.send("full-width", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("counts the insertion row of an exact-width line at the input viewport limit", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    const full = "x".repeat(157);
+    const text = [full, ...Array(25).fill("x")].join("\n"); // 26 logical rows, 27 visual rows.
+    const rows = [full, "", ...Array(25).fill("x")];
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 160, 45, f.bodies.a ? rows : undefined));
+    expect(await f.send("insertion-row", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("delivers an ordinary word-wrapped wake with its complete envelope at 80x22", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const line = "Please review the current task and reply with the smallest useful change.";
+    expect(stringWidth(line)).toBe(73);
+    const body = Array(3).fill(line).join(" ");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body, { stampISO: "2026-10-28T21:49:00Z" });
+    // Native FirstFit keeps each phrase together; the next word cannot fit on the previous row.
+    const rows = text.replace(body, Array(3).fill(line).join("\n")).split("\n");
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(await f.send("ordinary-wake", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
   });
 
   it("retains a raw-fitting 1200-code-point envelope before Codex collapses it into an unowned label", async () => {
