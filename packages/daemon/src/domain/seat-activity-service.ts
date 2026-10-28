@@ -337,7 +337,7 @@ export class SeatActivityService {
         const communityHarnessChanged = !!known && communityKind(known.inventory) !== communityKind(inventory);
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
-          this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
+          this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
         }
       }
 
@@ -686,13 +686,15 @@ export class SeatActivityService {
   }
 
   /** A runner seat declared with no hook evidence (after a daemon restart) takes its last recorded hook, so an idle seat
-   *  that posts nothing still reads idle. Its seq is 0: any live hook outranks it. */
-  private restoreDurableHook(seat: { seatNodeId: string; sessionName: string }, inventory: AdapterRungInventory): void {
+   *  that posts nothing still reads idle. Its seq is 0: any live hook outranks it. The seat's own runtime reads the
+   *  record, as its live hooks are read: a community runner's inventory names no runtime of its own. */
+  private restoreDurableHook(seat: { seatNodeId: string; sessionName: string }, inventory: AdapterRungInventory,
+    seatRuntime: string | null): void {
     if (!this.restoreHookEvidence || !inventory.rungs.some((r) => r.rung === "lifecycle-hooks" && r.durableBoundaries)) return;
     const ladder = this.ladder.get(seat.seatNodeId);
     if (!ladder || this.latestByRung(ladder, "lifecycle-hooks")) return;
     let evidence: ActivityEvidence | null = null;
-    try { evidence = this.restoreHookEvidence(seat, inventory.runtime); } catch { evidence = null; }
+    try { evidence = this.restoreHookEvidence(seat, seatRuntime ?? inventory.runtime); } catch { evidence = null; }
     if (evidence && evidence.seatNodeId === seat.seatNodeId && evidence.sessionName === seat.sessionName
         && evidence.rung === "lifecycle-hooks") this.reportEvidence({ ...evidence, seq: 0 });
   }

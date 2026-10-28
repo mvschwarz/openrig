@@ -86,7 +86,8 @@ export function restoredRunnerHookEvidence(
   const latest = store.getLatestForNode({ nodeId: seat.seatNodeId, sessionName: seat.sessionName, order: "source" });
   if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
   const state = !latest.stale ? latest.state
-    : latest.reason === "stale_runtime_hook" ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime) : "unknown";
+    : latest.reason === "stale_runtime_hook"
+      ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true) : "unknown";
   return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
     activity: { ...latest, state }, seq: 0 });
 }

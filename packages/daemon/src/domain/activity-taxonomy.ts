@@ -111,7 +111,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness";
+  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness" | "community-runner";
   rungs: RungDeclaration[];
 }
 

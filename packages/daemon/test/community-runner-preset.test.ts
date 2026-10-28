@@ -159,7 +159,8 @@ function fixture(runner: boolean | undefined) {
   }
   const state = () => oracle.getSeatState(node.id);
   const latest = () => store.getLatestForNode({ nodeId: node.id, sessionName: session.sessionName });
-  return { post, restart, replace, state, latest, db, oracle: () => oracle };
+  const later = (ms: number) => { clock.now += ms; };
+  return { post, restart, replace, state, latest, later, db, oracle: () => oracle };
 }
 
 describe("a runner seat's activity follows its hooks", () => {
@@ -176,6 +177,15 @@ describe("a runner seat's activity follows its hooks", () => {
     await seat.restart();
     await seat.post("UserPromptSubmit", "accepted");
     expect(seat.state()).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
+  });
+
+  it("comes back idle after a daemon restart, long past the store's freshness window, as a Pi seat does", async () => {
+    const seat = fixture(true);
+    await seat.post("UserPromptSubmit", "accepted");
+    await seat.post("Stop", "end_turn");
+    seat.later(60 * 60 * 1000);
+    await seat.restart();
+    expect(seat.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
   });
 
   it.each([["a plain launch", false], ["a legacy session with nothing recorded", undefined]] as const)(
@@ -206,6 +216,15 @@ describe("a runner's exit never reads idle", () => {
     await seat.post("Stop", "synth_exited");
     expect(seat.latest()).toMatchObject({ state: "unknown", communityRunner: true });
     expect(seat.state()?.activity).not.toBe("idle-at-prompt");
+  });
+
+  it("still reads a runner's exit as not idle after a daemon restart, once the record has gone stale", async () => {
+    const seat = fixture(true);
+    await seat.post("Stop", "end_turn");
+    await seat.post("Stop", "synth_exited");
+    seat.later(60 * 60 * 1000);
+    await seat.restart();
+    expect(seat.state()?.activity).toBe("unknown");
   });
 
   it.each([["a plain launch", false], ["a legacy session", undefined]] as const)(
