@@ -275,11 +275,16 @@ export function deriveOriented(db: Database.Database, nodeId: string): NodeOrien
  * node-scoped, so the per-node subset of rows + the identical fold yield the
  * identical verdict. Nodes with no proof events are simply absent (caller
  * defaults to "n-a", matching the no-challenge branch).
+ * An optional rig scope reads only its current nodes' history, retaining the
+ * same per-node fold without materializing other rigs' proof events.
  */
-export function buildOrientedMap(db: Database.Database): Map<string, NodeOriented> {
+export function buildOrientedMap(db: Database.Database, rigId?: string): Map<string, NodeOriented> {
+  // Inventory only consumes the current rig's nodes. Scope by node identity,
+  // not events.rig_id: a node's proof history can predate its current rig.
+  const scope = rigId === undefined ? "" : " AND node_id IN (SELECT id FROM nodes WHERE rig_id = ?)";
   const rows = db.prepare(
-    "SELECT node_id, type, payload, seq FROM events WHERE type IN ('node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected') ORDER BY node_id, seq DESC"
-  ).all() as Array<{ node_id: string; type: string; payload: string; seq: number }>;
+    "SELECT node_id, type, payload, seq FROM events WHERE type IN ('node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected')" + scope + " ORDER BY node_id, seq DESC"
+  ).all(...(rigId === undefined ? [] : [rigId])) as Array<{ node_id: string; type: string; payload: string; seq: number }>;
   const byNode = new Map<string, OrientedEventRow[]>();
   for (const r of rows) {
     let list = byNode.get(r.node_id);

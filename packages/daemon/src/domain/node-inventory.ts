@@ -588,9 +588,9 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   const identityVerdicts = new SeatIdentityStore(db).getForRig(rigId);
   // FS-1 W1.3 S1/S2 — the per-node restore-outcome + oriented reads built ONCE
   // for the rig (was a query per node inside the rows.map). rig-scoped restore
-  // map = the prior WHERE rig_id=? filter; oriented map is node-scoped/global.
+  // map = the prior WHERE rig_id=? filter; oriented history follows the rig's nodes.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
-  const orienteds = buildOrientedMap(db);
+  const orienteds = buildOrientedMap(db, rigId);
   const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
 
   const rows = queryInventoryRows(db, rigId);
