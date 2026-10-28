@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
 describe("POST /api/rigs/:rigId/expand", () => {
   let db: Database.Database;
@@ -460,5 +461,62 @@ describe("POST /api/rigs/:rigId/expand", () => {
         `${podId} must persist nothing`,
       ).toMatchObject({ c: 0 });
     }
+  });
+});
+
+// rig expand keeps a member's explicit effort: the route and the expansion service both carry it into the spec, so it
+// reaches the saved seat and the launch. The agent's profile prefers a different effort.
+describe("POST /api/rigs/:rigId/expand — member effort", () => {
+  const AGENT_YAML = `name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    preferences:\n      effort: low\n    uses:\n      skills: []\n`;
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let bindings: NodeBinding[];
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    bindings = [];
+    const adapter = {
+      runtime: "claude-code",
+      listInstalled: async () => [],
+      project: async () => ({ projected: [], skipped: [], failed: [] }),
+      deliverStartup: async () => ({ delivered: 0, failed: [] }),
+      launchHarness: async (binding: NodeBinding) => { bindings.push(binding); return { ok: true }; },
+      checkReady: async () => ({ ready: true }),
+    } as RuntimeAdapter;
+    setup = createTestApp(db, {
+      adapters: { "claude-code": adapter },
+      podInstantiatorFsOps: {
+        exists: (p: string) => p.includes("agents/impl"),
+        readFile: (p: string) => { if (p.includes("agents/impl")) return AGENT_YAML; throw new Error(`Not found: ${p}`); },
+      },
+    });
+  });
+
+  afterEach(() => { db.close(); });
+
+  async function expandWith(effort: Record<string, unknown>) {
+    const rig = setup.rigRepo.createRig("effort-rig");
+    const res = await setup.app.request(`/api/rigs/${rig.id}/expand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rigRoot: "/project/rigs/effort-rig", pod: { id: "qa", label: "QA", members: [
+        { id: "reviewer", runtime: "claude-code", agent_ref: "local:agents/impl", profile: "default", cwd: ".", ...effort },
+      ], edges: [] } }),
+    });
+    const node = db.prepare("SELECT effort FROM nodes WHERE logical_id = 'qa.reviewer'").get() as { effort: string | null } | undefined;
+    return { ok: res.ok, savedEffort: node?.effort ?? null, launchedEffort: bindings.map((b) => b.effort ?? null) };
+  }
+
+  it("keeps an explicit effort in the saved seat and the launch, over the profile's", async () => {
+    expect(await expandWith({ effort: "high" })).toEqual({ ok: true, savedEffort: "high", launchedEffort: ["high"] });
+  });
+
+  it("without an effort, the seat keeps the profile's", async () => {
+    expect(await expandWith({})).toEqual({ ok: true, savedEffort: "low", launchedEffort: ["low"] });
+  });
+
+  // A present but unusable effort stays an advisory, as in a rig spec: it's ignored, never a new refusal.
+  it.each([["blank", "  "], ["a number", 7]])("a %s effort is ignored and the expansion succeeds with the profile's", async (_label, effort) => {
+    expect(await expandWith({ effort })).toEqual({ ok: true, savedEffort: "low", launchedEffort: ["low"] });
   });
 });
