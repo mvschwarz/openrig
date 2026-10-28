@@ -188,6 +188,8 @@ export interface InboundDeps {
   queue: InboundQueuePort;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
+  /** What a person's emoji reaction does: "route" (absent) makes a row for the seat that asked; "off" ignores it (#2233). */
+  reactions?: "route" | "off";
   destination: string; // first-class config; default operator-agent@kernel
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
    *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
@@ -601,6 +603,8 @@ export class InboundRouter {
    * dead-lettered and retried like a message.
    */
   async routeReaction(ev: SlackEvent, attempts = 0): Promise<{ status: InboundDisposition; reason?: string }> {
+    // With reactions off, a person's emoji stays in Slack and never becomes a row (#2233).
+    if (this.deps.reactions === "off") return { status: "ignored", reason: "reactions-off" };
     const r = await this.attemptReaction(ev);
     if (r.status !== "handler-failed") return r;
     this.deps.deadLetter.append(ev, attempts + 1);

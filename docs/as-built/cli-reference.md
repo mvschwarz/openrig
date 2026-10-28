@@ -485,7 +485,7 @@ do not establish connectivity to a live peer.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig slack` | — | — |
-| `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reactions <mode>`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig slack status` | — | `--json` |
 | `rig slack manifest` | — | `--url`<br>`--json` |
 | `rig slack verify` | — | `--json` |
