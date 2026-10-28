@@ -438,7 +438,7 @@ export class SeatDeliveryGuard {
         const message = uncertainty === "controls"
           ? "OpenRig couldn't confirm the layout of tabs or control characters. Send the message without them; nothing was pasted."
           : uncertainty === "long"
-            ? "OpenRig couldn't confirm ownership of Codex's collapsed long paste. Send a shorter message, or set this seat's typing guard to off for delivery without draft protection; nothing was pasted."
+            ? "OpenRig couldn't confirm ownership of Codex's collapsed long paste. Send a shorter message; nothing was pasted. Turning this seat's typing guard off explicitly disables draft protection."
             : "OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted.";
         throw new DeliveryGuardError("draft_input_unknown", message);
       }
