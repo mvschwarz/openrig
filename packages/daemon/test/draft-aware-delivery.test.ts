@@ -106,6 +106,8 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
 // Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
 // shows only the envelope's reply footer and an upward scroll indicator.
 function codexViewport(body: string, width: number, height: number): ComposerSnapshot {
+  // rust-v0.164.0 uses this character-count label, not Claude's line-count label.
+  if ([...body].length > 1000) return codexViewport(`[Pasted Content ${[...body].length} chars]`, width, height);
   if (!body) return { screen: ["• DONE", "", "  Worked for 4s • 20:24", "", "",
     "› \x1b[2mAsk Codex to do anything\x1b[0m", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", "  ? for shortcuts", ""].join("\n"),
     cursor: { x: 2, y: 5, width, height }, inMode: false };
@@ -147,6 +149,36 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.submissions).toEqual([d1Envelope]);
     expect(f.writes).toHaveLength(2);
     expect(f.bodies.a).toBe("");
+  });
+
+  it("delivers nine native-fitting 61-column lines plus their envelope at 65x45", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const text = wrapPaneEnvelope("sender@test", "worker@test", Array(9).fill("x".repeat(61)).join("\n"));
+    expect(await f.send("native-fit", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("retains a raw-fitting 1200-code-point envelope before Codex collapses it into an unowned label", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    const empty = wrapPaneEnvelope("sender@test", "worker@test", "");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "x".repeat(1200 - [...empty].length));
+    expect([...text]).toHaveLength(1200);
+    const result = await f.send("native-long", text, f.options);
+    expect(result).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(result.error).toMatch(/shorter message.*guard.*off/);
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["\t", "\x1b"])("gives control-specific recovery at every size (%j)", async control => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    for (const text of [`a${control}b`, `${"x".repeat(1200)}${control}`]) {
+      const result = await f.send("control", text, f.options);
+      expect(result).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+      expect(result.error).toMatch(/without them/);
+      expect(result.error).not.toMatch(/larger terminal/);
+    }
+    expect(f.writes).toEqual([]);
   });
 
   it("leaves default-off delivery unchanged in the small viewport", async () => {
