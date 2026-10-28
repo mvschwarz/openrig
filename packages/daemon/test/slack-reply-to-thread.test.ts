@@ -182,7 +182,9 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
-    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string, channel?: string) => Promise<void>> {
+    // `respond` adds to Slack's answer for a post, such as the posted `message` for a reply that Slack put elsewhere.
+    async function connectInbound(respond?: (body: Record<string, unknown>, ts: string) => Record<string, unknown>):
+      Promise<(threadTs: string | undefined, ts: string, channel?: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -195,7 +197,10 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         inboundMaxConnects: 1,
         fetchImpl: async (url, init) => {
           if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
-          posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` });
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          posts.push(body);
+          const ts = `${posts.length}.1`;
+          return reply({ ok: true, ts, ...respond?.(body, ts) });
         },
       });
       stops.push(() => wire.stop()); wire.startServices?.();
@@ -279,6 +284,27 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
       // The thread still belongs to the decision; the answer opened no root of its own.
       expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    it("#2234: an update Slack posted top-level because its thread's root was gone verifies unthreaded, and the seat's answer to a reply threads under it", async () => {
+      // Slack answers a post into the deleted root 1.1 as a new top-level message.
+      const humanReply = await connectInbound((body, ts) => body.thread_ts === "1.1" ? { message: { ts, text: "posted" } } : {});
+      const decision = await repo.create({ ...request, humanAlert: true });
+      await deliver(decision.qitemId);
+      resolveDecision(decision.qitemId);
+      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: decision.qitemId });
+      await deliver(update.qitemId);
+      const promoted = `${posts.length}.1`;
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(update.qitemId)?.replyToFallback).toBe("thread-missing (thread 1.1)");
+
+      // The person replies under the update Slack promoted, and the seat answers that reply.
+      await humanReply(promoted, "920.1");
+      await vi.waitFor(() => expect(inboundRow("920.1")).toMatchObject({ destinationSession: "author@rig" }));
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inboundRow("920.1")!.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe(promoted);
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
     });
 
     it("interaction provenance: a completed button answer keeps its ask's thread for the seat's follow-up", async () => {
