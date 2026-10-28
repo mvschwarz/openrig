@@ -158,6 +158,20 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.submissions).toEqual([text]);
   });
 
+  it("owns the complete envelope after a native 62-column hard wrap at 65x45", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const body = "x".repeat(64);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body);
+    expect(text.split("\n").filter(row => row.length > 62)).toEqual([body]);
+    // Codex's two-column prompt and one-column right inset leave 62 cells.
+    // This ASCII word wraps without dropping or replacing any authored byte.
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport((f.bodies.a ?? "").replace(body, `${body.slice(0, 62)}\n${body.slice(62)}`), 65, 45));
+    expect(await f.send("native-wrap", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.bodies.a).toBe("");
+  });
+
   it("retains a raw-fitting 1200-code-point envelope before Codex collapses it into an unowned label", async () => {
     const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
     const empty = wrapPaneEnvelope("sender@test", "worker@test", "");
