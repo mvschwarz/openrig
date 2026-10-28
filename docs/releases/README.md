@@ -1,15 +1,8 @@
 # Release Notes
 
-This directory is the lightweight release history for OpenRig.
+This directory holds one note per release for OpenRig v0.1.12 through v0.6.3, plus v0.6.12 (for example `v0.1.12.md`).
 
-It is intentionally simpler than a monolithic `CHANGELOG.md`.
-
-Each shipped release gets its own note:
-
-- `v0.1.12.md`
-- `v0.2.0.md`
-- `v0.3.0.md`
-- and so on
+Notes for later releases are in [`CHANGELOG.md`](../../CHANGELOG.md) and on the [GitHub Releases page](https://github.com/mvschwarz/openrig/releases).
 
 ## Why This Exists
 
@@ -101,5 +94,3 @@ For each release:
 ## Scope
 
 This directory is a release-note archive, not a full historical changelog taxonomy.
-
-If OpenRig later wants a curated `CHANGELOG.md`, it can be generated or summarized from the release notes here.
