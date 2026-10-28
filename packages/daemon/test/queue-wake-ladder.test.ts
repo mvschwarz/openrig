@@ -453,6 +453,26 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     connectorBindings: [], prefs: { deliveryClass: "B" as const, availability: "available" as const },
   }] });
 
+  it.each([false, true])("an inadmissible sender cannot abort a failed baton escalation (consumed hop=%s)", async consumed => {
+    const baton = await exhaustToSelfSkip();
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=?, tags=? WHERE qitem_id=?")
+      .run(staleSource, JSON.stringify(consumed ? ["escalation-route:one-hop"] : []), baton.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posted: string[] = [];
+    const overrides = { resolveOrchestrator: () => null, deliveryEngine: recordingEngine(posted), humanRung: "always" };
+    const result = await tick(overrides);
+    expect(result.outcome).not.toBe("failed");
+    expect(posted).toEqual([baton.qitemId]);
+    expect(calls).toEqual([]);
+    const tag = consumed ? `consumed-hop:${baton.qitemId}` : (await ladderMod()).escalationDedupTag(baton.destinationSession);
+    const carriers = repo.list({ limit: 500 }).filter(row => row.tags?.includes(tag));
+    expect(carriers).toHaveLength(1);
+    expect(carriers[0]).toMatchObject({ sourceSession: staleSource, destinationSession: baton.destinationSession });
+    await tick(overrides);
+    expect(posted).toEqual([baton.qitemId]);
+  });
+
   it("HUMAN RUNG DEFAULT: with the engine wired and no setting, the operator rung posts the escalation as before", async () => {
     const baton = await exhaustToSelfSkip();
     const posted: string[] = [];
