@@ -27,6 +27,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 
 import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } from "./queue-owner.js";
 import { nodeSessionConfirmedMissing } from "./node-inventory.js";
+import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
 import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
@@ -865,21 +866,26 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // OpenRig rings, whose work is still unclaimed (its ring failed, or it didn't pick the work up by the unclaimed
     // age), goes the same way; one that claimed and stalled keeps its own finding, which rings it. Only a person can
     // make a hosted member check its work, so the person goes first: the operator seat when it's a person's address,
-    // else the row's creator, else the operator agent, skipping any that is unset, this seat, confirmed missing or
-    // unroutable itself.
+    // else the row's creator, else the operator agent, skipping any that is unset, this seat, confirmed missing,
+    // unroutable or a terminal seat itself. A bound terminal seat goes the same way: the queue wake types nothing into
+    // it, and nothing there can claim work.
     const classOf = (seat: string) => deps.queueRepo.classifyDestinationOf(seat).class;
     for (const c of candidates) {
       if (c.route !== c.row.destinationSession) continue;
       const destination = classOf(c.row.destinationSession);
       const noRoute = destination === "unroutable" && !!c.row.lastNudgeResult?.startsWith("unroutable:");
-      if (!noRoute && !(destination === "hosted" && !c.row.claimedAt)) continue;
+      const terminalSeat = destination === "pane-bound" && isBoundTerminalSeat(deps.db, c.row.destinationSession);
+      if (!noRoute && !terminalSeat && !(destination === "hosted" && !c.row.claimedAt)) continue;
       const operatorSeat = (deps.resolveOperatorSeat ?? resolveOperatorSeat)();
       const person = operatorSeat && classOf(operatorSeat) === "gateway-routable" ? operatorSeat : null;
       const choices = [person, c.row.sourceSession, (deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)()];
-      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat) && classOf(seat) !== "unroutable");
+      const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat) && classOf(seat) !== "unroutable"
+        && !isBoundTerminalSeat(deps.db, seat));
       c.why += noRoute
         ? `; ${c.route} has no wake route on this daemon (no terminal, not a person). If it's a hosted member, it sees this work only when it next checks, so ask it to; otherwise fix the address`
-        : `; ${c.route} is a hosted member. OpenRig rang its trigger (${c.row.lastNudgeResult ?? "no ring recorded"}), and it hasn't claimed this work. It sees work only when it checks, so ask it to`;
+        : terminalSeat
+          ? `; ${c.route} is a terminal seat; nothing there can claim this work, and no wake is typed into it. Route the work to an agent seat`
+          : `; ${c.route} is a hosted member. OpenRig rang its trigger (${c.row.lastNudgeResult ?? "no ring recorded"}), and it hasn't claimed this work. It sees work only when it checks, so ask it to`;
       if (chosen < 0) {
         c.why += `. No person, creator or operator agent that can be reached is available, so this finding stays addressed to it`;
         continue;
