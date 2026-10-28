@@ -1085,6 +1085,13 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
+  // The operator engine owns actual human delivery. Its non-nudged queue carrier
+  // must still be locally admissible: an original cross-host sender can outlive
+  // the rig/host registration that made it a valid return address.
+  const humanAlertCarrier = (dest: string, source?: string): string => {
+    const candidates = [resolveOperatorSeat(), source];
+    return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  };
   const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean }>();
   const readAt = (dest: string, refusedAt: string): "blocked" | "clear" | "unknown" => {
     try { return deps.readPromptState?.(dest, refusedAt) ?? "unknown"; } catch { return "unknown"; }
@@ -1282,7 +1289,7 @@ async function advancePromptRefusals(
         const choiceOnly = Boolean(group.choice && !group.other);
         const promptTags = choiceOnly ? [PROMPT_ALERT_TAG, PROMPT_CHOICE_TAG, `consumed-prompt-destination:${dest}`,
           ...(group.rowKeys.get(member.row.qitemId) ?? [])] : [];
-        const continuation = await ensureEscalationRow(deps, dest, resolveOperatorSeat() ?? member.row.sourceSession,
+        const continuation = await ensureEscalationRow(deps, dest, humanAlertCarrier(dest, member.row.sourceSession),
           [{ row: member.row, reason }], reason, `consumed-hop:${member.row.qitemId}`, [ESCALATION_HOP_TAG, ...promptTags]);
         if (!view.orchRung) appendMarker(deps.queueRepo, member.row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
         // A choice alert's tags and dispatch marker must live on the same durable row the shared gate reads.
@@ -1322,7 +1329,7 @@ async function advancePromptRefusals(
     const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
     const keys = group.keys.filter(key => group.jobKeys.has(key) || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
+      toOperator ? humanAlertCarrier(dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
