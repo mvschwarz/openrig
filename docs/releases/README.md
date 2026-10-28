@@ -4,22 +4,6 @@ This directory holds one note per release for OpenRig v0.1.12 through v0.6.3, pl
 
 Notes for later releases are in [`CHANGELOG.md`](../../CHANGELOG.md) and on the [GitHub Releases page](https://github.com/mvschwarz/openrig/releases).
 
-## Why This Exists
-
-We want a practical release-management pattern that works with how OpenRig is actually being shipped today:
-
-- npm package release
-- optional Git tag
-- optional GitHub Release
-- short, human-written summary of what is included
-
-This keeps release notes:
-
-- easy to author
-- easy to link in GitHub Releases
-- easy to paste into announcements
-- durable in the repo
-
 ## Minimal Process
 
 For each release:
