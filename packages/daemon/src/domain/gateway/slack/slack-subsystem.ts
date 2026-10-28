@@ -611,6 +611,12 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        // #2234: Slack posted a reply to this root as a new top-level message, so the root is gone. Its mapping is closed,
+        // so later posts don't reuse it. A closed root still routes a reply to its seat.
+        onThreadMissing: (_p, threadTs, channel) => {
+          threadMap.close(threadTs, channel);
+          log(`thread ${threadTs} in ${channel} is gone: Slack posted the reply as a new message, so its mapping is closed`);
+        },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
           // v3 digest branch: transport truth first — every member receipt is
