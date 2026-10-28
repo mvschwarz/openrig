@@ -1489,6 +1489,17 @@ export class RestoreOrchestrator {
       }
       return restoreEffort.effort;
     };
+    // The model `rig seat set-model` saved after the snapshot is the newer choice, and it says so when it differs.
+    let restoreModel: string | null | undefined;
+    const modelForRestore = (): string | null => {
+      if (restoreModel === undefined) {
+        restoreModel = this.liveModel(rigId, node, selected?.nodeId);
+        if (node.model && restoreModel !== node.model) {
+          warnings?.push(`Restore: ${node.logicalId}: this restore launched the seat's saved model ${restoreModel}, not ${node.model} from the snapshot.`);
+        }
+      }
+      return restoreModel;
+    };
     // OPR.0.5.7.1 D1 — the active occupant is RESOLVED, never inferred from
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
@@ -1615,7 +1626,7 @@ export class RestoreOrchestrator {
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node, selected?.nodeId), node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
           selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
@@ -1849,7 +1860,7 @@ export class RestoreOrchestrator {
             // the declared provider) passed nothing through ("No API key
             // found" on every resumed Pi seat). Claude/Codex silently lost
             // their -m/--model on restore the same way.
-            model: node.model ?? undefined,
+            model: modelForRestore() ?? undefined,
             effort: effortForRestore() ?? undefined,
             advisor: node.advisor ?? undefined,
           };
@@ -2158,6 +2169,18 @@ export class RestoreOrchestrator {
     // R2 terminal (954d97a0): NO provenance anywhere (and the error path) = the locked
     // minimum floor, explicitly — never undefined (which would delegate to ambient YOLO).
     return "floor";
+  }
+
+  /** The live seat's current model: `rig seat set-model` saves it on the live node after the snapshot, and every
+   *  managed resume reads it at call time, so an older snapshot can't bring back the model it replaced. Found by logical
+   *  id, as effort's restore does; a seat with no live row, or no model on it, keeps the snapshot's. */
+  private liveModel(rigId: string, node: { logicalId: string; model?: string | null }, selectedNodeId?: string): string | null {
+    const row = this.db.prepare(selectedNodeId
+      ? "SELECT model FROM nodes WHERE id = ? AND rig_id = ? AND logical_id = ?"
+      : "SELECT model FROM nodes WHERE rig_id = ? AND logical_id = ?")
+      .get(...(selectedNodeId ? [selectedNodeId, rigId, node.logicalId] : [rigId, node.logicalId])) as
+      { model: string | null } | undefined;
+    return row?.model ?? node.model ?? null;
   }
 
   /** The live seat's current Codex profile: a setter change made after the snapshot is the newer choice, so an older
