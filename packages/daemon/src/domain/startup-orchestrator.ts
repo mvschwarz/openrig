@@ -598,10 +598,12 @@ export class StartupOrchestrator {
               sessionId: input.sessionId, ...launchResult.firstInput });
             warnings.push("First startup input passed at launch; submission is not confirmed.");
           }
-          if (launchResult.modelInput) {
+          if (launchResult.modelInput?.dispatch === "confirmed") {
             this.eventBus.emit({ type: "node.startup_model_passed", rigId: input.rigId, nodeId: input.nodeId,
               sessionId: input.sessionId, model: launchResult.modelInput.model, resume: !!launchResumeToken });
             warnings.push(`Model "${launchResult.modelInput.model}" passed to the launcher at launch; which model runs is not confirmed.`);
+          } else if (launchResult.modelInput) {
+            warnings.push(`Model "${launchResult.modelInput.model}": the launch command's send is uncertain, so it isn't recorded as passed.`);
           }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;

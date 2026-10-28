@@ -304,15 +304,18 @@ model flag or config key.
 OpenRig keeps three things apart:
 - **requested:** the declared model, as `rig ps --nodes` shows it ("configured", or "not-declared");
 - **passed:** the launcher was handed the model. OpenRig records `node.startup_model_passed` with the model and whether the
-  launch was a resume, only once the launch command was typed: never from the declaration alone, and never for a launch
-  that failed before that. An uncertain launch stays uncertain and isn't retyped;
+  launch was a resume only when the launch command's send succeeded, and a later failure of the launch doesn't undo that.
+  It never says passed from the declaration alone or for a launch that failed before anything was typed. When typing
+  began and the send then failed, the model's dispatch is uncertain: it isn't recorded as passed, and it isn't retyped;
 - **effective:** the model that actually runs. OpenRig doesn't observe it for a community harness, so it reads UNKNOWN.
 
 Passing a model never makes OpenRig pick a default, substitute another model, or retry with one. A model the harness
 refuses is the harness's own error.
 
-The examples map it for a new session only; on a resume, the launcher applies no OpenRig model:
-- **Cursor:** `--model "$OPENRIG_MODEL"` for a new chat. Which model a resumed chat then runs hasn't been checked.
+The examples apply the request for a new session only; on a resume, the example launcher doesn't apply it, and which
+model a resumed session runs stays unknown unless the harness's own evidence says otherwise:
+- **Cursor:** `--model "$OPENRIG_MODEL"` for a new chat. What a resumed chat runs hasn't been checked: the launcher leaving
+  out `--model` doesn't show that it keeps its earlier model.
 - **Hermes:** Hermes takes its model only from the seat's `config.yaml`, so for a new session the launcher writes
   `model: "<id>"` there when the file names no model yet; a model already set there is left alone. Hermes v0.22.4 fixes a
   session's launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was

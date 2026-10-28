@@ -101,20 +101,26 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     const model = found.preset.passesModel ? binding.model?.trim() || undefined : undefined;
     if (found.preset.passesModel) command = model ? `/usr/bin/env OPENRIG_MODEL=${shellQuote(model)} ${command}` : `/usr/bin/env -u OPENRIG_MODEL ${command}`;
     const preset = command === found.preset.command ? found.preset : { ...found.preset, command };
-    // Passed only once typing began: never from the declaration alone, nor when the launch failed before that.
-    let passed = false;
-    const handed = { ...(firstInput ? { firstInput } : {}), ...(model ? { modelInput: { model } } : {}) };
+    // The first input counts as passed once typing began, as before. The model's dispatch is confirmed only by a send that
+    // succeeded, which a later failure of the launch doesn't undo; typing that began and then failed leaves it uncertain;
+    // a launch that failed before typing passed nothing.
+    let typed = false;
+    let sent = false;
+    const handed = () => ({ ...(firstInput ? { firstInput } : {}),
+      ...(model ? { modelInput: { model, dispatch: sent ? "confirmed" as const : "uncertain" as const } } : {}) });
     try {
-      const result = await this.launchPreset(session, preset, resumeRef, firstInput || model ? () => { passed = true; } : undefined);
-      return { ...result, ...(passed ? handed : {}) };
+      const result = await this.launchPreset(session, preset, resumeRef, firstInput || model ? () => { typed = true; } : undefined,
+        model ? () => { sent = true; } : undefined);
+      return { ...result, ...(typed ? handed() : {}) };
     } catch (error) {
-      if (!passed) throw error;
-      return { ok: false, ...handed, error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
+      if (!typed) throw error;
+      return { ok: false, ...handed(), error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
     }
   }
 
-  private async launchPreset(session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, beforeInput?: () => void): Promise<HarnessLaunchResult> {
-    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, beforeInput);
+  private async launchPreset(session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, beforeInput?: () => void,
+    onSent?: () => void): Promise<HarnessLaunchResult> {
+    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, beforeInput, onSent);
     let attempt: LaunchAttempt | undefined;
     let program = preset.command;
     // The record is optional: a folder that can't be made leaves the identity unavailable, and the harness still launches.
@@ -137,6 +143,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       : program;
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
+    onSent?.();
     // A runner reports its conversation in this record; without one, its seat needs a person rather than reading ready.
     if (!attempt && storageNote && preset.runner) return { ok: false, recovery: "attention_required", error: storageNote };
     if (!attempt) return storageNote ? { ok: true, warnings: [storageNote] } : { ok: true };
@@ -165,7 +172,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
    *  in OPENRIG_RESUME_REF. Nothing reports back, so the name is recorded as passed, not observed, and readiness says only
    *  that a process runs: a harness that hasn't yet found a gone conversation reads as ready. Never creating one on a
    *  resume is the launcher's job; OpenRig never asks for a new conversation on a resume. */
-  private async launchNamed(session: string, preset: string, resumeRef: string | undefined, beforeInput?: () => void): Promise<HarnessLaunchResult> {
+  private async launchNamed(session: string, preset: string, resumeRef: string | undefined, beforeInput?: () => void,
+    onSent?: () => void): Promise<HarnessLaunchResult> {
     const name = resumeRef ?? conversationName(session);
     const program = `/usr/bin/env ${resumeRef ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(name)} ${preset}`;
     const command = this.deps.seatLaunchEnvironment
@@ -173,6 +181,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       : program;
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
+    onSent?.();
     return { ok: true, resumeToken: name, resumeType: `community:${this.runtime}`, resumeProvenance: "passed" };
   }
 
