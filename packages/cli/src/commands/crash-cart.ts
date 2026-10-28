@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { copyFileSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { getOpenRigHome } from "../openrig-compat.js";
+import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
 import { formatDaemonHostForUrl } from "../client.js";
@@ -54,6 +54,14 @@ function existsOrThrow(path: string): boolean {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
+/** The evidence probe's URL: OPENRIG_URL with one trailing slash trimmed, as the detector trims it, else daemon.json's
+ *  host and port. The shared reader leaves a query or fragment URL as written, so the trim stays here. */
+export function crashCartEvidenceUrl(openrigUrl: string | undefined, state: { host?: string; port: number } | undefined): string {
+  return openrigUrl
+    ? `${openrigUrl.replace(/\/$/, "")}/healthz`
+    : `http://${formatDaemonHostForUrl(state?.host ?? "127.0.0.1")}:${state?.port ?? 7433}/healthz`;
+}
+
 /**
  * The real verdict: LAZY-imports the narrow @openrig/daemon/crash-cart subpath at invocation (dep
  * rail 2 — rig startup + other verbs never load the daemon module) and composes the shipped detector
@@ -63,7 +71,7 @@ function existsOrThrow(path: string): boolean {
 async function realEmit(): Promise<CrashCartEmit> {
   const cc = await import("@openrig/daemon/crash-cart");
   const home = getOpenRigHome();
-  const openrigUrl = process.env.OPENRIG_URL;
+  const openrigUrl = readOpenRigUrl();
   const probeClassified = (url: string) =>
     cc.probeHealthz(url, { fetch: (u, init) => fetch(u, init as RequestInit), timeoutMs: 700 });
   const detectDeps = {
@@ -83,9 +91,7 @@ async function realEmit(): Promise<CrashCartEmit> {
           ? `alive (pid ${state.pid})`
           : `dead (pid ${state.pid})`
         : "no daemon.json";
-      const url = openrigUrl
-        ? `${openrigUrl.replace(/\/$/, "")}/healthz`
-        : `http://${formatDaemonHostForUrl(state?.host ?? "127.0.0.1")}:${state?.port ?? 7433}/healthz`;
+      const url = crashCartEvidenceUrl(openrigUrl, state);
       const probeResult = await probeClassified(url);
       return { pidState, probeResult, failedSignal: `healthz ${probeResult} at ${url}` };
     },
