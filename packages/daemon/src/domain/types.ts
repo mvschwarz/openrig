@@ -576,6 +576,8 @@ export interface AgentActivity {
   turnId?: string | null;
   /** Native Claude hook actor: null is the main session; absent means an older or unrecognized relay. */
   hookAgentId?: string | null;
+  /** Recorded on a hook for a session launched for a community runner (its launch fact, not the hook's claim). */
+  communityRunner?: boolean;
 
   state: AgentActivityState;
   reason: string;

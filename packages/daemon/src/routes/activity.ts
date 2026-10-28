@@ -1,5 +1,5 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
-import { physicalSessionName } from "../domain/session-registry.js";
+import { physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -59,7 +59,7 @@ export function evidenceFromHookActivity(input: {
     }, needsInput: { count: 1, reason: "permission_prompt" } };
   }
   // A runner's exit report clears what its last turn said: the seat is no longer at a prompt or mid-turn.
-  if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime)) {
+  if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime, input.activity.communityRunner === true)) {
     return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
   }
   switch (input.activity.state) {
@@ -529,8 +529,9 @@ activityRoutes.post("/hooks", async (c) => {
   // the emitter supplied an old sessionName, so check both identities before
   // declaring an inventory (which would reactivate a retired seat).
   const currentSession = oracle && emitted?.nodeId
-    ? store.db.prepare("SELECT session_name, status FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
-      .get(emitted.nodeId) as { session_name: string; status: string } | undefined
+    ? store.db.prepare(`SELECT s.session_name, s.status, ${sessionCommunityHarnessSelect(store.db)} AS community_harness,
+        ${sessionCommunityRunnerSelect(store.db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
+      .get(emitted.nodeId) as { session_name: string; status: string; community_harness: string | null; community_runner: number | null } | undefined
     : undefined;
   const suppliedSessionName = stringOrNull(body.sessionName);
   if (oracle && emitted?.nodeId && emitted.sessionName
@@ -550,7 +551,8 @@ activityRoutes.post("/hooks", async (c) => {
     if (!oracle.hasRungInventory(emitted.nodeId, emitted.sessionName)) {
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
-        runtimeRungInventory(runtime),
+        // The same recorded launch facts the reconcile pass reads, so a community seat's first hook gets its own inventory.
+        runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
       );
     }
     const evidence = evidenceFromHookActivity({

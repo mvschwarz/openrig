@@ -130,6 +130,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       : program;
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
+    // A runner reports its conversation in this record; without one, its seat needs a person rather than reading ready.
+    if (!attempt && storageNote && preset.runner) return { ok: false, recovery: "attention_required", error: storageNote };
     if (!attempt) return storageNote ? { ok: true, warnings: [storageNote] } : { ok: true };
     const read = await waitForLaunchResult(attempt, this.runtime, { ...this.deps.launchResultWait, root: this.deps.launchResultRoot?.() ?? launchResultRoot() });
     if (resumeRef) {
@@ -147,9 +149,9 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
           error: `Community harness "${this.runtime}": asked to resume conversation ${resumeRef}, its launcher reports conversation ${read.nativeRef} instead. The seat keeps conversation ${resumeRef}, and OpenRig doesn't switch it to ${read.nativeRef}. Nothing was restarted.` };
       }
     }
-    return read.ok
-      ? { ok: true, resumeToken: read.nativeRef, resumeType: `community:${this.runtime}`, resumeProvenance: "launcher" }
-      : { ok: true, warnings: [`community harness "${this.runtime}": its launch identity is unavailable: ${read.reason}`] };
+    if (read.ok) return { ok: true, resumeToken: read.nativeRef, resumeType: `community:${this.runtime}`, resumeProvenance: "launcher" };
+    const unavailable = `community harness "${this.runtime}": its launch identity is unavailable: ${read.reason}`;
+    return preset.runner ? { ok: false, recovery: "attention_required", error: unavailable } : { ok: true, warnings: [unavailable] };
   }
 
   /** OpenRig names the conversation: a new one gets a fresh name in OPENRIG_CONVERSATION, and a resume passes the saved name
@@ -183,6 +185,12 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   firstInput(): boolean {
     const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
     return found.ok && found.preset.firstInput;
+  }
+
+  /** Whether this launch's preset declares an OpenRig-aware runner, recorded on the session with the launch. */
+  runner(): boolean {
+    const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
+    return found.ok && found.preset.runner;
   }
 
   /** A process running isn't proof that the startup paste was submitted. */

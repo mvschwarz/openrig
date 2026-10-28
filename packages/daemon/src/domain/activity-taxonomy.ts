@@ -240,14 +240,23 @@ export const OMP_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: RUNNER_ACTIVITY_RUNGS,
 };
 
+/** A community app whose preset declared `runner: true` at its launch: its runner posts turn boundaries as Pi's does,
+ *  so those hooks decide. Only a session recorded as launched for a runner gets it; any other community seat keeps
+ *  the sampling-only inventory above. */
+export const COMMUNITY_RUNNER_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "community-runner",
+  runtime: "community-runner",
+  rungs: RUNNER_ACTIVITY_RUNGS,
+};
+
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
  *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
  *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory. */
-export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null): AdapterRungInventory {
+export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null, communityRunner?: boolean): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
-  if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
+  if (communityHarnessOf(communityHarness, runtime)) return communityRunner === true ? COMMUNITY_RUNNER_RUNG_INVENTORY : COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }
