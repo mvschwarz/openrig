@@ -273,7 +273,8 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect([...text]).toHaveLength(1200);
     const result = await f.send("native-long", text, f.options);
     expect(result).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
-    expect(result.error).toMatch(/shorter message.*guard.*off/);
+    expect(result.error).toContain("Send a shorter message; nothing was pasted.");
+    expect(result.error).toContain("Turning this seat's typing guard off explicitly disables draft protection.");
     expect(f.writes).toEqual([]);
     expect(f.bodies.a).toBe("");
   });
