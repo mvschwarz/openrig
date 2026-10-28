@@ -179,26 +179,28 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
   return false;
 }
 
-/** Upper-bound a complete paste in the recognized Codex viewport before writing.
- * FirstFit may move a whole word to the next row; every adjacent pair of
- * non-final rows then consumes at least one row's width. Reserve another row
- * for the insertion cursor. Non-ASCII code points are charged two cells, so
- * combining marks/emoji cannot make this bound optimistic. Other readers keep
- * their existing policy; this is not ownership or permission to press Enter.
+/** Conservative uncertainty before a protected Codex paste, never Enter authority.
+ * Codex 0.164 collapses >1000 code points to [Pasted Content N chars], which
+ * the current ownership reader cannot own. Other wrapped text gets a row
+ * upper bound; a line fitting the native width needs only one row.
  */
-export function composerCanObservePaste(input: ComposerInput, text: string): boolean {
+export function composerPasteUncertainty(input: ComposerInput, text: string): "controls" | "long" | "viewport" | null {
   const viewport = input.pasteViewport;
-  if (!viewport) return true;
-  if (viewport.columns < 1 || viewport.rows < 1) return false;
+  if (!viewport) return null;
+  const normalized = text.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.some(line => /[\x00-\x1f\x7f-\x9f]/.test(line))) return "controls";
+  // rust-v0.164.0 chat_composer/paste_input.rs:184-192 (Unicode scalar count).
+  if ([...normalized].length > 1000) return "long";
+  if (viewport.columns < 1 || viewport.rows < 1) return "viewport";
   let rows = 0;
-  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
-    // Tabs/control sequences have no bounded printable layout here.
-    if (/[\x00-\x1f\x7f-\x9f]/.test(line)) return false;
+  for (const line of lines) {
+    // Two cells per non-ASCII code point conservatively covers wide glyphs.
     const cells = [...line].reduce((sum, ch) => sum + (ch >= " " && ch <= "~" ? 1 : 2), 0);
-    rows += cells < viewport.columns ? 1 : Math.ceil(2 * cells / viewport.columns) + 1;
-    if (rows > viewport.rows) return false;
+    rows += cells <= viewport.columns ? 1 : Math.ceil(2 * cells / viewport.columns) + 1;
+    if (rows > viewport.rows) return "viewport";
   }
-  return true;
+  return null;
 }
 
 /** Recognize this lease's paste immediately after pasting or before its Enter

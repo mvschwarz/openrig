@@ -470,8 +470,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     if (prompt.glyph !== "❯" && codexFooterSeparator(lines) === end) {
       // Codex 0.164 fullscreen: composer <= 2/3 of the pane (at least eight
       // rows, capped by the pane), less padding/status/hint rows. Leave the
-      // right padding and scroll marker out of the printable width.
-      input.pasteViewport = { columns: width - prefix - 2,
+      // one-column right inset out of the native printable width.
+      input.pasteViewport = { columns: width - prefix - 1,
         rows: Math.min(height, Math.max(8, Math.floor(height * 2 / 3))) - 4 };
     }
     candidates.push(input);

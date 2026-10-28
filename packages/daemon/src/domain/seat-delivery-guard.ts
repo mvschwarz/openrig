@@ -2,7 +2,7 @@ import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAdd
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { composerCanObservePaste, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+import { composerPasteUncertainty, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
 
 /** A binding is captured before waiting. Never rebind an old operation to a new occupant. */
 export interface GuardTarget {
@@ -433,8 +433,14 @@ export class SeatDeliveryGuard {
     } else if (input.state !== "empty") {
       throw new DeliveryGuardError("draft_input_busy", "The seat has an unsubmitted input. Automatic delivery is held.");
     } else {
-      if (pasteText !== undefined && !composerCanObservePaste(input, pasteText)) {
-        throw new DeliveryGuardError("draft_input_unknown", "Held before paste: the complete message cannot stay observable in this Codex viewport. Open a larger terminal or shorten the message, then retry this request.");
+      const uncertainty = pasteText === undefined ? null : composerPasteUncertainty(input, pasteText);
+      if (uncertainty) {
+        const message = uncertainty === "controls"
+          ? "OpenRig couldn't confirm the layout of tabs or control characters. Send the message without them; nothing was pasted."
+          : uncertainty === "long"
+            ? "OpenRig couldn't confirm ownership of Codex's collapsed long paste. Send a shorter message, or set this seat's typing guard to off for delivery without draft protection; nothing was pasted."
+            : "OpenRig couldn't confirm the complete message would stay visible in this Codex viewport. Open a larger terminal or shorten the message, then retry this request; nothing was pasted.";
+        throw new DeliveryGuardError("draft_input_unknown", message);
       }
       lease.inputFrame = input.frame;
     }
