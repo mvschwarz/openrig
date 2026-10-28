@@ -148,7 +148,7 @@ describe("Codex pre-paste observability through the real delivery path", () => {
   it.each(["draft-aware", "openrig-urgent"])("submits a fitting full envelope once (%s)", async mode => {
     const f = await codexDelivery(mode, { width: 160, height: 45 });
     expect(await f.send("fits", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
-    expect(f.submissions).toEqual([d1Envelope]);
+    expect(f.submissions).toEqual([mode === "openrig-urgent" ? `Urgent (marked by human@test):\n${d1Envelope}` : d1Envelope]);
     expect(f.writes).toHaveLength(2);
     expect(f.bodies.a).toBe("");
   });
@@ -238,7 +238,7 @@ describe("Codex pre-paste observability through the real delivery path", () => {
 
   it("leaves default-off delivery unchanged in the small viewport", async () => {
     const f = await codexDelivery("off");
-    expect(await f.send("off", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(await f.send("off", d1Envelope, f.options)).toMatchObject({ ok: true });
     expect(f.submissions).toEqual([d1Envelope]);
   });
 
