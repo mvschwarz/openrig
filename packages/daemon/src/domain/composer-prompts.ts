@@ -181,8 +181,8 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
 
 /** Conservative uncertainty before a protected Codex paste, never Enter authority.
  * Codex 0.164 collapses >1000 code points to [Pasted Content N chars], which
- * the current ownership reader cannot own. Other wrapped text gets a row
- * upper bound; a line fitting the native width needs only one row.
+ * the current ownership reader cannot own. Other text gets greedy word wraps
+ * plus the insertion row at each full logical-line end.
  */
 export function composerPasteUncertainty(input: ComposerInput, text: string): "controls" | "long" | "viewport" | null {
   const viewport = input.pasteViewport;
@@ -193,11 +193,30 @@ export function composerPasteUncertainty(input: ComposerInput, text: string): "c
   // rust-v0.164.0 chat_composer/paste_input.rs:184-192 (Unicode scalar count).
   if ([...normalized].length > 1000) return "long";
   if (viewport.columns < 1 || viewport.rows < 1) return "viewport";
+  const columns = viewport.columns;
+  const charge = (ch: string) => ch >= " " && ch <= "~" ? 1 : 2;
   let rows = 0;
   for (const line of lines) {
-    // Two cells per non-ASCII code point conservatively covers wide glyphs.
-    const cells = [...line].reduce((sum, ch) => sum + (ch >= " " && ch <= "~" ? 1 : 2), 0);
-    rows += cells <= viewport.columns ? 1 : Math.ceil(2 * cells / viewport.columns) + 1;
+    let lineRows = 1, used = 0;
+    // FirstFit words, counting every separator and conservatively charging
+    // non-ASCII. Leading/trailing spaces remain editable; interior wrap spaces
+    // hang off the prior row rather than becoming authored text on the next.
+    for (let token of line.match(/ *[^ ]+| +$/g) ?? []) {
+      const spaces = /^ */.exec(token)![0].length;
+      const word = token.slice(spaces);
+      const wordCells = [...word].reduce((sum, ch) => sum + charge(ch), 0);
+      if (used && word && used + spaces + wordCells > columns) {
+        lineRows++; used = 0; token = word;
+      }
+      for (const ch of token) {
+        const cells = charge(ch);
+        if (used && used + cells > columns) { lineRows++; used = 0; }
+        used += cells;
+      }
+    }
+    // rust-v0.164.0 textarea/wrapping.rs:177-180: even a non-final full
+    // logical line reserves an empty row for the insertion cursor.
+    rows += lineRows + (used >= columns ? 1 : 0);
     if (rows > viewport.rows) return "viewport";
   }
   return null;
