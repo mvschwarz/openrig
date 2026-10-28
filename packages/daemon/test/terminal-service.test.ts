@@ -162,6 +162,27 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect((await svc.openView({ view: "pod:acme-build/ghost" })).code).toBe("view_not_found"); // unknown pod
   });
 
+  it("opens a seat:<rig>/<logical-id> as just that seat, interactive (the TUI agent page)", async () => {
+    const { deps, herdr } = makeDeps();
+    const svc = new TerminalService(deps);
+    const res = await svc.openView({ view: "seat:acme-build/rev.r1" });
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["rev-r1@acme-build"]);
+    expect(herdr.lastView?.opened.every((p) => p.readOnly === false)).toBe(true);
+    expect(herdr.lastView?.id).toBe("seat:acme-build/rev.r1");
+    expect((await svc.openView({ view: "seat:rig-id-1/dev.driver" })).opened).toEqual(["dev-driver@acme-build"]); // rig id form
+  });
+
+  it("a malformed or unknown seat view → view_not_found, naming the expected form", async () => {
+    const { deps } = makeDeps();
+    const svc = new TerminalService(deps);
+    const malformed = await svc.openView({ view: "seat:acme-build" });
+    expect(malformed.code).toBe("view_not_found");
+    expect(malformed.error).toContain("seat:<rig>/<logical-id>");
+    expect((await svc.openView({ view: "seat:acme-build/ghost" })).code).toBe("view_not_found"); // unknown seat
+    expect((await svc.openView({ view: "seat:no-such-rig/dev.driver" })).code).toBe("view_not_found"); // unknown rig
+  });
+
   it.each(["mission:4.6", "slice:02"])("opens %s as a watch view without a team-conversation handoff", async view => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);

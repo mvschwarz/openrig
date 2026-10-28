@@ -101,7 +101,7 @@ it("answers a question ask from its request view: an act per open option, reply 
   const read: AttentionRead = { scope: "instance", readAt: asked.at, items: [asked], sources: [{ source: "queue", state: "available", detail: "fixture" }],
     detail: { item: asked, lines: [], files: [] }, detailError: null };
   const snap = { ...emptySnapshot(), attentionRead: read,
-    hosts: [{ id: "local", name: "local", reachable: true, rigs: [{ name: "r", pods: [{ name: "orch", agents: [{ session: "orch-lead@r" }] }] }] }] } as unknown as FleetSnapshot;
+    hosts: [{ id: "local", name: "local", reachable: true, rigs: [{ name: "r", pods: [{ name: "orch", agents: [{ name: "orch.lead", session: "orch-lead@r" }] }] }] }] } as unknown as FleetSnapshot;
   const view = createViewState({ instanceId: "attention-questions", getSnapshot: () => snap });
   const list = attentionLines(view.get(), snap, 200).map(l => l.text).join("\n");
   expect(list).toContain("Questions: 2, 1 unanswered");
@@ -115,7 +115,7 @@ it("answers a question ask from its request view: an act per open option, reply 
     { type: "act", act: "answer", qitemId: "two-questions", verb: "answer", actorSession: "human-founder@kernel", questionId: "q2", optionId: "y" },
     { type: "act", act: "answer", qitemId: "two-questions", verb: "answer", actorSession: "human-founder@kernel", questionId: "q2", optionId: "n" },
   ]);
-  expect(lines.find(l => l.text.includes("Chat with orch-lead@r"))?.action).toEqual({ type: "act", act: "open-terminal", view: "pod:r/orch" });
+  expect(lines.find(l => l.text.includes("Chat with orch-lead@r"))?.action).toEqual({ type: "act", act: "open-terminal", view: "seat:r/orch.lead" });
   // reply: the person's words on the open request; without one open it says how.
   expect(parseCommand("reply Neither, call it Gamma")).toEqual({ type: "attention-reply", text: "Neither, call it Gamma" });
   expect(replyAct(read, asked.id, "Neither, call it Gamma")).toEqual({ type: "act", act: "answer", qitemId: "two-questions", verb: "answer",

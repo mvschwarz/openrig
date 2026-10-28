@@ -48,14 +48,14 @@ describe("rig detail — Open terminals link", () => {
     });
   }
 
-  it("clicking the link gives the same act; pod term ▸ links still open their pod", () => {
+  it("clicking the link gives the same act; each row's term ▸ opens its own seat", () => {
     const v = drilled();
     const sc = renderScreen(v.get(), snap, { cols: 140, rows: 32 });
     const y = sc.lines.findIndex((l) => l.includes(`Open terminals ▸ rig ${RIG}`)) + 1;
     const rigHits = sc.hitMap.filter((h) => h.y === y && h.action?.type === "act");
     expect(rigHits.map((h) => h.action)).toContainEqual(RIG_ACT);
-    const podActs = sc.hitMap.filter((h) => h.action?.type === "act" && (h.action as { view?: string }).view?.startsWith(`pod:${RIG}/`));
-    expect(podActs.length).toBeGreaterThan(0);
+    const seatActs = sc.hitMap.filter((h) => h.action?.type === "act" && (h.action as { view?: string }).view?.startsWith(`seat:${RIG}/`));
+    expect(seatActs.length).toBeGreaterThan(0);
   });
 });
 
