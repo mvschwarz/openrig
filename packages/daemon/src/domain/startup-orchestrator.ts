@@ -553,9 +553,11 @@ export class StartupOrchestrator {
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
     // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
-    // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit.
+    // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
+    // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
     if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime, input.adapter.runner()); }
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
+        input.skipHarnessLaunch ? undefined : input.adapter.runner()); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
