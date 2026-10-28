@@ -137,6 +137,8 @@ export interface ComposerInput {
   state: "empty" | "text" | "unknown";
   rows: string[];
   columns: number;
+  /** Conservative visible capacity of the recognized Codex fullscreen composer. */
+  pasteViewport?: { columns: number; rows: number };
   cursor?: ComposerSnapshot["cursor"];
   unknownReason?: string;
   suggestionRows?: string[];
@@ -175,6 +177,28 @@ export function composerContainsOwnedText(input: ComposerInput, expected: string
     if (!offsets.size) return false;
   }
   return false;
+}
+
+/** Upper-bound a complete paste in the recognized Codex viewport before writing.
+ * FirstFit may move a whole word to the next row; every adjacent pair of
+ * non-final rows then consumes at least one row's width. Reserve another row
+ * for the insertion cursor. Non-ASCII code points are charged two cells, so
+ * combining marks/emoji cannot make this bound optimistic. Other readers keep
+ * their existing policy; this is not ownership or permission to press Enter.
+ */
+export function composerCanObservePaste(input: ComposerInput, text: string): boolean {
+  const viewport = input.pasteViewport;
+  if (!viewport) return true;
+  if (viewport.columns < 1 || viewport.rows < 1) return false;
+  let rows = 0;
+  for (const line of text.replace(/\r\n/g, "\n").split("\n")) {
+    // Tabs/control sequences have no bounded printable layout here.
+    if (/[\x00-\x1f\x7f-\x9f]/.test(line)) return false;
+    const cells = [...line].reduce((sum, ch) => sum + (ch >= " " && ch <= "~" ? 1 : 2), 0);
+    rows += cells < viewport.columns ? 1 : Math.ceil(2 * cells / viewport.columns) + 1;
+    if (rows > viewport.rows) return false;
+  }
+  return true;
 }
 
 /** Recognize this lease's paste immediately after pasting or before its Enter

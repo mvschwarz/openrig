@@ -2,7 +2,7 @@ import { hasOtherSeatHistory, isStoppedSeatPredecessor, resolveCurrentSessionAdd
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
+import { composerCanObservePaste, composerContainsOwnedText, ownCollapsedPaste, type ComposerInput, type ComposerOwnership } from "./composer-prompts.js";
 
 /** A binding is captured before waiting. Never rebind an old operation to a new occupant. */
 export interface GuardTarget {
@@ -414,7 +414,7 @@ export class SeatDeliveryGuard {
   }
 
   /** Called at the paste/key boundary after file and buffer preparation. */
-  async beforeInput(name: string, submit = false): Promise<void> {
+  async beforeInput(name: string, submit = false, pasteText?: string): Promise<void> {
     if (!this.needsInputCheck(name)) return;
     const target = this.target(name);
     const lease = this.scope.getStore()!.get(target.nodeId)!;
@@ -433,6 +433,9 @@ export class SeatDeliveryGuard {
     } else if (input.state !== "empty") {
       throw new DeliveryGuardError("draft_input_busy", "The seat has an unsubmitted input. Automatic delivery is held.");
     } else {
+      if (pasteText !== undefined && !composerCanObservePaste(input, pasteText)) {
+        throw new DeliveryGuardError("draft_input_unknown", "Held before paste: the complete message cannot stay observable in this Codex viewport. Open a larger terminal or shorten the message, then retry this request.");
+      }
       lease.inputFrame = input.frame;
     }
   }
