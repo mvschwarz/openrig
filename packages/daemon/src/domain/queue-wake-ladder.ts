@@ -1,6 +1,8 @@
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
+import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
@@ -640,7 +642,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
-        await deps.queueRepo.maybeNudge(qitemId, target, true, undefined, undefined, "openrig");
+        // It is sent as OpenRig (daemon@kernel); the row's original source stays visible in the body.
+        const row = deps.queueRepo.getById(qitemId);
+        const bodyOverride = `${renderQueueHandoffNudge(qitemId, null)}${row?.sourceSession ? ` Row source: ${row.sourceSession}.` : ""}`;
+        await deps.queueRepo.maybeNudge(qitemId, target, true, OPENRIG_SENDER, bodyOverride, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 

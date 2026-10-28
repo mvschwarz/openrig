@@ -866,7 +866,7 @@ export class WorkflowRuntime {
       );
     });
     if (entryQitemId && entryQitemDestinationSession) {
-      await this.queueRepo.maybeNudge(entryQitemId, entryQitemDestinationSession, entryQitemNudge);
+      await this.queueRepo.maybeNudge(entryQitemId, entryQitemDestinationSession, entryQitemNudge, input.createdBySession);
     }
 
     const finalInstance = this.instanceStore.getByIdOrThrow(instanceId!);

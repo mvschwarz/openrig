@@ -12,8 +12,9 @@
 // The ladder's state IS the transition log (AM-P3-F6): attempts, rungs, and suspension are
 // derived from markers at every tick, so a daemon restart resumes at the exact position —
 // forgotten-ladder and reset-count are both REDs below.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
+import { renderQueueHandoffNudge } from "../src/domain/queue-nudge-text.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, type QueueItem } from "../src/domain/queue-repository.js";
@@ -870,5 +871,42 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(store.resolveOne("queue.wake_retry_cap" as never)).toMatchObject({ value: 3, source: "default" });
     expect(store.resolveOne("queue.wake_unconfirmed_window_minutes" as never)).toMatchObject({ value: 30, source: "default" });
     expect(store.resolveOne("queue.wake_swap_grace_seconds" as never)).toMatchObject({ value: 180, source: "default" });
+  });
+});
+
+describe("wake ladder retry — envelope sender", () => {
+  it("a default ladder retry is sent as OpenRig and keeps the row's source visible in the body", async () => {
+    const db = new Database(":memory:");
+    migrate(db, ALL_MIGRATIONS);
+    const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
+    const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?").run(
+      new Date(Date.now() - 10 * 60_000).toISOString(),
+      "failed:tmux session not found",
+      created.qitemId,
+    );
+    const maybeNudge = vi.spyOn(repo, "maybeNudge").mockResolvedValue();
+    const mod = await ladderMod();
+    await mod.runWakeLadderTick({
+      db,
+      queueRepo: repo,
+      resolveOrchestrator: () => "orch@r",
+      retryIntervalSeconds: 300,
+      retryCap: 3,
+      unconfirmedWindowMinutes: 30,
+      swapGraceSeconds: 180,
+      log: () => {},
+    });
+    // The body is the default handoff nudge text, plus only the row-source suffix.
+    expect(maybeNudge).toHaveBeenCalledWith(
+      created.qitemId,
+      "worker@r",
+      true,
+      "daemon@kernel",
+      `${renderQueueHandoffNudge(created.qitemId, null)} Row source: relay@r.`,
+      "openrig",
+    );
+    db.close();
   });
 });
