@@ -6,6 +6,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import nativePaste from "./fixtures/claude-paste-footer.json";
+import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -101,6 +102,81 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   };
 }
 
+
+// Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
+// shows only the envelope's reply footer and an upward scroll indicator.
+function codexViewport(body: string, width: number, height: number): ComposerSnapshot {
+  if (!body) return { screen: ["• DONE", "", "  Worked for 4s • 20:24", "", "",
+    "› \x1b[2mAsk Codex to do anything\x1b[0m", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", "  ? for shortcuts", ""].join("\n"),
+    cursor: { x: 2, y: 5, width, height }, inMode: false };
+  if (height === 9 && body.includes("From:")) return {
+    screen: ["", "", "› ---                                                           ↑",
+      "  ↩ Reply if needed: rig queue create --destination host-",
+      '  fixture-driver@external --summary "<one line>" --body "..."',
+      "  --verify", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", ""].join("\n"),
+    cursor: { x: 10, y: 5, width, height }, inMode: false };
+  const rows = body.split("\n");
+  return { screen: ["Ready", "", `› ${rows[0]}`, ...rows.slice(1).map(row => `  ${row}`), "",
+    "  GPT-6.1-Sol low · ~/project", "  ? for shortcuts", ""].join("\n"),
+    cursor: { x: 2 + stringWidth(rows.at(-1)!), y: 1 + rows.length, width, height }, inMode: false };
+}
+
+const d1Envelope = wrapPaneEnvelope("host-fixture-driver@external", "worker@test",
+  "Write exactly draft-aware to /home/t1s075/project/delivery-draft-aware.txt with one shell tool; reply DONE briefly and wait.");
+
+async function codexDelivery(mode = "draft-aware", size = { width: 65, height: 9 }) {
+  const f = fixture(undefined, { runtime: "codex" });
+  await f.guard.set("a", { mode }, "human@test", "D1 protected delivery");
+  vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexViewport(f.bodies.a ?? "", size.width, size.height));
+  return { ...f, size, options: { verify: false, ...(mode === "openrig-urgent" ? { urgent: { by: "human@test" } } : {}) } };
+}
+
+describe("Codex pre-paste observability through the real delivery path", () => {
+  it.each(["draft-aware", "openrig-urgent"])("retains the full envelope before writing into the native 65x9 frame (%s)", async mode => {
+    const f = await codexDelivery(mode);
+    expect(await f.send("D1", d1Envelope, f.options)).toMatchObject({ ok: true, outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_unknown" });
+    expect(f.writes).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["draft-aware", "openrig-urgent"])("submits a fitting full envelope once (%s)", async mode => {
+    const f = await codexDelivery(mode, { width: 160, height: 45 });
+    expect(await f.send("fits", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([d1Envelope]);
+    expect(f.writes).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("leaves default-off delivery unchanged in the small viewport", async () => {
+    const f = await codexDelivery("off");
+    expect(await f.send("off", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([d1Envelope]);
+  });
+
+  it("rechecks the actual viewport after buffer preparation, before any paste", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    f.hooks.load = () => { f.size.width = 65; f.size.height = 9; };
+    expect(await f.send("resized", d1Envelope, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains a wrapped line which cannot stay visible without writing it", async () => {
+    const f = await codexDelivery();
+    expect(await f.send("wraps", "one-long-word-".repeat(40), f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("keeps a concurrent real draft and the human-input epoch check", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    f.hooks.load = () => f.guard.humanInput("a", async () => { f.bodies.a = "my real draft"; });
+    expect(await f.send("human", d1Envelope, f.options)).toMatchObject({ outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_changed" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("my real draft");
+  });
+});
 
 describe("current draft-aware delivery through the real transport", () => {
   it.each(["ordinary request ", "1. Review the change"])("attempts each ordinary authored request, even with a reused caller ID: %j", async text => {
