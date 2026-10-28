@@ -9,11 +9,18 @@ import { execFileSync } from "node:child_process";
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
  *  reading as an option. tmux reads the `-s` value as a format, where `##` is one `#` and a run of `#` before `[` is a
- *  style it keeps as written, so every other `#` is doubled and the session is exactly `chatroom@<rig>`. tmux still
- *  replaces `:` and `.` in a session name with `_`. */
+ *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. tmux still changes
+ *  some session names: `:` and `.` become `_`, and a backslash or a control character (newline, tab and others) is
+ *  escaped. `-P -F` prints the name tmux used. */
 export function chatroomWatchTmuxArgs(rig: string): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
-  return ["new-session", "-d", "-s", session, "rig", "chatroom", "watch", "--", rig];
+  return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
+    "rig", "chatroom", "watch", "--", tmuxArg(rig)];
+}
+
+/** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */
+function tmuxArg(value: string): string {
+  return value.endsWith(";") ? `${value.slice(0, -1)}\\;` : value;
 }
 
 interface RigSummary {
@@ -185,9 +192,11 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          execFileSync("tmux", chatroomWatchTmuxArgs(rig), { stdio: "ignore" });
-          console.log(`Started watch in tmux session: ${sessionName}`);
-          console.log(`Attach with: tmux attach -t ${sessionName}`);
+          // The name tmux used, which differs from sessionName when tmux changed it (a `.` in a rig name, for example).
+          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+            .trim() || sessionName;
+          console.log(`Started watch in tmux session: ${created}`);
+          console.log(`Attach with: tmux attach -t ${created}`);
         } catch {
           console.error(`Failed to create tmux session '${sessionName}'. It may already exist.`);
           process.exitCode = 1;
