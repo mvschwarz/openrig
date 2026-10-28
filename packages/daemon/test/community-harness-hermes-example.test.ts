@@ -55,7 +55,16 @@ describe("the documented Hermes launcher and preset", () => {
     expect(launch()).toMatchObject({ status: 0, stderr: "" });
   });
 
-  it("is a preset this OpenRig loads, declaring names_conversation and not resume", () => {
-    expect(loadCommunityHarnessPreset("hermes", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: false } });
+  it("writes the seat's model into its config for a new session only, and never over a model already set there", () => {
+    const { home, launch } = run({ OPENRIG_CONVERSATION: "openrig-a", OPENRIG_MODEL: "openai/gpt-4o-mini" });
+    const config = () => readFileSync(join(home, "config.yaml"), "utf8");
+    expect(parse(config())).toMatchObject({ model: "openai/gpt-4o-mini" });
+    launch({ OPENRIG_RESUME_REF: "openrig-a", OPENRIG_MODEL: "vendor/other" });
+    launch({ OPENRIG_CONVERSATION: "openrig-b", OPENRIG_MODEL: "vendor/other" });
+    expect(parse(config())).toMatchObject({ model: "openai/gpt-4o-mini" });
+  });
+
+  it("is a preset this OpenRig loads, declaring names_conversation and not resume, and doesn't yet take a model", () => {
+    expect(loadCommunityHarnessPreset("hermes", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: false, passesModel: false } });
   });
 });

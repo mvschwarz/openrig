@@ -126,7 +126,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed } & (
+export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
+  /** A community launcher that opts in was handed the seat's declared model as OPENRIG_MODEL. Passed, not proof of the model
+   *  that runs. */
+  modelInput?: { model: string } } & (
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
     /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
     resumeProvenance?: "launcher" | "passed";

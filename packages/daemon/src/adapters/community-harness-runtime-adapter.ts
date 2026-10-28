@@ -93,16 +93,23 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     } catch (error) {
       return { ok: false, error: `Couldn't prepare the first input for community harness "${this.runtime}": ${(error as Error).message}; nothing was started.` };
     }
-    const preset = found.preset.firstInput ? { ...found.preset, command: firstInput
+    let command = found.preset.firstInput ? (firstInput
       ? `/usr/bin/env OPENRIG_FIRST_INPUT=${shellQuote(firstInput.path)} ${found.preset.command}`
-      : `/usr/bin/env -u OPENRIG_FIRST_INPUT ${found.preset.command}` } : found.preset;
+      : `/usr/bin/env -u OPENRIG_FIRST_INPUT ${found.preset.command}`) : found.preset.command;
+    // An opted-in launcher gets the seat's declared model, or none (an inherited value is cleared). Passed is what it was
+    // handed, not which model runs.
+    const model = found.preset.passesModel ? binding.model?.trim() || undefined : undefined;
+    if (found.preset.passesModel) command = model ? `/usr/bin/env OPENRIG_MODEL=${shellQuote(model)} ${command}` : `/usr/bin/env -u OPENRIG_MODEL ${command}`;
+    const preset = command === found.preset.command ? found.preset : { ...found.preset, command };
+    // Passed only once typing began: never from the declaration alone, nor when the launch failed before that.
     let passed = false;
+    const handed = { ...(firstInput ? { firstInput } : {}), ...(model ? { modelInput: { model } } : {}) };
     try {
-      const result = await this.launchPreset(session, preset, resumeRef, firstInput ? () => { passed = true; } : undefined);
-      return { ...result, ...(passed ? { firstInput } : {}) };
+      const result = await this.launchPreset(session, preset, resumeRef, firstInput || model ? () => { passed = true; } : undefined);
+      return { ...result, ...(passed ? handed : {}) };
     } catch (error) {
       if (!passed) throw error;
-      return { ok: false, firstInput, error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
+      return { ok: false, ...handed, error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
     }
   }
 
