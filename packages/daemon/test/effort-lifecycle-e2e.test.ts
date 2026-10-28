@@ -715,3 +715,62 @@ describe("Effort precedence, latest wins: a choice saved after the snapshot (OPR
     ctx.db.close();
   });
 });
+
+// #2224: `rig seat set-model` saves the model on the seat's live node, and every managed resume reads it at call time,
+// so a restore from a snapshot taken before the change launches the saved model, and says so.
+describe("A model saved with rig seat set-model after the snapshot wins on restore (#2224)", () => {
+  // Claude's resume takes the model sixth, Codex's seventh.
+  const cases = [
+    { runtime: "claude-code", resumeType: "claude_name", before: "claude-fable-5-1", after: "claude-opus-5-5", modelArg: 5 },
+    { runtime: "codex", resumeType: "codex_id", before: "gpt-6.1-terra", after: "gpt-6.1-sol", modelArg: 6 },
+  ] as const;
+
+  async function restoreAfter(c: (typeof cases)[number], saved: string | null) {
+    const ctx = setup();
+    const rig = ctx.rigRepo.createRig(`model-${c.runtime}`);
+    const node = ctx.rigRepo.addNode(rig.id, "analyst", { runtime: c.runtime, model: c.before, cwd: "/workspace" });
+    const session = ctx.sessionRegistry.registerSession(node.id, `analyst@model-${c.runtime}`);
+    ctx.sessionRegistry.updateStatus(session.id, "running");
+    ctx.sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
+    ctx.db.prepare("UPDATE sessions SET resume_type = ?, resume_token = 'tok-model' WHERE id = ?").run(c.resumeType, session.id);
+    const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");
+    expect(snapshot.data.nodes[0]!.model).toBe(c.before);
+    if (saved) ctx.rigRepo.setNodeModel(node.id, saved);
+
+    const resume = vi.fn(async () => ({ ok: true, code: "resumed" }));
+    const mockTmux = {
+      createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })),
+      listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => false),
+      sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })),
+      listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []),
+      getPaneCommand: vi.fn(async () => (c.runtime === "codex" ? "codex" : "claude")),
+    } as any;
+    const nodeLauncher = new NodeLauncher({ db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus, tmuxAdapter: mockTmux });
+    const restoreOrch = new RestoreOrchestrator({
+      db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus,
+      snapshotRepo: ctx.snapshotRepo, snapshotCapture: ctx.snapshotCapture, checkpointStore: ctx.checkpointStore,
+      nodeLauncher, tmuxAdapter: mockTmux,
+      claudeResume: { canResume: vi.fn(() => c.runtime === "claude-code"), resume: c.runtime === "claude-code" ? resume : vi.fn() } as unknown as ClaudeResumeAdapter,
+      codexResume: { canResume: vi.fn(() => c.runtime === "codex"), resume: c.runtime === "codex" ? resume : vi.fn() } as unknown as CodexResumeAdapter,
+    });
+    const result = await restoreOrch.restore(snapshot.id);
+    ctx.db.close();
+    return { ok: result.ok, launched: (resume.mock.calls[0] as unknown[] | undefined)?.[c.modelArg], text: JSON.stringify(result) };
+  }
+
+  for (const c of cases) {
+    it(`${c.runtime}: restore launches the saved model, not the snapshot's, and says so`, async () => {
+      const restored = await restoreAfter(c, c.after);
+      expect(restored.ok).toBe(true);
+      expect(restored.launched).toBe(c.after);
+      expect(restored.text).toContain(`this restore launched the seat's saved model ${c.after}, not ${c.before} from the snapshot`);
+    });
+
+    it(`${c.runtime}: with no change since the snapshot, restore launches the snapshot's model and says nothing about it`, async () => {
+      const restored = await restoreAfter(c, null);
+      expect(restored.ok).toBe(true);
+      expect(restored.launched).toBe(c.before);
+      expect(restored.text).not.toContain("saved model");
+    });
+  }
+});
