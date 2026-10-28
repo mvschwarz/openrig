@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
  *  style it keeps as written, so every other `#` is doubled and the session is exactly `chatroom@<rig>`. tmux still
  *  replaces `:` and `.` in a session name with `_`. */
 export function chatroomWatchTmuxArgs(rig: string): string[] {
-  const session = `chatroom@${rig}`.replace(/#+(?![#[])/g, (run) => run + run);
+  const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
   return ["new-session", "-d", "-s", session, "rig", "chatroom", "watch", "--", rig];
 }
 
