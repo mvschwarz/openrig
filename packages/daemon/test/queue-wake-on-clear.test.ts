@@ -183,3 +183,39 @@ it("a refusal recorded against an address alias arms recovery from the physical 
   expect(f.send).toHaveBeenCalledTimes(2);
   expect(f.outbox.getById(WAKE_INTENT_PREFIX + id)?.deliveryState).toBe("delivered");
 });
+
+
+it("overlapping clear passes retain reservations until both passes finish", async () => {
+  const f = fixture();
+  const gates = Array.from({ length: 3 }, () => {
+    let release!: () => void;
+    const promise = new Promise<void>(resolve => { release = resolve; });
+    return { promise, release };
+  });
+  let attempts = 0;
+  const send = vi.fn(async () => {
+    const attempt = ++attempts;
+    if (attempt >= 4 && attempt <= 6) await gates[attempt - 4]!.promise;
+    return { ok: false, sent: false, reason: "target_needs_input", error: `Refused: '${destination}' is at an interactive prompt (selection_prompt). No text was sent.` };
+  });
+  // Legacy, non-precommitted wakes still share this clear recovery path. Separate
+  // sends let A finish while B still owns a reservation for the same rows.
+  const queue = new QueueRepository(f.db, f.bus, { transport: { send }, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
+  await queue.create({ sourceSession: "planner@demo", destinationSession: destination, body: "first" });
+  await queue.create({ sourceSession: "planner@demo", destinationSession: destination, body: "second" });
+  await vi.waitFor(() => {
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(queue.list({ limit: 100 }).every(row => row.lastNudgeWireResult?.startsWith("failed:"))).toBe(true);
+  });
+  const first = queue.retryPromptWakesOnClear(destination, "idle");
+  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(4));
+  await queue.retryPromptWakesOnClear(destination, "needs_input");
+  const second = queue.retryPromptWakesOnClear(destination, "idle");
+  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(5));
+  gates[0]!.release(); await first;
+  gates[1]!.release();
+  await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(6));
+  gates[2]!.release(); await second;
+  await queue.retryPromptWakesOnClear(destination, "idle");
+  expect(send).toHaveBeenCalledTimes(6);
+});

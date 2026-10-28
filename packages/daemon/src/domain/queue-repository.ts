@@ -925,7 +925,7 @@ export class QueueRepository {
   // A first clear may recover durable refusals observed before startup. Later clears need
   // a new positive refusal/attention episode, so a returning prompt cannot spin retries.
   private readonly promptRecoveryState = new Map<string, boolean>();
-  private readonly promptClearRetries = new Set<string>();
+  private readonly promptClearRetries = new Map<string, number>();
   private resolveOccupantGeneration?: (sessionName: string) => string | null;
   private readonly resolveSessionAddresses: (name: string) => string[];
   private readonly wakeRepo: QueueWakeRepository;
@@ -1668,7 +1668,7 @@ export class QueueRepository {
     const attempted = new Set<string>();
     // Reserve the whole selection before awaiting: a correlated send can include several rows.
     // Its refusal stays durable, but must not re-arm this same clear-triggered pass.
-    for (const row of rows) this.promptClearRetries.add(row.qitem_id);
+    for (const row of rows) this.promptClearRetries.set(row.qitem_id, (this.promptClearRetries.get(row.qitem_id) ?? 0) + 1);
     try {
       for (const row of rows) {
         const intents = this.outbox ? this.db.prepare(`SELECT outbox_id, delivery_state FROM outbox_entries
@@ -1682,7 +1682,11 @@ export class QueueRepository {
         }
       }
     } finally {
-      for (const row of rows) this.promptClearRetries.delete(row.qitem_id);
+      for (const row of rows) {
+        const remaining = this.promptClearRetries.get(row.qitem_id)! - 1;
+        if (remaining) this.promptClearRetries.set(row.qitem_id, remaining);
+        else this.promptClearRetries.delete(row.qitem_id);
+      }
     }
   }
 
