@@ -315,7 +315,7 @@ export class TerminalService {
     if ("code" in resolved) return resolved;
     const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux(), localTmuxServer: daemonTmuxServerArgs() });
     const saved = view.startsWith("saved:") ? this.deps.viewsStore.get(view.slice(6))
-      : !/^(qitem|mission|slice|pod|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
+      : !/^(qitem|mission|slice|pod|seat|rig):/.test(view) ? this.deps.viewsStore.get(view) : null;
     composed.viewDescriptor = { kind: saved && saved.id === resolved.id ? "fixed" : "following",
       name: resolved.task?.name ?? (saved?.id === resolved.id ? saved.name : resolved.id) };
     if (resolved.task) {
@@ -491,6 +491,23 @@ export class TerminalService {
       const rows = await this.deps.listPodSeats(rest.slice(0, slash), rest.slice(slash + 1));
       if (rows == null) {
         return { code: "view_not_found", error: `unknown pod '${rest.slice(slash + 1)}' in rig '${rest.slice(0, slash)}'` };
+      }
+      return { id: view, members: deriveViewMembers(rows, { readOnly: false }) };
+    }
+
+    // 2b. one seat within a rig — `seat:<rig-id-or-name>/<logicalId>` (the TUI's agent page opens just that agent).
+    //     Interactive, like its rig. A logical id has no `/`, so the last `/` splits it from the rig.
+    if (view.startsWith("seat:")) {
+      const rest = view.slice("seat:".length);
+      const slash = rest.lastIndexOf("/");
+      if (slash <= 0 || slash === rest.length - 1) {
+        return { code: "view_not_found", error: `malformed seat view '${view}' — expected seat:<rig>/<logical-id>` };
+      }
+      const rigArg = rest.slice(0, slash);
+      const logicalId = rest.slice(slash + 1);
+      const rows = ((await this.deps.listRigSeats(rigArg)) ?? []).filter((row) => row.logicalId === logicalId);
+      if (rows.length === 0) {
+        return { code: "view_not_found", error: `unknown seat '${logicalId}' in rig '${rigArg}'` };
       }
       return { id: view, members: deriveViewMembers(rows, { readOnly: false }) };
     }

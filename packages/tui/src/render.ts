@@ -404,7 +404,8 @@ function agentDetailLines(
           // appears only for outcome `accepted`; unknowns stay unknown.
           ...wrapDetailValue("effort", effortDetailText(effortReport, agent), contentWidth),
           ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
-          fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
+          // The agent page opens just this agent; the pod and rig pages open theirs.
+          fieldLine({ label: "terminal", value: `Open terminal ▸ ${agent.name}`, link: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${agent.name}` } }),
         ],
       },
       {
@@ -945,8 +946,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
-    // Keep the explicit desktop action above the rig's grid.
-    if (!podFilter) lines.push(fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
+    // Keep the explicit desktop action above the rig's grid: the whole rig, or on a pod's page that pod.
+    lines.push(podFilter
+      ? fieldLine({ label: "terminal", value: `Open terminals ▸ pod ${podFilter}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${podFilter}` } })
+      : fieldLine({ label: "terminal", value: `Open terminals ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {
@@ -1050,13 +1053,13 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       // ACTIONS = drive-structure ONLY (BR-9), each mapped to an EXISTING
       // write contract: `run ▸` = the rig-restore write (rendered only where
       // it applies — the seat is not running); `term ▸` = the terminal-open
-      // view contract (pod-scoped, the web's granularity). No false affordance.
+      // view contract for this row's own seat. No false affordance.
       const canRun = a.canRun ?? !a.live;
       const actionsCell = canRun ? "run ▸ · term ▸" : "term ▸";
       const zones: ContentLine["zones"] = [];
       if (actionsColStart >= 0) {
         const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
-        zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
+        zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `seat:${rig.name}/${a.name}` } });
       }
       if (canRun && actionsColStart >= 0)
         zones.push({

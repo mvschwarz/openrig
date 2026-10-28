@@ -85,9 +85,9 @@ export function attentionLines(state: ViewState, snap: FleetSnapshot, width: num
           lines.push({ text: `Or answer in your own words: reply <text>, ${as}${verb === "answer" ? " (it fills the first unanswered question and closes the request)" : ""}.` });
         }
       }
-      // Chat, as on the Feed card: open the asker's terminal (its pod's view) to answer in your own words.
+      // Chat, as on the Feed card: open the asker's own terminal to answer in your own words.
       if (d.item.asker) {
-        const view = podViewOf(snap, d.item.asker);
+        const view = seatViewOf(snap, d.item.asker);
         lines.push(view ? listItem(`Chat with ${d.item.asker} (opens its terminal)`, { type: "act", act: "open-terminal", view })
           : { text: `Chat: ${d.item.asker} isn't in this instance's loaded topology.` });
       }
@@ -173,10 +173,12 @@ function questionLines(item: AttentionItem): string[] {
   })];
 }
 
-/** The terminal view that holds a local seat: its pod, the agents table's own `term ▸` view. */
-function podViewOf(snap: FleetSnapshot, session: string): string | null {
+/** The terminal view of one local seat, the same view as the agents table's own `term ▸`. */
+function seatViewOf(snap: FleetSnapshot, session: string): string | null {
   for (const host of snap.hosts.filter(h => (h.id ?? "local") === "local"))
-    for (const rig of host.rigs) for (const pod of rig.pods)
-      if (pod.agents.some(a => a.session === session)) return `pod:${rig.name}/${pod.name}`;
+    for (const rig of host.rigs) for (const pod of rig.pods) {
+      const agent = pod.agents.find(a => a.session === session);
+      if (agent) return `seat:${rig.name}/${agent.name}`;
+    }
   return null;
 }
