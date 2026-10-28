@@ -1284,8 +1284,8 @@ export function attachTerminalActivityAndWork(
     }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
-    const hook = entry.canonicalSessionName
-      ? deps.agentActivity?.getLatestForNode({ sessionName: entry.canonicalSessionName, now,
+    const hook = entry.agentActivity == null && entry.canonicalSessionName
+      ? deps.agentActivity?.getLatestForNode({ nodeId: entry.nodeId, sessionName: entry.canonicalSessionName, now,
         order: entry.runtime === "claude-code" ? "source" : "arrival" }) ?? null : null;
     return {
       ...entry,
@@ -1603,11 +1603,12 @@ export async function attachAgentActivity(
       };
     };
 
-    const hookActivity = deps.activityStore?.getLatestForNode({
+    const hookActivity = entry.canonicalSessionName ? deps.activityStore?.getLatestForNode({
+      nodeId: entry.nodeId,
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
       order: entry.runtime === "claude-code" ? "source" : "arrival",
-    });
+    }) : null;
     // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
     // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
     // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.

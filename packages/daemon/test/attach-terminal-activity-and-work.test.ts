@@ -11,18 +11,22 @@
 //   BOTH must pass — that's what proves the two primitives are computed
 //   independently. Either alone is symmetry-breakable.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import {
   attachTerminalActivityAndWork,
+  attachAgentActivity,
   getNodeInventory,
   readAssignedWorkBySession,
 } from "../src/domain/node-inventory.js";
 import {
   countAssignedWorkForSession,
   countPendingWorkForSession,
+  PsProjectionService,
 } from "../src/domain/ps-projection.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
 
 function seedRig(db: Database.Database, name: string): string {
   const id = `rig-${name}`;
@@ -79,6 +83,72 @@ describe("attachTerminalActivityAndWork — slice 15 per-node enrichment", () =>
   let db: Database.Database;
   beforeEach(() => { db = createFullTestDb(); });
   afterEach(() => { db.close(); });
+
+  function emitHook(rigId: string, nodeId: string, sessionName: string, state: "needs_input" | "idle") {
+    const eventAt = new Date().toISOString();
+    new EventBus(db).emit({
+      type: "agent.activity", rigId, nodeId, sessionName, runtime: "codex",
+      activity: { state, reason: state === "needs_input" ? "permission_prompt" : "stop",
+        evidenceSource: "runtime_hook", sampledAt: eventAt, eventAt, fallback: false, stale: false },
+    } as never);
+  }
+
+  it.each(["codex", "claude-code"])("keeps %s hooks on their inventory node when another rig reuses the session name", async runtime => {
+    const rig = seedRig(db, "a-owner");
+    const otherRig = seedRig(db, "z-reused");
+    const node = seedNode(db, rig, "dev");
+    const other = seedNode(db, otherRig, "dev");
+    db.prepare("UPDATE nodes SET runtime = ?").run(runtime);
+    seedSession(db, node, "reused-session");
+    seedSession(db, other, "reused-session"); // Later session ID wins the old global name lookup.
+    emitHook(rig, node, "reused-session", "needs_input");
+    emitHook(otherRig, other, "reused-session", "idle");
+    const store = new AgentActivityStore({ db, eventBus: new EventBus(db) });
+    const base = getNodeInventory(db, rig);
+    const [attached] = await attachAgentActivity(base, { tmuxAdapter: {} as never, activityStore: store });
+    expect(attached!.agentActivity?.state).toBe("needs_input");
+    expect(attachTerminalActivityAndWork(base, { db, agentActivity: store })[0]!.needsAttention).toBe(true);
+    const totals = new PsProjectionService({ db, agentActivity: store }).getEntries();
+    expect(totals.find(e => e.rigId === rig)!.attentionCount).toBe(1);
+    expect(totals.find(e => e.rigId === otherRig)!.attentionCount).toBe(0);
+  });
+
+  it.each(["codex", "claude-code"])("does not revive %s hooks from an old session or a node without a session", async runtime => {
+    const rig = seedRig(db, "absence");
+    const current = seedNode(db, rig, "current");
+    const orphan = seedNode(db, rig, "no-session");
+    db.prepare("UPDATE nodes SET runtime = ?").run(runtime);
+    seedSession(db, current, "current-session");
+    emitHook(rig, current, "old-session", "needs_input");
+    emitHook(rig, orphan, "orphan-session", "needs_input");
+    const store = new AgentActivityStore({ db, eventBus: new EventBus(db) });
+    const base = getNodeInventory(db, rig);
+    const attached = await attachAgentActivity(base, { tmuxAdapter: {} as never, activityStore: store });
+    expect(attached.map(e => e.agentActivity?.state)).toEqual(["unknown", "unknown"]);
+    expect(attachTerminalActivityAndWork(base, { db, agentActivity: store }).map(e => e.needsAttention))
+      .toEqual([false, false]);
+    expect(new PsProjectionService({ db, agentActivity: store }).getEntries()[0]!.attentionCount).toBe(0);
+  });
+
+  it("reuses attached unknown activity without another read, but keeps the standalone hook fallback", async () => {
+    const rig = seedRig(db, "reuse");
+    const node = seedNode(db, rig, "dev");
+    seedSession(db, node, "dev@reuse");
+    const store = new AgentActivityStore({ db, eventBus: new EventBus(db) });
+    const read = vi.spyOn(store, "getLatestForNode");
+    const base = getNodeInventory(db, rig);
+    const attached = await attachAgentActivity(base, { tmuxAdapter: {} as never, activityStore: store });
+    expect(attached[0]!.agentActivity?.state).toBe("unknown");
+    expect(read).toHaveBeenCalledTimes(1);
+    emitHook(rig, node, "dev@reuse", "needs_input");
+    expect(attachTerminalActivityAndWork(attached, { db, agentActivity: store })[0]!.needsAttention).toBe(false);
+    expect(read).toHaveBeenCalledTimes(1);
+    for (const agentActivity of [undefined, null]) {
+      const standalone = [{ ...base[0]!, agentActivity }];
+      expect(attachTerminalActivityAndWork(standalone, { db, agentActivity: store })[0]!.needsAttention).toBe(true);
+    }
+    expect(read).toHaveBeenCalledTimes(3);
+  });
 
   it("HG-3 DIRECTION A — node producing output with NOTHING queued: terminalActive=true, hasAssignedWork=false", () => {
     const rig = seedRig(db, "active-only");

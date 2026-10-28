@@ -288,7 +288,7 @@ export class PsProjectionService {
           ? this.seatActivity.getSeatStateBySession(session)
           : null;
         const hook = this.agentActivity && session
-          ? this.agentActivity.getLatestForNode({ sessionName: session, now: nowDate,
+          ? this.agentActivity.getLatestForNode({ nodeId: node.nodeId, sessionName: session, now: nowDate,
             order: node.runtime === "claude-code" ? "source" : "arrival" })
           : null;
         // The row's served activity: a live hook, else the cached pane reading. A confirmed-missing session serves
