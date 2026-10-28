@@ -578,10 +578,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // hook/pane resolution as status. No new captures, timer or delivery admission path.
   const retryPromptWakes = (sessionName: string) => {
     const runtime = sessionRegistry.findResumeContextByName(sessionName)?.runtime;
+    const structural = seatStructuralActivityService.getStructuralActivity(sessionName);
     const state = hookOrPaneActivity(agentActivityStore.getLatestForNode({ sessionName,
-      order: runtime === "claude-code" ? "source" : "arrival" }),
-      seatStructuralActivityService.getStructuralActivity(sessionName), false, runtime)?.activity.state;
-    void queueRepoInstance.retryPromptWakesOnClear(sessionName, state)
+      order: runtime === "claude-code" ? "source" : "arrival" }), structural, false, runtime)?.activity.state;
+    void queueRepoInstance.retryPromptWakesOnClear(sessionName, state, structural?.state === "attention")
       .catch(error => console.warn(`Prompt-clear wake recovery: ${error instanceof Error ? error.name : typeof error}`));
   };
   seatStructuralActivityService.attachActivityChanged(retryPromptWakes);
