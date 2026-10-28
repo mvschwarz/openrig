@@ -16,7 +16,6 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - openrig-user
-      - openrig-operator
       - forming-an-openrig-mental-model
 ---
 

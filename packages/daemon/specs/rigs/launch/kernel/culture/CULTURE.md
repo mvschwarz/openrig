@@ -47,7 +47,8 @@ machine and have things happen.
     marks them healthy. A HOST reboot drops tmux entirely; the
     reconciler then marks the kernel's member sessions detached, and
     the operator pod owns the agent-restart workflow ("bring my
-    sessions back online") per the openrig-operator skill.
+    sessions back online") per "Incomplete setup and restart":
+    `rig context get reference/getting-started.md#incomplete-setup-and-restart`.
   Other rigs are NOT auto-instantiated by the daemon at any point —
   they require explicit operator-initiated `rig up` / `rig restore`
   via the agent-driven workflow.

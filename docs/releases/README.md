@@ -24,8 +24,8 @@ This keeps release notes:
 
 For each release:
 
-1. Copy `_template.md` to `vX.Y.Z.md`.
-2. Fill in the release summary, included changes, operator notes, known limitations, and verification performed.
+1. Add the release's section to [`CHANGELOG.md`](../../CHANGELOG.md).
+2. Write the release's GitHub Release notes. No new file is added to this directory.
 3. Run the **substance gate** at the exact release cut. The gate derives every
    file under the shipped pack sources, verifies a hash-bound human judgment
    and an individual disposition for each mechanical candidate, scans the
@@ -72,16 +72,16 @@ For each release:
    git push origin vX.Y.Z
    ```
 
-5. Create a GitHub Release using the same file:
+5. Create the GitHub Release with the notes from step 2:
 
    ```bash
    gh release create vX.Y.Z \
      --repo mvschwarz/openrig \
-     --title "OpenRig vX.Y.Z" \
-     --notes-file docs/releases/vX.Y.Z.md
+     --title "OpenRig X.Y.Z" \
+     --notes-file <release-notes.md>
    ```
 
-6. Publish the npm package if that is part of the release flow.
+6. Publish the npm package.
 
 ## Guidance
 
