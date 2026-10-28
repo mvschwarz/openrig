@@ -568,7 +568,7 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
-  it("doesn't give an external caller's connection the member workflow or its authority, only the shared lines", async () => {
+  it("gives an external caller its request workflow without member tools or authority", async () => {
     const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
       access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"] } } } });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -579,6 +579,8 @@ describe("MCP Server", () => {
     expect(instructions).toContain("reserved for a person");
     expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
     expect(instructions).not.toContain("basically authorized");
+    expect(instructions).toContain("You may omit destination");
+    expect(instructions).not.toMatch(/rig_whoami|rig_team|rig_queue_handoff|rig_queue_decide/);
     await external.close();
     await server.close();
   });

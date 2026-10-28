@@ -310,6 +310,8 @@ export type McpHttpOptions = {
   clientFactory?: (daemonUrl: string, sessionName?: string, principal?: McpPrincipal) => DaemonClient;
   /** Grants come from an external grant service instead of the token file, which is then never read. */
   grantService?: GrantServiceOptions;
+  /** Operator-configured receiver for external callers omitting a task destination; never an authority grant. */
+  taskDestination?: string;
   /** With grantService: OAuth discovery for clients that sign in with OAuth. The public resource this server is reached
    *  as and the authorization server that issues its keys, both served exactly as given. */
   oauth?: { resource: string; issuer: string };
@@ -338,6 +340,12 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: string; authenticated: boolean; close(): Promise<void> }> {
   const loopback = isLoopbackHost(opts.host);
   const service = opts.grantService;
+  if (opts.taskDestination !== undefined) {
+    if (!service) throw new McpHttpConfigError("--task-destination needs --grant-service");
+    if (!/^[^\s@]+@[^\s@]+$/.test(opts.taskDestination) || opts.taskDestination.endsWith("@external")) {
+      throw new McpHttpConfigError("--task-destination takes one local team seat, member@rig");
+    }
+  }
   const serviceUrl = service ? grantServiceUrl(service.url) : undefined;
   // The metadata describes the keys a grant service checks, so it's served only with one.
   if (opts.oauth && !service) throw new McpHttpConfigError("--oauth-resource and --oauth-issuer need --grant-service");
@@ -382,7 +390,8 @@ export async function startMcpHttpServer(opts: McpHttpOptions): Promise<{ url: s
     const caller = (authInfo?.extra as { caller?: RequestCaller } | undefined)?.caller;
     // Never a default seat: a request reaches the handler only with its caller decided.
     if (!caller) throw new Error("a request reached the MCP handler without its caller");
-    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access, presenceFile: () => presenceFile });
+    return createMcpServer(makeClient(opts.daemonUrl, caller.seat, caller.principal), { seat: caller.seat, access: caller.access,
+      taskDestination: opts.taskDestination, presenceFile: () => presenceFile });
   });
   const serveMcp = toNodeHandler(mcpHandler);
   const bearer = (req: http.IncomingMessage): string | undefined => /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1];
