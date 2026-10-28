@@ -199,7 +199,15 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     expect(f.writes).toEqual([]);
   });
 
-  it("delivers an ordinary word-wrapped wake with its complete envelope at 80x22", async () => {
+  it("delivers a full envelope whose logical lines fit one native row at 80x22", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "Please review this task.", { stampISO: "2026-10-28T22:06:00Z" });
+    expect(text.split("\n").every(row => stringWidth(row) < 77)).toBe(true);
+    expect(await f.send("one-row-fit", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("conservatively retains a natively fitting wrapped wake when its full-line bound exceeds 80x22", async () => {
     const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
     const line = "Please review the current task and reply with the smallest useful change.";
     expect(stringWidth(line)).toBe(73);
@@ -209,8 +217,53 @@ describe("Codex pre-paste observability through the real delivery path", () => {
     const rows = text.replace(body, Array(3).fill(line).join("\n")).split("\n");
     vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
       codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
-    expect(await f.send("ordinary-wake", text, f.options)).toMatchObject({ ok: true, sent: true });
-    expect(f.submissions).toEqual([text]);
+    expect(rows).toHaveLength(9); // Fits natively, but the conservative bound is larger.
+    expect(await f.send("ordinary-wake", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("retains a hyphen-separated envelope before native semantic breaks scroll it at 80x24", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    const body = Array(9).fill("x".repeat(40)).join("-");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body, { stampISO: "2026-10-28T22:03:00Z" });
+    expect(body).toHaveLength(368);
+    // Native HyphenSplitter moves each 41-cell piece whole; two cannot fit in 77.
+    const rows = text.replace(body, body.match(/x{40}-?/g)!.join("\n")).split("\n");
+    expect(rows).toHaveLength(15);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 24, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-hyphens", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains a three-segment path envelope at the native viewport limit", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const segment = "x".repeat(38) + "/";
+    const path = segment.repeat(3);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", path + "\n\n", { stampISO: "2026-10-28T22:03:00Z" });
+    expect(path).toHaveLength(117);
+    // Native UAX#14 path pieces are 39 cells; two need 78, exceeding 77.
+    const rows = text.replace(path, Array(3).fill(segment).join("\n")).split("\n");
+    expect(rows).toHaveLength(11);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-path", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains an envelope whose space before /path cannot be a native break", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const first = "a".repeat(30), glued = "b".repeat(46) + " /cc", last = "d".repeat(30);
+    const body = `${first} ${glued} ${last}`;
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body + "\n\n", { stampISO: "2026-10-28T22:03:00Z" });
+    // UAX#14 LB13 glues the slash to the preceding word across the space.
+    const rows = text.replace(body, [first, glued, last].join("\n")).split("\n");
+    expect(rows).toHaveLength(11);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-glue", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
   });
 
   it("retains a raw-fitting 1200-code-point envelope before Codex collapses it into an unowned label", async () => {
