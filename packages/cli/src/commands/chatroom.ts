@@ -4,7 +4,17 @@ import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+
+/** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
+ *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
+ *  reading as an option. tmux reads the `-s` value as a format, where `##` is one `#` and a run of `#` before `[` is a
+ *  style it keeps as written, so every other `#` is doubled and the session is exactly `chatroom@<rig>`. tmux still
+ *  replaces `:` and `.` in a session name with `_`. */
+export function chatroomWatchTmuxArgs(rig: string): string[] {
+  const session = `chatroom@${rig}`.replace(/#+(?![#[])/g, (run) => run + run);
+  return ["new-session", "-d", "-s", session, "rig", "chatroom", "watch", "--", rig];
+}
 
 interface RigSummary {
   id: string;
@@ -175,7 +185,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          execSync(`tmux new-session -d -s ${JSON.stringify(sessionName)} "rig chatroom watch ${JSON.stringify(rig)}"`, { stdio: "ignore" });
+          execFileSync("tmux", chatroomWatchTmuxArgs(rig), { stdio: "ignore" });
           console.log(`Started watch in tmux session: ${sessionName}`);
           console.log(`Attach with: tmux attach -t ${sessionName}`);
         } catch {
