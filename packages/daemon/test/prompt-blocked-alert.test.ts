@@ -128,6 +128,37 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
   });
 
+  it("a stale cross-host sender cannot prevent a prompt alert reaching the existing human route", async () => {
+    const row = await refusal();
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run(staleSource, row.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posts: unknown[] = [], wakes: string[] = [];
+    const port = engine(posts);
+    const result = await tick(port, { attemptWake: async (_id, target) => { wakes.push(target); return "failed:fixture"; } });
+    expect(result.outcome).not.toBe("failed");
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(wakes).toEqual([]);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.destinationSession).toBe(seat); // carrier only, never a pane nudge
+    expect(alerts()[0]?.sourceSession).toBe(staleSource); // provenance is not rewritten
+    expect(JSON.stringify(posts)).toContain(row.qitemId);
+    await tick(port);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("an invalid sender does not turn an explicit-only choice alert into a human post", async () => {
+    const row = await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run(staleSource, row.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posts: unknown[] = [];
+    await tick(engine(posts), { humanRung: "explicit-only", loadHumanRegistry: () => registry });
+    expect(alerts()).toHaveLength(1);
+    expect(posts).toEqual([]);
+    expect(notes(alerts()[0]!.qitemId).some(note => note.includes("human rung explicit-only"))).toBe(true);
+  });
+
   it("HUMAN RUNG EXPLICIT-ONLY: a prompt-blocked seat still reaches a person, since only a person can clear it", async () => {
     await refusal(); const posts: unknown[] = [];
     await runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null,
