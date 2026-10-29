@@ -1,7 +1,8 @@
 import net from "node:net";
 import { execSync } from "node:child_process";
-import { accessSync, mkdirSync, constants } from "node:fs";
-import { dirname } from "node:path";
+import { accessSync, mkdirSync, constants, openSync, closeSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
 import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
@@ -76,7 +77,14 @@ export function buildWritableHomeCheck(
   deps: WritableHomeCheckDeps = {},
 ): PreflightCheck {
   const mkdirp = deps.mkdirp ?? ((dirPath: string) => mkdirSync(dirPath, { recursive: true }));
-  const checkWritable = deps.checkWritable ?? ((dirPath: string) => accessSync(dirPath, constants.W_OK));
+  const checkWritable = deps.checkWritable ?? ((dirPath: string) => {
+    if (process.platform !== "win32") { accessSync(dirPath, constants.W_OK); return; }
+    // Windows access(W_OK) does not assess directory ACLs. Exercise the actual
+    // file-creation permission without overwriting any existing path or bytes.
+    const probe = join(dirPath, `.openrig-write-check-${randomUUID()}`);
+    const fd = openSync(probe, "wx", 0o600);
+    try { closeSync(fd); } finally { unlinkSync(probe); }
+  });
 
   const pathsToCheck = [
     { path: openrigHome, label: "OpenRig home" },
