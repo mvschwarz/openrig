@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native chatroom watcher entry (2026-10-30)
+
+`chatroom watch --tmux` handed the new session a bare rig program. Windows
+cannot directly spawn npm's rig.cmd as a native executable. The Windows watcher
+now supplies this Node executable and its paired CLI index entry as separate
+arguments. The POSIX watcher and existing session-name/semicolon encoding stay
+unchanged; no shell command string or alternate CLI lookup was introduced.
+
+An owned cmd-only PATH reproduces the direct-spawn failure. Substituting only
+the CLI entry with a recorder then proves actual native child argv for Unicode,
+spaces, apostrophes, percent expressions, operators and a dash-led rig name.
+No command from the inert cmd decoy executes. Three related files report 68
+passes, zero failures and 17 pending real-tmux cases because bare tmux is
+unavailable; CLI typecheck passes. This is child-entry/argv and command behavior
+evidence, not stock-psmux watcher-session or full SSE lifecycle acceptance. No
+actual chatroom, daemon, psmux session or conversation was opened or changed.
+
 ## Generated seat CLI through native hooks (2026-10-30)
 
 SeatLaunchEnvironment places a daemon-paired rig-only bin before the launch
