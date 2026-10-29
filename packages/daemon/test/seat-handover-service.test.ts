@@ -418,10 +418,12 @@ describe("SeatHandoverService", () => {
     ["default source", undefined],
     ["fresh source", "fresh"],
     ["rebuild source", "rebuild"],
-    ["fork source", "fork:abc123"],
+    ["fork source", "fork:dev-impl@seat-rig"],
     ["discovered source", "discovered:some-id"],
   ])("keeps dry-run mutation-free across %s (AC-1)", async (_label, source) => {
-    seedSeat();
+    const { sessionId } = seedSeat();
+    // A fork source is resolved in the dry run too, so it names a seat with a native conversation id.
+    if (source?.startsWith("fork:")) db.prepare("UPDATE sessions SET resume_token = ? WHERE id = ?").run("codex-thread-1", sessionId);
     const before = durableRows();
 
     const result = await service.handover({
