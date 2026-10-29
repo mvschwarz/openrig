@@ -6,6 +6,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
 import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
+import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -53,6 +54,10 @@ function pairedCli(): string {
  * falls back to the old literal-PATH command instead of guessing its meaning.
  */
 function codexEntry(searchPath: string, cwd: string, windows = false): string {
+  if (windows) {
+    const selected = resolveWindowsProviderCommand("codex", { PATH: searchPath }, cwd);
+    return [selected.command, ...selected.prefix].map(shellQuote).join(" ");
+  }
   const executable = launchExecutable("codex", searchPath, cwd, windows);
   const fd = openSync(executable, "r");
   let firstLine: string;
