@@ -94,6 +94,18 @@ the native profile wins, including mixed-case copied keys. Added tilde and
 empty-override cases pass; the complete setup file passes 75/75 and CLI
 typecheck passes. These are isolated consumer checks, not fleet activation.
 
+## Native Codex plugin CLI invocation (2026-10-30)
+
+The runtime adapter's default plugin installer still used bare execFile("codex"),
+which cannot execute npm's Windows cmd shim. It now uses the same selected
+native/package command resolver as other Codex consumers, preserving its result
+shape, environment and existing timeout. An owned offline npm program verifies
+exact plugin arguments (Unicode, spaces, quotes, metacharacters, empty and
+trailing-backslash arguments) and selected CODEX_HOME. Empty PATHEXT returns a
+missing-command result. The adjacent owned-hook-trust checks and native CLI
+fixture pass; daemon typecheck passes. No installed Codex, real login or plugin
+installation was used, and native plugin registration acceptance remains separate.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:
