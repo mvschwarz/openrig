@@ -174,6 +174,23 @@ x86/ARM64 and real provider turns remain unverified. This is not a recovery
 mechanism for arbitrary trees launched outside the helper, and does not establish
 the cause of previous daemon exits. See [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
 
+Native session-environment updates now source a private config instead of passing
+the value in `set-environment` argv. A current-SID protected directory is created
+and its owner/DACL checked before any private value is written. psmux's explicit
+time-format modifier reconstructs LF after physical config-line parsing; escaped
+hashes prevent the supplied value from executing format expressions. Quotes,
+backslashes, CR/LF, tabs, Unicode, percent sequences and empty values were checked
+against real psmux 3.4.0 in a unique namespace with two sessions. Only the selected
+session changed. A failed/uncertain source call retains its protected file; a
+protected-file failure never falls back to value-bearing argv. Successful calls
+remove their file and directory; cleanup failures report the retained path.
+Three focused suites passed five tests, including inherited file-DACL inspection.
+An expanded POSIX credential selection still has four scoped-shell fixture failures
+and three native-tmux skips on this Windows host. This update does not yet replace
+initial `new-session -e` or `respawn-pane -e` transport, preserve every startup/warm
+configuration path, or establish a general Windows credential-ACL audit. It has
+not been deployed.
+
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
 passed three tests. Earlier native holder/listener/process-table selections are

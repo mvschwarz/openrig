@@ -11,6 +11,7 @@ import type { TmuxControlExec } from "./tmux-control.js";
 import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -47,6 +48,7 @@ export type ArgvExecFn = (argv: string[]) => Promise<string>;
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
 export interface TmuxFileOps {
+  privateConfig?(content: string): Promise<PrivateConfig>;
   writeFile(path: string, content: string, options?: { mode: number; flag: "wx" }): Promise<void>;
   unlink(path: string): Promise<void>;
   /** Unique temp-file path per call - parallel `rig up` stands up many seats. */
@@ -71,6 +73,7 @@ export function isStagedSendScriptPath(path: string): boolean {
 
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
+    privateConfig: writeWindowsPrivateConfig,
     writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
     unlink: (p) => fsUnlink(p),
     tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
@@ -1659,6 +1662,14 @@ export class TmuxAdapter {
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
+    if (this.terminalKind === "psmux") {
+      if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+      const config = await this.fileOps.privateConfig(psmuxPrivateEnvironmentLine(key, value));
+      // Keep the file after any uncertain call; never fall back to value argv.
+      await this.run(["tmux", "source-file", "-t", target, config.path]);
+      await config.dispose().catch(() => { console.warn(`Native environment config cleanup failed: ${config.path}`); });
+      return;
+    }
     await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
       `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
