@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -33,7 +33,7 @@ const DAEMON_SURFACES = [
 ];
 
 function assertReleaseGuidance(version, note) {
-  const [heading, intro] = note.trim().split(/\n\s*\n/, 2);
+  const [heading, intro] = note.replaceAll("\r\n", "\n").trim().split(/\n\s*\n/, 2);
   assert.equal(heading, `# What changed in OpenRig ${version}`, 'packaged whats-new heading is stale');
   assert.ok(intro.includes(`just upgraded to ${version}.`), 'packaged whats-new introduction is stale');
 }
@@ -41,6 +41,7 @@ function assertReleaseGuidance(version, note) {
 test("whats-new names its package version, and rejects stale heading or introduction", () => {
   const note = '# What changed in OpenRig 0.7.0\n\nThis note is for an agent on an install that was just upgraded to 0.7.0.';
   assertReleaseGuidance('0.7.0', note);
+  assertReleaseGuidance('0.7.0', note.replaceAll('\n', '\r\n'));
   assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('OpenRig 0.7.0', 'OpenRig 0.6.12')), /heading is stale/);
   assert.throws(() => assertReleaseGuidance('0.7.0', note.replace('upgraded to 0.7.0', 'upgraded to 0.6.12')), /introduction is stale/);
 });
@@ -82,6 +83,18 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
     assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
 
     execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
+    for (const [projected, document] of [
+      ["help/help.md", "help.md"],
+      ["reference/acp-agents.md", "acp-agents.md"],
+      ["reference/getting-started.md", "getting-started.md"],
+      ["reference/instance-layout.md", "instance-layout.md"],
+      ["reference/rig-spec.md", "rig-spec.md"],
+      ["reference/whats-new.md", "whats-new.md"],
+    ]) {
+      const output = join(extract, "package/daemon/context-packs", projected);
+      assert.equal(lstatSync(output).isSymbolicLink(), false);
+      assert.deepEqual(readFileSync(output), readFileSync(join(REPO_ROOT, "docs/reference", document)), projected);
+    }
     const left = [];
     const walk = (dir) => {
       for (const entry of readdirSync(dir)) {

@@ -7,6 +7,35 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Windows Git reference projection, 2026-10-29
+
+The six tracked static-pack symlinks now project correctly when Git checks them
+out as regular placeholder files on Windows. The resolver requires index mode
+120000 and verifies the placeholder's Git blob hash (SHA-1 or SHA-256). Modified
+placeholders and unmerged index entries refuse rather than falling back to
+ordinary content. Other path-looking files remain ordinary files. Native links
+and attested placeholders must resolve to an actual file physically under
+docs/reference; missing targets, directories and junction escapes refuse.
+The same resolved file is used by scanning, manifest reading and projection.
+
+The combined generator/resolver selection ran 26 tests: 25 passed, one failed,
+none skipped/cancelled. The existing file-symlink fixture fails at creation with
+EPERM on this host; it was not waived. New tests use Git's actual placeholder
+checkout in both object formats, verify all six production outputs byte-for-byte,
+check stale/unmerged metadata and escaping targets, and prove resolved content
+is leak-scanned before replacing existing output. The previous production-library
+and help-address tests also pass with actual document content.
+
+An actual Git-for-Windows assembly, npm pack and extraction proof passed at base
+2148202a6 plus these edits, stamped dirty=true. It now explicitly checks all six
+extracted references are regular files with bytes identical to docs/reference,
+alongside daemon surfaces, bins, versioned release guidance and absence of
+unmapped daemon imports. The release-guidance assertion now accepts CRLF while
+still rejecting wrong headings/versions. This supersedes the earlier placeholder
+tarball failure. The temporary tarball/extraction was removed; derived assembly
+remains local. Clean-head install, provider and deployment acceptance remain
+unverified; no package was published or activated.
+
 ## Native npm subprocesses and package-root checks, 2026-10-29
 
 Repository release/package scripts now share a native npm command builder:
