@@ -7,6 +7,18 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native window routing with inherited Rex markers, 2026-10-29
+
+Consumer review found the Rex fast path running before the Windows platform
+selection. Two new tests failed before the fix: inherited Rex markers diverted
+a Windows window request into the POSIX provider, and explicit Rex selection
+tried that provider instead of refusing before work. Windows now keeps the native
+Windows Terminal route for automatic selection and explicitly reports Rex as
+unavailable when requested. The POSIX Rex path spells its paths with the POSIX
+library, including in cross-platform dependency tests. Both window test files
+passed in full: 36 tests, no skips. These injected launcher tests request no real
+desktop window and do not establish visual/layout acceptance.
+
 ## Case-variant Git environment isolation, 2026-10-29
 
 Review of the current platform-call inventory found that bundleGit removed only

@@ -335,7 +335,10 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string, requestedSession?: string, following?: FollowControls): Promise<OpenViewResult> {
   const session = requestedSession?.trim();
-  if (!following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
+  if (deps.platform === "win32" && requestedProvider === "rex") {
+    return { ...failure("rex", "Rex is unavailable on Windows; use --provider tmux --window."), windowAttempted: false };
+  }
+  if (deps.platform !== "win32" && !following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
     return openRexView(client, view, deps, expectedPlan);
   }
   const selectedProvider = requestedProvider ?? (session !== undefined || following ? "herdr" : undefined);

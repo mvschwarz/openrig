@@ -20,6 +20,19 @@ function fixture() {
   return { panes, get, launch, deps, client };
 }
 describe("Windows desktop terminal view", () => {
+  it("keeps inherited Rex markers on the Windows Terminal route", async () => {
+    const f = fixture(); f.deps.env = { TERM_PROGRAM: "rex", REX_SESSION: "inherited" };
+    expect(await openTerminalWindow(f.client, "saved", undefined, f.deps)).toMatchObject({ ok: true, provider: "tmux" });
+    expect(f.launch).toHaveBeenCalledOnce();
+    expect((f.deps.exec as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === "/bin/sh")).toBe(false);
+  });
+  it("refuses explicit Rex on Windows before any native or POSIX subprocess", async () => {
+    const f = fixture();
+    const result = await openTerminalWindow(f.client, "saved", "rex", f.deps);
+    expect(result).toMatchObject({ ok: false, provider: "rex", windowAttempted: false });
+    expect(result.error).toContain("Rex is unavailable on Windows");
+    expect(f.deps.exec).not.toHaveBeenCalled(); expect(f.launch).not.toHaveBeenCalled(); expect(f.get).not.toHaveBeenCalled();
+  });
   it("opens the composed pages in a new Windows Terminal without a Unix shell or source mutations", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "saved:中文", undefined, f.deps, "current");

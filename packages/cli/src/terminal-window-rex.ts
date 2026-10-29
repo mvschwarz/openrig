@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import path from "node:path";
+import { posix as path } from "node:path";
 import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import type { OpenViewResult } from "./commands/terminal.js";
