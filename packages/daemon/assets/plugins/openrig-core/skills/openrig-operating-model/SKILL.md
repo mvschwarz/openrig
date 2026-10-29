@@ -219,9 +219,12 @@ reorient. Why not simply "every N hours": identical scheduled prompts fade
 from an agent's attention with repetition, and idle seats accumulate ritual
 traces that crowd out real context.
 Where a schedule fits your context anyway, use one — but prefer gating the
-*action* on evidence of change: `scripts/trace-due.sh` decides "has enough
+*action* on evidence of change: `node scripts/trace-due.mjs <seat-dir> [work-dir ...]` decides "has enough
 happened since my last trace?" deterministically and stays silent when the
 answer is no, so a scheduler can fire it as often as it likes.
+After performing a trace, `node scripts/trace-stamp.mjs <seat-dir>` records its
+timestamp. Both commands work on Windows, macOS and Linux; the existing `.sh`
+entries delegate to the same Node implementations. They create no schedule.
 
 ## 5b. Trace and `rig walk` — one idea, two ends
 
@@ -406,10 +409,10 @@ and how you discover which seats cannot yet describe their own job.
   subtly; keep the trace path-only.
 - Summarizing this model for another agent instead of pointing them here —
   a summary becomes another copy that can drift from its source.
-- Scripts in `scripts/` are macOS-flavored in places (`stat -f`); verify
-  platform compatibility before trusting them on another OS.
+- The historical `trunk-diff.sh` entry still requires Bash, Python 3 and diff;
+  the Node scaffold and trace entries do not require those Unix tools.
 
 ## Files in this skill
 
 `templates/{SPEC,LEARNED,SOP}.md` ·
-`scripts/{compose.py, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.mjs, scaffold.sh}`
+`scripts/{compose.py, trace-due.mjs, trace-stamp.mjs, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.mjs, scaffold.sh}`

@@ -77,11 +77,11 @@
       "loading-addressable-markdown/scripts/resolve-markdown.mjs": "61a6d52c6c94fb1878361d19bdfaeb4524062fc4c483f557ab2f140e516d15f9",
       "messaging-the-human/SKILL.md": "680ca50b22b0aec280a6c7bb5e118cda1dca991742f42f9a5b74e138448753fe",
       "mission-slice-sop/SKILL.md": "a01e72a526c975a86f0754af206505efbafcbbc3583bea1394c50759dc5a584f",
-      "openrig-operating-model/SKILL.md": "d670d5218af66fa9c50591167fe9f66c191a7dbcf4d9bed50491eeaad468e38a",
+      "openrig-operating-model/SKILL.md": "3680702c840c07c14e9615f49e0783d021fa3629e3526835d75e42dcb32a218e",
       "openrig-operating-model/scripts/compose.py": "f71065de92b1ef4ce3ca78a8bc0cfe07bcf54ed84bb8ec5359d3889674fe385d",
       "openrig-operating-model/scripts/scaffold.sh": "c0ebac8d48a29ef89173f30818a9616d113c7be1a476a069b60c153407364356",
-      "openrig-operating-model/scripts/trace-due.sh": "c56a8b044e624f40972654bc810df623e70303cc5daa4aa06e3ee86b262b7792",
-      "openrig-operating-model/scripts/trace-stamp.sh": "6fd3a0999dd36ea58252181f5129489a460a60631291f0ff84c4f374b65113c7",
+      "openrig-operating-model/scripts/trace-due.sh": "64f05ba1506f5c8a94eac214f1103d9b45be7635306f15cb7c0c62442e421c54",
+      "openrig-operating-model/scripts/trace-stamp.sh": "450fe928802c328f438784dc46bdeed6603700b5d8923619964bde4950bd0bf1",
       "openrig-operating-model/scripts/trunk-diff.sh": "c0362a5a02aed2caf28b7c026989c88a6fef0bc35fa2e6ae8ba9dba2c2f9cc64",
       "openrig-operating-model/templates/LEARNED.md": "37d67f788ffe6c4bd282e5ed0859e07e613b8940e8fa84726c84fbaef8f87fd6",
       "openrig-operating-model/templates/NOTES.md": "ca73848520871474428f87d28bb2346feeb3bd59763b299399d9dacf4d64bcf5",
@@ -104,7 +104,9 @@
       "seat-continuity-and-handover/references/orchestrator-role.md": "2ddf05125e0bf22e2dc64cb328fcc4bd94fa62eb2fcfd21d75f21c488c72ecaa",
       "session-compaction-and-restore/SKILL.md": "1abdf9810903e805d81946cd0fe0af70fc96a6103cdf8c1ba094b9c989cb3d0d",
       "software-for-agents/SKILL.md": "c36c6d3ae7484f477f1bd24e8ff72846f6dfbff685aef1e780f6011072a51ac7",
-      "openrig-operating-model/scripts/scaffold.mjs": "712a0dab1a43947b4f4c9bdfb5a3d76376fda3fb08903ff871a8b5164c395301"
+      "openrig-operating-model/scripts/scaffold.mjs": "712a0dab1a43947b4f4c9bdfb5a3d76376fda3fb08903ff871a8b5164c395301",
+      "openrig-operating-model/scripts/trace-due.mjs": "9864227c5f22cd164938f80926dd50db65b84e71fb33a62e7678d1ebf3bf8b88",
+      "openrig-operating-model/scripts/trace-stamp.mjs": "bdb04e9c577554f77985a11af8deb27e3106ef81b58b20995871e28cece000e3"
     },
     "spec": {
       "core/agent-starters/SKILL.md": "8e8961f44fccb812f39e01174a331dab24f153ceaba91925f1e42371836cdec0",
