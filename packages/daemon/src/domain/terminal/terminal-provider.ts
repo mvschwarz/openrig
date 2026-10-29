@@ -149,5 +149,5 @@ export interface TerminalProvider {
   openView(view: ComposedView): Promise<OpenViewResult>;
   ensureViewer?(key: ViewerKey, pane: ComposedPane, stillCurrent?: () => Promise<boolean>): Promise<ViewerResult>;
   lookupViewer?(key: ViewerKey, pane: ComposedPane): Promise<ViewerResult>;
-  followView?(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>): Promise<OpenViewResult>;
+  followView?(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult>;
 }

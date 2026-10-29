@@ -471,8 +471,8 @@ export class HerdrAdapter implements TerminalProvider {
     return this.deps.viewer?.lookup(key, pane) ?? { ok: false, code: "viewer_not_provisioned", error: "No qualified viewer mapping." };
   }
 
-  async followView(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>): Promise<OpenViewResult> {
-    return this.deps.following?.follow(viewId, view, controls, stillCurrent)
+  async followView(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
+    return this.deps.following?.follow(viewId, view, controls, stillCurrent, membershipError)
       ?? { provider: "herdr", ok: false, opened: [], absent: [], degraded: [], pages: 0,
         code: "follow_unsupported", error: "This endpoint has no qualified following allocator." };
   }

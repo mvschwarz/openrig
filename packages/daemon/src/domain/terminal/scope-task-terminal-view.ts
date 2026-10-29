@@ -12,20 +12,20 @@ type IndexContext = Pick<SliceIndexer, "slicesRoot" | "additionalSliceRoots" | "
 interface Scope { name: string; id?: string; title: string; source: string }
 const MAX_ENTRIES = 4096, MAX_HEADER_BYTES = 16384, MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_ROWS = 50000, MAX_TAG_BYTES = 16384, MAX_TOTAL_TAG_BYTES = 8 * 1024 * 1024;
+class ScopeLimit extends Error {}
 const unavailable = (error: string): ScopeViewError => ({ code: "scope_unavailable", error });
 
 /** Strict bounded identity read over the configured index roots. The review
  * listing's first-match and unreadable-as-empty fallbacks are not authority
  * for retiring viewers. No inferred project, substring match or remote I/O. */
-function resolveSlice(index: IndexContext, key: string): Scope | ScopeViewError {
-  if (!key || key.trim() !== key || /[\\/\x00-\x1f\x7f]/.test(key)) return { code: "scope_not_found", error: "Invalid slice name or id." };
+function readScopeIndex(index: IndexContext): Scope[] | ScopeViewError {
   let entries = 0, bytes = 0;
   const scopes: Scope[] = [], seenRoots = new Set<string>(), seenScopes = new Set<string>();
   const list = (dir: string, visit: (name: string) => void) => {
     const handle = fs.opendirSync(dir);
     try {
       for (let entry = handle.readSync(); entry; entry = handle.readSync()) {
-        if (++entries > MAX_ENTRIES) throw new Error(`Scope index exceeds its ${MAX_ENTRIES}-entry work limit.`);
+        if (++entries > MAX_ENTRIES) throw new ScopeLimit(`Scope index exceeds its ${MAX_ENTRIES}-entry work limit.`);
         if (entry.isDirectory() && !entry.name.startsWith(".")) visit(entry.name);
       }
     } finally { handle.closeSync(); }
@@ -43,9 +43,12 @@ function resolveSlice(index: IndexContext, key: string): Scope | ScopeViewError 
         const buffer = Buffer.alloc(MAX_HEADER_BYTES);
         const size = fs.readSync(fd, buffer, 0, buffer.length, 0);
         bytes += size;
-        if (bytes > MAX_SOURCE_BYTES) throw new Error("Scope index exceeds its source-byte work limit.");
+        if (bytes > MAX_SOURCE_BYTES) throw new ScopeLimit("Scope index exceeds its 8-MiB source-byte work limit.");
         raw = buffer.subarray(0, size).toString("utf8");
-        if (raw.startsWith("---") && !raw.slice(3).includes("\n---")) throw new Error("Scope frontmatter is unreadable or exceeds its header work limit.");
+        if (raw.startsWith("---") && !raw.slice(3).includes("\n---")) {
+          if (size === MAX_HEADER_BYTES) throw new ScopeLimit("Scope frontmatter exceeds its 16-KiB header work limit.");
+          throw new Error("Unterminated scope frontmatter.");
+        }
       } finally { fs.closeSync(fd); }
       break; // SPEC.md wins; an unreadable selected node never falls back.
     }
@@ -76,13 +79,20 @@ function resolveSlice(index: IndexContext, key: string): Scope | ScopeViewError 
         else add(dir, name);
       });
     }
-  } catch { return unavailable("Scope index could not be read completely within its entry/header/source limits; refresh after repairing its configured sources."); }
+  } catch (error) {
+    return unavailable(error instanceof ScopeLimit ? `${error.message} This index is too large for this bounded read; use a smaller configured index or a qitem view.`
+      : "Scope index sources are unavailable or malformed; inspect the configured sources and refresh the view.");
+  }
+  return scopes;
+}
+function selectSlice(scopes: Scope[], key: string): Scope | ScopeViewError {
+  if (!key || key.trim() !== key || /[\\/\x00-\x1f\x7f]/.test(key)) return { code: "scope_not_found", error: "Invalid slice name or id." };
   const matches = scopes.filter(scope => scope.name === key || scope.id === key);
   if (!matches.length) return { code: "scope_not_found", error: `No indexed slice exactly matches '${key}'.` };
   if (matches.length !== 1) return { code: "scope_ambiguous", error: `Multiple indexed slices match '${key}'; choose an unambiguous scope.` };
   const selected = matches[0]!;
   // A unique name cannot certify which rows an ambiguous alias names.
-  if (scopes.some(other => other !== selected && (other.name === selected.name
+  if (scopes.some(other => other !== selected && (other.name === selected.name || other.id === selected.name
     || (selected.id && (other.id === selected.id || other.name === selected.id))))) {
     return { code: "scope_ambiguous", error: `Slice '${key}' has a colliding name or id association.` };
   }
@@ -92,9 +102,11 @@ function resolveSlice(index: IndexContext, key: string): Scope | ScopeViewError 
 /** Active typed-tag owners only, with one bounded local queue projection.
  * A cap or malformed record is incomplete, never authoritative empty. */
 export function readScopedTaskTerminalView(db: Database.Database, view: string, index: IndexContext,
-  resolveSeat: (address: string) => TaskSeat | null): TaskTerminalView | ScopeViewError {
+  resolveSeat: (address: string) => TaskSeat | null, readIndex = () => readScopeIndex(index)): TaskTerminalView | ScopeViewError {
   if (!view.startsWith("slice:")) return { code: "scope_unsupported", error: "Authoritative following for this scope kind is not implemented." };
-  const scope = resolveSlice(index, view.slice(6));
+  const identities = readIndex();
+  if ("code" in identities) return identities;
+  const scope = selectSlice(identities, view.slice(6));
   if ("code" in scope) return scope;
   return db.transaction(() => {
     const issues = new Set<string>();
@@ -123,4 +135,37 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
     return projectTaskOwners({ kind: "slice", id: scope.id ?? scope.name, name: scope.title,
       complete: issues.size === 0, issues: [...issues] }, selected, resolveSeat);
   })();
+}
+
+
+/** Cache identities only under live primary-root notification coverage.
+ * Queue ownership is always read anew. Missing legacy roots are checked on
+ * every call; an appearing/unwatched root disables generation reuse. */
+export function createScopedTaskResolver(db: Database.Database, index: IndexContext,
+  resolveSeat: (address: string) => TaskSeat | null, observed: () => boolean) {
+  let cached: Scope[] | undefined;
+  return {
+    invalidate() { cached = undefined; },
+    resolve(view: string): TaskTerminalView | ScopeViewError {
+      let reusable = false;
+      try {
+        const primary = fs.realpathSync(index.slicesRoot);
+        reusable = observed() && index.additionalSliceRoots.every(root => {
+          try { const real = fs.realpathSync(root); return real === primary || real.startsWith(primary + path.sep); }
+          catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+        });
+      } catch { /* Unconfirmed coverage always takes a fresh bounded read. */ }
+      if (!reusable) cached = undefined;
+      try {
+        const result = readScopedTaskTerminalView(db, view, index, resolveSeat, () => {
+          if (cached) return cached;
+          const next = readScopeIndex(index);
+          if (reusable && Array.isArray(next)) cached = next;
+          return next;
+        });
+        if ("code" in result) cached = undefined;
+        return result;
+      } catch (error) { cached = undefined; throw error; }
+    },
+  };
 }

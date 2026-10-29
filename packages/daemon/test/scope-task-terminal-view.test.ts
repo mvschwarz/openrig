@@ -102,7 +102,7 @@ describe("authoritative scoped terminal membership", () => {
   it("does not certify unknown aliases through an unreadable or oversized selected header", () => {
     const f = fixture(), dir = f.addSlice("another", "04-other");
     writeFileSync(path.join(dir, "SPEC.md"), "---\nid: " + "x".repeat(17000) + "\n---\n");
-    expect(f.read()).toMatchObject({ code: "scope_unavailable" });
+    expect(f.read()).toMatchObject({ code: "scope_unavailable", error: expect.stringContaining("too large") });
   });
   it("bounds active queue enumeration rather than scanning each qitem family", () => {
     const f = fixture();

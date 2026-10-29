@@ -360,3 +360,28 @@ poll. Structural edits under additional legacy roots, or a filesystem where
 watching is unavailable, require `rig`'s existing slice refresh endpoint
 `POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
 keep prior viewers; they never certify that the work disappeared.
+
+
+Scope identity reads are bounded to 4,096 directory entries, 16 KiB per selected
+node-header read, and 8 MiB of source bytes per index generation. The byte budget
+counts the bounded read, including text after short frontmatter. An index that
+exceeds these limits is too large for this read; use a smaller configured index
+or a qitem view. This is separate from unreadable or malformed sources.
+Queue membership reads are bounded to 50,000 active rows plus one lookahead,
+16 KiB of encoded tags per row and 8 MiB of aggregate encoded tags. They remain
+fresh on each render. Identities are reused within a scope-source generation
+only while the primary-root watcher is live and existing additional roots are
+covered by that root. A source event or explicit refresh invalidates them;
+errors discard the cache. Unavailable watching or an existing unwatched legacy
+root uses fresh bounded identity reads instead. Missing legacy roots are checked
+on each call so an appearing root cannot reuse an older cached identity set.
+
+Error bodies remain authoritative. `scope_unsupported` is HTTP 400,
+`scope_not_found` is 404, and `scope_ambiguous`/`scope_unavailable` are 409.
+An incomplete queue snapshot is a successful preview with `task.complete:false`;
+ensure returns `viewer_unconfirmed` without a provider effect. Unsupported
+ensure view kinds retain `view_required` (400). Unsupported follow view kinds
+retain `follow_view_required` in a 200 `ok:false` body, as before. A changed
+preview remains `preview_changed` (409). During automatic refresh a missing or
+ambiguous slice retains the existing tiles and names the source problem in the
+explanation strip; refresh or reopen it under the current unambiguous key.

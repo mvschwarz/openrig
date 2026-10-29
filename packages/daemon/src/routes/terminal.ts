@@ -50,8 +50,9 @@ function statusForOpen(ok: boolean, code: string | undefined): 200 | 400 | 404 |
   if (ok) return 200;
   if (code === "view_required" || code === "unknown_provider") return 400;
   if (code === "invalid_terminal_session" || code === "unsupported_terminal_session") return 400;
-  if (code === "view_not_found") return 404;
-  if (code === "preview_changed") return 409;
+  if (code === "view_not_found" || code === "scope_not_found") return 404;
+  if (code === "preview_changed" || code === "scope_ambiguous" || code === "scope_unavailable") return 409;
+  if (code === "scope_unsupported") return 400;
   // provider-unavailable / layout-unsupported / honest-partial: a truthful 200 body.
   return 200;
 }
@@ -114,7 +115,7 @@ export function terminalRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
     const result = await svc.ensureViewer({ ...parsed, view: parsed.view ?? "", expectedPlan: raw.expectedPlan,
       member: { hostId: member.hostId, nodeId: member.nodeId } });
-    return c.json(result, result.ok ? 200 : result.code === "preview_changed" ? 409 : result.code === "view_not_found" ? 404 : 200);
+    return c.json(result, statusForOpen(result.ok, result.ok ? undefined : result.code));
   });
 
   app.get("/views", async (c) => {

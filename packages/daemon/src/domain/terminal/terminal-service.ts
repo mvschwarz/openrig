@@ -140,6 +140,8 @@ export interface TerminalServiceDeps {
   resolveTaskView?(qitemId: string): Promise<TaskTerminalView | null> | TaskTerminalView | null;
   /** Authoritative scoped work in this daemon's configured index context. */
   resolveScopeView?(view: string): Promise<TaskTerminalView | ScopeViewError> | TaskTerminalView | ScopeViewError;
+  /** Drop generation-cached scope identities on the same source event as following. */
+  invalidateScopeView?(): void;
   /** Known rig names (for the `views` listing). */
   listRigNames(): Promise<string[]> | string[];
   /** Read-only host resolution for the composer (registry unavailable → null for every id). */
@@ -185,17 +187,21 @@ export class TerminalService {
   private localTmux?: Promise<string | undefined>;
   private following?: TerminalFollowing;
 
+  private unsubscribeScope?: () => void;
   constructor(private readonly deps: TerminalServiceDeps) {
+    if (deps.invalidateScopeView) this.unsubscribeScope = deps.eventBus?.subscribe(event => {
+      if (event.type === "scope.sources_changed") deps.invalidateScopeView?.();
+    });
     if (deps.eventBus) this.following = new TerminalFollowing(
       deps.followingStatePath ?? getDefaultOpenRigPath("private/terminal-following/selectors.json"), deps.eventBus,
       (selector, controls) => this.renderFollowing(selector, controls));
   }
 
-  async stop(): Promise<void> { await this.following?.stop(); }
+  async stop(): Promise<void> { this.unsubscribeScope?.(); await this.following?.stop(); }
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
-    if (!/^(qitem|slice):.+/.test(req.view)) return errorResult("herdr", "scope_unsupported", "Follow requires an authoritative qitem:<id> or slice:<id-or-name> view.");
+    if (!/^(qitem|slice):.+/.test(req.view)) return errorResult("herdr", "follow_view_required", "Follow requires an authoritative qitem:<id> or slice:<id-or-name> view.");
     if (req.view.startsWith("slice:") && !this.deps.resolveScopeView) return errorResult("herdr", "scope_unsupported", "This daemon has no authoritative slice membership resolver.");
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return selected;
@@ -215,9 +221,11 @@ export class TerminalService {
     if ("ok" in selected) return selected;
     if (!selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "This provider cannot follow a task.");
     let composed: ComposedView | null = null;
+    let membershipError: string | undefined;
     try {
       const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
       if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p)) };
+      else membershipError = `${current.code}: ${current.error}${selector.view.startsWith("slice:") ? " Refresh or reopen the slice under its current unambiguous key." : ""}`;
     } catch { /* Unreadable membership is supplied as unknown, never empty. */ }
     const plan = composed && this.planId(selected.name, composed, selected.session);
     const stillCurrent = async () => {
@@ -226,7 +234,7 @@ export class TerminalService {
       return !("code" in current) && current.task?.complete === true && this.planId(selected.name,
         { ...current, opened: current.opened.map(p => this.viewerPane(p)) }, selected.session) === plan;
     };
-    const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent);
+    const result = await selected.provider.followView(selector.view, composed, controls, stillCurrent, membershipError);
     return { ...result, ...(selected.session !== undefined ? { session: selected.session } : {}),
       ...(composed?.task ? { task: composed.task } : {}), viewDescriptor: { kind: controls.enabled && result.following?.enabled !== false ? "following" : "fixed", name: composed?.task?.name ?? selector.view } };
   }
@@ -383,7 +391,7 @@ export class TerminalService {
   /** Explicit owner operation: membership never grants input authority. The
    * HTTP route supplies the existing owner bearer/browser boundary. */
   async ensureViewer(req: OpenViewRequest & { member: ViewerKey; expectedPlan: string }): Promise<ViewerResult> {
-    if (!/^(qitem|slice):.+/.test(req.view)) return { ok: false, code: "scope_unsupported", error: "Ensure-viewer requires an authoritative qitem or slice view." };
+    if (!/^(qitem|slice):.+/.test(req.view)) return { ok: false, code: "view_required", error: "Ensure-viewer requires an authoritative qitem or slice view." };
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return { ok: false, code: selected.code ?? "unknown_provider", error: selected.error ?? "Provider unavailable." };
     if (!selected.provider.ensureViewer) return { ok: false, code: "viewer_unsupported", error: "This provider has no qualified ensure-viewer operation." };

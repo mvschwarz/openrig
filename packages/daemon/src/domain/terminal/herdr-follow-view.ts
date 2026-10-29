@@ -37,11 +37,11 @@ export class HerdrFollowView {
   private pending: Promise<unknown> = Promise.resolve();
   constructor(private readonly deps: HerdrFollowDeps) {}
 
-  follow(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>): Promise<OpenViewResult> {
-    const result = this.pending.then(() => this.apply(viewId, view, controls, stillCurrent));
+  follow(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
+    const result = this.pending.then(() => this.apply(viewId, view, controls, stillCurrent, membershipError));
     this.pending = result.catch(() => {}); return result;
   }
-  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>): Promise<OpenViewResult> {
+  private async apply(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult> {
     const id = createHash("sha256").update(JSON.stringify([this.deps.socketPath, viewId])).digest("hex");
     const root = path.join(this.deps.root ?? getDefaultOpenRigPath("private/terminal-following/provider"), id);
     const file = path.join(root, "canvas.json"), log = path.join(root, "events.log");
@@ -74,8 +74,9 @@ export class HerdrFollowView {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (!controls.enabled) return result(true, "disabled"); // Keep the fixed canvas exactly as it is.
       if (!view?.task?.complete) {
-        if (state) { notice("Task membership is incomplete; keeping the previous view."); save(); }
-        return result(false, "retained", "Task membership is incomplete; keeping the previous view.");
+        const message = membershipError ?? "Task membership is incomplete; keeping the previous view.";
+        if (state) { notice(message); save(); }
+        return result(false, "retained", message);
       }
       if ((this.deps.platform ?? process.platform) !== "linux") throw new Error("Following is qualified on Linux Herdr 0.9.5/protocol 22 only.");
       const status = body(await this.deps.run(["status", "server", "--json"]));
@@ -252,13 +253,15 @@ export class HerdrFollowView {
       }
       for (const member of view.task.members) if (member.availability !== "available") notice(`${member.seat}: ${member.reason ?? member.availability}`);
       for (const overflow of plan.overflow) notice(`${overflow.seat}: ${overflow.reason}`);
-      if (!members.length && !state.tiles.length) notice("No open obligation remains. Automatic following has stopped; the workspace is kept. Use --follow to resume it.");
+      if (!members.length && !state.tiles.length) notice(view.task.kind === "qitem"
+        ? "No open obligation remains. Automatic following has stopped; the workspace is kept. Use --follow to resume it."
+        : "No active work; waiting for associated work while following this slice.");
       save();
       const unavailableJoins = plan.joins.filter(join => !state!.tiles.some(tile => tile.key === join.key)
         && view.task!.members.some(m => keyOf(m.key.hostId, m.key.nodeId) === join.key && m.availability === "available"));
       const answer = result(unavailableJoins.length === 0, members.length === 0 && state.tiles.length === 0 ? "empty" : "following",
         unavailableJoins.length ? "Some current members have unconfirmed viewers; see the explanation strip. Inspect before refreshing." : undefined, plan.nextAt);
-      if (answer.following!.state === "empty") answer.following!.enabled = false;
+      if (view.task.kind === "qitem" && answer.following!.state === "empty") answer.following!.enabled = false;
       answer.following!.overflow = plan.overflow;
       answer.following!.tiles = state.tiles.map(t => ({ key: t.key, seat: t.seat, departedAt: t.departedAt,
         ...(plan.retained.find(r => r.key === t.key) ? { reason: plan.retained.find(r => r.key === t.key)!.reason } : {}) }));
