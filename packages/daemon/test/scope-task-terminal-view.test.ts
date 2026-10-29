@@ -295,7 +295,7 @@ describe("mission views with repeated slice templates", () => {
   });
   it.each([
     { label: "no mission", tags: [] },
-    { label: "both missions", tags: ["mission:release", "mission:other"] },
+    { label: "two other missions", tags: ["mission:other", "mission:third"] },
     { label: "non-claimant mission", tags: ["mission:unknown"] },
   ])("names an unplaceable shared-key row with $label without losing known owners", ({ tags }) => {
     const f = fixture(); f.addSlice("other", "03-build", "OTHER");
@@ -305,4 +305,14 @@ describe("mission views with repeated slice templates", () => {
     expect(result.task).toMatchObject({ complete: false, members: [{ seat: "a" }] });
     expect(result.task.issues.join(" ")).toContain("unplaced");
   });
+});
+
+
+it("keeps directly tagged shared work in both missions despite a colliding child key", () => {
+  const f = fixture(); f.addSlice("other", "03-build", "OTHER");
+  f.add("shared", "b", "pending", ["mission:release", "mission:other", "slice:03-build"]);
+  for (const mission of ["release", "other"]) {
+    expect(f.read(`mission:${mission}`)).toMatchObject({ task: { complete: true, issues: [],
+      members: [{ seat: "b", obligations: [{ qitemId: "shared" }] }] } });
+  }
 });
