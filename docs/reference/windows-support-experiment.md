@@ -1735,3 +1735,21 @@ The adjacent directory-link fixtures now use native Windows junctions (POSIX
 directory symlinks elsewhere), retaining the cyclic-directory and linked bundled
 skill assertions. The route and audit suites passed all 36 tests on Windows;
 daemon TypeScript checking passed. No installed user skills were changed.
+
+## Standalone runner instance-home parity (2026-10-30)
+
+Pi activity-endpoint discovery and the stub runner's endpoint/compaction setup
+previously joined `.openrig` to an empty string when `HOME` was absent. This
+could select a current-directory path on a normal Windows host. Both now use
+the same standalone resolver: explicit `OPENRIG_HOME`, then `HOME`, then native
+Windows `USERPROFILE`, then Node's OS home. Native environment key lookup is
+case-insensitive on Windows. Pi's resolver also uses its supplied environment
+rather than reading a different global `HOME` value.
+
+A synthetic Unicode Windows profile with no `HOME` supplies the endpoint to the
+real stub endpoint reader. Explicit instance and direct endpoint precedence,
+POSIX selection and OS fallback are covered. Resolver, stub execution and real
+stub HTTP activity checks passed all 15 tests. Daemon build passed, including
+the compiled standalone resolver dependency. The adjacent Pi path suite skipped
+all six cases under its existing Windows guard; this is not Pi/provider runtime
+acceptance. No active runner or daemon was restarted.
