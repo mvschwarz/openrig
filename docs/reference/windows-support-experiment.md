@@ -273,6 +273,20 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native authored cwd expansion (2026-10-30)
+
+The shared authored-cwd resolver now expands a leading `~\` on Windows and
+looks up `$VAR`/`${VAR}` using the existing platform environment rules. Thus
+native backslash home paths and mixed-case Windows environment names reach the
+same expansion path used by launch, profile resolution and preflight. POSIX
+backslash names remain literal; unset references remain written and explicitly
+empty values remain empty. Existing literal directories still take precedence.
+
+Owned temporary directories cover both literal precedence and absent-literal
+expansion. The complete cwd-expansion and cwd-dot-prefix files pass 20/20 and
+daemon typecheck passes. Older assertions now compare native resolved paths
+or normalize equivalent slash spelling; no live seat or host environment changed.
+
 ## Native restore precondition path coverage (2026-10-30)
 
 Restore pre-validation recognized only slash-led, tilde and forward-slash
