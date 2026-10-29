@@ -86,7 +86,7 @@ describe("authoritative scoped terminal membership", () => {
     const f = fixture();
     expect(f.read()).toMatchObject({ task: { complete: true, members: [] } });
     expect(f.read("slice:absent")).toMatchObject({ code: "scope_not_found" });
-    expect(f.read("mission:release")).toMatchObject({ code: "scope_unsupported" });
+    expect(f.read("project:release")).toMatchObject({ code: "scope_unsupported" });
     f.index.slicesRoot += "-missing"; expect(f.read()).toMatchObject({ code: "scope_unavailable" });
   });
   it("does not turn malformed or over-budget active tags into complete empty", () => {
@@ -168,8 +168,8 @@ describe("mission union over the same authoritative scope snapshot", () => {
     f.add("closed", "wrong", "done", ["mission:release"]);
     const result = f.read("mission:release"); if ("code" in result) throw new Error(result.error);
     expect(result.task).toMatchObject({ kind: "mission", id: "release", name: "release", complete: true,
-      members: [{ seat: "remote", availability: "unresolved" }, { seat: "a", obligations: [{ qitemId: "mission" }, { qitemId: "slice" }] },
-        { seat: "b", obligations: [{ qitemId: "both" }] }] });
+      members: [{ seat: "a", obligations: [{ qitemId: "mission" }, { qitemId: "slice" }] },
+        { seat: "b", obligations: [{ qitemId: "both" }] }, { seat: "remote", availability: "unresolved" }] });
     expect(result.task).not.toHaveProperty("qitemId");
   });
   it("follows inherited tags through handoff, remains known empty, and sees later direct work", () => {
