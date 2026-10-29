@@ -582,7 +582,7 @@ export function replaceArtifactFile(target: string, content: string, stagingId: 
   }
   try {
     if (failure !== undefined) throw failure;
-    if (nativeRegular) replaceWindowsFilePreservingMetadata(target, staging);
+    if (nativeRegular) replaceWindowsFilePreservingMetadata(target, staging, true);
     else fs.renameSync(staging, target);
   } catch (err) {
     try { fs.rmSync(staging, { force: true }); }

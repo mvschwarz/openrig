@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPrivateTextFile } from "../src/lib/private-text-file.js";
@@ -49,4 +49,49 @@ it.runIf(process.platform === "win32")("preserves protected artifact access duri
   expect(readFileSync(file, "utf8")).toBe("replacement synthetic evidence");
   expect(accessPolicy(file)).toBe(before);
   expect(readdirSync(root)).toEqual(["proof.md"]);
+});
+it.runIf(process.platform === "win32")("replaces a readonly proof while retaining readonly aliases and their original bytes", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-proof-readonly-"));
+  const file = join(root, "proof.md"), alias = join(root, "original.md");
+  createPrivateTextFile(file, "original synthetic evidence");
+  linkSync(file, alias);
+  chmodSync(file, 0o444);
+  const before = accessPolicy(file);
+  replaceArtifactFile(file, "replacement synthetic evidence");
+  expect(readFileSync(file, "utf8")).toBe("replacement synthetic evidence");
+  expect(readFileSync(alias, "utf8")).toBe("original synthetic evidence");
+  expect(statSync(file).mode & 0o222).toBe(0);
+  expect(statSync(alias).mode & 0o222).toBe(0);
+  expect(accessPolicy(file)).toBe(before);
+  expect(accessPolicy(alias)).toBe(before);
+  expect(readdirSync(root).sort()).toEqual(["original.md", "proof.md"]);
+});
+it.runIf(process.platform === "win32")("restores readonly when a native delete-sharing lock refuses proof replacement", async () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-proof-locked-"));
+  const file = join(root, "proof.md");
+  createPrivateTextFile(file, "original synthetic evidence");
+  chmodSync(file, 0o444);
+  const before = accessPolicy(file);
+  const script = "$ErrorActionPreference='Stop'; $s=[IO.File]::Open($env:OPENRIG_TEST_LOCK_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite); try { [Console]::WriteLine('ready'); $null=[Console]::ReadLine() } finally { $s.Dispose() }";
+  const child = spawn(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+    { env: { ...process.env, OPENRIG_TEST_LOCK_FILE: file }, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  const exit = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const timeout = setTimeout(() => child.kill(), 10_000);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", data => { if (String(data).includes("ready")) resolve(); });
+      child.once("error", reject);
+      child.once("close", () => reject(new Error("fixture lock exited before ready")));
+    });
+    expect(() => replaceArtifactFile(file, "replacement synthetic evidence")).toThrow();
+    expect(readFileSync(file, "utf8")).toBe("original synthetic evidence");
+    expect(statSync(file).mode & 0o222).toBe(0);
+    expect(accessPolicy(file)).toBe(before);
+    expect(readdirSync(root)).toEqual(["proof.md"]);
+  } finally {
+    child.stdin.end("\n");
+    await exit;
+    clearTimeout(timeout);
+  }
 });

@@ -2097,3 +2097,24 @@ host-denied file symlink creation, two POSIX mode-bit expectations, and actual
 read-only artifact replacement. The last remains an implementation gap; native
 ACL preservation alone does not establish read-only replacement parity. CLI
 TypeScript checking passes. No real proof records or user files were modified.
+
+## Explicit readonly proof replacement (2026-10-30)
+
+The preceding readonly artifact gap is now implemented for explicit proof
+replacement. A separate native operation pins regular-file handles for the
+original and staging inode, temporarily clears readonly attributes for
+ReplaceFileW, then restores readonly on the replacement and retained hard-link
+aliases. On failure, restoration uses those handles rather than reopening an
+uncertain pathname. DACL preservation remains enabled with no ignore-errors
+flags. Ordinary config replacement does not select this operation and retains
+its existing writable-target requirement.
+
+The implementation uses [SetFileInformationByHandle](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+with FileBasicInfo for attribute changes, not ACL grants. Native owned fixtures
+verify replacement content, unchanged protected DACL, readonly replacement,
+readonly hard-link alias with original bytes, and restoration after an actual
+delete-sharing lock refuses publication. The ACL/readonly fixture file passes
+6/6. The earlier combined proof run at this source passes 47/50: readonly
+replacement now passes; the remaining three are file-symlink creation EPERM and
+two POSIX mode-bit assertions. CLI TypeScript checking and daemon build pass.
+These are source-level owned fixtures, not fleet activation or full acceptance.

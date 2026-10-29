@@ -27,6 +27,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else if(args[0]=="directory-write-access")DirectoryWriteAccess(args[1]);
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
+      else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -39,6 +40,8 @@ public static class OpenRigOwnedText {
     public uint attributes; public System.Runtime.InteropServices.ComTypes.FILETIME created, accessed, written;
     public uint volume, sizeHigh, sizeLow, links, indexHigh, indexLow;
   }
+  [StructLayout(LayoutKind.Sequential)] struct BasicInformation { public long created,accessed,written,changed; public uint attributes; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle file,int kind,ref BasicInformation info,uint size);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SecurityAttributes security,uint disposition,uint flags,IntPtr template);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
@@ -84,6 +87,36 @@ public static class OpenRigOwnedText {
       FileInformation info;
       if(!GetFileInformationByHandle(file,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
       if((info.attributes & 0x10u)==0)throw new InvalidOperationException("state path must be a directory");
+    }
+  }
+  static SafeFileHandle AttributeHandle(string path) {
+    var security=new SecurityAttributes(); security.length=Marshal.SizeOf(security);
+    var file=CreateFile(path,0x180u,7u,ref security,3u,0x00200000u,IntPtr.Zero);
+    if(file.IsInvalid) { int error=Marshal.GetLastWin32Error(); file.Dispose(); throw new Win32Exception(error); }
+    return file;
+  }
+  static void Attributes(SafeFileHandle file,uint attributes) {
+    var basic=new BasicInformation(); basic.attributes=attributes==0?0x80u:attributes;
+    if(!SetFileInformationByHandle(file,0,ref basic,(uint)Marshal.SizeOf(basic)))throw new Win32Exception(Marshal.GetLastWin32Error());
+  }
+  static void ReplaceArtifact(string target,string staging) {
+    using(var original=AttributeHandle(target))using(var replacement=AttributeHandle(staging)) {
+      var oldInfo=Regular(original,false); var newInfo=Regular(replacement,false);
+      bool oldReadOnly=(oldInfo.attributes&1u)!=0, newReadOnly=(newInfo.attributes&1u)!=0, replaced=false;
+      try {
+        if(oldReadOnly)Attributes(original,oldInfo.attributes&~1u);
+        if(newReadOnly)Attributes(replacement,newInfo.attributes&~1u);
+        if(!ReplaceFile(target,staging,null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error());
+        replaced=true;
+      } finally {
+        // Restore through pinned handles, never an uncertain pathname after a
+        // failed native replacement. Retained hard-link aliases keep readonly.
+        try { if(oldReadOnly && (!replaced || oldInfo.links>1))Attributes(original,oldInfo.attributes); }
+        finally {
+          if(replaced && oldReadOnly)Attributes(replacement,newInfo.attributes|1u);
+          else if(newReadOnly)Attributes(replacement,newInfo.attributes);
+        }
+      }
     }
   }
   static FileInformation Regular(SafeFileHandle file,bool write,bool owned=false) {
@@ -353,9 +386,10 @@ export function checkWindowsDirectoryWriteAccess(directory: string): void {
 }
 
 /** Replace an existing file using Windows metadata-preserving replacement.
- * No ignore-ACL-errors flags: failure must not silently broaden access. */
-export function replaceWindowsFilePreservingMetadata(target: string, staging: string): void {
-  execFileSync(nativeHelper(), ["replace-preserve", toNamespacedPath(target), toNamespacedPath(staging)], {
+ * Only explicit proof replacement may temporarily clear readonly attributes;
+ * pinned handles restore them on success/failure. No ignore-ACL-errors flags. */
+export function replaceWindowsFilePreservingMetadata(target: string, staging: string, explicitArtifactReplacement = false): void {
+  execFileSync(nativeHelper(), [explicitArtifactReplacement ? "replace-artifact" : "replace-preserve", toNamespacedPath(target), toNamespacedPath(staging)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }
