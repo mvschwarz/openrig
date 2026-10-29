@@ -1033,6 +1033,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       seen: inboundSeen,
       deadLetter: dead,
       destination: cfg.inboundDestination,
+      reactions: cfg.reactions === "off" ? "off" : "route",
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.

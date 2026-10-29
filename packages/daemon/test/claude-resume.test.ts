@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
+import type { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
+import type { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 
 const CLAUDE_FLOOR_EFFECT = {
   runtime: "claude-code",
@@ -33,6 +35,25 @@ function mockTmux(overrides?: {
 }
 
 describe("ClaudeResumeAdapter", () => {
+  it.each([false, true])("refuses API resume when the token step cannot run (environment present: %s)", async (hasEnvironment) => {
+    const tmux = mockTmux();
+    tmux.sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const adapter = new ClaudeResumeAdapter(tmux, {
+      claudeManagedLaunch: { seatTokenLaunch: () => ({
+        ref: { label: "api", tokenFile: "/synthetic/api-key", kind: "api-key" },
+        step: "synthetic-token-step", warnings: [],
+      }) } as unknown as ClaudeManagedLaunch,
+      ...(hasEnvironment ? { seatLaunchEnvironment: {
+        command: async (_session: string, command: string) => command,
+      } as unknown as SeatLaunchEnvironment } : {}),
+    });
+    const result = await adapter.resume("seat@rig", "claude_id", "original", "/repo", "floor", "haiku", undefined, "node");
+    expect(result).toMatchObject({ ok: false, code: "resume_failed", message: expect.stringContaining("no Claude process started") });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
   it("the legacy continuation uses the retained executable and original conversation", async () => {
     const tmux = mockTmux();
     const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });

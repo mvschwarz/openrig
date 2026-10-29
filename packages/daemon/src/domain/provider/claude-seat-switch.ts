@@ -19,11 +19,14 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
   const refuse = (reason: PrecheckReason, message: string, claude?: ClaudeSwitchView): ClaudeCheck =>
     ({ ok: false, verdict: { safe: false, reasons: [reason], message, ...(claude ? { claude } : {}) } });
   if (!precedence) return refuse("rebind_unsupported_for_runtime", "This daemon can't check what would outrank a Claude seat's own token, so it doesn't move Claude seats.");
-  if (input.tokenFile === undefined) {
+  if (input.apiKeyFile !== undefined && input.tokenFile !== undefined) return refuse("invalid_token_reference", "Choose --api-key-file or a subscription token/stored login, not both.");
+  if (input.tokenFile === undefined && input.apiKeyFile === undefined) {
     return refuse("token_file_required", "A Claude seat moves to its own subscription token with --to-account <label> --token-file <absolute path to a 0600 "
       + "file holding the token>, or back to its config dir's stored login with --stored-login.");
   }
-  const ref = input.tokenFile === null ? null : { label: input.toAccount, tokenFile: input.tokenFile };
+  const ref: ClaudeSeatTokenRef | null = input.apiKeyFile !== undefined
+    ? { label: input.toAccount, tokenFile: input.apiKeyFile, kind: "api-key" }
+    : input.tokenFile === null ? null : { label: input.toAccount, tokenFile: input.tokenFile! };
   if (ref) {
     const problem = claudeSeatTokenRefProblem(ref);
     if (problem) return refuse("invalid_token_reference", `${problem}.`);
@@ -33,10 +36,10 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
   if (!seat.running) {
     return refuse("seat_not_running", `${input.seat} isn't running, so there's no conversation to resume. Launch it first: rig launch ${seat.rigName} ${seat.logicalId}.`);
   }
-  const found = await precedence(seat.nodeId, ref ? {} : { storedLogin: true });
+  const found = await precedence(seat.nodeId, ref?.kind === "api-key" ? { apiKey: true } : ref ? {} : { storedLogin: true });
   const instead = found.instead?.length
     ? `the CLAUDE_CODE_OAUTH_TOKEN from ${found.instead.map((c) => `${c.source} (${c.remedy})`).join("; ")}` : null;
-  const claude: ClaudeSwitchView = { label: ref?.label ?? STORED_LOGIN, tokenFile: ref?.tokenFile ?? null, checked: found.checked, notChecked: found.notChecked,
+  const claude: ClaudeSwitchView = { ...(ref?.kind ? { credentialKind: ref.kind } : {}), label: ref?.label ?? STORED_LOGIN, tokenFile: ref?.tokenFile ?? null, checked: found.checked, notChecked: found.notChecked,
     ...(instead ? { instead } : {}) };
   if (found.conflicts.length) {
     return refuse("credential_outranks_token", "Claude Code would use these instead, so nothing changed: "
@@ -71,7 +74,7 @@ export async function switchClaudeSeat(input: ProviderSwitchInput, relaunch: Cla
     }
     // Its reference was set before the error; what the seat runs isn't known.
     return { outcome: "unknown", reasons: ["relaunch_threw"],
-      seat: { seat: input.seat, account: input.tokenFile === null ? STORED_LOGIN : input.toAccount, loginChanged: true, peers: [], undo: null },
+      seat: { seat: input.seat, account: input.tokenFile === null ? STORED_LOGIN : input.toAccount, ...(input.apiKeyFile ? { credentialKind: "api-key", tokenFile: input.apiKeyFile } : {}), loginChanged: true, peers: [], undo: null },
       message: `${input.seat}'s relaunch stopped with an error after its process may have been ended (${message}). Check the pane with rig capture ${input.seat}. Not retried.` };
   }
 }
@@ -94,11 +97,11 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   }
   const before = relaunch.tokenRef(nodeId);
   const account = checked.ref?.label ?? STORED_LOGIN;
-  const report: SeatSwitchReport = { seat: input.seat, account, ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}),
+  const report: SeatSwitchReport = { seat: input.seat, account, ...(checked.ref?.kind ? { credentialKind: checked.ref.kind } : {}), ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}),
     conversation: snapshot.conversation, loginChanged: false, peers: [],
     // The label's characters are limited; a path can hold any but a newline, so it's quoted.
     undo: before
-      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} --token-file ${shellQuote(before.tokenFile)}`
+      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
       : `rig provider switch --seat ${input.seat} --stored-login` };
   touching();
   relaunch.setTokenRef(nodeId, checked.ref);
@@ -114,8 +117,8 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   if (!relaunched.ok) {
     const recoveryCommand = `rig launch ${rigName} ${logicalId} --snapshot-id ${snapshot.snapshotId}`;
     report.restart = { outcome: relaunched.code, message: relaunched.message, recoveryCommand,
-      remainingStep: `If the pane (rig capture ${input.seat}) shows no running Claude, stop the seat first (rig seat stop ${input.seat} --reason "<why>"), `
-        + `then run the recovery command; it resumes the conversation from snapshot ${snapshot.snapshotId} with the new reference. The way back works once the seat runs.` };
+      remainingStep: `Inspect the pane (rig capture ${input.seat}). If a leftover shell/session remains without a running Claude, stop it first (rig seat stop ${input.seat} --reason "<why>"). `
+        + `If the session is already absent, run the recovery command directly; it resumes the conversation from snapshot ${snapshot.snapshotId} with the new reference. The way back works once the seat runs.` };
     return { outcome: "unknown", reasons: [relaunched.code === "relaunch_threw" ? "relaunch_threw" : `relaunch_${relaunched.code.replace(/-/g, "_")}`], seat: report,
       message: `${input.seat}'s relaunch in its pane from snapshot ${snapshot.snapshotId} didn't report a resumed conversation (${relaunched.code}: ${relaunched.message}). `
         + "Its process may have been ended. Not retried." };
@@ -123,6 +126,12 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   const fallback = relaunched.warnings.filter(isClaudeSeatTokenFallback);
   report.warnings = relaunched.warnings;
   report.restart = { outcome: "resumed", message: `Resumed conversation ${snapshot.conversation ?? "(not recorded in the snapshot)"} in the seat's own pane.` };
+  if (checked.ref?.kind === "api-key") {
+    report.tokenApplied = fallback.length === 0;
+    report.next = "After a real tool turn, check the seat's /status for API-key authentication. The label is operator-supplied; OpenRig does not verify the billing account or enforce a budget.";
+    return { outcome: "rebind_in_progress", seat: report,
+      message: `Relaunched ${input.seat} on its selected API-key file, resuming conversation ${snapshot.conversation ?? "from the snapshot"} in its own pane. Work in flight when it stopped didn't carry over.` };
+  }
   if (checked.ref) {
     report.tokenApplied = fallback.length === 0;
     report.next = report.tokenApplied

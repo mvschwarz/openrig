@@ -401,7 +401,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       });
     });
 
-    async function reactToAsk(decisionId: string, eventTs: string): Promise<string> {
+    /** With `routed` false, the reaction must make no row: a routed one lands well within the wait (#2233). */
+    async function reactToAsk(decisionId: string, eventTs: string, routed = true): Promise<string> {
       const eventId = `reaction:C-TEST:1.1:UFOUNDER:eyes:${eventTs}`;
       const qitemId = `qitem-slack-reaction-${createHash("sha256").update(eventId).digest("hex").slice(0, 20)}`;
       inboundSocket.onmessage?.({ data: JSON.stringify({
@@ -410,10 +411,28 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           item: { type: "message", channel: "C-TEST", ts: "1.1" },
         } },
       }) });
+      if (!routed) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(repo.getById(qitemId)).toBeNull();
+        return qitemId;
+      }
       await vi.waitFor(() => expect(repo.getById(qitemId)).not.toBeNull());
       expect(repo.getById(qitemId)?.body).toContain(`In reply to: ${decisionId}`);
       return qitemId;
     }
+
+    it("#2233: with reactions off, a person's emoji on an ask makes no row, so it costs the asking seat no turn", async () => {
+      saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: join(home, "fake.env"), minimumLevelThatInterrupts: "NOTICE", reactions: "off" }, home);
+      await connectInbound();
+      const decision = await repo.create({ ...request, humanAlert: true });
+      await deliver(decision.qitemId);
+      await reactToAsk(decision.qitemId, "913.1", false);
+      expect(repo.getById(decision.qitemId)).toMatchObject({ humanAnswers: null });
+    });
+
+    it("#2233: reactions accepts only route or off", () => {
+      expect(() => saveConfig({ ...DEFAULT_CONFIG, reactions: "sometimes" } as never, home)).toThrow(/reactions must be one of route, off/);
+    });
 
     it("interaction provenance: a reaction row keeps its resolved ask's thread for the seat's follow-up", async () => {
       await connectInbound();

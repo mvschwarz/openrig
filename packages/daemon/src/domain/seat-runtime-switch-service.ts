@@ -239,7 +239,7 @@ export class SeatRuntimeSwitchService {
       return { ok: true, dryRun: !!input.dryRun, changed: false, ...base };
     }
     if (input.accountHome !== undefined && target === "claude-code" && node.cwd) {
-      const problem = isolatedClaudeAccountProblem(input.accountHome, node.cwd, !!input.accountToken);
+      const problem = isolatedClaudeAccountProblem(input.accountHome, node.cwd, !!input.accountToken, input.accountToken?.kind === "api-key");
       if (problem) return refuse("invalid_runtime_settings", problem);
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;

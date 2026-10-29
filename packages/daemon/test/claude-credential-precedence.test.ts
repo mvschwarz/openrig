@@ -30,10 +30,26 @@ function fixture(opts: { daemonEnv?: Record<string, string>; memberEnv?: Record<
   db.prepare("INSERT INTO nodes VALUES ('node', 'rig', 'claude-code', ?, ?)").run(cwd, opts.memberEnv ? JSON.stringify(opts.memberEnv) : null);
   db.exec("INSERT INTO bindings VALUES ('b', 'node', 'seat@rig', '%1'); INSERT INTO occupant_tenures VALUES ('node', 'gen', 1)");
   const managed = new ClaudeManagedLaunch(db, { PATH: "/usr/bin:/bin", HOME: home, ...opts.daemonEnv }, {}, async () => undefined);
-  return { managed, home, main, cwd };
+  return { db, managed, home, main, cwd };
 }
 
 describe("what would outrank a Claude seat's own subscription token", () => {
+  it.each([{}, { apiKey: true }, { storedLogin: true }])("allows credential changes within the selected home: %j", async (mode) => {
+    const f = fixture();
+    f.db.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT");
+    f.db.prepare("UPDATE nodes SET account_home = ? WHERE id = 'node'").run(path.join(f.home, ".claude"));
+    expect((await f.managed.credentialPrecedence("node", mode)).conflicts).toEqual([]);
+  });
+
+  it("API-key launch scrubs inherited auth but refuses selectors in settings env", async () => {
+    const f = fixture({ daemonEnv: { CLAUDE_CODE_OAUTH_TOKEN: "synthetic-old", ANTHROPIC_API_KEY: "synthetic-old-api" } });
+    expect((await f.managed.credentialPrecedence("node", { apiKey: true })).conflicts).toEqual([]);
+    writeFileSync(path.join(f.home, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "synthetic-helper" }));
+    expect((await f.managed.credentialPrecedence("node", { apiKey: true })).conflicts).toEqual([]);
+    writeFileSync(path.join(f.cwd, ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "synthetic-other-account" } }));
+    expect((await f.managed.credentialPrecedence("node", { apiKey: true })).conflicts).toMatchObject([{ name: "ANTHROPIC_AUTH_TOKEN" }]);
+  });
+
   it("names each one in the launch environment and the settings files the seat loads, with its remedy", async () => {
     const f = fixture({ daemonEnv: { ANTHROPIC_AUTH_TOKEN: "x" }, memberEnv: { ANTHROPIC_API_KEY: "y" }, worktree: true });
     writeFileSync(path.join(f.home, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "/usr/local/bin/key" }));

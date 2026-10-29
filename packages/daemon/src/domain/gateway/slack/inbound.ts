@@ -190,6 +190,8 @@ export interface InboundDeps {
   queue: InboundQueuePort;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
+  /** What a person's emoji reaction does: "route" (absent) makes a row for the seat that asked; "off" ignores it (#2233). */
+  reactions?: "route" | "off";
   destination: string; // first-class config; default operator-agent@kernel
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
    *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
@@ -612,6 +614,9 @@ export class InboundRouter {
   }
 
   private async attemptReaction(ev: SlackEvent): Promise<{ status: InboundDisposition; reason?: string }> {
+    // With reactions off, a person's emoji stays in Slack and never becomes a row (#2233). That holds on the retry too, so a
+    // reaction retained from before reactions were turned off is dropped as ignored.
+    if (this.deps.reactions === "off") return { status: "ignored", reason: "reactions-off" };
     const eventId = `reaction:${ev.item?.channel ?? "-"}:${ev.item?.ts ?? "-"}:${ev.user ?? "-"}:${ev.reaction ?? "-"}:${ev.event_ts ?? "-"}`;
     if (this.deps.seen.load().has(eventId)) return { status: "ignored", reason: "dup" };
     if (this.inflight.has(eventId)) return { status: "ignored", reason: "inflight" };

@@ -55,7 +55,15 @@ export interface SlackConnectorConfig {
    * every channel is handled here, as before. Not in DEFAULT_CONFIG, like `channelMap`.
    */
   forwardChannels?: ForwardChannel[];
+  /**
+   * What a person's emoji reaction on an OpenRig post does. Absent or "route" = a row for the seat that asked, as before.
+   * "off" = reactions are ignored, so an acknowledging emoji costs no agent turn. Not in DEFAULT_CONFIG, like `channelMap`.
+   */
+  reactions?: SlackReactionsMode;
 }
+
+export const SLACK_REACTIONS_MODES = ["route", "off"] as const;
+export type SlackReactionsMode = typeof SLACK_REACTIONS_MODES[number];
 
 export const DEFAULT_CONFIG: SlackConnectorConfig = {
   enabled: false,
@@ -82,6 +90,10 @@ function validateConfig(cfg: SlackConnectorConfig, opts: { reading?: boolean } =
   validateLevel("minimumLevelThatPosts", cfg.minimumLevelThatPosts);
   validateLevel("minimumLevelThatInterrupts", cfg.minimumLevelThatInterrupts);
   validateChannelMap(cfg, { allowUnknownFields: opts.reading });
+  // A value a newer OpenRig wrote is read as the default rather than failing the connector.
+  if (!opts.reading && cfg.reactions !== undefined && !SLACK_REACTIONS_MODES.includes(cfg.reactions)) {
+    throw new Error(`reactions must be one of ${SLACK_REACTIONS_MODES.join(", ")} (got ${String(cfg.reactions)})`);
+  }
 }
 
 export function configPathFor(home?: string): string {

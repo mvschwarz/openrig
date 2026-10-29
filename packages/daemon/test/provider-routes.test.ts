@@ -46,6 +46,19 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
+  it("forwards API-key file references on both endpoints and refuses conflicting selectors", async () => {
+    const precheck = vi.fn<ProviderService["precheck"]>(async () => ({ safe: true as const }));
+    const switchAccount = vi.fn<ProviderService["switchAccount"]>(async () => ({ outcome: "succeeded" as const }));
+    const app = appWith({ ...stubService, precheck, switchAccount });
+    await app.request("/api/provider/precheck?seat=dev-a@rig&toAccount=api&apiKeyFile=%2Fsynthetic%2Fkey");
+    expect(precheck.mock.calls[0]?.[0]).toMatchObject({ apiKeyFile: "/synthetic/key" });
+    const request = (body: object) => app.request("/api/provider/switch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await request({ seat: "dev-a@rig", toAccount: "api", apiKeyFile: "/synthetic/key" })).status).toBe(200);
+    expect(switchAccount.mock.calls[0]?.[0]).toMatchObject({ apiKeyFile: "/synthetic/key" });
+    expect((await request({ seat: "dev-a@rig", toAccount: "api", apiKeyFile: "/synthetic/key", tokenFile: null })).status).toBe(400);
+    expect(switchAccount).toHaveBeenCalledTimes(1);
+  });
+
   it("move reports are queue items now, not the removed event-log record: no setting gates them, and there's no /moves/:id", async () => {
     const app = appWith(stubService);
     // This app wires no queue, so the report routes say so rather than answering a disabled-feature 409.
@@ -171,6 +184,13 @@ describe("provider routes", () => {
       app.route("/api/provider", providerRoutes());
       await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
       expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ nodeId: node.id, logicalId: "dev.a", running: true, pane: "%101" });
+      // Restores can mix ISO and SQLite timestamp spellings; ULIDs retain creation order.
+      registry.updateStatus(session.id, "superseded");
+      const current = registry.registerSession(node.id, "dev-a@fixture-rig");
+      registry.updateStatus(current.id, "running");
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-10-28T00:00:01Z", session.id);
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-10-28 00:00:02", current.id);
+      expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ running: true });
       expect(await lent.exclusive(node.id, async () => "held")).toBe("held");
       expect(leased).toEqual([[node.id]]);
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toEqual({ ok: true, status: "resumed", warnings: ["dev-a@fixture-rig: a launch warning"] });
@@ -179,6 +199,8 @@ describe("provider routes", () => {
       // Restore's stops before it touches the seat leave it unchanged; anything else after the launch began is unknown.
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", error: "decide first" }] };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "awaiting-decision" });
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", launchStarted: true, error: "resume failed after cutover" }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "awaiting-decision" });
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", error: "the pane couldn't be respawned" }] };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };

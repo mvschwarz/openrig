@@ -75,7 +75,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
 
 function narrowLaunchErrorStatus(code: string | undefined): 404 | 409 | 500 {
   if (code === "rig_not_found" || code === "no_matching_nodes" || code === "snapshot_not_found" || code === "snapshot_wrong_rig" || code === "no_usable_snapshot") return 404;
-  if (code === "snapshot_unusable") return 409;
+  if (code === "snapshot_unusable" || code === "selection_changed") return 409;
   return 500;
 }
 
@@ -285,7 +285,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
   }
 
-  if (node.podId) {
+  if (node.podId || body.snapshotId !== undefined) {
     if (body.snapshotId === undefined) {
       const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
       const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);

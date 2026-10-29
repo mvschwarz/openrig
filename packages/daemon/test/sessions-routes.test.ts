@@ -208,6 +208,41 @@ describe("Session routes", () => {
     expect(body.binding.tmuxSession).toBe(body.sessionName);
   });
 
+  it("POST .../launch honors an explicit snapshot for a legacy seat instead of starting a blank shell", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("legacy-recovery");
+    rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/worker/launch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshotId: "missing-snapshot" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: "snapshot_not_found" });
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual([]);
+  });
+
+  it.each([false, true])("POST .../launch rejects a recreated snapshot seat before dispatch (pod: %s)", async pod => {
+    const tmux = mockTmuxAdapter();
+    const createSession = vi.spyOn(tmux, "createSession");
+    const { app, rigRepo, snapshotCapture, sessionRegistry } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("recreated");
+    if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "Dev");
+    const logicalId = pod ? "dev.worker" : "worker";
+    const first = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", ...(pod ? { podId: "pod" } : {}) });
+    const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(first.id);
+    const current = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", ...(pod ? { podId: "pod" } : {}) });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${logicalId}/launch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshotId: snapshot.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "selection_changed" });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual([]);
+    expect(rigRepo.getRig(rig.id)!.nodes[0]!.id).toBe(current.id);
+  });
+
   it("POST .../launch already-bound -> 409", async () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("r01");

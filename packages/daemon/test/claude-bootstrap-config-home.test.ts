@@ -80,6 +80,32 @@ console.log(JSON.stringify({env:{HOME:process.env.HOME,CLAUDE_CONFIG_DIR:dir}, s
 }
 
 describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects the launch config home", () => {
+  it.each(["managed", "classic"])("%s API successor bootstraps and checks its selected home, leaving predecessor credentials alone", async route => {
+    const f = fixture("unset", false, true);
+    const old = path.join(f.root, "old-home"), selected = path.join(f.root, "new-home");
+    fs.mkdirSync(old); fs.mkdirSync(selected);
+    fs.writeFileSync(path.join(old, "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "synthetic-old-conflict" } }));
+    fs.writeFileSync(path.join(selected, "settings.json"), JSON.stringify({ apiKeyHelper: "synthetic-unused-helper" }));
+    const tokenFile = path.join(f.root, "new-api"); fs.writeFileSync(tokenFile, "synthetic-selected-api", { mode: 0o600 });
+    f.db.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT; ALTER TABLE nodes ADD COLUMN claude_token_ref TEXT");
+    f.db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = 'node'").run(old,
+      JSON.stringify({ label: "old-api", tokenFile: path.join(old, "missing-key"), kind: "api-key" }));
+    const cli = path.join(f.root, "rig"); fs.writeFileSync(cli, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const executable = path.join(f.root, "bin", "claude");
+    fs.writeFileSync(executable, fs.readFileSync(executable, "utf8").replace("JSON.stringify({env:", "JSON.stringify({api:process.env.ANTHROPIC_API_KEY==='synthetic-selected-api',env:"));
+    f.tmux.getPaneCommand = async () => "sh";
+    const identity: Record<string, string> = { OPENRIG_NODE_ID: "node", OPENRIG_SESSION_NAME: "seat" };
+    f.tmux.getSessionEnv = async (_session, key) => identity[key];
+    const launch = new SeatLaunchEnvironment(f.tmux, { ...f.env, OPENRIG_HOME: path.join(f.root, "instance") }, f.cwd, cli, undefined, () => old);
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, claudeManagedLaunch: f.managed, seatLaunchEnvironment: launch, sleep: async () => {} });
+    const binding = { ...f.binding, ...(route === "classic" ? { permissionMode: undefined } : {}), accountHome: selected,
+      accountToken: { label: "new-api", tokenFile, kind: "api-key" as const } };
+    await adapter.deliverStartup([], binding);
+    expect(await adapter.launchHarness(binding, { name: "seat" })).toMatchObject({ ok: true });
+    expect(f.launches[0]).toMatchObject({ api: true, statePath: path.join(selected, ".claude.json"), state: { hasCompletedOnboarding: true } });
+    expect(f.writes).toEqual([path.join(selected, ".claude.json")]);
+    expect(JSON.parse((f.db.prepare("SELECT claude_token_ref AS ref FROM nodes WHERE id = 'node'").get() as { ref: string }).ref).label).toBe("old-api");
+  });
   for (const route of ["managed", "classic"]) for (const selection of ["persisted", "staged", "cleared"] as const) {
     it(`${route}: ${selection} account home bootstraps only the state its child reads`, async () => {
       const f = fixture("unset", false, true);

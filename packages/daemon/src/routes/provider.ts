@@ -60,7 +60,7 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       if (!rigRepo) return null;
       const row = rigRepo.db.prepare(`SELECT n.id, n.rig_id, n.logical_id, n.runtime, r.name, s.status, b.tmux_pane FROM sessions s
         JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id LEFT JOIN bindings b ON b.node_id = n.id
-        WHERE s.session_name = ? ORDER BY s.created_at DESC, s.id DESC LIMIT 1`)
+        WHERE s.session_name = ? ORDER BY s.id DESC LIMIT 1`)
         .get(seat) as { id: string; rig_id: string; logical_id: string; runtime: string | null; name: string; status: string; tmux_pane: string | null } | undefined;
       return row?.runtime === "claude-code"
         ? { nodeId: row.id, rigId: row.rig_id, rigName: row.name, logicalId: row.logical_id, running: row.status === "running", pane: row.tmux_pane ?? null } : null;
@@ -90,7 +90,7 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const node = result.launched?.find((n) => n.logicalId === logicalId);
       if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [] };
       // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat.
-      const untouched = node?.status === "awaiting-decision" || node?.status === "left_attached";
+      const untouched = !node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached");
       return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot." };
     },
   };
@@ -317,7 +317,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     // A Claude seat's own token file, or `storedLogin=1` for its config dir's stored login.
     const tokenFile = c.req.query("storedLogin") === "1" ? null : c.req.query("tokenFile");
     // An unsafe verdict is a valid 200 response, not an error.
-    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(c.req.query("apiKeyFile") !== undefined ? { apiKeyFile: c.req.query("apiKeyFile") } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   router.post("/switch", async (c) => {
@@ -332,6 +332,9 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "body must be a JSON object" }, 400);
     }
     const body = raw as Record<string, unknown>;
+    if (body["apiKeyFile"] !== undefined && (body["accountHome"] !== undefined || body["clearAccountHome"] === true)) {
+      return c.json({ error: "apiKeyFile cannot be combined with accountHome or clearAccountHome; switch credentials in place separately" }, 400);
+    }
     const seat = body["seat"];
     const clearAccountHome = body["clearAccountHome"] === true;
     if (body["clearAccountHome"] !== undefined && typeof body["clearAccountHome"] !== "boolean") return c.json({ error: "clearAccountHome must be true or false" }, 400);
@@ -374,8 +377,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     }
     const svc = svcOf(c);
     if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const apiKeyFile = body["apiKeyFile"];
+    if (apiKeyFile !== undefined && (typeof apiKeyFile !== "string" || tokenFile !== undefined)) {
+      return c.json({ error: "apiKeyFile must be a path and cannot be combined with tokenFile" }, 400);
+    }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}) },
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(typeof apiKeyFile === "string" ? { apiKeyFile } : {}) },
       seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
