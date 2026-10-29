@@ -84,7 +84,7 @@ interface RunningSeatRow {
   community_harness?: string | null;
 }
 
-type PaneObservation = { pid: number | null; command: string | null };
+type PaneObservation = { pid: number | null; command: string | null; dead?: boolean };
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
@@ -202,7 +202,7 @@ export class SeatIdentityReconciler {
     // the sole-pane recheck below; do not sample when that capability is absent.
     const nativeSeats: RunningSeatRow[] = [];
     for (const seat of seats) {
-      if (!seat.tmux_pane || !liveSessions.has(seat.session_name)) continue;
+      if (!seat.tmux_pane || !liveSessions.has(seat.session_name) || panes.get(seat.tmux_pane)?.dead === true) continue;
       if (seat.runtime === "codex") nativeSeats.push(seat);
       else if (seat.runtime === "claude-code" && (seat.resume_token != null || this.tmux.listPanes)) {
         try {
@@ -314,6 +314,12 @@ export class SeatIdentityReconciler {
 
     // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
     const batched = panes?.get(seat.tmux_pane) ?? null;
+    if (batched?.dead === true) {
+      return {
+        ...base, verdict: "pane_missing", evidenceSource: "pane_process", reason: "pane_exited",
+        evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: batched.command, matchedLayer: null },
+      };
+    }
     const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
     if (pid === null) {
       // The registered pane no longer resolves. Distinguish "the whole tmux

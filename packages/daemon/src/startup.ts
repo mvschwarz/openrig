@@ -113,7 +113,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, SessionTransport, inspectComposerInput } from "./domain/session-transport.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
-import { hookOrPaneActivity, nodeSessionConfirmedMissing } from "./domain/node-inventory.js";
+import { hookOrPaneActivity, nodeExecutorConfirmedStopped } from "./domain/node-inventory.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
 import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-service.js";
@@ -2236,7 +2236,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const node = db.prepare("SELECT node_id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1").get(session) as { node_id: string } | undefined;
       // A confirmed-missing session reads unknown, as in the node inventory: its last Stop
       // or pane sample can't stand for a seat that no longer exists.
-      return node && !nodeSessionConfirmedMissing(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
+      return node && !nodeExecutorConfirmedStopped(db, node.node_id) ? seatActivityService.getSeatState(node.node_id) : null;
     });
     const watchdogPolicyEngine = new WatchdogPolicyEngine({
       jobsRepo: watchdogJobsRepoInstance,
@@ -2300,7 +2300,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
               )
               .all(rigName) as Array<{ node_id: string; session_name: string }>;
             const parkedDeps = {
-              getSeatState: (seatNodeId: string) => seatActivityService.getSeatState(seatNodeId),
+              getSeatState: (seatNodeId: string) => nodeExecutorConfirmedStopped(db, seatNodeId) ? null : seatActivityService.getSeatState(seatNodeId),
               listOpenObligations: (destinationSession: string, limit: number) => ({
                 rows: queueRepoInstance.listOpenObligations(destinationSession, limit),
                 limit,

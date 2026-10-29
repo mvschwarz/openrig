@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { NodeInventoryEntry, NodeLifecycleState, RigLifecycleState } from "./types.js";
-import { identityVerdictConfirmsSessionMissing } from "./types.js";
+import { identityVerdictConfirmsExecutorStopped } from "./types.js";
 import {
   countAssignedWorkForEntry,
   seatNeedsAttention,
@@ -125,8 +125,8 @@ export function deriveRigLifecycleFromInventory(
  * verdict for exactly that case; node-inventory already surfaces it here,
  * applicability-gated (a stale verdict is null → fail-open).
  *
- * ONLY `reason === "session_missing"` — a genuinely-gone tmux session — is
- * excluded. `pane_pid_gone` / `mismatch` / `tmux_unavailable` and an absent or
+ * Only positive `session_missing` or `pane_exited` evidence excludes an executor.
+ * `pane_pid_gone` / `mismatch` / `tmux_unavailable` and an absent or
  * inapplicable (null) verdict all stay running: an ambiguous or non-fatal
  * identity signal must never fabricate `stopped` (it down-ranks lifecycle to
  * attention, a separate axis). runningCount, status, and activeCount all flow
@@ -135,7 +135,7 @@ export function deriveRigLifecycleFromInventory(
  */
 export function isEffectivelyRunning(node: NodeInventoryEntry): boolean {
   if (node.sessionStatus !== "running") return false;
-  if (identityVerdictConfirmsSessionMissing(node.identityVerdict)) return false;
+  if (identityVerdictConfirmsExecutorStopped(node.identityVerdict)) return false;
   return true;
 }
 
@@ -294,7 +294,7 @@ export class PsProjectionService {
         // The row's served activity: a live hook, else the cached pane reading. A confirmed-missing session serves
         // neither, as on the row.
         const structural = this.structuralActivity && session ? this.structuralActivity.getStructuralActivity(session) : null;
-        const activity = identityVerdictConfirmsSessionMissing(node.identityVerdict) ? null
+        const activity = identityVerdictConfirmsExecutorStopped(node.identityVerdict) ? null
           : hookOrPaneActivity(hook, structural, false, node.runtime)?.activity ?? hook;
         if (seatNeedsAttention(node, activity, arbitratedNeedsInputSignal(arbitrated))) attentionCount++;
       }

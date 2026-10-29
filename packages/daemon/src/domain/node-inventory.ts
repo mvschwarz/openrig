@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
-import { identityVerdictConfirmsSessionMissing, identityVerdictDownranksRunning } from "./types.js";
+import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -269,7 +269,7 @@ function deriveOccupantLifecycle(
   row: InventoryRow,
   identityVerdict: SeatIdentityVerdict | null,
 ): NodeInventoryEntry["occupantLifecycle"] {
-  if (row.occupant_lifecycle === "active" && identityVerdictConfirmsSessionMissing(identityVerdict)) {
+  if (row.occupant_lifecycle === "active" && identityVerdictConfirmsExecutorStopped(identityVerdict)) {
     return "unknown";
   }
   if (row.occupant_lifecycle) {
@@ -551,10 +551,8 @@ function applicableVerdict(
   return verdict;
 }
 
-/** Is this node's current session confirmed missing? The inventory's own rule (an identity
- *  verdict for the current session and binding that confirms session_missing), for readers
- *  outside the inventory projection. No verdict, a stale one or an unreadable store: false. */
-export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+/** Read only identity evidence applicable to this session, binding and occupant. Unknown stays null. */
+function currentIdentityVerdict(db: Database.Database, nodeId: string): SeatIdentityVerdict | null {
   try {
     const row = db.prepare(`
       SELECT n.handover_at, s.id AS session_id, s.session_name, s.created_at AS session_created_at, b.tmux_pane AS binding_tmux_pane
@@ -563,10 +561,24 @@ export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: strin
         LEFT JOIN bindings b ON b.node_id = n.id
        WHERE n.id = ?
     `).get(nodeId) as Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at"> | undefined;
-    return !!row && identityVerdictConfirmsSessionMissing(applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row));
+    return row ? applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row) : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+  return identityVerdictConfirmsSessionMissing(currentIdentityVerdict(db, nodeId));
+}
+
+/** Current positive stopped-executor evidence, without conflating a retained pane with a missing session. */
+export function nodeExecutorStoppedReason(db: Database.Database, nodeId: string): "session_missing" | "pane_exited" | null {
+  const reason = currentIdentityVerdict(db, nodeId)?.reason;
+  return reason === "session_missing" || reason === "pane_exited" ? reason : null;
+}
+
+export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: string): boolean {
+  return nodeExecutorStoppedReason(db, nodeId) !== null;
 }
 
 // -- Public API --
@@ -741,11 +753,14 @@ function buildInventoryEntry(
   const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
-  const sessionStatus = row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict)
-    ? "detached" : row.session_status;
+  const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
+  const sessionStatus = paneExited ? "exited"
+    : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
+  const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
+    ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
   const lifecycleState = deriveNodeLifecycleState({
     sessionStatus,
-    startupStatus: row.startup_status,
+    startupStatus,
     restoreOutcome,
     nodeId: row.node_id,
     usableSnapshot,
@@ -775,10 +790,7 @@ function buildInventoryEntry(
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
-    startupStatus: sessionStatus === "running"
-      && identityVerdictDownranksRunning(identityVerdict?.verdict)
-      ? "attention_required"
-      : row.startup_status as NodeInventoryEntry["startupStatus"],
+    startupStatus,
     restoreOutcome,
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has
@@ -1251,7 +1263,7 @@ export function attachTerminalActivityAndWork(
   const assignedByDest = readAssignedWorkBySession(deps.db);
   const now = deps.now ?? new Date();
   return entries.map((entry) => {
-    const sessionMissing = identityVerdictConfirmsSessionMissing(entry.identityVerdict);
+    const sessionMissing = identityVerdictConfirmsExecutorStopped(entry.identityVerdict);
     let terminalActive: boolean | null | undefined = sessionMissing ? false : undefined;
     // ARCH RULING 3a947fb1 (FR-7 additive): project the RAW lastActivityAt fact
     // alongside terminalActive from the SAME observation — honest-absence ladder
@@ -1268,7 +1280,7 @@ export function attachTerminalActivityAndWork(
     let activityState: NodeInventoryEntry["activityState"] = sessionMissing ? null : undefined;
     // Capability-checked: a partial injected double without the S19 surface keeps the
     // pre-taxonomy shape (undefined) rather than faking a null oracle answer.
-    const arb = seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function"
+    const arb = !sessionMissing && seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function"
       ? seatActivity.getSeatStateBySession(entry.canonicalSessionName) : null;
     if (!sessionMissing && seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function") {
       activityState = arb
@@ -1284,7 +1296,7 @@ export function attachTerminalActivityAndWork(
     }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
-    const hook = entry.agentActivity == null && entry.canonicalSessionName
+    const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
       ? deps.agentActivity?.getLatestForNode({ nodeId: entry.nodeId, sessionName: entry.canonicalSessionName, now,
         order: entry.runtime === "claude-code" ? "source" : "arrival" }) ?? null : null;
     return {
@@ -1507,15 +1519,15 @@ export async function attachAgentActivity(
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
   return Promise.all(entries.map(async (entry) => {
-    // A cached hook, pane sample or motion cannot revive a confirmed absent
-    // session. Preserve the identity observation's provenance without probing.
-    if (identityVerdictConfirmsSessionMissing(entry.identityVerdict)) {
+    // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
+    // Preserve the applicable missing-session or exited-pane observation without probing.
+    if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
       return {
         ...entry,
         agentActivity: {
           state: "unknown",
-          reason: "session_missing",
-          evidenceSource: "tmux_session",
+          reason: entry.identityVerdict!.reason!,
+          evidenceSource: entry.identityVerdict!.evidenceSource ?? "tmux_session",
           sampledAt: entry.identityVerdict!.observedAt,
           evidence: entry.canonicalSessionName,
         },

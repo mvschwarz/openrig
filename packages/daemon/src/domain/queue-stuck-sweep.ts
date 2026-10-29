@@ -26,7 +26,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // legitimately wait; only an undelivered human notice is a delivery finding.
 
 import { resolveOperatorSeat, resolveRecoveryAgentSeat, resolveSessionNodeId } from "./queue-owner.js";
-import { nodeSessionConfirmedMissing } from "./node-inventory.js";
+import { nodeExecutorStoppedReason } from "./node-inventory.js";
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import type Database from "better-sqlite3";
 import { deriveCrossHostSuccessorId, hasLinkedSuccessor, matchesRecordedHandoffTarget, QueueRepositoryError, type QueueItem, type QueueRepository } from "./queue-repository.js";
@@ -173,8 +173,8 @@ export interface StuckSweepDeps {
    *  handed-off batons only, so a finding addressed to a dead seat would reach nobody.
    *  Injectable for tests; default derives from topology. */
   resolveOrchestrator?: (session: string) => string | null;
-  /** Is this session's current binding confirmed missing (node inventory's session_missing
-   *  rule)? Such a session's finding goes to a live recovery seat when one is available.
+  /** Legacy missing-session override. The default also consumes an applicable pane_exited fact:
+   *  such an executor's finding uses the same live recovery floor when one is available.
    *  Injectable for tests; default reads the seat identity verdicts. */
   sessionConfirmedMissing?: (session: string) => boolean;
   /** The agent a confirmed-missing session's finding goes to first. Injectable for tests;
@@ -841,23 +841,26 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // the stuck row's creator, skipping any that is unset, confirmed missing or this seat. When none
     // qualifies, the finding stays addressed to the missing session and says so; it's never dropped.
     // A live seat keeps its own.
-    const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => {
+    const stoppedReason = (session: string) => {
       const nodeId = resolveSessionNodeId(deps.db, session);
-      return nodeId !== null && nodeSessionConfirmedMissing(deps.db, nodeId);
-    });
+      return nodeId === null ? null : nodeExecutorStoppedReason(deps.db, nodeId);
+    };
+    const sessionMissing = deps.sessionConfirmedMissing ?? ((session: string) => stoppedReason(session) !== null);
     let recoverySeats: Array<string | null> | undefined;
     for (const c of candidates) {
       if (!sessionMissing(c.route)) continue;
+      const stoppedDescription = stoppedReason(c.route) === "pane_exited"
+        ? "has a confirmed exited pane (pane_exited)" : "is confirmed missing (session_missing)";
       recoverySeats ??= [(deps.resolveRecoveryAgentSeat ?? resolveRecoveryAgentSeat)(), (deps.resolveOperatorSeat ?? resolveOperatorSeat)()];
       const choices = [...recoverySeats, c.row.sourceSession];
       const chosen = choices.findIndex((seat) => !!seat && seat !== c.route && !sessionMissing(seat));
       const floor = chosen < 0 ? null : choices[chosen]!;
       if (!floor) {
-        c.why += `; ${c.route} is confirmed missing (session_missing) and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat; an operator agent setting that's unreadable or isn't an agent's session counts as unset), so this finding stays addressed to it`;
+        c.why += `; ${c.route} ${stoppedDescription} and no live recovery seat is available (operator agent, operator seat and creator are each unset, missing or this seat; an operator agent setting that's unreadable or isn't an agent's session counts as unset), so this finding stays addressed to it`;
         continue;
       }
       // Name the rule that chose it, so whoever receives the finding knows why, and which setting to change.
-      c.why += `; ${c.route} is confirmed missing (session_missing), so this finding goes to ${floor}, ${RECOVERY_SEAT_RULES[chosen]}`;
+      c.why += `; ${c.route} ${stoppedDescription}, so this finding goes to ${floor}, ${RECOVERY_SEAT_RULES[chosen]}`;
       c.route = floor;
     }
 

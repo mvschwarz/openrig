@@ -11,6 +11,7 @@ import { verifyStartupProof } from "../domain/startup-proof.js";
 import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
+import { nodeExecutorConfirmedStopped } from "../domain/node-inventory.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { claudeHookFromLaunchedProcess, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -629,7 +630,7 @@ activityRoutes.get("/parked", (c) => {
 
   const { diagnoseSeatParked, diagnoseRigParked, PARKED_OBLIGATION_LIMIT } = parkedQuery;
   const deps = {
-    getSeatState: (id: string) => oracle.getSeatState(id),
+    getSeatState: (id: string) => nodeExecutorConfirmedStopped(rigRepo.db, id) ? null : oracle.getSeatState(id),
     listOpenObligations: (destination: string, limit: number) => ({
       rows: queueRepo
         .list({ destinationSession: destination, state: ["pending", "in-progress", "blocked"], limit })

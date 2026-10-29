@@ -240,7 +240,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           for (const qitemId of knownRows) {
             try {
               for (const key of openKeysOnRow(deps.rows.listTransitions(qitemId))) {
-                if (deps.rows.appendNote(qitemId, `${CLOSE_PREFIX} ${key} (seat resumed)`).ok && !closures.includes(key)) closures.push(key);
+                if (deps.rows.appendNote(qitemId, `${CLOSE_PREFIX} ${key} (no longer observed parked)`).ok && !closures.includes(key)) closures.push(key);
               }
             } catch { /* best-effort closure of old prompt-refusal records */ }
           }
