@@ -1598,3 +1598,11 @@ The three policy-reuse, source-root and mission-identity consumer files also pas
 ### Native workflow diagnostic labels (2026-10-30)
 
 The full daemon failure inventory also exposed malformed workflow files labeled with their entire Windows path: writeDiagnostic split paths only on '/'. It now takes the host-native basename while retaining the existing full-path fallback when another diagnostic already owns that filename. The retention test's own display helper had the same separator assumption and now uses native basename too. All three complete workflow folder-scanner, retention and cache files pass 48/48; current/pinned versions, parse-error repair and outside-folder preservation stay covered. This fixes native diagnostic labeling, not every scanner or workflow behavior.
+
+### Native workflow folder aliases during reconciliation (2026-10-30)
+
+The workflow folder scanner still selected cached rows with a raw SQL path prefix and compared seen paths case-sensitively. An actual Windows filesystem/SQLite case reproduced a vanished diagnostic row surviving a scan of the same directory through uppercase and slash-form spelling. Windows reconciliation now compares resolved native path identities for seen files and uses native relative-path containment to select only rows beneath the scanned directory. It reads cache metadata without the separator-sensitive SQL prefilter on Windows; neighboring directories remain outside the removal boundary. POSIX source selection keeps its prior query. No source file is deleted.
+
+The new case fails before correction and passes after it: the vanished row is removed, a present workflow remains, and a similarly named neighboring folder's diagnostic survives. The complete folder-scanner and version-retention files pass 34/34, retaining pinned-version and parse-error repair behavior. This is native folder reconciliation evidence, not full workflow/runtime acceptance.
+
+The three complete workflow-library scanner, library routes and folder-route consumer files also pass 32/32. Type checking and diff whitespace checks pass.
