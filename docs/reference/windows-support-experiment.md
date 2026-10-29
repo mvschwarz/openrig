@@ -7,6 +7,24 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native telemetry migration inventory, 2026-10-29
+
+The lexical audit found a second shipped upgrade helper still directly spawning
+rig.cmd. An actual temporary Windows shim reproduced inventory_unavailable in
+read-only plan mode before the fix. The helper now uses the same literal binary
+and JSON-argv PowerShell call boundary as upgrade inspection. Both editable spec
+and regenerated canonical copies were exercised with successful and exit-7
+inventory fixtures; plan mode left the owned home empty. The combined upgrade
+inspection/migration file passed 2/2 tests without skips, and the actual mirror
+check passed. No apply/rollback phase or real instance inventory was invoked.
+
+The full workspace run has now ended nonzero. Its very large output was truncated
+by the terminal response, so exact aggregate counts are not established here.
+Observed failures include native-resume-probe cases and TUI fixture fetch-guard
+refusals on unregistered fixed ports. The run spanned subsequent source edits
+and is not exact-head evidence. This result is retained as failed, never replaced
+by the targeted passes; per-package structured receipts are still needed.
+
 ## Default-shell failure before native pane cutover, 2026-10-29
 
 The callsite audit found a native lifecycle gap: a failed default-shell read

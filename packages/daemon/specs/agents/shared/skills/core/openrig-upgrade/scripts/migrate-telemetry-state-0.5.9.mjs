@@ -309,7 +309,13 @@ function systemWorldPlan(home, issues) {
 }
 
 function inventoryClaudeSeats(issues) {
-  const result = spawnSync(rig, ["ps", "--nodes", "-A", "--json", "--full"], { encoding: "utf8" });
+  const args = ["ps", "--nodes", "-A", "--json", "--full"];
+  const result = process.platform === "win32"
+    ? spawnSync(path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); $OutputEncoding=[Console]::OutputEncoding; $argv=@(ConvertFrom-Json $env:OPENRIG_TELEMETRY_PROBE_ARGS); $bin=$env:OPENRIG_TELEMETRY_PROBE_BIN; if(Test-Path -LiteralPath $bin -PathType Leaf){$command=(Get-Item -LiteralPath $bin).FullName}else{$command=(Get-Command -Name $bin -CommandType Application -ErrorAction Stop).Source}; & $command @argv; exit $LASTEXITCODE",
+    ], { encoding: "utf8", windowsHide: true, env: { ...process.env, OPENRIG_TELEMETRY_PROBE_BIN: rig, OPENRIG_TELEMETRY_PROBE_ARGS: JSON.stringify(args) } })
+    : spawnSync(rig, args, { encoding: "utf8" });
   if (result.status !== 0) {
     issues.push(issue(
       "inventory_unavailable",
