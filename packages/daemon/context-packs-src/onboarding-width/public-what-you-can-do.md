@@ -1064,8 +1064,10 @@ reaching them is ordinary work rather than an escalation.
   request, then boundedly inspect its transport receipt. Posted means posted, not read;
   pending, failed, or indeterminate delivery leaves the row intact. Inspect the same row's
   transitions before retrying. `rig send` remains agent-terminal delivery only.
-  `--human-questions-file` adds clickable decision questions. A typed Slack reply to one is kept
-  in `humanAnswers`, placed under the first unanswered question; closing isn't approval.
+  `--human-questions-file` adds clickable decision questions. On an unparked ask, a typed Slack
+  reply is kept in `humanAnswers` under the first unanswered question. On a question parked on
+  its own person, a typed reply resumes it but isn't recorded as the answer; the owner receives
+  it as a message instead. Buttons work in both cases. Closing isn't approval.
 - **When project policy calls for human judgment or an update, load `messaging-the-human`.**
   Use `rig context get skills/core/messaging-the-human/SKILL.md` for a complete decision brief,
   related supplemental detail and explicit quiet-update intent. An FYI creates no approval
