@@ -83,6 +83,13 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
     expect(lastCmd(tmux)).toContain("--resume 'original'");
   });
 
+  it("retains the npm script beside its Node interpreter in the classic continuation", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness({ ...makeBinding(), claudeExecutable: "C:/owned/node.exe", claudeScript: "C:/owned tools/cli.js" }, { name: "seat", resumeToken: "original" });
+    expect(lastCmd(tmux)).toContain("exec 'C:/owned/node.exe' 'C:/owned tools/cli.js'");
+    expect(lastCmd(tmux)).toContain("--resume 'original'");
+  });
+
   it("FRESH launch emits --model when the binding declares one", async () => {
     const tmux = mockTmux();
     await adapterWith(tmux).launchHarness(withModel(MODEL), { name: "seat" });

@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { readPlatformEnv } from "./platform-env.js";
-import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { recognizedWindowsClaudeScript, resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
@@ -23,6 +23,8 @@ import { isolatedClaudeAccountProblem, OUTRANKING_TOKEN_ENV, projectRootForLocal
 export interface ClaudeLaunchTarget {
   /** A running seat's verified executable, carried through its in-place continuation. */
   executable?: string;
+  /** The verified npm entry paired with the running seat's Node executable. */
+  script?: string;
   nodeId: string;
   cwd?: string;
   session?: string;
@@ -277,7 +279,7 @@ export class ClaudeManagedLaunch {
     return (accountHome === null ? selected !== undefined : !!selected) ? this.configPaths(cwd, nodeId, accountHome).statePath : undefined;
   }
 
-  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string) {
+  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string, selectedScript?: string) {
     const PATH = readPlatformEnv(this.sessionEnv, "PATH", this.platform), HOME = readPlatformEnv(this.sessionEnv, "HOME", this.platform);
     const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
@@ -300,6 +302,13 @@ export class ClaudeManagedLaunch {
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     let prefix: string[] = [];
+    if (selectedScript) {
+      const script = this.platform === "win32" ? recognizedWindowsClaudeScript(selectedScript) : null;
+      if (!selectedExecutable || !/^node\.(exe|com)$/i.test(path.basename(selectedExecutable)) || !script) {
+        throw new Error("Claude managed continuation has no verified Node/script selection; no fallback was selected.");
+      }
+      prefix = [script];
+    }
     const names = this.platform === "win32"
       ? (readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => "claude" + ext.toLowerCase())
       : ["claude"];
@@ -354,7 +363,7 @@ export class ClaudeManagedLaunch {
     if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
     const credentialKeys: readonly string[] = accountHome ? ACCOUNT_HOME_PROVIDER_ENV : [];
     const isCredentialKey = (key: string) => credentialKeys.includes(this.platform === "win32" ? key.toUpperCase() : key);
-    const context = this.context(cwd, target.nodeId, accountHome, target.executable);
+    const context = this.context(cwd, target.nodeId, accountHome, target.executable, target.script);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const nativeName = (key: string) => this.platform === "win32" ? key.toUpperCase() : key;
@@ -367,7 +376,7 @@ export class ClaudeManagedLaunch {
     const assertCurrent = () => {
       if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
       if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable)) !== JSON.stringify(context)
+        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable, target.script)) !== JSON.stringify(context)
         || JSON.stringify(inheritedKeys()) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }

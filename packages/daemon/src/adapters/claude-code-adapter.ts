@@ -299,7 +299,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try { this.claudeManagedLaunch!.assertAccountHome(binding.nodeId, accountHome, binding.accountHome ? binding.accountToken ?? null : undefined); }
       catch (error) { return { ok: false, error: (error as Error).message }; }
     }
-    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}` : "claude";
+    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}${binding.claudeScript ? ` ${shellQuote(binding.claudeScript)}` : ""}` : "claude";
     this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
@@ -319,6 +319,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
           ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
+          ...(binding.claudeScript ? { script: binding.claudeScript } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
           ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
           ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
@@ -448,8 +449,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const launch = { binding, token: opts.resumeToken ?? generatedSessionId!,
-      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable,
-      scriptLaunch: managed?.executableIsScript, selectedScript: managed?.selectedScript } as
+      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable ?? binding.claudeExecutable,
+      scriptLaunch: managed?.executableIsScript, selectedScript: managed?.selectedScript ?? binding.claudeScript } as
       { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; selectedScript?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {

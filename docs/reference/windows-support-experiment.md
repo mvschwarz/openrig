@@ -11,7 +11,7 @@ not activate the running daemon or seats.
 | --- | --- | --- |
 | Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
 | Native pane shells | PowerShell/pwsh plus bounded cmd-to-PowerShell staging; owned cmd/runner lineage and Pi record-selection checks | All-provider cmd lifecycle and stock psmux visible-terminal acceptance remain incomplete |
-| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, frozen managed and declared-entry Claude Node identity, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; recorded npm-entry recovery and installed-provider acceptance remain incomplete |
+| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, frozen/declared Claude Node identity and retained in-place entry, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; cold/provider lifecycle and installed-provider acceptance remain incomplete |
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
@@ -272,6 +272,34 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Native npm continuation retains interpreter and script (2026-10-30)
+
+The in-place restore path previously carried only a verified executable. For
+npm Claude that executable is Node, so losing its script could launch Node with
+provider flags or select another installation. Windows continuation capture now
+uses native argv parsing and carries both the verified interpreter and declared
+npm script into the continuation binding and legacy resume tail. Managed launch
+accepts this explicit pair, rechecks its declaration, and freezes both files
+without consulting PATH for a replacement. Classic fresh/resume command builders
+also retain the quoted script operand before provider options. Native identity
+observations receive the same pair.
+
+The real restore-orchestrator consumer uses owned package metadata and supplied
+native process rows to prove both fields reach the adapter. The offline npm
+managed fixture retains its pair after PATH no longer names an installation;
+classic prefix checks retain the original conversation. The final four-file
+retained-entry selection passes 117/117 without skips, and the separate classic
+adapter case passes with other cases filtered. Daemon type checking passes.
+No actual process is stopped or live seat restored by these fixtures.
+
+Expanded observations remain non-green: the earlier four-file observation has
+224 cases, 203 passed and 21 failed in claude-runtime-adapter.test.ts (including
+missing /bin/sh and projection assertions). A separate diagnostic started before
+later classic edits reports 424 cases, 396 passed and 28 failed, including seven
+restore-orchestrator failures; it is not an exact-final-source acceptance run.
+Those failures are retained for follow-up, not waived. This entry proves the
+observed running-seat continuation path, not cold provider/reboot acceptance.
 
 ## Existing npm Claude processes use declared-entry identity (2026-10-30)
 

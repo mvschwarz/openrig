@@ -63,6 +63,13 @@ describe("managed Windows launch", () => {
       { env: { SystemRoot: process.env.SystemRoot, HOME: f.home, USERPROFILE: f.home, TEMP: f.home, TMP: f.home }, encoding: "utf8", windowsHide: true, timeout: 10000 },
       (error, stdout) => error ? reject(error) : resolve(stdout)));
     expect(JSON.parse(output.trim())).toEqual(args);
+    // A continuation retains this pair even when the current PATH has no
+    // Claude installation. It must not silently choose a new installation.
+    f.env.PATH = path.join(f.home, "unrelated-bin");
+    const retained = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1", executable: prepared.executable, script: prepared.selectedScript }, "auto");
+    expect(retained.executable).toBe(prepared.executable);
+    expect(retained.selectedScript).toBe(prepared.selectedScript);
+    f.env.PATH = f.home;
     fs.appendFileSync(entry, "\n// changed after preparation");
     expect(() => prepared.assertCurrent()).toThrow(/context changed/);
   });

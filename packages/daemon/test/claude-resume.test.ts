@@ -63,6 +63,15 @@ describe("ClaudeResumeAdapter", () => {
     expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--resume 'original'"));
   });
 
+  it("the legacy continuation retains the Node script before provider resume options", async () => {
+    const tmux = mockTmux();
+    const adapter = new ClaudeResumeAdapter(tmux, { maxWaitMs: 1, sleep: async () => {} });
+    await adapter.resume("seat@rig", "claude_id", "original", "/repo", undefined, undefined, undefined, "node",
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, "C:/owned/node.exe", undefined, "C:/owned tools/cli.js");
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("exec 'C:/owned/node.exe' 'C:/owned tools/cli.js'"));
+    expect(tmux.sendText).toHaveBeenCalledWith("seat@rig", expect.stringContaining("--resume 'original'"));
+  });
+
   describe("canResume", () => {
     it("claude_name + token -> true", () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());

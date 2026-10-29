@@ -831,6 +831,31 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
     });
 
+    it.runIf(process.platform === "win32")("carries the observed native Node and npm script together through continuation", async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-npm-"));
+      try {
+        const pkg = path.join(root, "node_modules", "@anthropic-ai", "claude-code");
+        fs.mkdirSync(pkg, { recursive: true });
+        const script = path.join(pkg, "cli.js"); fs.writeFileSync(script, "// owned inert fixture\n");
+        fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
+        const executable = process.execPath;
+        const shell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+        const { rigId, nodeIds } = seedPodAwareRig();
+        seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+        liveDriver(rigId, nodeIds[0]!);
+        Object.assign(tmux, { isNativeWindows: true, getDefaultShell: vi.fn(async () => shell) });
+        tmux.getPanePid.mockResolvedValue(10 as never);
+        processes = [
+          { platform: "win32", pid: 10, ppid: 1, command: `"${shell}"`, executableName: "powershell.exe", executablePath: shell, startedAt: "2026-10-30T00:00:00.000Z" },
+          { platform: "win32", pid: 11, ppid: 10, command: `"${executable}" "${script}" --session-id original`, executableName: "node.exe", executablePath: executable, startedAt: "2026-10-30T00:00:01.000Z" },
+        ];
+        const adapter = readyAdapter("claude-code");
+        (tmux as any).signalPaneProcess.mockImplementation(async () => { processes = []; return { ok: true }; });
+        await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+        expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeExecutable: fs.realpathSync(executable), claudeScript: fs.realpathSync(script) }), expect.anything());
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    });
+
     it("keeps a seat's Claude MCP opt-out beside the retained executable on the continuation", async () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-executable-"));
       try {
