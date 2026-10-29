@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Existing operator-store access preservation (2026-10-30)
+
+Active workflow lens updates and saved terminal-view save/remove operations
+used rename-only publication, losing an existing Windows file's access policy.
+Both actual stores reproduced the loss on owned protected-DACL fixtures. Their
+existing regular Windows files now use private staging and the established
+metadata-preserving replacement helper. New files, final-link entries and POSIX
+writes retain their existing behavior. No store's data schema changed.
+
+The two native cases fail before repair and pass afterward, checking repeated
+updates, returned/readback state, unchanged protected access and no staging
+residue. Ten unrelated cases in that ACL file were filtered, not platform
+skipped. Complete active-lens and terminal-provider/store checks separately
+pass 54/54; daemon typecheck passes. Only owned test stores were changed; live
+operator selections, views and desktop windows were untouched. Other history
+and continuity stores still need their own review.
+
 ## Hook rig dispatch selected PATHEXT (2026-10-30)
 
 The packaged hook's standalone rig resolver still searched COM, EXE, BAT and

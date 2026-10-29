@@ -20,6 +20,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 
 export interface ActiveLens {
   specName: string;
@@ -81,8 +83,13 @@ export class ActiveLensStore {
     // re-clicks Activate).
     const tmp = `${this.filePath}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      fs.writeFileSync(tmp, JSON.stringify(lens));
-      fs.renameSync(tmp, this.filePath);
+      if (process.platform === "win32" && fs.existsSync(this.filePath) && fs.lstatSync(this.filePath).isFile()) {
+        createPrivateTextFile(tmp, JSON.stringify(lens));
+        replaceWindowsFilePreservingMetadata(this.filePath, tmp);
+      } else {
+        fs.writeFileSync(tmp, JSON.stringify(lens));
+        fs.renameSync(tmp, this.filePath);
+      }
     } catch (err) {
       try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
       throw err;

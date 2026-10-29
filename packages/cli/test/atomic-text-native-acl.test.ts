@@ -14,6 +14,8 @@ import { registerBundleProject } from "../../daemon/src/domain/workspace/project
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../../daemon/src/domain/codex-auth.js";
 import { DEFAULT_HEALTH_POLICY, HealthPolicyStore } from "../../daemon/src/domain/health-policy.js";
+import { ActiveLensStore } from "../../daemon/src/domain/active-lens-store.js";
+import { TerminalViewsStore } from "../../daemon/src/domain/terminal/terminal-views-store.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -23,6 +25,27 @@ function accessPolicy(file: string): string {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_TEST_ACL_FILE: file }, encoding: "utf8", windowsHide: true }).trim();
 }
+it.runIf(process.platform === "win32").each(["lens", "views"])("retains existing protected %s access across repeated operator updates", kind => {
+  root = mkdtempSync(join(tmpdir(), "openrig-operator-acl-"));
+  const file = join(root, kind === "lens" ? "lens.json" : "views.yaml");
+  createPrivateTextFile(file, kind === "lens" ? "{}" : "version: 1\nviews: []\n");
+  const before = accessPolicy(file);
+  if (kind === "lens") {
+    const store = new ActiveLensStore({ filePath: file });
+    store.set("first", "1");
+    expect(accessPolicy(file)).toBe(before);
+    store.set("second", "2");
+    expect(store.get()).toMatchObject({ specName: "second", specVersion: "2" });
+  } else {
+    const store = new TerminalViewsStore(file);
+    store.save({ id: "owned", name: "Owned", members: [{ seat: "owned@fixture" }] });
+    expect(accessPolicy(file)).toBe(before);
+    expect(store.get("owned")?.members).toEqual([{ seat: "owned@fixture" }]);
+    expect(store.remove("owned").views).toEqual([]);
+  }
+  expect(accessPolicy(file)).toBe(before);
+  expect(readdirSync(root)).toEqual([kind === "lens" ? "lens.json" : "views.yaml"]);
+});
 it.runIf(process.platform === "win32")("preserves an existing protected DACL across atomic text replacement", () => {
   root = mkdtempSync(join(tmpdir(), "openrig-atomic-acl-"));
   const file = join(root, "config.json");

@@ -16,7 +16,10 @@
 // serialization uses a fixed field order and OMITS absent optionals (never
 // null), so a read→save round-trip of the same logical content is idempotent.
 
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { createPrivateTextFile } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import type { ViewMemberInput } from "./view-composer.js";
@@ -135,6 +138,13 @@ export class TerminalViewsStore {
   }
 
   private writeAtomic(file: TerminalViewsFile): void {
+    if (process.platform === "win32" && existsSync(this.path) && lstatSync(this.path).isFile()) {
+      const staging = `${this.path}.tmp-${randomUUID()}`;
+      createPrivateTextFile(staging, serialize(file));
+      try { replaceWindowsFilePreservingMetadata(this.path, staging); }
+      finally { try { unlinkSync(staging); } catch { /* Published or retained private staging. */ } }
+      return;
+    }
     const tmp = `${this.path}.tmp`;
     writeFileSync(tmp, serialize(file), "utf-8");
     renameSync(tmp, this.path);
