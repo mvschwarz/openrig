@@ -2369,3 +2369,24 @@ the tool-request claim in the test name. The selected lifecycle combination
 passes 5/5 using real local stdio processes and an owned IPv6 loopback server.
 No production change was needed for these two failures. This is bounded IPC
 and endpoint evidence, not real-provider or full Windows runtime acceptance.
+
+## Native-cased saved auth profile directories (2026-10-30)
+
+The saved-profile real-directory containment check compared canonical strings
+with case-sensitive equality/prefixes. A valid alternate Windows casing of the
+profile directory therefore returned unsafe_path during an actual synthetic
+authSave. Native path-relative containment now compares the resolved directories
+while retaining parent traversal and absolute-relative-result rejection. It
+still resolves real paths before comparison, so a junction cannot substitute an
+out-of-home directory. POSIX case-sensitive containment remains.
+
+Owned fixtures verify save/list/switch with alternate casing and unchanged
+private DACL, plus refusal to list a similarly prefixed sibling home or a
+junction pointing there. The CLI successful-switch fixture now creates its
+synthetic auth file with native private access instead of assuming mode 0600
+establishes a Windows DACL. This corrects the fixture, not the private-file gate.
+The selected command/native case combination passes 7 (8 unrelated cases
+filtered); an earlier broader combination passes 23/25 with the two remaining
+failures at host-denied file-symlink creation. Those file-link checks are not
+waived or replaced by junction tests. Daemon build passes. No real auth files,
+provider sign-in or running seats were read or modified.

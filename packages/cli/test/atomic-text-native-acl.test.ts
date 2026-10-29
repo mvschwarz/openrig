@@ -11,7 +11,8 @@ import { replaceArtifactFile } from "../src/commands/proof.js";
 import { FileWriteService, sha256Hex } from "../../daemon/src/domain/files/file-write-service.js";
 import { realpathSync } from "node:fs";
 import { registerBundleProject } from "../../daemon/src/domain/workspace/project-registration.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { authList, authSave, authSwitch, resolveCodexHome } from "../../daemon/src/domain/codex-auth.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -128,4 +129,21 @@ it.runIf(process.platform === "win32")("preserves protected workspace catalog ac
   expect(accessPolicy(catalog)).toBe(before);
   expect(readFileSync(catalog, "utf8")).toContain("# retain this comment");
   expect(readdirSync(workspace).sort()).toEqual(["projects", "workspace.yaml"]);
+});
+it.runIf(process.platform === "win32")("saves and switches synthetic auth with equivalent native-cased profile paths", () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-auth-casing-")));
+  const account = join(root, "account"); mkdirSync(account);
+  const paths = resolveCodexHome({ CODEX_HOME: account });
+  paths.profileDir = paths.profileDir.toUpperCase();
+  createPrivateTextFile(paths.activeAuth, JSON.stringify({ OPENAI_API_KEY: "synthetic-private-value" }));
+  expect(authSave(paths, "fixture")).toMatchObject({ ok: true, name: "fixture", mode: "600" });
+  const before = accessPolicy(paths.activeAuth);
+  expect(authSwitch(paths, "fixture")).toMatchObject({ ok: true, name: "fixture", mode: "600" });
+  expect(accessPolicy(paths.activeAuth)).toBe(before);
+  expect(authList(paths)).toEqual(["fixture"]);
+  const outside = join(root, "account-other"); mkdirSync(outside);
+  createPrivateTextFile(join(outside, "outside.json"), "{}");
+  expect(authList({ ...paths, profileDir: outside })).toEqual([]);
+  const linked = join(account, "linked-profiles"); symlinkSync(outside, linked, "junction");
+  expect(authList({ ...paths, profileDir: linked })).toEqual([]);
 });

@@ -117,7 +117,8 @@ function realDirContained(dir: string, codexHome: string): boolean {
   try {
     const root = fs.realpathSync(codexHome);
     const resolved = fs.realpathSync(dir);
-    return resolved === root || resolved.startsWith(root + path.sep);
+    const relative = path.relative(root, resolved);
+    return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
   } catch {
     return false;
   }
