@@ -105,6 +105,20 @@ describe("expansion member fidelity", () => {
     expect(spec.pods[0]!.members[0]).not.toHaveProperty("agentRef");
   });
 
+  it.each([
+    ["agentRef", "agent_ref", "local:agents/impl"],
+    ["codexConfigProfile", "codex_config_profile", "named-profile"],
+    ["restorePolicy", "restore_policy", "checkpoint_only"],
+  ])("a non-string %s falls back to its canonical string", async (camel, canonical, value) => {
+    const rig = setup.rigRepo.createRig("string-alias-rig");
+    const spy = vi.spyOn(setup.podInstantiator, "materializeStructured").mockResolvedValue({ ok: false, code: "validation_failed", errors: ["stop at validator"] });
+    await routeExpand(rig.id, { ...member(), [camel!]: null, [canonical!]: value });
+    expect(spy).toHaveBeenCalled();
+    const spec = spy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(spec.pods[0]!.members[0]![canonical!]).toBe(value);
+    expect(spec.pods[0]!.members[0]).not.toHaveProperty(camel!);
+  });
+
   it("leaves malformed members to canonical validation", async () => {
     const rig = setup.rigRepo.createRig("malformed-member");
     const response = await routeExpand(rig.id, null);
