@@ -236,7 +236,8 @@ const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 // Canonical POSIX quotes and literal unquoted words only; no expansion or wrappers.
 function settingsRelayPath(command) {
   if (/[\r\n]/.test(command)) return null;
-  const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
+  const literal = process.platform === "win32" ? /[-A-Za-z0-9_./:@%+=,][-A-Za-z0-9_./:@%+=,~]*/.source : /[-A-Za-z0-9_./:@%+=,]+/.source;
+  const token = `'(?:[^']|'"'"')*'|${literal}`;
   const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim());
   if (!m) return null;
   const decode = token => token.startsWith("'") ? token.slice(1, -1).split(`'"'"'`).join("'") : token;

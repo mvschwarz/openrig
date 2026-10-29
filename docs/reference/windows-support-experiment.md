@@ -1972,3 +1972,20 @@ for a new CLI/TUI whole-suite run with stock psmux 3.4.0 and real-Codex opt-in
 disabled. Its start receipt is `workspace-cli-tui-dd4bc68-frozen-r1-metadata.json`
 in the local audit resources. It was still running when this follow-up was
 recorded; this is not a passing/current-head acceptance claim.
+
+## Native short-path hook reconciliation (2026-10-30)
+
+The refresh fixtures first needed valid literal Windows shell spellings:
+unquoted backslashes are shell escapes, so those cases now use forward slashes.
+That exposed a real parser gap: Windows 8.3 components such as `USERNA~1` were
+not accepted as literal command paths. Both managed-command readers now permit
+an interior tilde on Windows while still rejecting a leading tilde, shell
+operators, command substitution and wrappers. POSIX grammar remains unchanged.
+
+All five actual-writer refresh cases pass and preserve unrelated settings and
+custom wrapper commands. A dedicated short-path case keeps the adapter and
+standalone relay parsers in parity. The three-suite batch now has 28 tests:
+24 passed, two file-symlink EPERM failures and two POSIX-shell invocation
+failures. This resolves the three refresh failures reported above. Daemon
+TypeScript and mirror checks passed; plugin manifests are 0.1.29. No live
+settings or hook registrations were rewritten.

@@ -18,6 +18,17 @@ const relay = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/
 const collector = path.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
 const relayParser = createRequire(import.meta.url)(relay) as { settingsRelayPath(command: string): { executable: string; relay: string } | null };
 
+it.runIf(process.platform === "win32")("recognizes literal native short paths in both readers without accepting tilde expansion", () => {
+  const executable = "C:/PROGRA~1/nodejs/node.exe", script = "C:/Users/USERNA~1/state/claude-activity-hooks/activity-relay.cjs";
+  const command = `${executable} ${script}`;
+  expect(parseManagedClaudeNodeCommand(command)).toEqual({ executable, args: [script] });
+  expect(relayParser.settingsRelayPath(command)).toEqual({ executable, relay: script });
+  for (const invalid of [`~node ${script}`, "node ~/state/claude-activity-hooks/activity-relay.cjs", command + " && echo extra", command + " $(echo extra)"]) {
+    expect(parseManagedClaudeNodeCommand(invalid)).toBeNull();
+    expect(relayParser.settingsRelayPath(invalid)).toBeNull();
+  }
+});
+
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "hook-node-")); roots.push(root);
   const cwd = path.join(root, "O'Brien project"), state = path.join(root, "instance's state");
@@ -53,7 +64,9 @@ it.each(["legacy", "pinned", "unquoted", "absolute-unquoted", "plugin-unquoted"]
   const oldRelay = kind === "plugin-unquoted" ? path.join(f.root, "plugins/openrig-core/hooks/scripts/activity-relay.cjs")
     : unquoted ? path.join(f.root, "state/claude-activity-hooks/activity-relay.cjs") : f.relayDest;
   const oldCollector = unquoted ? path.join(f.root, ".openrig/context-collector.cjs") : f.collectorDest;
-  const arg = (value: string) => unquoted ? value : shellQuote(value);
+  // These exercise literal shell words. Backslashes in an unquoted native
+  // Windows path are shell escapes, so use its valid forward-slash spelling.
+  const arg = (value: string) => unquoted ? value.replaceAll("\\", "/") : shellQuote(value);
   const custom = { type: "command", command: `custom-wrapper ${shellQuote(f.relayDest)}` };
   const permissions = { allow: ["Bash(ls:*)"] };
   fs.writeFileSync(f.settings, JSON.stringify({ permissions,
