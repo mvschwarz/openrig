@@ -199,6 +199,7 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
       if (index.projectId && !belongsToProject(row.tags, index.projectId)) continue;
       const parsed = parseScopeTags(row.tags);
       if (kind === "mission") {
+        if (missionKey && parsed.missions.has(missionKey)) { selected.push(row); continue; }
         const mission = parsed.missions.size === 1 ? parsed.missions.values().next().value : undefined;
         const unplaced = [...parsed.slices].some(key => collidingKeys.has(key)
           && (mission === undefined || !collidingKeys.get(key)!.has(mission)));
@@ -206,7 +207,7 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
           issues.add(`Queue row '${row.qitem_id}' has unplaceable or contradictory colliding slice tags; membership is incomplete.`);
           continue;
         }
-        if ((missionKey && parsed.missions.has(missionKey)) || [...parsed.slices].some(tag => sliceKeys.has(tag))) selected.push(row);
+        if ([...parsed.slices].some(tag => sliceKeys.has(tag))) selected.push(row);
         continue;
       }
       let here = false, elsewhere = false, unplaced = false;

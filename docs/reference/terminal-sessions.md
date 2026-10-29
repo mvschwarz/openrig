@@ -340,8 +340,10 @@ inferred into a mission. A child's historical status or composition activation
 flag does not remove its current obligations from the union. Duplicate mission
 IDs are ambiguous. Shared child names/IDs are omitted from bare slice matching;
 rows with one indexed claimant mission are placed through their mission tag.
-A shared-key row with missing, contradictory or non-claimant mission tags is
-named in `issues` and makes the snapshot incomplete; known owners remain.
+A direct mission tag takes precedence, including work tagged to both missions.
+Without that direct tag, a shared-key row with missing, contradictory or
+non-claimant mission tags is named in `issues` and makes the snapshot incomplete;
+known owners remain.
 The launcher reads this same terminal preview and submits its `expectedPlan`
 when opening, rather than using the review-agent roster.
 
