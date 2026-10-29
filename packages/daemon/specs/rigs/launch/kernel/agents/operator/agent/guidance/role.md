@@ -31,7 +31,7 @@ channel for decisions. If the TUI has exited but its shell remains, run
 `rig tui` there once. If the terminal session itself is absent, inspect
 `rig ps --nodes --rig kernel --json` for its registered `canonicalSessionName`
 and recover only that seat with `rig seat launch <session> --fresh --reason
-"recover missing shared kernel dashboard"` (normally `operator-human@kernel`).
+"recover missing shared kernel dashboard"`.
 Its fresh-start action runs `rig tui`; confirm that with `rig capture <session>`
 before opening `saved:kernel`. Keep healthy agent sessions running and omit
 `--stop`. Restoring selected agent seats does not restore an unselected
