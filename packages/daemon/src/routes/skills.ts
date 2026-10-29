@@ -20,6 +20,7 @@
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir as nativeHomeDirectory } from "node:os";
 import type { SkillLibraryDiscoveryService } from "../domain/skill-library-discovery.js";
 import {
   resolveAllowedDirectory,
@@ -205,7 +206,7 @@ export function skillsRoutes(): Hono {
     const { auditSkills, listBundledSkillSources } = await import("../domain/skill-audit.js");
     const { getDefaultOpenRigPath } = await import("../openrig-compat.js");
 
-    const homedir = c.get("homedir" as never) as string | undefined ?? process.env.HOME ?? "/tmp";
+    const homedir = c.get("homedir" as never) as string | undefined ?? nativeHomeDirectory();
     const cwd = c.get("cwd" as never) as string | undefined ?? process.cwd();
     // The installed plugins the daemon projects bundled skills from (startup's userPluginsDir).
     const pluginsDir = c.get("pluginsDir" as never) as string | undefined ?? getDefaultOpenRigPath("plugins");

@@ -1721,3 +1721,17 @@ for the denied directory while retaining its contents and mtime. Both focused
 cases passed, and daemon TypeScript checking passed. The broader 119-case run
 had 101 passed and 18 previously observed activity-hook fixture failures; those
 remain unresolved. No live restore, restart or runtime deployment was performed.
+
+## Native home for skill audit discovery (2026-10-30)
+
+The skills audit HTTP route fell back to `/tmp` when neither its explicit home
+context nor `HOME` was present. It now uses Node's native home resolver, so an
+ordinary Windows environment can discover user-global skills through its native
+profile directory. Explicit context still wins. A synthetic native-home fixture
+with no `HOME` exercises the actual HTTP audit and discovers its user skill;
+the native home resolver itself is mocked to prevent reading real user data.
+
+The adjacent directory-link fixtures now use native Windows junctions (POSIX
+directory symlinks elsewhere), retaining the cyclic-directory and linked bundled
+skill assertions. The route and audit suites passed all 36 tests on Windows;
+daemon TypeScript checking passed. No installed user skills were changed.
