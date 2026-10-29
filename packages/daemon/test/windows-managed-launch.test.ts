@@ -42,6 +42,33 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32").each(["binding", "executable", "cwd", "PATH", "config"] as const)(
+    "refuses a changed %s after the capability query without returning a launch command", async change => {
+      const f = fixture();
+      vi.mocked(execFile).mockImplementation(((file: string, args: string[], options: { env: Record<string, string> }, done: (error: null, help: string) => void) => {
+        expect(file).toBe(fs.realpathSync(f.executable));
+        expect(args).toEqual(["--help"]);
+        expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
+        if (change === "binding") f.db.exec("UPDATE bindings SET tmux_pane='%2' WHERE node_id='node'");
+        if (change === "executable") fs.appendFileSync(f.executable, "\nchanged while querying");
+        if (change === "cwd") { fs.renameSync(f.cwd, f.cwd + "-previous"); fs.mkdirSync(f.cwd); }
+        if (change === "PATH") f.env.PATH += path.delimiter + f.home;
+        if (change === "config") f.env.CLAUDE_CONFIG_DIR = path.join(f.home, "new config");
+        done(null, '--permission-mode <mode> (choices: "auto", "default")');
+      }) as never);
+      await expect(f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto"))
+        .rejects.toThrow(/context changed during capability discovery\/input/);
+      expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+    });
+
+  it.runIf(process.platform === "win32")("rechecks the native executable at command construction after successful preparation", async () => {
+    const f = fixture();
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    fs.appendFileSync(f.executable, "\nchanged before dispatch");
+    expect(() => prepared.command(["--session-id", "owned-id"])).toThrow(/context changed/);
+    expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+  });
+
   it.runIf(process.platform === "win32")("uses the selected API-key reference through preparation and actual child launch", async () => {
     const f = fixture();
     fs.copyFileSync(process.execPath, f.executable);
