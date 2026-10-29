@@ -445,21 +445,21 @@ export class CodexInPlaceRestart {
 
     // Resolve ambiguous launcher names before classifying the observed process chain.
     const byPid = new Map(rows.map(row => [row.pid, row]));
-    const launcherExecutables = new Map<number, string | null>();
+    const launcherFacts = new Map<number, ProcessFacts | null>();
     const visited = new Set<number>([process.pid]);
     let ancestor = process;
     while (ancestor.pid !== panePid) {
       const parent = byPid.get(ancestor.ppid);
       if (!parent || visited.has(parent.pid)) break;
       visited.add(parent.pid);
-      if (executableBase(parent) === "MainThread") {
-        launcherExecutables.set(parent.pid, (await this.io.readProcess(parent.pid))?.exe ?? null);
+      if (executableBase(parent) === "node" || executableBase(parent) === "MainThread") {
+        launcherFacts.set(parent.pid, await this.io.readProcess(parent.pid));
       }
       ancestor = parent;
     }
 
     // Pane shape: the pane's root is Codex itself, or a shell whose child chain is Codex.
-    const chain = codexChain(rows, process, panePid, launcherExecutables);
+    const chain = codexChain(rows, process, panePid, launcherFacts);
     const top = chain.at(-1)!;
     const root = rows.find((row) => row.pid === panePid);
     let paneShape: PaneShape;
@@ -889,7 +889,7 @@ function nodeLaunchScript(argv: string[]): string | undefined {
 
 /** The Codex process and its Codex launcher ancestors, deepest first, up to the pane root. */
 function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid: number,
-  launcherExecutables: ReadonlyMap<number, string | null>): NativeProcessRow[] {
+  launcherFacts: ReadonlyMap<number, ProcessFacts | null>): NativeProcessRow[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const chain = [deepest];
   let current = deepest;
@@ -899,9 +899,10 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     const name = executableBase(parent);
     // A Codex launcher above the native binary: codex itself, or node running Codex's launcher script.
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
-    const node = name === "node" || (name === "MainThread"
-      && nodePath.basename(launcherExecutables.get(parent.pid) ?? "") === "node");
-    const script = nodeLaunchScript(processArgv(parent.command));
+    const facts = launcherFacts.get(parent.pid);
+    const node = name === "node" || (name === "MainThread" && nodePath.basename(facts?.exe ?? "") === "node");
+    // ps flattens argument boundaries; only exact argv can distinguish an option value from the entry script.
+    const script = nodeLaunchScript(facts?.argv ?? []);
     const codexScript = !!script && nodePath.isAbsolute(script)
       && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
     const launcher = /^codex/i.test(name) || (node && codexScript);

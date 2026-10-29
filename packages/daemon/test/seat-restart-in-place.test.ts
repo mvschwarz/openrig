@@ -400,7 +400,7 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
 
   it.each(["node", "MainThread"])("refuses a %s supervisor mentioning Codex outside its launcher script", async betweenName => {
     for (const between of ["node /opt/supervisor.js --project=codex", "node /opt/codex-supervisor.js", "node -e codex", "node /opt/tools.js /usr/local/bin/codex", "node --require /absolute/bin/codex.js /opt/supervisor.js", "node --eval=0 /absolute/bin/codex.js", "node --title /absolute/bin/codex.js /opt/supervisor.js"]) {
-      const w = world({ between, betweenName, facts: { 150: facts({ exe: "/usr/bin/node" }) } });
+      const w = world({ between, betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv: between.split(" ") }) } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" }), between).toMatchObject({ ok: false, code: "pane_shape_unknown" });
       expect(w.calls, between).toEqual([]);
     }
@@ -408,8 +408,30 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
 
   it.each(["node", "MainThread"])("recognizes a %s Codex launcher after Node options", async betweenName => {
     for (const options of ["--no-warnings", "--enable-source-maps --no-warnings", "--require /opt/preload.js", "--import=/opt/preload.mjs", "--inspect=127.0.0.1:9229", "--"]) {
-      const w = world({ between: `node ${options} /absolute/bin/codex.js`, betweenName, facts: { 150: facts({ exe: "/usr/bin/node" }) } });
+      const w = world({ between: `node ${options} /absolute/bin/codex.js`, betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv: ["node", ...options.split(" "), "/absolute/bin/codex.js"] }) } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }), options).toMatchObject({ ok: true, paneShape: "shell_backed" });
+      expect(w.calls).toEqual([]);
+    }
+  });
+
+  it.each(["node", "MainThread"])("uses exact argv to distinguish a %s supervisor from a spaced launcher path", async betweenName => {
+    const cases = [
+      { argv: ["node", "--require", "/tmp/preload /absolute/bin/codex.js", "/opt/supervisor.js"], accepted: false },
+      { argv: ["node", "--require", "/tmp/preload with spaces.js", "/opt/tools/bin/codex.js"], accepted: true },
+      { argv: ["node", "--no-warnings", "/opt/my tools/bin/codex.js"], accepted: true },
+    ];
+    for (const { argv, accepted } of cases) {
+      const w = world({ between: argv.join(" "), betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv }) } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject(accepted
+        ? { ok: true, paneShape: "shell_backed" } : { ok: false, code: "pane_shape_unknown" });
+      expect(w.calls).toEqual([]);
+    }
+  });
+
+  it.each(["node", "MainThread"])("refuses a %s launcher with unreadable exact argv", async betweenName => {
+    for (const observed of [null, facts({ exe: "/usr/bin/node" }), facts({ exe: "/usr/bin/node", argv: null }), facts({ exe: "/usr/bin/node", argv: [] })]) {
+      const w = world({ between: "node /usr/local/bin/codex", betweenName, facts: { 150: observed } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown" });
       expect(w.calls).toEqual([]);
     }
   });
@@ -417,7 +439,7 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
   it("recognizes a MainThread-named npm launcher only when its OS executable is Node", async () => {
     for (const exe of ["/usr/local/bin/node", "/usr/bin/python3", "", null]) {
       const w = world({ between: "node /usr/local/bin/codex", betweenName: "MainThread",
-        facts: { 150: exe === null ? null : facts({ exe }) } });
+        facts: { 150: exe === null ? null : facts({ exe, argv: ["node", "/usr/local/bin/codex"] }) } });
       const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
       expect(result).toMatchObject(exe?.endsWith("/node")
         ? { ok: true, paneShape: "shell_backed" }
