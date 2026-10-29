@@ -1,4 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { join } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
+import { packageBuildShell } from "../../../scripts/run-package-build.mjs";
 import { describe, expect, it } from "vitest";
 import { executionContentLines, executionSliceStripLines } from "../src/execution/execution-model.js";
 import { demoSnapshot } from "../src/demo-data.js";
@@ -6,6 +11,22 @@ import { renderScreen } from "../src/render.js";
 import { createViewState } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
 import type { FleetSnapshot } from "../src/types.js";
+import { actionLines } from "../src/execution/workflow-model.js";
+
+function powershellWords(action: string, native = false): string[] {
+  const root = native ? mkdtempSync(join(tmpdir(), "workflow-native-argv-")) : null;
+  try {
+    const exe = root ? writeWindowsNodeFixture(root, "rig", "console.log(JSON.stringify(['rig',...process.argv.slice(2)]));") : null;
+    const shim = root ? join(root, "rig.cmd") : null;
+    if (shim && exe) writeFileSync(shim, `@echo off\r\n@"${exe}" %*\r\n`);
+    const command = shim ? action.replace(/^rig\b/, `& '${shim.replaceAll("'", "''")}'`) : action;
+    const receiver = exe ? "" : "function rig { ConvertTo-Json -InputObject (@('rig')+@($args)) -Compress }; ";
+    const code = `$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); ${receiver}${command}`;
+    return JSON.parse(execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(code, "utf16le").toString("base64")],
+    { encoding: "utf8", windowsHide: true, timeout: 10000 }));
+  } finally { if (root) rmSync(root, { recursive: true, force: true }); }
+}
 
 const REPO_BASIS = "no reachable repo context (no EC-3 worktree on the board)";
 
@@ -379,10 +400,11 @@ describe("mission execution story — readable rows over the shipped projections
         let cursor = content.findIndex((line) => line.trimStart().startsWith("action rig workflow project"));
         if (cursor >= 0) {
           let candidate = content[cursor]!.replace(/^\s*action /, "");
-          while (candidate.endsWith("\\") && cursor + 1 < content.length && !content[cursor + 1]!.trimStart().startsWith("scroll ")) {
+          const continuation = process.platform === "win32" ? "`" : "\\";
+          while (candidate.endsWith(continuation) && cursor + 1 < content.length && !content[cursor + 1]!.trimStart().startsWith("scroll ")) {
             candidate += `\n${content[++cursor]!}`;
           }
-          if (!candidate.endsWith("\\")) action = candidate;
+          if (!candidate.endsWith(continuation)) action = candidate;
         }
         if (action == null && offset < screen.contentMaxOffset) {
           view.dispatch({ type: "content-scroll", delta: 1 });
@@ -390,7 +412,7 @@ describe("mission execution story — readable rows over the shipped projections
         }
       }
       expect(action, `${size.cols}x${size.rows}: complete action is scroll-reachable`).not.toBeNull();
-      const argv = execFileSync("/bin/sh", ["-c", `set -- ${action}\nprintf '%s\\0' "$@"`])
+      const argv = process.platform === "win32" ? powershellWords(action!, true) : execFileSync("/bin/sh", ["-c", `set -- ${action}\nprintf '%s\\0' "$@"`])
         .toString()
         .split("\0")
         .filter(Boolean);
@@ -406,6 +428,27 @@ describe("mission execution story — readable rows over the shipped projections
       ]);
       expect(action, `${size.cols}x${size.rows}`).not.toContain("…");
     }
+  });
+
+  it.runIf(process.platform === "win32")("PowerShell workflow actions preserve literal values across narrow line wraps", () => {
+    const values = ["", "00123", "-0012", "@splat", "space and apostrophe's quote", 'double " quote', "$() ` %PATH% & | ;", "C:\\科学\\trailing\\", "long/".repeat(35)];
+    const action = "rig workflow project " + values.map(value => `'${value.replaceAll("'", `'"'"'`)}'`).join(" ");
+    for (const width of [24, 40, 80, 160]) {
+      const lines = actionLines(action, width, "win32");
+      expect(lines.every(line => line.text.length <= width)).toBe(true);
+      const shown = lines.map(line => line.text).join("\n").replace(/^\s*action /, "");
+      expect(powershellWords(shown)).toEqual(["rig", "workflow", "project", ...values]);
+    }
+  });
+
+  it("retains POSIX workflow command quoting and continuations", () => {
+    const values = ["apostrophe's value", "$() ` %PATH% & | ;", "long/".repeat(35)];
+    const action = "rig workflow project " + values.map(value => `'${value.replaceAll("'", `'"'"'`)}'`).join(" ");
+    const lines = actionLines(action, 40, "linux");
+    const command = lines.map(line => line.text).join("\n").replace(/^\s*action /, "");
+    const argv = execFileSync(packageBuildShell(process.platform, process.env), ["-c", `set -- ${command}\nprintf '%s\\0' "$@"`]).toString().split("\0").slice(0, -1);
+    expect(argv).toEqual(["rig", "workflow", "project", ...values]);
+    expect(lines.every(line => line.text.length <= 40)).toBe(true);
   });
 
   it("keeps terminal failure history visible without rendering an impossible resume command", () => {
