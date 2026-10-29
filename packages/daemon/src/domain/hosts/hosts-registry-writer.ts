@@ -20,7 +20,9 @@
 // re-running the add re-converges (add-time validation = load-time
 // validation, verbatim).
 
-import { existsSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, renameSync, mkdirSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { createPrivateTextFile } from "../private-text-file.js";
 import { dirname, join } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -56,9 +58,19 @@ export function addHostEntry(rawEntry: Record<string, unknown>, path: string = d
 
   try {
     mkdirSync(dirname(path), { recursive: true });
-    const tmp = join(dirname(path), `.hosts.yaml.tmp-${process.pid}`);
-    writeFileSync(tmp, stringifyYaml({ hosts: validated.registry.hosts }), { mode: 0o600 });
-    renameSync(tmp, path);
+    const tmp = join(dirname(path), `.hosts.yaml.tmp-${process.pid}${process.platform === "win32" ? `-${randomUUID()}` : ""}`);
+    let created = false;
+    try {
+      const content = stringifyYaml({ hosts: validated.registry.hosts });
+      if (process.platform === "win32") createPrivateTextFile(tmp, content);
+      else writeFileSync(tmp, content, { mode: 0o600 });
+      created = true;
+      renameSync(tmp, path);
+    } finally {
+      if (process.platform === "win32" && created) {
+        try { unlinkSync(tmp); } catch { /* published, or retain owned private staging on cleanup failure */ }
+      }
+    }
   } catch (err) {
     return { ok: false, error: `failed to write host registry at ${path}: ${(err as Error).message}` };
   }
