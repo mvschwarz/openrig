@@ -22,6 +22,7 @@ import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "
 import { observeClaudePaneRuntime, verifyPaneIdleShell, verifyClaudePaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { renderWindowsLaunch } from "../adapters/windows-launch.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
@@ -43,7 +44,7 @@ interface ResumeMetadataRefresherDeps {
   /** A seat's own runtime home from its member or rig `env:`, when it declares one. */
   seatHome?: (nodeId: string, runtime: HomeRuntime) => string | undefined;
   tmuxAdapter: TmuxAdapter;
-  listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  listProcesses?: () => ProcessRow[] | Promise<ProcessRow[]>;
   readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
   /** `configDir` is the seat's own Claude config dir, passed only when it declares one. */
   probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string, claudeMcp?: ClaudeMcp) => Promise<"resumable" | "not_resumable" | "inconclusive">;
@@ -72,7 +73,7 @@ export class ResumeMetadataRefresher {
   private readonly log: (line: string) => void;
   private sessionRegistry: SessionRegistry;
   private tmuxAdapter: TmuxAdapter;
-  private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  private listProcesses: () => ProcessRow[] | Promise<ProcessRow[]>;
   private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
   private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string, claudeMcp?: ClaudeMcp) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
@@ -150,7 +151,7 @@ export class ResumeMetadataRefresher {
       fillNullOnly?: boolean;
       /** OPR.0.5.3.10 mini-req 2 — a CYCLE-SCOPED process lister (one census for
        *  the whole tick, all rigs and seats). Absent → the instance lister. */
-      listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+      listProcesses?: () => Promise<ProcessRow[]>;
     },
   ): Promise<void> {
     const fillNullOnly = opts?.fillNullOnly === true;
@@ -320,7 +321,7 @@ export class ResumeMetadataRefresher {
       sessionId?: string;
       /** The seat, so its own CODEX_HOME is searched when it declares one. */
       nodeId?: string;
-      listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+      listProcesses?: () => Promise<ProcessRow[]>;
     },
   ): Promise<string | undefined> {
     const seatHome = opts?.nodeId ? this.seatHome?.(opts.nodeId, "codex") : undefined;
@@ -528,13 +529,13 @@ export async function defaultListProcessesStrict(): Promise<Array<ProcessRow & {
 }
 
 function findCodexDescendantPids(
-  processes: Array<{ pid: number; ppid: number; command: string }>,
+  processes: ProcessRow[],
   parentPid: number
 ): number[] {
-  const childrenByParent = new Map<number, Array<{ pid: number; command: string }>>();
+  const childrenByParent = new Map<number, ProcessRow[]>();
   for (const proc of processes) {
     const siblings = childrenByParent.get(proc.ppid) ?? [];
-    siblings.push({ pid: proc.pid, command: proc.command });
+    siblings.push(proc);
     childrenByParent.set(proc.ppid, siblings);
   }
 
@@ -542,7 +543,7 @@ function findCodexDescendantPids(
   const visit = (pid: number): void => {
     for (const child of childrenByParent.get(pid) ?? []) {
       visit(child.pid);
-      if (commandLooksLikeCodex(child.command)) {
+      if (commandLooksLikeCodex(child)) {
         matches.push(child.pid);
       }
     }
@@ -560,7 +561,14 @@ function readCodexThreadIdFromLogs(
   return readCodexThreadIdFromCandidateHomes(pid, [resolvedHome, homeDir, os.homedir()]);
 }
 
-function commandLooksLikeCodex(command: string): boolean {
+function commandLooksLikeCodex(row: ProcessRow): boolean {
+  const command = row.command;
+  if (row.platform === "win32") {
+    const executable = row.executablePath;
+    const first = parseWindowsCommandLine(command)[0];
+    return !!executable && !!first && nodePath.win32.basename(executable).toLowerCase() === "codex.exe"
+      && nodePath.win32.normalize(first).toLowerCase() === nodePath.win32.normalize(executable).toLowerCase();
+  }
   const tokens = command.trim().split(/\s+/).filter(Boolean);
   return tokens.some((token) => {
     const unquoted = token.replace(/^['"]|['"]$/g, "");

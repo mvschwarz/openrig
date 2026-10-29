@@ -273,6 +273,24 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Codex resume capture recognizes native executable rows (2026-10-30)
+
+ResumeMetadataRefresher's lightweight descendant discovery still split command
+text on whitespace and matched only the POSIX basename `codex`. It missed a
+native `codex.exe`, particularly under a quoted path containing spaces. The
+descendant walk now retains ProcessRow's native fields. Windows rows use the
+existing Windows argv parser and require argv[0] to match the OS executable
+path with basename codex.exe. POSIX discovery remains unchanged; mentioning
+codex.exe in another program's arguments does not qualify a native row.
+
+A controlled process-row fixture exercises captureCodexThreadId through real
+owned logs/state SQLite files. It fails before the repair, then captures the
+exact thread and rejects executable-path mismatch and argument-only decoys.
+Both complete resume-capture/refresher files pass 44/44 without skips; daemon
+type checking passes. These injected process rows verify the capture consumer,
+not an installed provider launch or stock psmux process census. No actual seat,
+provider credential or personal transcript is read or changed.
+
 ## Empty HOME account projection matches its resolvers (2026-10-30)
 
 ProviderServiceImpl independently calculated its displayed Codex home using a
