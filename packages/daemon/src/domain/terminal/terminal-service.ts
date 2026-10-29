@@ -18,8 +18,8 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 // RESOLVES + ROUTES.
 //
 // View argument resolution (precedence):
-//   1. `mission:<id>` / `slice:<id>`  → derived, LIVE from the review agents
-//      band; READ-ONLY by construction (a cross-rig observational grouping —
+//   1. `mission:<id>` / `slice:<id>`  → current active obligation owners;
+//      READ-ONLY by construction (a cross-rig observational grouping —
 //      AC-3 "another rig's agents ... read-only"). Never persisted (A3).
 //   2. a rig NAME                      → per-rig derived, LIVE from the node
 //      inventory; INTERACTIVE (you asked for that rig, you drive it — AC-1c).
@@ -134,7 +134,7 @@ export interface TerminalServiceDeps {
   listRigSeatsBatch?(rigNames: string[]): Promise<Map<string, LiveSeatRow[]>> | Map<string, LiveSeatRow[]>;
   /** Live seats of a pod within a rig (by rig name-or-id + pod namespace); null when the rig/pod is unknown. */
   listPodSeats(rigArg: string, podNamespace: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
-  /** Live seats for a derived scope (`mission:<id>` | `slice:<id>`); null when the scope is unknown/invalid. */
+  /** Legacy display callback; authoritative scope composition uses resolveScopeView. */
   listScopeSeats(scope: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
   /** Exact local queue episode; unavailable owners must remain in task.members. */
   resolveTaskView?(qitemId: string): Promise<TaskTerminalView | null> | TaskTerminalView | null;
@@ -201,12 +201,12 @@ export class TerminalService {
 
   async followView(req: OpenViewRequest & FollowControls): Promise<OpenViewResult> {
     if (!this.following) return errorResult("herdr", "follow_unavailable", "This daemon has no event-driven terminal following service.");
-    if (!/^(qitem|slice):.+/.test(req.view)) return errorResult("herdr", "follow_view_required", "Follow requires an authoritative qitem:<id> or slice:<id-or-name> view.");
-    if (req.view.startsWith("slice:") && !this.deps.resolveScopeView) return errorResult("herdr", "scope_unsupported", "This daemon has no authoritative slice membership resolver.");
+    if (!/^(qitem|slice|mission):.+/.test(req.view)) return errorResult("herdr", "follow_view_required", "Follow requires an authoritative qitem:<id>, slice:<id-or-name> or mission:<id> view.");
+    if (/^(slice|mission):/.test(req.view) && !this.deps.resolveScopeView) return errorResult("herdr", "scope_unsupported", "This daemon has no authoritative scoped membership resolver.");
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return selected;
     if (selected.name !== "herdr" || !selected.provider.followView) return errorResult(selected.name, "follow_unsupported", "Follow is supported by the qualified Herdr provider only.");
-    if (req.view.startsWith("slice:") || req.expectedPlan !== undefined) {
+    if (/^(slice|mission):/.test(req.view) || req.expectedPlan !== undefined) {
       const composed = await this.resolveComposed(req.view, selected.provider.panesPerPage);
       if ("code" in composed) return errorResult(selected.name, composed.code, composed.error);
       if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(selected.name, composed, selected.session)) return errorResult(selected.name, "preview_changed", "Task membership changed since preview; refresh before enabling following.");
@@ -225,7 +225,7 @@ export class TerminalService {
     try {
       const current = await this.resolveComposed(selector.view, selected.provider.panesPerPage);
       if (!("code" in current)) composed = { ...current, opened: current.opened.map(p => this.viewerPane(p)) };
-      else membershipError = `${current.code}: ${current.error}${selector.view.startsWith("slice:") ? " Refresh or reopen the slice under its current unambiguous key." : ""}`;
+      else membershipError = `${current.code}: ${current.error}${/^(slice|mission):/.test(selector.view) ? ` Refresh or reopen the ${selector.view.split(":")[0]} under its current unambiguous key.` : ""}`;
     } catch { /* Unreadable membership is supplied as unknown, never empty. */ }
     const plan = composed && this.planId(selected.name, composed, selected.session);
     const stillCurrent = async () => {
@@ -391,7 +391,7 @@ export class TerminalService {
   /** Explicit owner operation: membership never grants input authority. The
    * HTTP route supplies the existing owner bearer/browser boundary. */
   async ensureViewer(req: OpenViewRequest & { member: ViewerKey; expectedPlan: string }): Promise<ViewerResult> {
-    if (!/^(qitem|slice):.+/.test(req.view)) return { ok: false, code: "view_required", error: "Ensure-viewer requires an authoritative qitem or slice view." };
+    if (!/^(qitem|slice|mission):.+/.test(req.view)) return { ok: false, code: "view_required", error: "Ensure-viewer requires an authoritative qitem, slice or mission view." };
     const selected = this.selectProvider({ ...req, provider: req.provider ?? "herdr" });
     if ("ok" in selected) return { ok: false, code: selected.code ?? "unknown_provider", error: selected.error ?? "Provider unavailable." };
     if (!selected.provider.ensureViewer) return { ok: false, code: "viewer_unsupported", error: "This provider has no qualified ensure-viewer operation." };
@@ -472,8 +472,8 @@ export class TerminalService {
       return task ? { id: view, members: task.members, task: task.task }
         : { code: "view_not_found", error: `unknown local queue episode '${view.slice(6)}'` };
     }
-    if (view.startsWith("slice:")) {
-      if (!this.deps.resolveScopeView) return { code: "scope_unsupported", error: "This daemon has no authoritative slice membership resolver." };
+    if (/^(slice|mission):/.test(view)) {
+      if (!this.deps.resolveScopeView) return { code: "scope_unsupported", error: "This daemon has no authoritative scoped membership resolver." };
       const scope = await this.deps.resolveScopeView(view);
       return "code" in scope ? scope : { id: view, members: scope.members, task: scope.task };
     }
@@ -487,18 +487,6 @@ export class TerminalService {
       }
       return { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
     }
-    // 1. derived scope prefixes → live, read-only, never persisted.
-    if (view.startsWith("mission:") || view.startsWith("slice:")) {
-      const rows = await this.deps.listScopeSeats(view);
-      if (rows == null) {
-        return { code: "view_not_found", error: `unknown or invalid scope '${view}'` };
-      }
-      return {
-        id: view,
-        members: deriveViewMembers(rows, { readOnly: true, labelSuffix: view }),
-      };
-    }
-
     // 2. a pod within a rig — `pod:<rig-id-or-name>/<podNamespace>` (AC-5 launcher
     //    target). Interactive (a subset of your own rig).
     if (view.startsWith("pod:")) {

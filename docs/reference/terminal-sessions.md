@@ -308,7 +308,7 @@ only sizing client. Observers of a Herdr terminal do not themselves resize it;
 a controlling browser can. No cross-version resize guarantee is implied.
 
 
-## Following a slice's current work
+## Following a slice or mission's current work
 
 Use `rig terminal open slice:<name-or-id> --follow --provider herdr` to keep
 one workspace following the current destination owners of that slice's active
@@ -323,7 +323,18 @@ tag does not put a row in every slice. No project is inferred from a tag or the
 caller's working directory. Duplicate names or aliases require disambiguation
 in the configured index; no first-match scope is selected.
 
-Slice keys are case-sensitive and can include Unicode, plus signs and internal
+Mission views use `mission:<directory-id>`, from the same configured index.
+A mission is known when its directory contains `slices/` (even empty) or a
+readable `mission.yaml` declaration. Its directory ID is its exact identity;
+mission frontmatter is not an alias. Membership is the union of active rows
+with that exact `mission:` tag and rows associated with any physically indexed
+child slice by its exact name or unique ID. Each row counts once even when it
+has both tags. Flat legacy slices without that parent association are not
+inferred into a mission. A child's historical status or composition activation
+flag does not remove its current obligations from the union. Duplicate mission
+IDs or colliding child slice names/IDs are ambiguous, never first-match.
+
+Slice and mission keys are case-sensitive and can include Unicode, plus signs and internal
 spaces. They cannot be empty or contain slash, backslash, control characters,
 or leading/trailing whitespace. Pass the literal selector in JSON or a quoted
 CLI argument; encode it once as a GET query value. Do not double-decode it.
@@ -337,21 +348,25 @@ view/provider implements ensure; the existing member, completeness, owner and
 `expectedPlan` checks still apply. A missing capability/task on an older daemon
 is unsupported scoped membership, not an empty team.
 
-New slice workspaces default to four automatic tiles; `--max-tiles` overrides
+Mission results use the same shape with `task.kind:"mission"`; `task.id` and
+`task.name` are the directory ID, with no synthetic `qitemId`. Ordinary mission
+preview/open uses this current-obligation membership too: past participants
+without active obligations are excluded, while unavailable current owners
+remain named. Follow, preview and ensure share the same authority.
+
+New slice and mission workspaces default to four automatic tiles; `--max-tiles` overrides
 that. Qitem views retain their eight-tile default. The full membership and
 obligation list remains available when tiles exceed capacity. Pins, drafts,
 unknown input and focus retention still protect departed viewers. Closing a
 viewer never stops its agent. Opening a tile can change the agent's dimensions.
 
-A known empty slice remains enabled in the same workspace; later associated
+A known empty slice or mission remains enabled in the same workspace; later associated
 work can join it. An incomplete queue read (`task.complete:false` plus `issues`)
 retains previous viewers. A missing scope is `scope_not_found`, duplicate scope
 identity is `scope_ambiguous`, unreadable/capped index data is `scope_unavailable`,
 and an unavailable resolver is `scope_unsupported`. None is authoritative empty.
 Ensure of an incomplete snapshot returns `viewer_unconfirmed`; changed plans
-return `preview_changed` before provisioning. Mission following is a separate
-increment; the existing mission display projection is not authoritative follow
-or ensure capability.
+return `preview_changed` before provisioning.
 
 Ordinary ownership changes follow queue/session/node events. Node and directory
 changes under the primary configured index use the existing filesystem watcher,
@@ -383,5 +398,5 @@ ensure returns `viewer_unconfirmed` without a provider effect. Unsupported
 ensure view kinds retain `view_required` (400). Unsupported follow view kinds
 retain `follow_view_required` in a 200 `ok:false` body, as before. A changed
 preview remains `preview_changed` (409). During automatic refresh a missing or
-ambiguous slice retains the existing tiles and names the source problem in the
+ambiguous scope retains the existing tiles and names the source problem in the
 explanation strip; refresh or reopen it under the current unambiguous key.

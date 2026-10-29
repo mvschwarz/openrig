@@ -255,7 +255,7 @@ export class HerdrFollowView {
       for (const overflow of plan.overflow) notice(`${overflow.seat}: ${overflow.reason}`);
       if (!members.length && !state.tiles.length) notice(view.task.kind === "qitem"
         ? "No open obligation remains. Automatic following has stopped; the workspace is kept. Use --follow to resume it."
-        : "No active work; waiting for associated work while following this slice.");
+        : `No active work; waiting for associated work while following this ${view.task.kind}.`);
       save();
       const unavailableJoins = plan.joins.filter(join => !state!.tiles.some(tile => tile.key === join.key)
         && view.task!.members.some(m => keyOf(m.key.hostId, m.key.nodeId) === join.key && m.availability === "available"));

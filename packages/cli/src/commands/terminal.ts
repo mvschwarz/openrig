@@ -132,7 +132,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
-    .option("--follow", "Keep one qitem:<id> or slice:<id-or-name> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
+    .option("--follow", "Keep one qitem:<id>, slice:<id-or-name> or mission:<id> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
     .option("--no-follow", "Stop following and keep the existing workspace and tiles as a fixed layout")
     .option("--max-tiles <count>", "Following tile limit, 1–256; explicitly raise it to show more members", Number)
     .option("--pin <seats...>", "Retain these following tiles after they leave the task")

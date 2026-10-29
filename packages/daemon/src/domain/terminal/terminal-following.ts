@@ -25,7 +25,7 @@ export class TerminalFollowing {
       const saved = JSON.parse(readFileSync(file, "utf8")) as { version: number; selections: Selection[] };
       if (saved.version !== 1 || !Array.isArray(saved.selections) || saved.selections.length > 64
         || saved.selections.some(s => typeof s.enabled !== "boolean" || s.selector?.provider !== "herdr"
-          || typeof s.selector.view !== "string" || !/^(qitem|slice):.+/.test(s.selector.view)
+          || typeof s.selector.view !== "string" || !/^(qitem|slice|mission):.+/.test(s.selector.view)
           || (s.selector.session !== undefined && typeof s.selector.session !== "string"))) throw new Error("Invalid following selectors.");
       for (const selected of saved.selections) this.selections.set(this.key(selected.selector), selected);
     } catch (error) {
