@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { TerminalService } from "../src/domain/terminal/terminal-service.js";
@@ -30,7 +30,7 @@ function fixture() {
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let lateFocus: { seat: string; reads: number } | undefined;
-  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false;
+  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -48,7 +48,7 @@ function fixture() {
       if (args.length !== 2) throw new Error("usage: herdr workspace list");
       return JSON.stringify({ result: { workspaces: [{ workspace_id: "w1" }] } });
     }
-    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()] } });
+    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: selected } });
@@ -89,8 +89,14 @@ function fixture() {
       return { type: "pane_focused" };
     } } });
   const provider = create();
-  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true) => provider.follow("qitem:task", transform(task(seats, complete)), { enabled: true, ...controls }, async () => true);
-  return { follow, create, panes, calls, rpc, inputs, frames, advance: (ms: number) => { clock += ms; },
+  const follow = (seats = ["a", "b", "c"], controls = {}, complete = true, current = async () => true) => provider.follow("qitem:task", transform(task(seats, complete)), { enabled: true, ...controls }, current);
+  const journal = () => {
+    const directory = path.join(root, readdirSync(root)[0]!, "viewers");
+    return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
+  };
+  const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
+  return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+    hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
       ? { ...target, paneCommand: `${target.paneCommand} --changed`, attachArgv: [...target.attachArgv!.slice(0, 4), "replacement-a", ...target.attachArgv!.slice(5)] } : target) }); },
@@ -99,6 +105,75 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
+  it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
+    const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
+    const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length; let reads = 0;
+    const paused = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 4);
+    expect(paused.opened).toEqual(["a", "b", "c"]);
+    const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+    expect(entry.phase).toBe("created"); expect(entry.pane).toBeTruthy();
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(1);
+    expect([...f.panes.values()].slice(0, 4).map(p => [p.pane_id, p.terminal_id])).toEqual(before);
+    expect([...f.panes.values()].find(p => p.focused)?.argv.at(-1)).toBe("$b");
+    expect(f.inputs.get("b")).toBe("text"); expect(f.rpc).toHaveLength(0);
+  });
+  it("an unconfirmed older viewer holds the whole view before a new join", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("c"); const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, opened: ["a", "b", "c"], following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["run", "close", "split", "create"].includes(c[1]!))).toBe(false);
+  });
+  it("keeps an already dispatched attach unconfirmed with its original seat, phase and reason", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("a"); const count = f.calls.length;
+    const held = await f.follow();
+    expect(held).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
+    expect(held.error).toContain("a:"); expect(held.error).toContain("starting");
+    expect(held.error).toContain("The viewer process is not confirmed");
+    await f.follow(); expect(f.calls.slice(count).some(c => ["run", "close", "split"].includes(c[1]!))).toBe(false);
+  });
+  it("a known refusal before split preserves its reason and allows a later join", async () => {
+    const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0;
+    const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 3);
+    expect(held.opened).toEqual(["a", "b", "c"]);
+    expect(held.following!.events.join("\n")).toContain("d: creating: Membership changed before the split.");
+    expect(f.calls.slice(count).some(c => ["split", "run", "close"].includes(c[1]!))).toBe(false);
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+  });
+  it("a known pre-split refusal retires its unused intent even when directory cleanup fails", async () => {
+    const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0, retainedFile = "";
+    const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => {
+      if (++reads !== 3) return true;
+      const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+      retainedFile = path.join(entry.cwd, "retained-note"); writeFileSync(retainedFile, "keep this file");
+      return false;
+    });
+    expect(held.following!.events.join("\n")).toContain("d: creating: Membership changed before the split.");
+    expect(JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])]).toBeUndefined();
+    expect(readFileSync(retainedFile, "utf8")).toBe("keep this file");
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+  });
+  it("an uncertain dispatched split keeps its intent even when enumeration is empty", async () => {
+    const f = fixture(); await f.follow(); f.loseCreate(); f.hideViewers(); const count = f.calls.length;
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.following!.events.join("\n")).toContain("d: creating: Viewer effect is unconfirmed: lost create response");
+    const before = readFileSync(f.journal(), "utf8");
+    await f.follow(["a", "b", "c", "d"]);
+    expect(readFileSync(f.journal(), "utf8")).toBe(before);
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
+  });
+  it("a changed terminal identity holds the whole view before joining another member", async () => {
+    const f = fixture(); await f.follow();
+    [...f.panes.values()].find(p => p.cwd.includes("/viewers/"))!.terminal_id = "other-generation";
+    const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["run", "split", "close"].includes(c[1]!))).toBe(false);
+  });
   it.each(["", "\x1b[2mAsk Codex to do anything\x1b[22m"])("closes only a departed viewer when the real reader confirms its two-footer Codex composer is empty (%s)", async body => {
     const f = fixture(); f.frames.set("c", codexTwoRowComposer(body));
     await f.follow();

@@ -10,9 +10,11 @@ import type { ComposedPane } from "./terminal-provider.js";
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
 export type ViewerResult = { ok: true; viewer: ViewerMapping; created: boolean }
-  | { ok: false; code: string; error: string };
+  | { ok: false; code: string; error: string; phase?: Entry["phase"] };
 export type InspectViewerSeat = (argv: string[]) => Promise<{ sessionId: string; nodeId: string }>;
 export type HerdrViewerRun = (argv: string[]) => Promise<string>;
+/** Only the caller which has not dispatched a create may assert this. */
+export class ViewerCreateNotDispatchedError extends Error {}
 export type CreateViewerPane = (cwd: string, label: string) => Promise<string>;
 export interface ViewerPane { workspace_id: string; pane_id: string; terminal_id: string; cwd: string; focused?: boolean }
 type Pane = ViewerPane;
@@ -21,7 +23,6 @@ interface Entry {
   phase: "creating" | "created" | "starting"; pane?: Pane;
 }
 interface Journal { version: 1; entries: Record<string, Entry> }
-const unavailable = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error });
 const runFile = promisify(execFile);
 
 /** The supported CLI, never guessed socket RPC method parity. Its reported
@@ -103,16 +104,18 @@ export class HerdrViewer {
     return findAttributedViewerPanes(this.run, entry.cwd);
   }
   private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
+    let entry: Entry | undefined;
+    const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
       if (this.platform !== "linux") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer is qualified on Linux Herdr 0.9.5/protocol 22 only." };
       const status = body(await this.run(["status", "server", "--json"]));
       if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.socketPath) {
-        return unavailable("The qualified Herdr version/protocol or selected socket was not confirmed.");
+        return unconfirmed("The qualified Herdr version/protocol or selected socket was not confirmed.");
       }
-      if (provision && !await stillCurrent()) return unavailable("Task membership changed while waiting to provision; refresh its preview.");
-      if (!target.attachArgv) return unavailable("Only verified local tmux bindings support ensure-viewer.");
+      if (provision && !await stillCurrent()) return unconfirmed("Task membership changed while waiting to provision; refresh its preview.");
+      if (!target.attachArgv) return unconfirmed("Only verified local tmux bindings support ensure-viewer.");
       const binding = await this.inspect(target.attachArgv);
-      if (binding.nodeId !== key.nodeId) return unavailable("The current tmux binding does not match this member’s node identity.");
+      if (binding.nodeId !== key.nodeId) return unconfirmed("The current tmux binding does not match this member’s node identity.");
       if (provision) mkdirSync(this.root, { recursive: true, mode: 0o700 });
       const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
       const file = path.join(this.root, `${endpoint}.json`);
@@ -122,36 +125,49 @@ export class HerdrViewer {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         journal = { version: 1, entries: {} };
       }
-      if (journal.version !== 1 || !journal.entries || typeof journal.entries !== "object" || Array.isArray(journal.entries)) return unavailable("Viewer provenance is unreadable; no provider mutation was attempted.");
+      if (journal.version !== 1 || !journal.entries || typeof journal.entries !== "object" || Array.isArray(journal.entries)) return unconfirmed("Viewer provenance is unreadable; no provider mutation was attempted.");
       const save = () => {
         const tmp = `${file}.${randomUUID()}.tmp`;
         writeFileSync(tmp, `${JSON.stringify(journal)}\n`, { mode: 0o600 }); renameSync(tmp, file);
       };
       const id = JSON.stringify([key.hostId, key.nodeId]);
-      let entry = journal.entries[id];
+      entry = journal.entries[id];
       let created = false;
       if (entry && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
-        return unavailable("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
+        return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
       }
       if (!entry) {
         if (!provision) return { ok: false, code: "viewer_not_provisioned", error: "No owned viewer has been provisioned for this member." };
-        if (Object.keys(journal.entries).length >= 256) return unavailable("This endpoint has 256 retained viewer records; inspect its viewer provenance before adding more.");
+        if (Object.keys(journal.entries).length >= 256) return unconfirmed("This endpoint has 256 retained viewer records; inspect its viewer provenance before adding more.");
         const token = randomUUID();
         const cwd = path.join(this.root, endpoint, token); mkdirSync(cwd, { recursive: true, mode: 0o700 });
         entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating" };
         journal.entries[id] = entry; save();
         // No retry here. A timeout is reconciled by enumeration on the next request.
-        const reply = body(await (createPane ? createPane(cwd, entry.label)
-          : this.run(["workspace", "create", "--cwd", cwd, "--label", entry.label, "--no-focus"])));
+        let raw: string;
+        try {
+          raw = await (createPane ? createPane(cwd, entry.label)
+            : this.run(["workspace", "create", "--cwd", cwd, "--label", entry.label, "--no-focus"]));
+        } catch (error) {
+          if (createPane && error instanceof ViewerCreateNotDispatchedError) {
+            // This invocation positively refused BEFORE dispatch, not an empty
+            // enumeration or a timeout after a possible provider effect.
+            delete journal.entries[id]; save();
+            try { rmdirSync(cwd); } catch { /* An unused directory must not prevent a later join. */ }
+            return unconfirmed(error.message);
+          }
+          throw error;
+        }
+        const reply = body(raw);
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== cwd) return unavailable("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
+        if (!made || made.cwd !== cwd) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
         entry.pane = made; entry.phase = "created"; save(); created = true;
       }
       if (!entry.pane) {
         // A unique private cwd attributes a previously initiated create, not a
         // caller ID or mutable display label. Empty/unreadable is still unknown.
         const found = await this.ownedPanes(entry);
-        if (found.length !== 1) return unavailable("Uncertain viewer creation has no unique private-cwd mapping.");
+        if (found.length !== 1) return unconfirmed("Uncertain viewer creation has no unique private-cwd mapping.");
         entry.pane = found[0]!; entry.phase = "created"; if (provision) save();
       }
       let current: Pane | null;
@@ -160,13 +176,13 @@ export class HerdrViewer {
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
         || current.workspace_id !== entry.pane.workspace_id || current.cwd !== entry.cwd) {
         if (!provision || (await this.ownedPanes(entry)).length !== 0) {
-          return unavailable("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
+          return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
         }
         // Only a complete empty readback retires provenance. Remove our empty
         // attribution directory, never provider panes or arbitrary journal paths.
         if (!/^openrig-viewer-[0-9a-f-]{36}$/.test(entry.label)
           || entry.cwd !== path.join(this.root, endpoint, entry.label.slice("openrig-viewer-".length))) {
-          return unavailable("Absent viewer provenance has no owned attribution directory.");
+          return unconfirmed("Absent viewer provenance has no owned attribution directory.");
         }
         try { rmdirSync(entry.cwd); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -174,8 +190,10 @@ export class HerdrViewer {
         return { ok: false, code: "viewer_not_provisioned", error: "The old viewer is confirmed absent; ensure again to create a verified replacement." };
       }
       if (entry.phase === "created") {
-        if (!provision) return unavailable("The created viewer process is not yet confirmed.");
-        if (!await stillCurrent()) return unavailable("Task membership changed before the viewer process started.");
+        if (!provision) return unconfirmed("The created viewer process is not yet confirmed.");
+        if (!await stillCurrent()) return unconfirmed("Task membership changed before the viewer process started.");
+        const beforeRun = await this.inspect(target.attachArgv);
+        if (beforeRun.nodeId !== key.nodeId || beforeRun.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed before the viewer process started.");
         entry.phase = "starting"; save();
         // pane run rc0/empty stdout is not proof. It is sent ONCE then checked.
         await this.run(["pane", "run", current.pane_id, entry.command]);
@@ -195,11 +213,11 @@ export class HerdrViewer {
           && (actual[expected.length] === `=${targetName}` || actual[expected.length] === binding.sessionId);
       });
       const afterBinding = await this.inspect(target.attachArgv);
-      if (afterBinding.nodeId !== key.nodeId || afterBinding.sessionId !== binding.sessionId) return unavailable("The seat binding changed while provisioning its viewer.");
-      if (!verified) return unavailable("The viewer process is not confirmed; no pane run was repeated.");
+      if (afterBinding.nodeId !== key.nodeId || afterBinding.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed while provisioning its viewer.");
+      if (!verified) return unconfirmed("The viewer process is not confirmed; no pane run was repeated.");
       return { ok: true, viewer: { workspaceId: current.workspace_id, paneId: current.pane_id, terminalId: current.terminal_id, readOnly: entry.readOnly }, created };
     } catch (error) {
-      return unavailable(`Viewer effect is unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
+      return unconfirmed(`Viewer effect is unconfirmed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
