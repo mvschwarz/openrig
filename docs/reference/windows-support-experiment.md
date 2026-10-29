@@ -11,7 +11,7 @@ not activate the running daemon or seats.
 | --- | --- | --- |
 | Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
 | Native pane shells | PowerShell/pwsh plus bounded cmd-to-PowerShell staging; owned cmd/runner lineage and Pi record-selection checks | All-provider cmd lifecycle and stock psmux visible-terminal acceptance remain incomplete |
-| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, frozen managed Claude Node entry/identity, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; unselected/adopted npm Claude identity and installed-provider acceptance remain incomplete |
+| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, frozen managed and declared-entry Claude Node identity, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; recorded npm-entry recovery and installed-provider acceptance remain incomplete |
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
@@ -272,6 +272,29 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Existing npm Claude processes use declared-entry identity (2026-10-30)
+
+An existing Windows npm Claude process need not have a current in-memory frozen
+launch. Native identity now recognizes its Node/script path only when the script
+occupies the official npm package layout and equals the package manifest's
+declared Claude bin. The manifest must identify @anthropic-ai/claude-code, be a
+regular file within the bounded size, and declare a relative contained entry.
+Unreadable, mismatched or escaped declarations remain unknown. This reads entry
+metadata; it does not prove package authenticity. Explicit frozen selections
+retain priority and are not replaced by layout discovery.
+
+The Node OS executable name/path and argv[0], ancestor creation ordering,
+unique candidate and conversation argument gates remain. A node foreground
+label alone is insufficient. Actual owned Node processes exercise both frozen
+and declared-entry modes, with wrong script/interpreter/token, competing row
+and changed-package-name refusals. The final six-file identity/managed/adapter
+selection passes 101/101 without skips; daemon type checking passes. No real
+provider or deployed session is touched. Foreground values remain test seams.
+
+This fills the recognized-layout unselected identity gap below. Preserving the
+observed script/interpreter pair through recorded-entry restore is still a
+separate incomplete consumer; installed-provider acceptance also remains open.
 
 ## Frozen managed npm Claude launch and native identity (2026-10-30)
 

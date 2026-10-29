@@ -9,6 +9,7 @@ import { readNativeProcessArguments } from "./native-process-arguments.js";
 import { readProcessTable } from "./process-table.js";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readWindowsConsoleProcesses } from "./windows-process-facts.js";
+import { recognizedWindowsClaudeScript } from "./windows-provider-command.js";
 
 
 export interface NativeProcessRow {
@@ -673,14 +674,17 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
     // A unique native child rooted in this pane is the Windows occupancy proof.
     // Creation ordering rejects a recycled parent PID; no foreground PGID is invented.
     const matches: NativeProcessObservation[] = [];
-    const nodeLaunch = runtime === "claude-code" && !!selectedExecutable && !!selectedScript;
-    const expectedName = nodeLaunch ? "node" : runtime === "claude-code" ? "claude" : "codex";
     for (const row of rows) {
+      const nativeNode = row.platform === "win32" && windowsExecutableName(row.executablePath ?? "") === "node";
+      const declaredEntry = runtime === "claude-code" && !selectedExecutable && !selectedScript && nativeNode
+        ? recognizedWindowsClaudeScript(parseWindowsCommandLine(row.command)[1] ?? "") : null;
+      const selectedNode = runtime === "claude-code" && !!selectedExecutable && !!selectedScript;
+      const expectedName = selectedNode || declaredEntry ? "node" : runtime === "claude-code" ? "claude" : "codex";
       if (row.platform !== "win32" || windowsExecutableName(row.executableName ?? "") !== expectedName
         || !row.executablePath || windowsExecutableName(row.executablePath) !== expectedName
         || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
         || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
-      if (nodeLaunch && (parseWindowsCommandLine(row.command)[1] ?? "").replace(/\//g, "\\") !== selectedScript!.replace(/\//g, "\\")) continue;
+      if (selectedNode && (parseWindowsCommandLine(row.command)[1] ?? "").replace(/\//g, "\\") !== selectedScript!.replace(/\//g, "\\")) continue;
       const chain: NativeProcessRow[] = [];
       const visited = new Set<number>();
       let current: NativeProcessRow | undefined = row;
@@ -839,7 +843,7 @@ async function observeNativePaneProcess(input: {
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
       const foreground = windowsExecutableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
-      if (!(runtime === "claude-code" ? ["claude", ...(input.selectedScript ? ["node"] : [])] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
+      if (!(runtime === "claude-code" ? ["claude", "node"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
     }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv, input.selectedScript);
