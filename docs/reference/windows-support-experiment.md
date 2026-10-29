@@ -17,10 +17,19 @@ PowerShell/Node pair observed through CIM verifies that join; synthetic cases
 also reject stale executable paths, repeated selections and unrelated programs.
 These are process-boundary checks, not real provider-turn or fleet acceptance.
 
-The rebase retains upstream API-key credential checks. Windows API-key file
-privacy validation is still unavailable and refuses launch; subscription-token
-launch remains supported by the native child-environment tests. Initial private
-session environment, warm-shell isolation and full parity validation remain open.
+The rebase retains upstream API-key credential checks. Windows API-key files now
+use a current-SID owner/ACL check on the opened read handle, shared by preflight
+and launch. Launch rechecks privacy and size, reads at most 8193 bytes, accepts
+only the existing printable ASCII key format, and updates only the child's
+environment after clearing login/routing overrides. The selected file stays
+locked against writes/replacement during that read. No credential file ACL is
+rewritten. Broad ACLs and unavailable/malformed/oversized files refuse launch
+without fallback. A static .NET helper keeps key bytes and strings out of
+PowerShell variable tracing; the compiler receives only fixed source. An owned
+PowerShell 7 child also exercised its .NET ACL path and tracing behavior.
+These tests use synthetic credentials; real account/billing acceptance remains
+unverified. Initial private session environment, warm-shell isolation and full
+parity validation remain open.
 
 ## Native service-adapter follow-up, 2026-10-29
 

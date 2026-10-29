@@ -1,4 +1,5 @@
 import { shellQuote } from "../../adapters/shell-quote.js";
+import { powershellQuote } from "../../adapters/windows-launch.js";
 import { claudeSeatTokenFileProblem, claudeSeatTokenRefProblem, isClaudeSeatTokenFallback, type ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import type { ClaudeSwitchView, PrecheckReason, PrecheckResult } from "./provider-types.js";
 import type { ClaudeCredentialPrecedence, ClaudeSeatRelaunch, ProviderPrecheckInput, ProviderSwitchInput, ProviderSwitchResult, SeatSwitchReport } from "./provider-service.js";
@@ -103,7 +104,7 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}), conversation, loginChanged: false, peers: [],
     // The label's characters are limited; a path can hold any but a newline, so it's quoted.
     undo: before
-      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
+      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${(process.platform === "win32" ? powershellQuote : shellQuote)(before.tokenFile)}`
       : `rig provider switch --seat ${input.seat} --stored-login` });
   if (!seat.running) {
     // Nothing to relaunch: the reference is saved for the seat's next launch, which the check found resumes its

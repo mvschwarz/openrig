@@ -7,8 +7,9 @@ import Database from "better-sqlite3";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { renderWindowsManagedLaunch } from "../src/adapters/windows-launch.js";
 import { parseWindowsCommandLine, windowsArguments } from "../src/adapters/windows-argv.js";
+import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
 
-vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
+vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(), execFile: vi.fn() }));
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.clearAllMocks(); });
 
@@ -41,6 +42,29 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("uses the selected API-key reference through preparation and actual child launch", async () => {
+    const f = fixture();
+    fs.copyFileSync(process.execPath, f.executable);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(((file: string, args: string[], opts: object, done: (error: Error | null, output: string) => void) => {
+      if (args[0] === "--help") done(null, '--permission-mode <mode> (choices: "auto", "default")');
+      else return native.execFile(file, args, opts, done as never);
+    }) as never);
+    const privateFile = await writeWindowsPrivateConfig("synthetic-selected-api-key\r\n");
+    try {
+      f.db.exec("ALTER TABLE nodes ADD COLUMN claude_token_ref TEXT");
+      f.db.prepare("UPDATE nodes SET claude_token_ref=? WHERE id='node'").run(JSON.stringify({ label: "test", tokenFile: privateFile.path, kind: "api-key" }));
+      const receiver = path.join(f.home, "api-receiver.cjs");
+      fs.writeFileSync(receiver, "console.log(JSON.stringify({selected:process.env.ANTHROPIC_API_KEY==='synthetic-selected-api-key',loginAbsent:process.env.CLAUDE_CODE_OAUTH_TOKEN===undefined,routingAbsent:process.env.ANTHROPIC_BASE_URL===undefined}));");
+      const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+      const command = prepared.command([receiver]);
+      expect(command).not.toContain("synthetic-selected-api-key");
+      const output = await new Promise<string>((resolve, reject) => native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+        env: { ...process.env, ANTHROPIC_API_KEY: "synthetic-other-key", CLAUDE_CODE_OAUTH_TOKEN: "synthetic-old", ANTHROPIC_BASE_URL: "synthetic-other-route" }, encoding: "utf8", windowsHide: true, timeout: 10000,
+      }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+      expect(JSON.parse(output.trim())).toEqual({ selected: true, loginAbsent: true, routingAbsent: true });
+    } finally { await privateFile.dispose(); }
+  }, 20000);
   it.runIf(process.platform === "win32")("does not reintroduce credentials through launch overrides for an isolated account", async () => {
     const f = fixture();
     fs.copyFileSync(process.execPath, f.executable);
