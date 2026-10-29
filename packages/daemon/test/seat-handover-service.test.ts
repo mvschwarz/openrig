@@ -1360,8 +1360,9 @@ describe("SeatHandoverService", () => {
     });
   });
 
-  it("carries the current rules, primary model and Advisor through handover to the successor", async () => {
+  it.each([undefined, "none"] as const)("carries current rules, model, Advisor and MCP selection (%s) to the successor", async claudeMcp => {
     const { node } = seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
+    rigRepo.setNodeClaudeMcp(node.id, claudeMcp ?? null);
     capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
     const rules = { allow: [], deny: ["Read(./private/**)"] };
     const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
@@ -1375,7 +1376,7 @@ describe("SeatHandoverService", () => {
     });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     expect(launchHarness).toHaveBeenCalledTimes(1);
-    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeMcp });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {

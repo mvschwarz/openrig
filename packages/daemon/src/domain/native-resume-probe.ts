@@ -1,6 +1,7 @@
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudePostureFlag, codexPostureArg } from "../adapters/yolo-mode.js";
+import { claudeMcpArgs, type ClaudeMcp } from "./claude-mcp.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -50,11 +51,13 @@ export function buildNativeResumeCommand(
   codexConfigProfile?: string | null,
   /** Codex: the seat's recorded daemon choice; only a positive true adds --no-daemon (absent and false print as before). */
   codexDaemonOptOut?: boolean,
+  claudeMcp?: ClaudeMcp | null,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
     const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
-    return `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}`;
+    const mcpSuffix = claudeMcpArgs(claudeMcp).map(arg => ` ${shellQuote(arg)}`).join("");
+    return `claude ${claudePostureFlag(process.env)} --resume ${shellQuote(resumeToken)}${nameSuffix}${mcpSuffix}`;
   }
   if (runtime === "codex") {
     return buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, codexDaemonOptOut === true);

@@ -1,4 +1,5 @@
 import { isShellForeground } from "./shell-classifier.js";
+import { EMPTY_CLAUDE_MCP_CONFIG } from "./claude-mcp.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
@@ -39,7 +40,8 @@ function tokens(command: string): string[] {
       if (char === quote) quote = null;
     } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
       || command.startsWith("'{", start) || command.startsWith("--settings={", start)
-      || command.startsWith('--settings="', start))) {
+      || command.startsWith('--settings="', start) || command.startsWith("--mcp-config={", start)
+      || command.startsWith('--mcp-config="', start))) {
       quote = char;
     } else if (/\s/.test(char)) {
       append(index);
@@ -244,6 +246,16 @@ type ClaudeArgvIds = { resume: string | null; "session-id": string | null };
 // path that reads back that way (`claudePathBounds`), so a value token opening with `--` or a settings-like `{` ends it.
 const CLAUDE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const opensSpan = (token: string): boolean => token.startsWith("--") || /^["']?\{/.test(token);
+// Only the empty configuration OpenRig emits is understood here. Unknown MCP paths/configs
+// still cannot supply positive session proof, and JSON contents never become identity options.
+function claudeMcpValueEnd(args: string[], index: number): number | null | undefined {
+  const arg = args[index]!;
+  if (arg === "--strict-mcp-config") return index;
+  if (arg === "--mcp-config") return args[index + 1] === EMPTY_CLAUDE_MCP_CONFIG ? index + 1 : null;
+  if (arg.startsWith("--mcp-config=")) return arg.slice("--mcp-config=".length) === EMPTY_CLAUDE_MCP_CONFIG ? index : null;
+  return undefined;
+}
+
 function claudeAdditionValueEnd(args: string[], index: number): number | null | undefined {
   const arg = args[index]!;
   const inline = arg.match(/^(--agent|--append-system-prompt-file)=([\s\S]*)$/);
@@ -299,6 +311,9 @@ function claudeSessionToken(args: string[]): string | null {
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+    const mcpEnd = claudeMcpValueEnd(args, index);
+    if (mcpEnd === null) return null;
+    if (mcpEnd !== undefined) { index = mcpEnd; continue; }
     const additionEnd = claudeAdditionValueEnd(args, index);
     if (additionEnd === null) return null;
     if (additionEnd !== undefined) { index = additionEnd; continue; }
@@ -339,6 +354,9 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
     }
     if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
       || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
+    const mcpEnd = claudeMcpValueEnd(args, index);
+    if (mcpEnd === null) return unparsed;
+    if (mcpEnd !== undefined) { index = mcpEnd; continue; }
     const additionEnd = claudeAdditionValueEnd(args, index);
     if (additionEnd === null) return unparsed;
     if (additionEnd !== undefined) { index = additionEnd; continue; }

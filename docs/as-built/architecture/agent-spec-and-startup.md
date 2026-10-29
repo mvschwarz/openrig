@@ -65,6 +65,35 @@ resolve → project → deliver pre-launch files → persist replay context → 
 
 ## 2. Execution and projection types
 
+The member's optional `claude_mcp: none` is normalized as `claudeMcp` and
+persisted independently in `nodes.claude_mcp` (migration 141). The
+expansion HTTP route preserves both `claude_mcp` and `claudeMcp`, including
+invalid values for the canonical validator to reject. An authored relaunch
+updates the seat choice after launch eligibility and startup-source resolution;
+an already-bound seat or a failed tmux launch keeps its prior value. Export
+describes the current runtime; a dormant choice on another runtime is omitted
+and must be restored in the Claude declaration when rebuilding from that export.
+The YAML export route names those agents in the existing `# Not carried:` report;
+the JSON export is unchanged. `rigspec-routes.test.ts` covers both pod-aware and
+legacy exports, omission controls and successful JSON export.
+
+The shared `StartupOrchestrator` reads the current seat record, so both an authored start
+and saved-context restore pass the choice to Claude. Legacy resume and handover
+successors read it separately; a runtime-switch successor reads it only when
+the target is Claude. `claude-mcp.ts` builds the strict empty-server arguments
+for the adapters, shutdown resume probes and displayed recovery commands,
+including the conversation picker. Shutdown skips a probe with an unreadable
+saved choice and keeps the resume token without adding a shutdown refusal.
+The native lineage selectors recognize these exact
+arguments without treating JSON contents as session options. Invalid stored
+values refuse launch. With no choice, the adapters add no MCP arguments.
+
+`claude-mcp-lifecycle.test.ts` exercises real schema/storage, export, snapshot
+and restore with simulated tmux/provider processes. `claude-mcp-launch.test.ts`
+executes managed and unmanaged shell commands against a private argv-printing
+fake, including fresh/resume/fork and legacy resume. These tests verify command
+plumbing and identity handling; they do not claim live provider enforcement.
+
 Restore/snapshot types are detailed in `lifecycle-snapshot-restore.md`; the
 spec/projection types live here.
 

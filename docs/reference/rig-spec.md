@@ -742,6 +742,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `effort` | string | no | — | Reasoning effort override, trimmed. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`, Pi `--thinking` (see "Pi" below). A non-string value is ignored with an advisory. |
 | `advisor` | string | no | — | Claude-only Advisor model for this seat. Overrides the AgentSpec profile/default; blank or non-string values are ignored with an advisory. |
+| `claude_mcp` | `none` | no | normal loading | Claude members only. Disable MCP server loading for this agent on every launch and resume. Omit the field to keep Claude's normal configuration; see [Claude MCP loading](#claude-mcp-loading-runtime-claude-code). |
 | `permission_policy` | string | no | — | Member-level permission policy; overrides the rig's. Not valid on terminal members. |
 | `env` | map | no | — | Launch environment for this seat, laid over the rig's `env`. Same rules as the rig-level field. Valid on terminal members too. See "Launch environment" below. |
 | `agent_file` | string | no | — | Claude members only. A Claude agent definition (a `.md` file with `name` in its frontmatter) for this seat. It's copied into the seat's own storage and launched as `--agent openrig:<name>`. A path beside the spec: no `..`, not absolute. |
@@ -754,6 +755,53 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+### Claude MCP loading (`runtime: claude-code`)
+
+Set `claude_mcp: none` on an individual member to launch it without MCP servers:
+
+```yaml
+members:
+  - id: reviewer
+    agent_ref: local:agents/reviewer
+    profile: default
+    runtime: claude-code
+    cwd: .
+    claude_mcp: none
+```
+
+OpenRig passes `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` to
+Claude for this seat. Strict mode selects only the supplied empty server set,
+excluding servers from user, project, team and plugin configuration. It does
+not disable plugin skills or change the seat's permission mode. The choice is
+saved on the seat and carried through fresh starts, forks, resumes (including
+saved startup context) and handover successors. Export and bundle round trips
+preserve it. The same field is supported on legacy `nodes` declarations.
+
+Other agents in the same directory keep their own choices; OpenRig does not
+rewrite shared MCP configuration files. Omit the field for Claude's normal
+loading. A later launch from an authored spec without the field clears the
+seat's saved opt-out once the launch is accepted for startup; a rejected
+launch leaves the choice unchanged. Restarting from saved context keeps it.
+Only `none` is accepted, and the field is invalid on other runtimes. If the
+seat switches to another runtime, the Claude choice stays dormant and applies
+again if it switches back. A currently running Claude process is unaffected.
+Export describes the current runtime and omits a dormant Claude choice. YAML
+exports name each affected agent in a `# Not carried:` comment, which `rig export`
+also prints after writing the file; JSON exports keep their existing shape. If
+you rebuild from that export and switch back to Claude, restore `claude_mcp: none`
+in the Claude declaration. Re-check this setting after downgrading
+OpenRig too: older versions can ignore it.
+
+Shutdown resume probes and the displayed native recovery commands (including
+the conversation picker) also carry the saved MCP choice. If shutdown cannot
+read that choice, it skips the probe and retains the token; shutdown proceeds.
+
+This opt-out is incompatible with an active enterprise `managed-mcp.json`:
+[Claude rejects strict overrides of that managed server set](https://code.claude.com/docs/en/managed-mcp#servers-passed-with---mcp-config-or---strict-mcp-config).
+OpenRig keeps the requested opt-out flags, so startup and resume remain subject
+to that native refusal; it does not fall back to loading servers. Use a host
+without that managed configuration, or omit the opt-out to use the managed set.
 
 ### Claude Advisor (`runtime: claude-code`)
 

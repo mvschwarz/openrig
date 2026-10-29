@@ -30,6 +30,8 @@ import { tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 
 // -- Row types for SQL results --
 
@@ -46,6 +48,7 @@ interface InventoryRow {
   effort: string | null;
   effort_choice: string | null;
   codex_config_profile: string | null;
+  claude_mcp: ClaudeMcp | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -107,8 +110,8 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut);
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
+  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
@@ -122,21 +125,22 @@ function computeRecoveryGuidance(input: {
   codexConfigProfile?: string | null;
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
+  claudeMcp?: ClaudeMcp;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
     const notes: string[] = [];
 
     if (resumeToken) {
-      const cmd = buildNativeResumeCommand(runtime, resumeToken, sessionName);
+      const cmd = buildNativeResumeCommand(runtime, resumeToken, sessionName, undefined, undefined, claudeMcp);
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
-    commands.push("claude --resume");
+    commands.push(["claude --resume", ...claudeMcpArgs(claudeMcp).map(shellQuote)].join(" "));
 
     if (sessionName) {
       notes.push(`Look for session name: ${sessionName}`);
@@ -647,6 +651,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
+      ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -803,7 +808,7 @@ function buildInventoryEntry(
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id)),
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -1096,6 +1101,7 @@ export function getNodeDetail(
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
       codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
+      claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
     }),
     binding,
     startupFiles,

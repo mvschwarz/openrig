@@ -768,6 +768,25 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
     });
 
+    it("keeps a seat's Claude MCP opt-out beside the retained executable on the continuation", async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-executable-"));
+      try {
+        const executable = path.join(root, "claude");
+        fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        const { rigId, nodeIds } = seedPodAwareRig();
+        db.prepare("UPDATE nodes SET claude_mcp = 'none' WHERE id = ?").run(nodeIds[0]!);
+        seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+        liveDriver(rigId, nodeIds[0]!);
+        tmux.getPanePid.mockResolvedValue(10 as never);
+        processes = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, command: `${executable} --session-id original`,
+          executableName: "claude", startedAt: "Fri Oct 9 07:00:00 2026" }];
+        const adapter = readyAdapter("claude-code");
+        (tmux as any).signalPaneProcess.mockImplementation(async () => { processes = []; return { ok: true }; });
+        await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+        expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeExecutable: fs.realpathSync(executable), claudeMcp: "none" }), expect.anything());
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    });
+
     it("a process that won't end isn't replaced: no shell is started over it", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });

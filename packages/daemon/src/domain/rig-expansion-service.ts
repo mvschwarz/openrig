@@ -145,7 +145,7 @@ export class RigExpansionService {
             // this is not a list of accepted member fields.
             if (!member || typeof member !== "object" || Array.isArray(member)) return member;
             const raw: Record<string, unknown> = { ...member };
-            for (const alias of ["agentRef", "codexConfigProfile", "claudePermissions", "claudeToken", "codexPermissions",
+            for (const alias of ["agentRef", "codexConfigProfile", "claudePermissions", "claudeToken", "claudeMcp", "codexPermissions",
               "permissionPolicy", "restorePolicy", "sessionSource", "starterRef"]) {
               // These aliases historically select a string, otherwise the raw
               // canonical value wins. Permission/session-source aliases use presence.

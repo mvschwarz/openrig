@@ -36,6 +36,8 @@ export interface Node {
   effort?: string | null;
   /** Session-scoped Claude Advisor model; never written to shared Claude settings. */
   advisor?: string | null;
+  /** Claude MCP loading for this seat; null/absent preserves the provider default. */
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   /** Explicit native account-home selection; a path only, not credential data. */
@@ -1101,6 +1103,7 @@ export interface LegacyRigSpecNode {
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   cwd?: string;
   surfaceHint?: string;
@@ -1224,6 +1227,7 @@ export interface RigSpecPodMember {
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
   claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex member's own permission envelope; the seat's live record afterwards. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
@@ -1517,6 +1521,7 @@ export interface ExpansionPodFragment {
     codexConfigProfile?: string;
     claudePermissions?: unknown;
     claudeToken?: unknown;
+    claudeMcp?: unknown;
     codexPermissions?: unknown;
     /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
      *  expansion ingress exactly like role (never silently dropped). Typed UNKNOWN

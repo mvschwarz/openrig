@@ -129,6 +129,38 @@ describe("Rigspec export routes", () => {
     }
   });
 
+  it.each(["legacy", "pod-aware"])("names dormant Claude MCP choices in the %s YAML export without changing JSON", async (format) => {
+    const rig = rigRepo.createRig("mcp-export");
+    const pod = format === "pod-aware" ? new PodRepository(db).createPod(rig.id, "dev", "Dev") : undefined;
+    const member = { runtime: "claude-code", podId: pod?.id, agentRef: "local:agents/worker", profile: "default", cwd: "/workspace" };
+    const switched = rigRepo.addNode(rig.id, "dev.switched", { ...member, claudeMcp: "none" });
+    rigRepo.addNode(rig.id, "dev.claude", { ...member, claudeMcp: "none" });
+    rigRepo.addNode(rig.id, "dev.plain", { ...member, runtime: "codex" });
+    // Runtime switches retain the saved Claude choice, while the exported declaration describes Codex.
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(switched.id);
+
+    const response = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(response.status).toBe(200);
+    const yaml = await response.text();
+    expect(yaml.split("\n").filter((line) => line.startsWith("# Not carried:"))).toEqual([
+      "# Not carried: dev.switched's claude_mcp: none; add it again if this exported copy is switched back to Claude.",
+    ]);
+    const parsed = PodRigSpecCodec.parse(yaml);
+    if (format === "pod-aware") expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+
+    const jsonResponse = await app.request(`/api/rigs/${rig.id}/spec.json`);
+    expect(jsonResponse.status).toBe(200);
+    const json = await jsonResponse.json();
+    const members: Array<{ id: string; runtime: string; claudeMcp?: string }> = format === "pod-aware" ? json.pods[0].members : json.nodes;
+    const id = (name: string) => format === "pod-aware" ? name : `dev.${name}`;
+    expect(members.find((entry) => entry.id === id("switched"))).toMatchObject({ runtime: "codex" });
+    expect(members.find((entry) => entry.id === id("switched"))).not.toHaveProperty("claudeMcp");
+    expect(members.find((entry) => entry.id === id("claude"))).toMatchObject({ runtime: "claude-code", claudeMcp: "none" });
+    expect(members.find((entry) => entry.id === id("plain"))).not.toHaveProperty("claudeMcp");
+    expect(json).not.toHaveProperty("notCarried");
+    expect(rigRepo.getRig(rig.id)?.nodes.find((node) => node.id === switched.id)?.claudeMcp).toBe("none");
+  });
+
   it("GET /api/rigs/:rigId/spec encodes non-ASCII X-Rig-Root header safely", async () => {
     const rig = rigRepo.createRig("non-ascii-rig");
     const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");

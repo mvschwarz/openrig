@@ -53,6 +53,7 @@ export interface SuccessorNode {
   kernelAuthority?: boolean;
   teamPermissionDefault?: boolean;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   permissionMode?: string;
   /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
@@ -414,6 +415,7 @@ export class SuccessorSessionLauncher {
       kernelAuthority: node.kernelAuthority,
       teamPermissionDefault: node.teamPermissionDefault,
       claudePermissions: node.claudePermissions,
+      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp : undefined,
       codexPermissions: node.codexPermissions,
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),

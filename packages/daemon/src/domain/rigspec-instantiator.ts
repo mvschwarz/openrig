@@ -124,6 +124,7 @@ export class RigInstantiator {
             advisor: specNode.advisor,
             claudePermissions: specNode.claudePermissions,
             claudeTokenRef: specNode.claudeTokenRef,
+            claudeMcp: specNode.claudeMcp,
             codexPermissions: specNode.codexPermissions,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
@@ -934,6 +935,7 @@ export class PodRigInstantiator {
       return { name: liveRig.rig.name, logicalId: live.logicalId, podId: live.podId,
         member: { ...context.member, agentRef: live.agentRef ?? "", profile: live.profile ?? "default", runtime: live.runtime ?? "",
           model: live.model ?? undefined, effort: live.effort ?? undefined, advisor: live.advisor ?? undefined,
+          claudeMcp: live.runtime === "claude-code" ? live.claudeMcp ?? undefined : undefined,
           codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
           env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
           permissionPolicy: undefined },
@@ -1342,7 +1344,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "codex_permissions", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "advisor", "cwd", "role", "codex_config_profile", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1358,7 +1360,7 @@ export class PodRigInstantiator {
     const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
     if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
       || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
-      || !same(member.permissionPolicy, node.permissionPolicy)) return refuse("Member source disagrees with the retained seat identity or policy.");
+      || !same(member.permissionPolicy, node.permissionPolicy) || !same(member.claudeMcp, node.claudeMcp)) return refuse("Member source disagrees with the retained seat identity or policy.");
     const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
     if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
     if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
@@ -1686,6 +1688,7 @@ export class PodRigInstantiator {
             permissionPolicy: member.permissionPolicy,
             claudePermissions: member.claudePermissions,
             claudeTokenRef: member.claudeTokenRef,
+            claudeMcp: member.claudeMcp,
             codexPermissions: member.codexPermissions,
             env: member.env,
             sessionSource: member.sessionSource,
@@ -2079,6 +2082,7 @@ export class PodRigInstantiator {
       permissionPolicy: input.member.permissionPolicy,
       claudePermissions: input.member.claudePermissions,
       claudeTokenRef: input.member.claudeTokenRef,
+      claudeMcp: input.member.claudeMcp,
       codexPermissions: input.member.codexPermissions,
       env: input.member.env,
       sessionSource: input.member.sessionSource,
@@ -2176,6 +2180,7 @@ export class PodRigInstantiator {
     // latest operator choice. Keep those choices authoritative across a restart.
     const member = {
       ...context.member,
+      claudeMcp: node.runtime === "claude-code" ? node.claudeMcp ?? undefined : undefined,
       ...(node.model !== null ? { model: node.model } : {}),
       ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
       ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
@@ -2729,6 +2734,10 @@ export class PodRigInstantiator {
     const finalResolvedStartupFiles = starterArtifacts
       ? [...starterArtifacts, ...dedupedResolvedFiles]
       : dedupedResolvedFiles;
+
+    // Apply the authored selection only after accepting the launch and resolving its startup sources.
+    // An already-bound seat, failed tmux launch or unresolved source must keep the previous choice.
+    if (input.member.runtime === "claude-code") this.deps.rigRepo.setNodeClaudeMcp(input.nodeId, input.member.claudeMcp ?? null);
 
     const startupResult = await this.deps.startupOrchestrator.startNode({
       rigId: input.rigId,

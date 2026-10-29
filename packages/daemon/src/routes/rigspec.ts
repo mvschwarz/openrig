@@ -40,9 +40,11 @@ export function handleExportYaml(c: Context): Response {
     const serialized = isPodAware
       ? RigSpecCodec.serialize(spec as import("../domain/types.js").RigSpec)
       : LegacyRigSpecCodec.serialize(spec as import("../domain/types.js").LegacyRigSpec);
-    // Seats whose launch additions this export doesn't carry are named at the top of the file.
+    // Seats whose settings this export doesn't carry are named at the top of the file.
     const notCarried = exporter.launchAdditionsNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s launch additions (agent_file, append_system_prompt_file, plugin_dirs); add them back by hand.\n`);
+    notCarried.push(...exporter.claudeMcpNotCarried(rigId)
+      .map((seat) => `# Not carried: ${seat}'s claude_mcp: none; add it again if this exported copy is switched back to Claude.\n`));
     const yaml = notCarried.join("") + serialized;
     const startupLayers = rigRepo.getRigStartupLayers(rigId);
     const headers: Record<string, string> = { "Content-Type": "text/yaml" };

@@ -378,9 +378,10 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
-  it("carries retained Claude rules into a target successor while replacing a Codex mode selection", async () => {
+  it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {
     const rules = { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] };
     db.prepare("UPDATE nodes SET claude_permissions_json=? WHERE id=?").run(JSON.stringify(rules), nodeId);
+    rigRepo.setNodeClaudeMcp(nodeId, claudeMcp ?? null);
     new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "floor" }, "operator", "earlier Codex choice");
     const claude = adapter("claude-code");
     const svc = service({ runtimeAdapters: { codex: adapter("codex"), "claude-code": claude } });
@@ -388,7 +389,7 @@ describe("live seat runtime switch", () => {
     expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", permissionMode: "acceptEdits", reason: "switch with retained rules" }))
       .toMatchObject({ ok: true, to: "claude-code" });
     expect(claude.launchHarness).toHaveBeenCalledWith(expect.objectContaining({
-      claudePermissions: rules, permissionMode: "acceptEdits",
+      claudePermissions: rules, permissionMode: "acceptEdits", claudeMcp,
     }), expect.objectContaining({ name: SEAT }));
   });
 
@@ -437,12 +438,15 @@ describe("live seat runtime switch", () => {
 
   it("a Claude Code seat moves to Codex, with an explicit Codex profile", async () => {
     db.prepare("UPDATE nodes SET runtime = 'claude-code', codex_config_profile = NULL, advisor = 'opus' WHERE id = ?").run(nodeId);
-    const svc = service();
+    rigRepo.setNodeClaudeMcp(nodeId, "none");
+    const codex = adapter("codex"), svc = service({ runtimeAdapters: { codex, "claude-code": adapter("claude-code") } });
     successorConfirms(svc);
     const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Claude usage limit", codexConfigProfile: "deep" });
     expect(result).toMatchObject({ ok: true, changed: true, from: "claude-code", to: "codex",
       settings: { codexConfigProfile: { value: "deep", source: "explicit" }, advisor: { value: null } } });
     expect(nodeRow()).toMatchObject({ runtime: "codex", codex_config_profile: "deep", advisor: null });
+    expect(codex.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ claudeMcp: undefined }), expect.anything());
+    expect(db.prepare("SELECT claude_mcp FROM nodes WHERE id=?").get(nodeId)).toEqual({ claude_mcp: "none" });
   });
 
   describe("a retained Codex envelope on the way back to Codex", () => {

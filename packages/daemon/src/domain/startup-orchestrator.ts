@@ -17,6 +17,7 @@ import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { readSeatClaudeMcp } from "./claude-mcp.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
@@ -343,6 +344,9 @@ export class StartupOrchestrator {
     }
     try {
       input = { ...input, binding: new NativePermissionStore(this.db).apply(input.binding, input.adapter.runtime) };
+      if (input.adapter.runtime === "claude-code") {
+        input = { ...input, binding: { ...input.binding, claudeMcp: readSeatClaudeMcp(this.db, input.nodeId) } };
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Permission selection: ${(error as Error).message}`], undefined, false, undefined, false, "permission_selection", true);
     }

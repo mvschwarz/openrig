@@ -167,6 +167,7 @@ export class RigSpecCodec {
         if (m.permissionPolicy) member["permission_policy"] = m.permissionPolicy;
         if (m.claudePermissions !== undefined) member["claude_permissions"] = m.claudePermissions;
         if (m.claudeTokenRef) member["claude_token"] = { label: m.claudeTokenRef.label, file: m.claudeTokenRef.tokenFile };
+        if (m.claudeMcp !== undefined) member["claude_mcp"] = m.claudeMcp;
         if (m.codexPermissions !== undefined) member["codex_permissions"] = m.codexPermissions;
         if (m.agentFile) member["agent_file"] = m.agentFile;
         if (m.appendSystemPromptFile) member["append_system_prompt_file"] = m.appendSystemPromptFile;
@@ -249,6 +250,7 @@ export class LegacyRigSpecCodec {
         if (node.advisor != null) n["advisor"] = node.advisor;
         if (node.claudePermissions !== undefined) n["claude_permissions"] = node.claudePermissions;
         if (node.claudeTokenRef) n["claude_token"] = { label: node.claudeTokenRef.label, file: node.claudeTokenRef.tokenFile };
+        if (node.claudeMcp !== undefined) n["claude_mcp"] = node.claudeMcp;
         if (node.codexPermissions !== undefined) n["codex_permissions"] = node.codexPermissions;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;

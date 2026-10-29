@@ -1,5 +1,6 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { validateClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
@@ -172,6 +173,7 @@ function isStoredRigSpec(value: unknown): value is NodeLaunchRecipe["rigSpec"] {
         && (entry.effort === undefined || typeof entry.effort === "string")
         && (entry.role === undefined || typeof entry.role === "string")
         && (entry.advisor === undefined || typeof entry.advisor === "string")
+        && (entry.claudeMcp === undefined || (entry.runtime === "claude-code" && entry.claudeMcp === "none"))
         && (entry.agentFile === undefined || typeof entry.agentFile === "string")
         && (entry.appendSystemPromptFile === undefined || typeof entry.appendSystemPromptFile === "string")
         && (entry.pluginDirs === undefined
@@ -314,6 +316,7 @@ interface NodeOptions {
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** A Claude seat's own subscription token file, by reference (spec `claude_token`). */
   claudeTokenRef?: ClaudeSeatTokenRef;
+  claudeMcp?: ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -610,6 +613,11 @@ export class RigRepository {
   }
 
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
+    if (opts?.claudeMcp !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_mcp requires a claude-code seat");
+      validateClaudeMcp(opts.claudeMcp);
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -751,6 +759,7 @@ export class RigRepository {
         .run(opts.effort, id);
     }
     if (opts?.advisor) this.setNodeAdvisor(id, opts.advisor);
+    if (opts?.claudeMcp !== undefined) this.setNodeClaudeMcp(id, opts.claudeMcp);
 
     if (opts?.env && this.hasNodeColumn("env_json")) {
       this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
@@ -832,6 +841,15 @@ export class RigRepository {
   }
 
   /** Persist the resolved Advisor; null removes a previous spec's selection. */
+  setNodeClaudeMcp(nodeId: string, value: ClaudeMcp | null): boolean {
+    if (value !== null) validateClaudeMcp(value);
+    if (!this.hasNodeColumn("claude_mcp")) {
+      if (value !== null) throw new Error("Cannot persist claude_mcp: database migration is required");
+      return false;
+    }
+    return this.db.prepare("UPDATE nodes SET claude_mcp = ? WHERE id = ?").run(value, nodeId).changes > 0;
+  }
+
   setNodeAdvisor(nodeId: string, advisor: string | null): boolean {
     if (!this.hasNodeColumn("advisor")) return false;
     return this.db.prepare("UPDATE nodes SET advisor = ? WHERE id = ?")
@@ -1089,6 +1107,7 @@ export class RigRepository {
       model: row.model,
       effort: row.effort ?? null,
       advisor: row.advisor ?? null,
+      claudeMcp: row.claude_mcp ?? null,
       effortChoice: row.effort_choice ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       claudeTokenRef: parseClaudeSeatTokenRef(row.claude_token_ref),
@@ -1184,6 +1203,7 @@ interface NodeRow {
   model: string | null;
   effort?: string | null;
   advisor?: string | null;
+  claude_mcp?: ClaudeMcp | null;
   effort_choice?: string | null;
   codex_config_profile?: string | null;
   claude_token_ref?: string | null;
