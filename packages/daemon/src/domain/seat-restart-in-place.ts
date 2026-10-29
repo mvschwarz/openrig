@@ -865,6 +865,28 @@ function isStagedLaunchScript(row: NativeProcessRow): boolean {
   return SH_RUNS_AS.has(executableBase(row)) && argv.length === 2 && /^(?:\/bin\/)?sh$/.test(argv[0]!) && isStagedSendScriptPath(argv[1]!);
 }
 
+const NODE_LAUNCH_FLAGS = new Set(["--no-warnings", "--trace-warnings", "--enable-source-maps",
+  "--preserve-symlinks", "--preserve-symlinks-main", "--no-deprecation", "--trace-deprecation",
+  "--throw-deprecation", "--inspect", "--inspect-brk"]);
+const NODE_LAUNCH_VALUE_FLAGS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader",
+  "-C", "--conditions", "--title"]);
+
+/** Identify the entry script, never an option's value or a script argument. Unknown option arity refuses the restart. */
+function nodeLaunchScript(argv: string[]): string | undefined {
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--") return argv[i + 1];
+    if (!arg.startsWith("-")) return arg;
+    if (NODE_LAUNCH_VALUE_FLAGS.has(arg)) {
+      if (!argv[++i]) return undefined;
+    } else if (!NODE_LAUNCH_FLAGS.has(arg)
+      && !(arg.includes("=") && process.allowedNodeEnvironmentFlags.has(arg))) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 /** The Codex process and its Codex launcher ancestors, deepest first, up to the pane root. */
 function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid: number,
   launcherExecutables: ReadonlyMap<number, string | null>): NativeProcessRow[] {
@@ -879,7 +901,7 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
     const node = name === "node" || (name === "MainThread"
       && nodePath.basename(launcherExecutables.get(parent.pid) ?? "") === "node");
-    const script = processArgv(parent.command)[1];
+    const script = nodeLaunchScript(processArgv(parent.command));
     const codexScript = !!script && nodePath.isAbsolute(script)
       && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
     const launcher = /^codex/i.test(name) || (node && codexScript);

@@ -399,10 +399,18 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
   });
 
   it.each(["node", "MainThread"])("refuses a %s supervisor mentioning Codex outside its launcher script", async betweenName => {
-    for (const between of ["node /opt/supervisor.js --project=codex", "node /opt/codex-supervisor.js", "node -e codex", "node /opt/tools.js /usr/local/bin/codex"]) {
+    for (const between of ["node /opt/supervisor.js --project=codex", "node /opt/codex-supervisor.js", "node -e codex", "node /opt/tools.js /usr/local/bin/codex", "node --require /absolute/bin/codex.js /opt/supervisor.js", "node --eval=0 /absolute/bin/codex.js", "node --title /absolute/bin/codex.js /opt/supervisor.js"]) {
       const w = world({ between, betweenName, facts: { 150: facts({ exe: "/usr/bin/node" }) } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" }), between).toMatchObject({ ok: false, code: "pane_shape_unknown" });
       expect(w.calls, between).toEqual([]);
+    }
+  });
+
+  it.each(["node", "MainThread"])("recognizes a %s Codex launcher after Node options", async betweenName => {
+    for (const options of ["--no-warnings", "--enable-source-maps --no-warnings", "--require /opt/preload.js", "--import=/opt/preload.mjs", "--inspect=127.0.0.1:9229", "--"]) {
+      const w = world({ between: `node ${options} /absolute/bin/codex.js`, betweenName, facts: { 150: facts({ exe: "/usr/bin/node" }) } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }), options).toMatchObject({ ok: true, paneShape: "shell_backed" });
+      expect(w.calls).toEqual([]);
     }
   });
 
