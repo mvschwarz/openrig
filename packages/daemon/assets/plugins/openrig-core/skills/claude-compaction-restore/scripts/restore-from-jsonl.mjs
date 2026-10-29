@@ -22,7 +22,21 @@ function stripBinary(text) {
     (m) => `[base64 omitted: ~${m.length} bytes]`);
   return s;
 }
-const DEFAULT_OUT = "/tmp/claude-compaction-restore";
+const DEFAULT_OUT = process.platform === "win32" ? path.join(os.tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore";
+
+function nativeFiles(root, maxDepth, suffix) {
+  const files = [];
+  const walk = (directory, depth) => {
+    if (depth >= maxDepth) return;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(file, depth + 1);
+      else if (entry.isFile() && entry.name.endsWith(suffix)) files.push(file);
+    }
+  };
+  walk(root, 0);
+  return files;
+}
 
 function parseArgs(argv) {
   const args = {
@@ -74,7 +88,7 @@ function findLatestJsonl(cwd) {
   roots.push(projectsRoot);
 
   for (const root of roots) {
-    const result = spawnSync("find", [root, "-name", "*.jsonl", "-maxdepth", root === projectsRoot ? "4" : "2"], {
+    const result = process.platform === "win32" ? { status: 0, stdout: nativeFiles(root, root === projectsRoot ? 4 : 2, ".jsonl").join("\n") } : spawnSync("find", [root, "-name", "*.jsonl", "-maxdepth", root === projectsRoot ? "4" : "2"], {
       encoding: "utf8",
     });
     if (result.status !== 0 && !result.stdout) continue;
@@ -238,7 +252,7 @@ function discoverDocs(cwd) {
     const stat = fs.statSync(full);
     if (stat.isFile()) docs.add(full);
     if (stat.isDirectory()) {
-      const result = spawnSync("find", [full, "-maxdepth", candidate === "docs" ? "2" : "1", "-type", "f", "-name", "*.md"], {
+      const result = process.platform === "win32" ? { stdout: nativeFiles(full, candidate === "docs" ? 2 : 1, ".md").join("\n") } : spawnSync("find", [full, "-maxdepth", candidate === "docs" ? "2" : "1", "-type", "f", "-name", "*.md"], {
         encoding: "utf8",
       });
       for (const file of result.stdout.split(/\r?\n/).filter(Boolean)) {

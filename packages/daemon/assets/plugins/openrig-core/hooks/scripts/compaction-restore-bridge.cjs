@@ -129,7 +129,7 @@ function writeMarker(marker) {
 }
 
 function buildRestoreContext(marker) {
-  const outputDir = firstString(marker.data.outputDir) || "/tmp/claude-compaction-restore";
+  const outputDir = firstString(marker.data.outputDir) || (process.platform === "win32" ? path.join(os.tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore");
   const ack = firstString(marker.data.expectedAck) || "restored from packet at <path>; resumed at step <X>";
   const postInstruction = firstString(marker.data.postCompactInstruction);
   const restoreMapPath = firstString(marker.data.restoreMapPath);

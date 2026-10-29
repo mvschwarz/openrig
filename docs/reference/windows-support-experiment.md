@@ -1899,3 +1899,21 @@ the shell executor was never called. The downstream install planner preserves
 installed/missing distinctions; Windows system-package install support remains
 manual under its existing policy. Native/POSIX probe and install-planner suites
 passed all 25 tests; daemon TypeScript checking passed. No software was installed.
+
+## Native compaction packet discovery and temp defaults (2026-10-30)
+
+The shipped restore skill used POSIX `find` for transcript/document discovery
+and fixed `/tmp` output defaults. Windows now uses native directory traversal
+with the existing depth bounds and does not traverse directory links. Its hook,
+restore script and bridge fallback use the native temporary directory. POSIX
+defaults/probes remain unchanged, and explicit output roots still win. The
+hook's informational restore instructions now reference the actual packet path
+instead of directing the seat back to a fixed `/tmp` path.
+
+An owned Windows fixture clears PATH, discovers its synthetic transcript and
+architecture document, creates a restore packet and then runs the real hook,
+verifying the native-temp marker path. No live session or user transcript is
+read. Hook/bridge/native-discovery checks passed 28 tests with two existing
+skips; daemon TypeScript checking and skill-mirror checking passed. Plugin
+manifests are 0.1.25; changed skill digests are checked against staged Git bytes,
+not only working-tree bytes. Runtime deployment remains separate.
