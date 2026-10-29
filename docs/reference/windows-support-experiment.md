@@ -2414,3 +2414,19 @@ filtered); an earlier broader combination passes 23/25 with the two remaining
 failures at host-denied file-symlink creation. Those file-link checks are not
 waived or replaced by junction tests. Daemon build passes. No real auth files,
 provider sign-in or running seats were read or modified.
+
+## Refused seat skills root traversal (2026-10-30)
+
+Cleanup's recorded-file pass already refused a directory junction outside the
+seat storage, but its leftover-listing pass exempted the skills root from the
+anchored directory check. An owned Windows fixture reproduced enumeration of
+that refused root. The same existing directory check now applies to the skills
+root as well as launch additions; no alternative traversal or deletion path is
+introduced.
+
+The regression fails before repair and now verifies the recorded-file refusal,
+no readdir call through the root junction, no removal, no outside leftover
+listing and unchanged owned outside-fixture content. Combined seat-storage
+checks pass 24/24, and daemon TypeScript checking passes. Only synthetic test
+storage was cleaned; no actual seat material or live deployment was touched.
+The separately pinned CLI/TUI run remains pending at this source checkpoint.

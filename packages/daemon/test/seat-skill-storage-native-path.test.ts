@@ -1,11 +1,12 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import fs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { cleanSeatSkills, insideSeatStorage, insideSeatStorageFolder, recordSeatSkillWrite, rehydrateSeatSkills, seatSkillPaths, seatSkillReplay, writeInsideSeatStorage } from "../src/domain/seat-skill-storage.js";
 
 let home: string | undefined;
-afterEach(() => { if (home) rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); if (home) rmSync(home, { recursive: true, force: true }); });
 it.runIf(process.platform === "win32")("accepts native casing for the same seat while refusing siblings and directory links", () => {
   home = mkdtempSync(join(tmpdir(), "seat-skill-native-"));
   const paths = seatSkillPaths({ rigId: "rig", logicalId: "worker", runtime: "claude-code" }, home);
@@ -27,6 +28,24 @@ it.runIf(process.platform === "win32")("accepts native casing for the same seat 
   expect(insideSeatStorageFolder(paths.root.toUpperCase(), linked)).toBe(false);
   expect(insideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"))).toBe(false);
   expect(() => writeInsideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"), "not written")).toThrow(/not inside/);
+});
+it.runIf(process.platform === "win32")("does not enumerate a refused junction at the skills root during cleanup", () => {
+  home = mkdtempSync(join(tmpdir(), "seat-clean-junction-"));
+  const paths = seatSkillPaths({ rigId: "rig", logicalId: "worker", runtime: "claude-code" }, home);
+  const source = join(home, "source.md"), file = join(paths.skillsRoot, "fixture", "SKILL.md");
+  writeFileSync(source, "synthetic skill\n");
+  writeInsideSeatStorage(paths.root, file, "synthetic skill\n");
+  recordSeatSkillWrite(paths.skillsRoot, file, source, "synthetic skill\n");
+  rmSync(paths.skillsRoot, { recursive: true });
+  const outside = join(home, "outside"); mkdirSync(join(outside, "fixture"), { recursive: true });
+  writeFileSync(join(outside, "fixture", "SKILL.md"), "outside synthetic skill\n");
+  writeFileSync(join(outside, "unrelated.md"), "outside synthetic file\n");
+  symlinkSync(outside, paths.skillsRoot, "junction");
+  const reads = vi.spyOn(fs, "readdirSync");
+  const result = cleanSeatSkills(paths);
+  expect(result).toEqual({ removed: [], kept: [], refused: [file] });
+  expect(reads.mock.calls.some(([dir]) => relative(paths.skillsRoot, String(dir)) === "")).toBe(false);
+  expect(readFileSync(join(outside, "unrelated.md"), "utf8")).toBe("outside synthetic file\n");
 });
 it.runIf(process.platform === "win32")("restores and cleans native-cased projection records while preserving edits", () => {
   home = mkdtempSync(join(tmpdir(), "seat-record-native-"));

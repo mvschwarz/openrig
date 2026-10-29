@@ -566,7 +566,7 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   }
   for (const dir of [paths.skillsRoot, ...seatAdditionLocations(paths)]) {
     // A linked location is refused above, file by file; nothing is walked through it.
-    if (dir !== paths.skillsRoot && lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
+    if (lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
     for (const file of leftovers(dir)) {
       if (!out.kept.some(kept => nodePath.relative(kept, file) === "") && !out.refused.some(refused => nodePath.relative(refused, file) === "")) out.kept.push(file);
     }
