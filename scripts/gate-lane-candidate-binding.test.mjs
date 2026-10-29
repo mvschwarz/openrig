@@ -125,6 +125,12 @@ test("candidate binding: only the canonical verdict path may be present and the 
   const verdict = JSON.parse(readFileSync(verdictPath, "utf8"));
   assert.equal(verdict.candidateSha, head);
   assert.equal(verdict.gate, "pass");
+  assert.equal(verdict.foreignLoad.processObservation, "available");
+  assert.equal(typeof verdict.foreignLoad.foreignProcessCount, "number");
+  if (process.platform === "win32") {
+    assert.equal(verdict.foreignLoad.loadavg, null);
+    assert.ok(verdict.foreignLoad.advisory.some(line => /loadavg unavailable/.test(line)));
+  }
 });
 
 test("candidate binding: HEAD drift during the gate refuses before writing a verdict", async () => {

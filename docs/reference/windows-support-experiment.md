@@ -7,6 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native gate process-load advisory, 2026-10-29
+
+Gate logs showed `ps` failing on Windows and the old catch converting that failure
+into an empty process list. The gate now reads PID/process-name pairs through
+bounded, no-profile, noninteractive Windows PowerShell. It reads no command lines
+and changes no processes. POSIX uses direct ps argv rather than a command shell.
+Malformed, failed or timed-out observations record an unavailable census and a
+null foreign-process count, rather than zero. Windows loadavg is likewise null
+and explicitly unavailable; Node's Windows zero tuple is not a real load measure.
+The advisory still does not change engineering-leg exit decisions.
+
+All 29 process-reader, gate wiring, candidate-binding and hermeticity tests passed
+without skips. Evidence includes the actual host census finding this Node PID
+and an actual fixture gate receipt containing the observation and unavailable
+Windows loadavg. Invalid-census tests preserve unknowns without recording error
+bodies. This is not a full lint/test gate result.
+
 ## Gate and reduced-environment scenario fixtures, 2026-10-29
 
 The native failure log exposed directory-link fixtures created without a Windows
@@ -23,7 +40,7 @@ including when its synthetic command/SQLite seams run on Windows. Host path.join
 had prevented removal of the container wrapper from PATH in those tests.
 All 39 tests across candidate binding, hermeticity and PR scenario contracts
 passed without skips. This does not prove real container restart or native npm
-engineering legs; the gate's process-load advisory still needs a Windows census.
+engineering legs. The subsequent native census follow-up is recorded above.
 
 ## Native runtime mirror drift comparison, 2026-10-29
 
