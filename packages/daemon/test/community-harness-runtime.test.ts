@@ -31,8 +31,8 @@ import { seatCommand } from "../../cli/src/commands/seat.js";
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   for (const db of dbs.splice(0)) db.close();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function presets(files: Record<string, string>): string {
@@ -429,19 +429,26 @@ describe("activity after the seat's occupant is replaced under the same session 
     const scratch = mkdtempSync(join(tmpdir(), "community-harness-swap-"));
     dirs.push(scratch);
     const socket = join(scratch, "tmux.sock");
-    const tmux = async (...args: string[]) => (await promisify(execFile)("tmux", ["-S", socket, ...args])).stdout;
+    const native = process.platform === "win32";
+    const multiplexer = native ? process.env.OPENRIG_TEST_PSMUX ?? "psmux" : "tmux";
+    const scope = native ? ["-L", basename(scratch)] : ["-S", socket];
+    const tmux = async (...args: string[]) => (await promisify(execFile)(multiplexer, [...scope, ...args], { windowsHide: true, timeout: 10000 })).stdout;
     const db = new Database(join(scratch, "state.db"));
     dbs.push(db);
     db.exec(`CREATE TABLE nodes(id TEXT PRIMARY KEY, runtime TEXT);
       CREATE TABLE sessions(id INTEGER, node_id TEXT, session_name TEXT, status TEXT, agent_app TEXT);
       CREATE TABLE bindings(node_id TEXT, attachment_type TEXT);`);
+    let started = false;
     try {
       const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell path"); }, undefined, async argv => tmux(...argv.slice(1)));
       // A reader clock ten seconds ahead makes the real window timestamps quiet without sleeping.
       const svc = new SeatActivityService({ tmux: adapter, defaultWindowSeconds: 3, now: () => new Date(Date.now() + 10_000) });
       db.prepare("INSERT INTO nodes VALUES ('n1', 'synth')").run();
       db.prepare("INSERT INTO sessions VALUES (1, 'n1', 'work-worker@r', 'running', 'synth')").run();
-      await tmux("new-session", "-d", "-s", "work-worker@r", "sleep 60");
+      await tmux("new-session", "-d", "-s", "work-worker@r", ...(native
+        ? ["--", join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60"]
+        : ["sleep 60"]));
+      started = true;
       await svc.pollAllRunningTmuxSeats(db);
       expect(svc.getSeatState("n1")).toMatchObject({ activity: "unknown", decidedBy: null });
       // The same seat and session name, now a free-text self-attach with no recorded selection; no sweep saw it absent.
@@ -450,7 +457,8 @@ describe("activity after the seat's occupant is replaced under the same session 
       await svc.pollAllRunningTmuxSeats(db);
       expect(svc.getSeatState("n1")).toMatchObject({ activity: "idle-at-prompt", decidedBy: "window-sampling" });
     } finally {
-      await tmux("kill-server").catch(() => {});
+      if (started) await tmux("kill-server");
+      else await tmux("kill-server").catch(() => {});
     }
   });
 });
