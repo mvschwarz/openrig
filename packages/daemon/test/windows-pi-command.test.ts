@@ -7,6 +7,15 @@ import { resolveWindowsPiCommand } from "../src/adapters/windows-pi-command.js";
 import { buildPiChildEnv } from "../src/adapters/pi-runner-protocol.js";
 
 describe("Windows Pi executable resolution", () => {
+  it.runIf(process.platform === "win32")("pins the actual OMP child home and forwards only its selected native provider", () => {
+    const home = path.join(os.tmpdir(), "synthetic-omp-seat"), agentDir = path.join(home, "agent");
+    const env = buildPiChildEnv({ HOME: "C:\\synthetic-operator", USERPROFILE: "C:\\synthetic-operator", path: path.dirname(process.execPath), systemroot: process.env.SystemRoot, anthropic_api_key: "synthetic-selected", openai_api_key: "synthetic-denied", openrig_activity_hook_token: "synthetic-denied" }, {
+      runtime: "omp", agentDir, sessionsDir: path.join(home, "sessions"), platform: "win32", model: "anthropic/fixture",
+    });
+    const observed = JSON.parse(execFileSync(process.execPath, ["-e", "console.log(JSON.stringify({home:require('os').homedir(),configured:process.env.HOME,selected:process.env.ANTHROPIC_API_KEY==='synthetic-selected',other:process.env.OPENAI_API_KEY!==undefined,hook:process.env.OPENRIG_ACTIVITY_HOOK_TOKEN!==undefined}))"], { env, encoding: "utf8", windowsHide: true, timeout: 5000 }));
+    expect(observed).toEqual({ home, configured: home, selected: true, other: false, hook: false });
+  });
+
   it("resolves a standard npm shim without evaluating cmd.exe", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "pi-resolve-"));
     const pkg = path.join(dir, "node_modules", "@earendil-works", "pi-coding-agent");
