@@ -331,12 +331,9 @@ describe("Claude Code runtime adapter", () => {
   });
 
   // #2277: `claude` was missing when the launch ran (an update re-linking it, say). The shell's own not-found line is the
-  // reason, and the launch can't recover, so readiness ends at once.
-  it.each([
-    ["the shell can't find claude", "bash: claude: command not found", undefined],
-    ["the managed launch's executable is gone", "/usr/bin/env: ‘/home/u/.local/share/claude/versions/2.1.3’: No such file or directory",
-      "/home/u/.local/share/claude/versions/2.1.3"],
-  ])("checkReady names a missing claude and fails at once when %s", async (_label, line, claudeExecutable) => {
+  // reason. It stays an ordinary wait: the line may be an earlier launch's, left on screen while a new command is still
+  // being dispatched into the same pane, so it never ends readiness by itself.
+  const idleShellAfter = async (line: string, claudeExecutable?: string) => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("bash");
     (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
@@ -348,14 +345,27 @@ describe("Claude Code runtime adapter", () => {
         { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
       ],
     });
+    return adapter.checkReady({ ...makeBinding(), ...(claudeExecutable ? { claudeExecutable } : {}) });
+  };
+  const versioned = "/home/u/.local/share/claude/versions/2.1.3";
 
-    const result = await adapter.checkReady({ ...makeBinding(), ...(claudeExecutable ? { claudeExecutable } : {}) });
-
-    expect(result).toEqual({
+  it.each([
+    ["the shell can't find claude", "bash: claude: command not found", undefined],
+    ["the managed launch's executable is gone", `/usr/bin/env: ‘${versioned}’: No such file or directory`, versioned],
+    ["zsh can't find the managed launch's executable", `zsh: no such file or directory: ${versioned}`, versioned],
+  ])("checkReady names a missing claude when %s, and keeps waiting", async (_label, line, claudeExecutable) => {
+    expect(await idleShellAfter(line, claudeExecutable)).toEqual({
       ready: false,
       reason: `claude wasn't found when the launch ran (the pane shows: ${line}). Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.`,
       code: "returned_to_shell",
-      failed: true,
+    });
+  });
+
+  it("checkReady doesn't read another executable's missing file as the launch's own (#2277)", async () => {
+    expect(await idleShellAfter(`/usr/bin/env: ‘${versioned}0’: No such file or directory`, versioned)).toEqual({
+      ready: false,
+      reason: "The probe pane returned to a shell instead of staying inside the runtime.",
+      code: "returned_to_shell",
     });
   });
 

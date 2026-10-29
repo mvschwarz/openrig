@@ -2465,20 +2465,28 @@ describe("StartupOrchestrator", () => {
     expect(callCount).toBeGreaterThanOrEqual(3);
   });
 
-  it("a readiness failure the wait can't outlast ends startup at once with its reason (#2277)", async () => {
+  // #2277: a fresh retry in the same pane can be dispatched while the previous launch's not-found line is still on screen.
+  const notFound = "claude wasn't found when the launch ran (the pane shows: bash: claude: command not found).";
+
+  it("an earlier launch's not-found line doesn't end a new launch that then becomes ready (#2277)", async () => {
     const seed = seedSession();
-    const reason = "claude wasn't found when the launch ran (the pane shows: bash: claude: command not found).";
+    let calls = 0;
     const adapter = mockAdapter({
-      checkReady: vi.fn(async () => ({ ready: false, reason, code: "returned_to_shell", failed: true as const })),
+      checkReady: vi.fn(async () => (++calls >= 2 ? { ready: true } : { ready: false, reason: notFound, code: "returned_to_shell" })),
     });
     const orch = createOrchestrator();
-    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 2_000 }));
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 10_000 }));
+    expect(result.ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it("a launch that stays not-found reports it when the readiness wait ends (#2277)", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => ({ ready: false, reason: notFound, code: "returned_to_shell" })) });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
     expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.startupStatus).toBe("failed");
-      expect(result.errors).toEqual([`Startup failed: ${reason}`]);
-    }
-    expect(adapter.checkReady).toHaveBeenCalledTimes(1);
+    if (!result.ok) expect(result.errors).toEqual([`Readiness timeout after 0.1s — harness did not become interactive: ${notFound}`]);
   });
 
   it("a pane back at its shell for another reason still waits for the readiness timeout", async () => {
