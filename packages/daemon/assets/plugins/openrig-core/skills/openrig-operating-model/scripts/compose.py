@@ -301,10 +301,12 @@ def resolve_roots():
 
 
 def rig_config(key):
-    if not shutil.which("rig"):
+    executable = shutil.which("rig")
+    if not executable:
         return None
     try:
-        p = subprocess.run(["rig", "config", "get", key], capture_output=True, text=True, timeout=10)
+        p = subprocess.run([executable, "config", "get", key], capture_output=True,
+                           encoding="utf-8", timeout=10)
         v = (p.stdout or "").strip()
         return v if p.returncode == 0 and v else None
     except Exception:

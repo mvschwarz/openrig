@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,11 +28,14 @@ HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A
 
 
 def rig_output(*args):
+    executable = shutil.which("rig")
+    if not executable:
+        return None
     try:
         result = subprocess.run(
-            ["rig", *args], capture_output=True, text=True, timeout=10, check=False
+            [executable, *args], capture_output=True, encoding="utf-8", timeout=10, check=False
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
     value = (result.stdout or "").strip()
     return value if result.returncode == 0 and value else None

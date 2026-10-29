@@ -40,7 +40,11 @@ for (const prefix of ["OPENRIG", "RIGGED"]) {
     });
     let output = "";
     try {
-      const child = spawn("npm", ["test", "-w", "packages/daemon", "--",
+      // Node's native Windows spawn does not resolve/execute npm.cmd. Reuse
+      // the running npm CLI (or Node's colocated installation) without a shell.
+      const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
+      const command = process.platform === "win32" ? process.execPath : "npm";
+      const child = spawn(command, [...(process.platform === "win32" ? [npmCli] : []), "test", "-w", "packages/daemon", "--",
         "test/bundle-routes.test.ts", "test/instance-environment.test.ts", "--maxWorkers=1",
         "-t", "v2 bundle enters pod-aware path|test instance environment"],
       { cwd: repo, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });

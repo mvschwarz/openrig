@@ -7,6 +7,38 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Python CLI lookup, 2026-10-29
+
+The historical composer and refocusing scripts now execute the full path from
+`shutil.which("rig")`, and decode CLI stdout as UTF-8. A native Windows fixture
+reproduced error 2 when only `rig.cmd` was on PATH but Python launched the bare
+`rig` name. The same fixture succeeded with the resolved path. Both shipped
+Python subprocess call sites use the correction; their fixed config/whoami
+arguments are unchanged and no shell=True path was added.
+
+An opt-in native Python test passed using the existing Python 3.13 installation:
+a fixture shim in a path containing spaces, ampersand and Chinese characters
+received exact config/whoami arguments, returned a Unicode root correctly, and
+missing CLI/nonzero exit returned unavailable. This exercises synthetic CLI
+responses, not a live topology configuration or managed refocus acceptance.
+The Python interpreter remains a prerequisite for these historical entries.
+
+The repository's inherited-instance isolation test now runs npm's CLI through
+Node on Windows, rather than attempting native spawn of the `npm` shim name.
+Both OPENRIG and RIGGED cases passed their actual daemon child selection and
+confirmed unchanged outer audit, no outer database creation and no requests to
+the fixture's outer server. This repairs test execution; it does not exercise an
+operator's real daemon or alter deployment state.
+
+The repository Node-script sweep at the uncommitted Python/isolation follow-up
+ran 337 tests: 238 passed, 96 failed, three skipped, zero cancelled. This is not
+full `npm test`: `test:repo` stopped on script failures before workspace suites
+and the later chained check commands. Failures include native-incompatible
+fixtures/prerequisites, link permissions, packaging assumptions and generated
+lineage drift; they are not all diagnosed or waived. Targeted docs/mirror checks
+and the explicit opt-in Python test passed separately. No whole-suite green
+claim follows from the new targeted successes.
+
 ## Native subtree render and trunk diff, 2026-10-29
 
 `compose-down.mjs` and `trunk-diff.mjs` provide native Node entries for subtree
