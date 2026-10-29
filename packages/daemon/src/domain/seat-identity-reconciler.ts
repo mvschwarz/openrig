@@ -315,6 +315,10 @@ export class SeatIdentityReconciler {
     // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
     const batched = panes?.get(seat.tmux_pane) ?? null;
     if (batched?.dead === true) {
+      // Pane IDs can outlive their stored association after a move or server restart.
+      // Only observed membership in the exact session proves this executor exited.
+      const currentPanes = await this.tmux.listPanes?.(seat.session_name, true).catch(() => null);
+      if (!currentPanes?.some(pane => pane.id === seat.tmux_pane)) return this.tmuxUnavailableVerdict(seat, observedAt);
       return {
         ...base, verdict: "pane_missing", evidenceSource: "pane_process", reason: "pane_exited",
         evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: batched.command, matchedLayer: null },
