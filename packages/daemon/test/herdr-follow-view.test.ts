@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { TerminalService } from "../src/domain/terminal/terminal-service.js";
+import type { EventBus } from "../src/domain/event-bus.js";
 import { HerdrFollowView } from "../src/domain/terminal/herdr-follow-view.js";
 import { composeView } from "../src/domain/terminal/view-composer.js";
 import type { ComposedView } from "../src/domain/terminal/terminal-provider.js";
@@ -249,4 +251,43 @@ describe("slice follower policy", () => {
     expect([...f.panes.values()].map(pane => [pane.pane_id, pane.terminal_id])).toEqual(ids);
     const qitem = await f.follow(); expect(qitem.following?.maxTiles).toBe(8);
   });
+});
+
+
+function scopeCoreFixture(kind: "qitem" | "slice") {
+  const f = fixture(), component = f.create();
+  let failed = false;
+  const callbacks = new Set<Parameters<EventBus["subscribe"]>[0]>();
+  const snapshot = () => ({ task: { kind, id: "empty", ...(kind === "qitem" ? { qitemId: "empty" } : {}),
+    name: "Empty work", complete: true, issues: [], members: [] }, members: [] });
+  const service = new TerminalService({ followingStatePath: path.join(roots.at(-1)!, "core-selectors.json"),
+    eventBus: { subscribe: callback => { callbacks.add(callback); return () => { callbacks.delete(callback); }; } },
+    resolveProvider: () => ({ name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }),
+      liveness: async () => ({ alive: true }), openView: async () => { throw new Error("No whole-view relayout"); },
+      followView: component.follow.bind(component) }),
+    viewsStore: { list: () => [], get: () => null }, listRigSeats: () => null, listPodSeats: () => null,
+    listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
+    resolveTaskView: snapshot, resolveScopeView: () => failed ? { code: "scope_not_found", error: "Slice was renamed; reopen the view under its current key." } : snapshot() });
+  return { ...f, service, selector: `${kind}:empty`, fail: () => {
+    failed = true; for (const callback of callbacks) callback({ type: "queue.updated" } as Parameters<typeof callback>[0]);
+  } };
+}
+it.each(["slice", "qitem"] as const)("reports a real empty %s provider result consistently through Core", async kind => {
+  const f = scopeCoreFixture(kind);
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, following: { state: "empty", enabled: kind === "slice" },
+      viewDescriptor: { kind: kind === "slice" ? "following" : "fixed" } });
+    expect(result.following?.events.join(" ")).toContain(kind === "slice" ? "waiting for" : "stopped");
+    const current = await f.service.status(); expect(current.following).toHaveLength(kind === "slice" ? 1 : 0);
+  } finally { await f.service.stop(); }
+});
+it("preserves the resolver's renamed-slice explanation in the real provider notice", async () => {
+  const f = scopeCoreFixture("slice");
+  try {
+    await f.service.followView({ view: f.selector, provider: "herdr", enabled: true }); f.fail();
+    await expect.poll(async () => (await f.service.status()).following?.[0]?.status?.events.join(" ")).toContain("reopen the view under its current key");
+    expect((await f.service.status()).following?.[0]?.enabled).toBe(true);
+    expect(f.calls.some(call => call[1] === "close")).toBe(false);
+  } finally { await f.service.stop(); }
 });

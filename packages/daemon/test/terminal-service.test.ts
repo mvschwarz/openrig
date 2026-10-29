@@ -8,6 +8,8 @@
 //  - the composed view handed to the provider carries the composer's partition.
 
 import { describe, it, expect } from "vitest";
+import { Hono } from "hono";
+import { terminalRoutes } from "../src/routes/terminal.js";
 import { createHash } from "node:crypto";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
@@ -778,4 +780,18 @@ describe("slice task preview and explicit viewer capability", () => {
       .toMatchObject({ ok: false, code: "viewer_unconfirmed" });
     expect(effects()).toBe(0);
   });
+});
+
+
+it("keeps unsupported ensure as a client error and maps unknown/ambiguous scope errors explicitly", async () => {
+  const { deps, herdr } = makeDeps(); Object.assign(herdr, { ensureViewer: async () => { throw new Error("No effect"); } });
+  const service = new TerminalService(deps), app = new Hono();
+  app.use("*", async (c, next) => { c.set("terminalService" as never, service as never); await next(); });
+  app.route("/terminal", terminalRoutes({ bearerToken: "fixture-owner-token" }));
+  const unsupported = await app.request("/terminal/viewer/ensure", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer fixture-owner-token" },
+    body: JSON.stringify({ view: "saved:fixed", member: { hostId: "local", nodeId: "a" }, expectedPlan: "p" }) });
+  expect(unsupported.status).toBe(400); expect(await unsupported.json()).toMatchObject({ code: "view_required" });
+  expect((await app.request("/terminal/preview?view=slice:absent")).status).toBe(404);
+  Object.assign(deps, { resolveScopeView: () => ({ code: "scope_ambiguous", error: "Ambiguous scope" }) });
+  expect((await app.request("/terminal/preview?view=slice:duplicate")).status).toBe(409);
 });

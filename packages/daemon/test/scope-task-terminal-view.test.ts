@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import * as scopeReader from "../src/domain/terminal/scope-task-terminal-view.js";
 import { readScopedTaskTerminalView } from "../src/domain/terminal/scope-task-terminal-view.js";
 import type { TaskSeat } from "../src/domain/terminal/task-terminal-view.js";
 
@@ -109,4 +110,44 @@ describe("authoritative scoped terminal membership", () => {
     f.add("real-member", "a");
     expect(f.read()).toMatchObject({ task: { complete: false } });
   });
+});
+
+
+it("rejects a slice name claimed as another alias even when selected through its unique id", () => {
+  const f = fixture(); f.addSlice("other-mission", "other", "03-build");
+  f.add("wrong-owner", "b", "pending", ["slice:03-build"]);
+  expect(f.read("slice:OPR.3")).toMatchObject({ code: "scope_ambiguous" });
+});
+
+function cachedFixture() {
+  const f = fixture(); let observed = true;
+  type Resolver = { resolve: (view: string) => ReturnType<typeof f.read>; invalidate(): void };
+  const create = (scopeReader as unknown as { createScopedTaskResolver?: (db: Database.Database, index: typeof f.index,
+    resolveSeat: (address: string) => TaskSeat | null, observed: () => boolean) => Resolver }).createScopedTaskResolver;
+  // Before the cache fix, exercise the same always-fresh reader; its next
+  // identity read exposes the missing generation reuse, rather than an import failure.
+  const resolver = create ? create(f.db, f.index, address => f.seats.get(address) ?? null, () => observed)
+    : { resolve: (view: string) => f.read(view), invalidate() {} };
+  const changeId = (id: string) => writeFileSync(path.join(f.root, "release/slices/03-build/SPEC.md"), `---\nid: ${id}\n---\n`);
+  return { ...f, resolver, changeId, unobserved: () => { observed = false; } };
+}
+it("reuses a watched identity generation, rereads queue owners, and invalidates on scope changes", () => {
+  const f = cachedFixture(); expect(f.resolver.resolve("slice:03-build")).toMatchObject({ task: { id: "OPR.3", members: [] } });
+  f.changeId("next-id"); f.add("fresh-owner", "b");
+  expect(f.resolver.resolve("slice:03-build")).toMatchObject({ task: { id: "OPR.3", members: [{ seat: "b" }] } });
+  f.resolver.invalidate();
+  expect(f.resolver.resolve("slice:03-build")).toMatchObject({ task: { id: "next-id", members: [{ seat: "b" }] } });
+});
+it("rereads identities when watcher coverage is unavailable", () => {
+  const f = cachedFixture(); f.resolver.resolve("slice:03-build"); f.unobserved(); f.changeId("changed");
+  expect(f.resolver.resolve("slice:03-build")).toMatchObject({ task: { id: "changed" } });
+});
+it("rereads identities for an existing unwatched legacy root and after a scope error", () => {
+  const f = cachedFixture(); const extra = mkdtempSync(path.join(tmpdir(), "legacy-scope-")); cleanup.push(() => rmSync(extra, { recursive: true, force: true }));
+  f.resolver.resolve("slice:03-build"); f.index.additionalSliceRoots.push(extra); f.changeId("changed");
+  expect(f.resolver.resolve("slice:03-build")).toMatchObject({ task: { id: "changed" } });
+  f.index.additionalSliceRoots.pop();
+  expect(f.resolver.resolve("slice:new")).toMatchObject({ code: "scope_not_found" });
+  f.addSlice("another", "new");
+  expect(f.resolver.resolve("slice:new")).toMatchObject({ task: { complete: true } });
 });
