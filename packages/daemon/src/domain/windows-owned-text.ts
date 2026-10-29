@@ -26,6 +26,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="seal-private") { using(var file=Open(args[1],true,false,true))SealPrivate(file); }
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else if(args[0]=="directory-write-access")DirectoryWriteAccess(args[1]);
+      else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -40,6 +41,7 @@ public static class OpenRigOwnedText {
   }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SecurityAttributes security,uint disposition,uint flags,IntPtr template);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
   [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
@@ -346,6 +348,14 @@ export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
  * a child or changing its metadata. The OS evaluates the actual process token. */
 export function checkWindowsDirectoryWriteAccess(directory: string): void {
   execFileSync(nativeHelper(), ["directory-write-access", toNamespacedPath(directory)], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** Replace an existing file using Windows metadata-preserving replacement.
+ * No ignore-ACL-errors flags: failure must not silently broaden access. */
+export function replaceWindowsFilePreservingMetadata(target: string, staging: string): void {
+  execFileSync(nativeHelper(), ["replace-preserve", toNamespacedPath(target), toNamespacedPath(staging)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }

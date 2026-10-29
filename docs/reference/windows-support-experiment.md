@@ -2051,3 +2051,28 @@ passes 10/10; CLI TypeScript checking passes. Canonical-key precedence,
 including an explicitly empty canonical value, and legacy fallback rules remain.
 POSIX lookup remains case-sensitive. No live daemon target or credentials were
 used for these synthetic environment checks.
+
+## Preserve Windows settings DACL on replacement (2026-10-30)
+
+An owned temporary-file experiment reproduced a real gap in both CLI text
+replacement and daemon SettingsStore replacement: publishing the staging inode
+with rename discarded the original protected DACL and inherited the parent
+directory's access rules. Windows mode bits did not preserve that policy.
+
+Existing Windows targets now stage content inside an owner-only directory and
+publish with native ReplaceFileW, without flags that ignore ACL merge errors.
+This retains the target's access policy and the API's replacement metadata.
+See [Microsoft's ReplaceFileW contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew).
+An error after invoking native replacement is surfaced without retrying against
+the original path, because replacement errors can have different name outcomes.
+Earlier staging permission failures retain the existing in-place fallback;
+partial data writes never trigger it. New files and POSIX behavior retain their
+previous publication path. No actual user configuration was read or modified.
+
+The native protected-DACL regression failed before repair. Direct text
+replacement and both ConfigStore/SettingsStore set/reset now retain protection
+and access rules, with successful content readback and no staging leftovers.
+The combined 41-case check has 29 passed, 9 existing platform skips and 3 failures
+at host-denied file-symlink creation (EPERM). Those link cases remain unverified,
+not waived or converted to a different link type. Daemon and CLI TypeScript
+checking pass. These receipts do not activate the source in the running fleet.

@@ -1,1 +1,1 @@
-export { readWindowsRegularText, writeWindowsOwnedText } from "@openrig/daemon/windows-owned-files";
+export { readWindowsRegularText, writeWindowsOwnedText, replaceWindowsFilePreservingMetadata } from "@openrig/daemon/windows-owned-files";

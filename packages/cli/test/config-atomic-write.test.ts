@@ -5,6 +5,20 @@ import { tmpdir } from "node:os";
 import { ConfigStore } from "../src/config-store.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 const failure = vi.hoisted(() => ({ active: false, ownership: false, renameCode: "", createCode: "", writeCode: "ENOSPC" }));
+vi.mock("../src/lib/windows-owned-text.js", async (original) => {
+  const actual = await original<typeof import("../src/lib/windows-owned-text.js")>();
+  return { ...actual, replaceWindowsFilePreservingMetadata: (...args: Parameters<typeof actual.replaceWindowsFilePreservingMetadata>) => {
+    if (failure.renameCode) throw Object.assign(new Error("fixture replacement denied"), { code: failure.renameCode });
+    return actual.replaceWindowsFilePreservingMetadata(...args);
+  } };
+});
+vi.mock("../../daemon/src/domain/windows-owned-text.js", async (original) => {
+  const actual = await original<typeof import("../../daemon/src/domain/windows-owned-text.js")>();
+  return { ...actual, replaceWindowsFilePreservingMetadata: (...args: Parameters<typeof actual.replaceWindowsFilePreservingMetadata>) => {
+    if (failure.renameCode) throw Object.assign(new Error("fixture replacement denied"), { code: failure.renameCode });
+    return actual.replaceWindowsFilePreservingMetadata(...args);
+  } };
+});
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof import("node:fs")>();
   return { ...actual, openSync: (...args: Parameters<typeof fs.openSync>) => {
@@ -101,11 +115,18 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each(stores)
   }
 });
 for (const code of ["EACCES", "EPERM", "EBUSY"]) {
-  it.each(stores)(`%s falls back in place when replacement returns ${code}`, (Store) => {
+  it.each(stores)(`%s ${process.platform === "win32" ? "does not retry a native replacement failure" : "falls back in place"} when replacement returns ${code}`, (Store) => {
     const file = join(dir, "config.json");
     fs.writeFileSync(file, "{}");
     const inode = fs.statSync(file).ino;
     failure.renameCode = code;
+    if (process.platform === "win32") {
+      expect(() => new Store(file).set("transcripts.lines", "20")).toThrow(/fixture replacement denied/);
+      expect(fs.readFileSync(file, "utf8")).toBe("{}");
+      expect(fs.statSync(file).ino).toBe(inode);
+      expect(fs.readdirSync(dir)).toEqual(["config.json"]);
+      return;
+    }
     new Store(file).set("transcripts.lines", "20");
     expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ transcripts: { lines: 20 } });
     expect(fs.statSync(file).ino).toBe(inode);

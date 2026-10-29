@@ -15,7 +15,9 @@
 // resolveWorkspacePaths) project the raw strings into structured data
 // the daemon's UEP routes + Slice Story View consume.
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, rmdirSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { createWindowsPrivateDirectory } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -1239,10 +1241,15 @@ export class SettingsStore {
     // Match direct writes: a writable directory must not bypass a read-only
     // target. Opening without truncation also checks native ACL permissions.
     if (existing) closeSync(openSync(target, "r+"));
-    const temporary = `${target}.tmp-${randomUUID()}`;
+    let stagingDirectory: string | undefined;
+    let temporary = `${target}.tmp-${randomUUID()}`;
     let owned = false;
     let canFallBack = true;
     try {
+      if (existing && process.platform === "win32") {
+        stagingDirectory = createWindowsPrivateDirectory(path.dirname(target));
+        temporary = path.join(stagingDirectory, `.openrig.tmp-${randomUUID()}`);
+      }
       // Atomic replacement requires directory create/rename permission. Keep
       // staged bytes private until the original ownership and mode are restored.
       const fd = openSync(temporary, "wx", 0o600);
@@ -1263,7 +1270,10 @@ export class SettingsStore {
       }
       // chown may clear permission bits, so apply the final mode afterward.
       chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
-      renameSync(temporary, target);
+      if (existing && process.platform === "win32") {
+        canFallBack = false;
+        replaceWindowsFilePreservingMetadata(target, temporary);
+      } else renameSync(temporary, target);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
@@ -1275,6 +1285,7 @@ export class SettingsStore {
       throw error;
     } finally {
       if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+      if (stagingDirectory) try { rmdirSync(stagingDirectory); } catch { /* Retain owned staging if cleanup is unavailable. */ }
     }
   }
 
