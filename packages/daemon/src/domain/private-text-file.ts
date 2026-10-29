@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
-import { closeSync, linkSync, openSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, linkSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -35,6 +35,23 @@ export function createPrivateTextFile(file: string, content: string): void {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(CREATE_PRIVATE_FILE, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_PRIVATE_TEXT_FILE: file }, input: Buffer.from(content, "utf8").toString("base64"),
       windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] });
+}
+
+/** Windows atomic replacement: establish private access before content, then
+ * publish the staging inode. A failed publish leaves the prior destination.
+ * Callers retain their existing POSIX persistence and failure contracts. */
+export function replaceWindowsPrivateTextFile(file: string, content: string): void {
+  const staging = `${file}.tmp-${randomUUID()}`;
+  let created = false;
+  try {
+    createPrivateTextFile(staging, content);
+    created = true;
+    renameSync(staging, file);
+  } finally {
+    if (created) {
+      try { unlinkSync(staging); } catch { /* published, or retain owned private staging on cleanup failure */ }
+    }
+  }
 }
 
 const CREATE_PRIVATE_DIRECTORY = String.raw`

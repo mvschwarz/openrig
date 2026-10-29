@@ -21,6 +21,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
 import { parseSessionName } from "../session-name.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
@@ -406,6 +407,10 @@ export function resolveSlackHandle(
 export function atomicWrite(path: string, body: string): { ok: true } | { ok: false; error: string } {
   try {
     mkdirSync(dirname(path), { recursive: true });
+    if (process.platform === "win32") {
+      replaceWindowsPrivateTextFile(path, body);
+      return { ok: true };
+    }
     const tmp = `${path}.tmp-${process.pid}`;
     writeFileSync(tmp, body, { mode: 0o600 });
     renameSync(tmp, path);
