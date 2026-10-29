@@ -39,6 +39,13 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("resolves native workspace-relative evidence paths to the same canonical reference", () => {
+    const f = fixture();
+    const native = join("missions", "trial", "slices", "01-alpha", "proof", "evidence.md");
+    const canonical = "missions/trial/slices/01-alpha/proof/evidence.md";
+    expect(evidenceAt(f.root, f.alpha, native)).toEqual(evidenceAt(f.root, f.alpha, canonical));
+    expect(evidenceAt(f.root, f.alpha, native).ref).toBe(canonical);
+  });
   it("reads CRLF judgment receipts without changing identity or accepting changed payloads", () => {
     const f = fixture(), input = f.input(), first = f.judge(input);
     const file = join(f.alpha, "proof", "judgments", "00000001.md");

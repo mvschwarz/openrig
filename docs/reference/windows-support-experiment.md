@@ -167,6 +167,16 @@ OMP's existing native-only contract. Actual copied Node witnesses execute from
 relative PATH as EXE and COM under isolated child homes; no OMP or provider is
 invoked. Adjacent OMP checks and daemon typecheck pass.
 
+## Native workspace-relative proof evidence (2026-10-30)
+
+The actual evidenceAt consumer rejected an owned workspace-relative Windows
+`missions\\...` path by resolving it under the slice instead of the workspace.
+It now recognizes the native separator for that existing workspace-relative
+prefix, while retaining canonical slash references, identical evidence hashes
+and the existing realpath containment check. The regression verifies native
+and canonical spellings resolve to the same evidence identity. Selected proof
+checks and daemon typecheck pass; this adds no file-symlink acceptance claim.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

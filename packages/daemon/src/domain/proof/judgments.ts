@@ -156,7 +156,8 @@ export function evidenceAt(root: string, dir: string, ref: string): Evidence {
   if (!ref || typeof ref !== "string") throw new JudgmentError("evidence_required", "Reference readable evidence under the project workspace");
   const { ref: file, headerPath } = parseAddress(ref);
   const fragment = headerPath.join("/");
-  const target = contained(root, path.isAbsolute(file!) ? file! : file!.startsWith("missions/") ? file! : path.resolve(dir, file!));
+  const workspaceRelative = file!.startsWith("missions/") || file!.startsWith(`missions${path.sep}`);
+  const target = contained(root, path.isAbsolute(file!) ? file! : workspaceRelative ? file! : path.resolve(dir, file!));
   if (!fs.existsSync(target) || !fs.statSync(target).isFile()) throw new JudgmentError("evidence_missing", `Evidence is unavailable: ${ref}`);
   const bytes = fs.readFileSync(target);
   let addressed: Buffer | string = bytes;
