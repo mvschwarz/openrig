@@ -254,7 +254,7 @@ it("keeps the default catalog beside the real workspace when workspace.root is a
   const root = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-link-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const workspace = join(root, "physical", "workspace"), gamma = join(root, "physical", "gamma"), alias = join(root, "logical", "workspace");
   mkdirSync(workspace, { recursive: true }); mkdirSync(gamma); mkdirSync(join(root, "logical")); mkdirSync(join(root, "catalogs"));
-  symlinkSync(workspace, alias, "dir");
+  symlinkSync(workspace, alias, process.platform === "win32" ? "junction" : "dir");
   writeFileSync(join(workspace, "workspace.yaml"), "projects: [{id: gamma, root: ../gamma}]\n");
   writeFileSync(join(gamma, "project.yaml"), "metadata: {id: gamma}\n");
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
