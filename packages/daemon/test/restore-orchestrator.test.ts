@@ -38,6 +38,8 @@ import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import type { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { createHash } from "node:crypto";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
@@ -2912,7 +2914,7 @@ describe("RestoreOrchestrator", () => {
   // conversation Claude never wrote, and never reached its prompt. The records can't tell that from a used conversation that
   // lives elsewhere, so when Claude reports it missing the blank attempt is rolled back and the seat waits, with the one step
   // that starts only this seat fresh for the person who knows it was never used.
-  it.each([false, true])("pod-aware missing conversation pauses with the one-step fresh start, preserving a reused pane: %s", async keepPane => {
+  it.each([false, true])("pod-aware missing conversation pauses with the steps that start it fresh, preserving a reused pane: %s", async keepPane => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -2955,8 +2957,13 @@ describe("RestoreOrchestrator", () => {
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
       expect(nodeResult!.error).toContain("OpenRig's records can't tell whether this conversation was ever used.");
-      // The one-seat command, not a whole-rig re-run, which is refused while sibling seats run.
-      expect(nodeResult!.error).toContain(`If you know this seat was never used, nothing is lost by starting only this seat fresh, in one step: rig seat launch '${node.logicalId}@test-rig' --fresh --reason "<why>".`);
+      // The one-seat commands, not a whole-rig re-run, which is refused while sibling seats run. A new pane is gone after the
+      // rollback, so the fresh launch is one step; a reused pane is left at a shell under the seat's own session name, which
+      // the fresh launch won't replace until the seat is stopped.
+      const fresh = `rig seat launch '${node.logicalId}@test-rig' --fresh --reason "<why>"`;
+      expect(nodeResult!.error).toContain(keepPane
+        ? `If you know this seat was never used, nothing is lost by starting only this seat fresh, in two steps: rig seat stop '${node.logicalId}@test-rig' --reason "<why>", then ${fresh}.`
+        : `If you know this seat was never used, nothing is lost by starting only this seat fresh, in one step: ${fresh}.`);
       expect(nodeResult!.error).not.toContain("Re-run with --fresh");
       expect(result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("started fresh")]));
       expect(launchHarness).toHaveBeenCalledTimes(1);
@@ -2973,6 +2980,23 @@ describe("RestoreOrchestrator", () => {
       if (keepPane) {
         expect(tmux.killSession).not.toHaveBeenCalled();
         expect(launchedSessions.find(row => row.id === session.id)?.status).toBe("superseded");
+
+        // The two steps, by effect, through the seat lifecycle service the commands reach: on the kept pane the fresh launch
+        // alone is refused, and once the seat is stopped it can go ahead.
+        let present = true;
+        Object.assign(tmux, {
+          probeSession: vi.fn(async () => ({ state: present ? "present" : "absent" })),
+          hasSession: vi.fn(async () => present),
+          killSession: vi.fn(async () => { present = false; return { ok: true as const }; }),
+        });
+        const seats = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+          nodeLauncher: {} as NodeLauncher, startupOrchestrator: {} as StartupOrchestrator,
+          runtimeAdapters: { "claude-code": mockAdapter as unknown as RuntimeAdapter } });
+        const seatRef = `${node.logicalId}@test-rig`;
+        expect(await seats.planFresh({ seatRef, fresh: true }))
+          .toMatchObject({ launchable: false, blockers: [expect.objectContaining({ code: "unmanaged_session_collision" })] });
+        expect(await seats.stopSeat({ seatRef, reason: "never used" })).toMatchObject({ ok: true, sessionName: "dev-impl@test-rig" });
+        expect(await seats.planFresh({ seatRef, fresh: true })).toMatchObject({ launchable: true, currentOccupant: "absent" });
       }
       else expect(tmux.killSession).toHaveBeenCalled();
     }
