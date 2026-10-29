@@ -1835,3 +1835,18 @@ target DACL. The focused case passed. Adjacent CLI auth checks plus this case
 had 17 tests: 14 passed, two file-symlink EPERM failures and one previously
 observed sign-in fixture failure. Daemon build passed. No real credential or
 account data was read, copied or changed, and no provider was invoked.
+
+## Agent Starter native environment selection (2026-10-30)
+
+Agent Starter registry discovery now uses native case-insensitive environment
+lookup on Windows, including a caller-supplied environment snapshot. Without
+`HOME`, its supplied `USERPROFILE` is used before the OS fallback. Explicit
+registry, home registry and fallback precedence remain intact. The synthetic
+consumer resolves an actual clean starter from a Unicode profile and from a
+mixed-case registry override without inspecting real user registries.
+
+Resolver fixtures now model native filesystem path normalization and retain all
+credential-refusal/redaction assertions. All 18 resolver/native-home cases pass;
+daemon TypeScript checking passed. The two separately attempted Claude/Codex
+adapter integration cases remain failing on their synthetic path fixtures, so
+end-to-end starter delivery is not claimed by this change.
