@@ -533,7 +533,7 @@ Examples:
   cmd
     .command("handover")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--source <source>", "Source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<id> (native fork of the source conversation), or rebuild (fresh agent primed from the seat's durable artifacts).")
+    .option("--source <source>", "Source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<seat> (native fork of that seat's conversation, by its session name), or rebuild (fresh agent primed from the seat's durable artifacts).")
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
@@ -1507,7 +1507,7 @@ export function handoverCommand(depsOverride?: SeatDeps): Command {
   };
   return new Command("handover")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--source <source>", "Successor source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<id> (native fork of the source conversation), or rebuild (fresh agent primed from the seat's durable artifacts).")
+    .option("--source <source>", "Successor source: fresh (default; launches a new agent), discovered:<id> (operator-prepared), fork:<seat> (native fork of that seat's conversation, by its session name), or rebuild (fresh agent primed from the seat's durable artifacts).")
     .option("--reason <reason>", "Why the handover is happening")
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
@@ -1515,8 +1515,8 @@ export function handoverCommand(depsOverride?: SeatDeps): Command {
     .description("Hand a seat to a successor: create -> deliver context -> verify continuity -> rebind")
     .addHelpText("after", `
 All four sources execute (OPR.0.5.5.5): fresh delivers a captured restore
-packet; discovered adopts an operator-prepared live session; fork:<id> launches
-a NATIVE FORK of the source conversation (the successor carries the incumbent
+packet; discovered adopts an operator-prepared live session; fork:<seat> launches
+a NATIVE FORK of that seat's conversation (the successor carries the incumbent
 context from its first byte); rebuild launches fresh and primes from the seat's
 durable artifact chain, recording exactly what it found. A source that cannot
 proceed (e.g. fork with no discoverable native id) refuses honestly before any

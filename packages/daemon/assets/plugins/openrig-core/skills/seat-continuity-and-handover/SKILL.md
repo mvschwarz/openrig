@@ -113,7 +113,7 @@ A fork can create a candidate occupant; handover binds it into an existing seat.
 The continuity outcome is `forked`; the binding outcome is independent.
 
 The packaged `rig handover <seat>` and `rig seat handover <seat>` accept `fresh`,
-`discovered:<id>`, `fork:<id>` and `rebuild` sources. Use `--dry-run` to request
+`discovered:<id>`, `fork:<seat>` and `rebuild` sources. Use `--dry-run` to request
 planning only. Without it, these surfaces can execute; do not infer read-only
 behavior from the shorter seat command's planning-oriented description.
 `rig seat status <seat>` is the read-only observability surface.

@@ -304,6 +304,13 @@ export class SeatHandoverService {
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
       if (planResult.ok) {
+        // A preview must not approve a fork source the real run refuses: resolve it the same way.
+        const parsed = parseHandoverSource(input.source);
+        const status = this.statusService.getStatus(input.seatRef);
+        if (parsed.ok && parsed.source.mode === "fork" && parsed.source.ref && status.ok) {
+          const fork = this.resolveForkSource(parsed.source.ref, this.lookupNode(status.status).runtime);
+          if (!fork.ok) return fork;
+        }
         return { ok: true, plan: planResult.plan };
       }
       switch (planResult.code) {
@@ -405,33 +412,9 @@ export class SeatHandoverService {
     // mid-swap abort for a condition knowable up front.
     let forkSource: { kind: "native_id"; value: string; pendingIdAllowed: true } | null = null;
     if (parsed.source.mode === "fork") {
-      const forkRef = parsed.source.ref ?? latestSession.session_name;
-      const discovery = discoverResumeToken(this.db, forkRef);
-      if (!discovery.ok) {
-        return {
-          ok: false,
-          code: discovery.failure.code === "session_not_found" ? "fork_source_not_found" : "resume_token_unavailable",
-          message: discovery.failure.message,
-          guidance: "Fork needs a resolvable native conversation id. Inspect the source session with: rig ps --nodes",
-        };
-      }
-      if (!discovery.result.nativeId) {
-        return {
-          ok: false,
-          code: "resume_token_unavailable",
-          message: `No native resume id is discoverable for fork source "${forkRef}" — the conversation may not have produced output yet. No successor was created and the seat is untouched.`,
-          guidance: "Retry after the source session has a native conversation id, or use --source fresh.",
-        };
-      }
-      if (node.runtime && discovery.result.runtime && node.runtime !== discovery.result.runtime) {
-        return {
-          ok: false,
-          code: "runtime_mismatch",
-          message: `Seat expects runtime "${node.runtime}", but fork source "${forkRef}" is "${discovery.result.runtime}".`,
-          guidance: "Fork from a source session that runs the seat's runtime.",
-        };
-      }
-      forkSource = { kind: "native_id", value: discovery.result.nativeId, pendingIdAllowed: true };
+      const fork = this.resolveForkSource(parsed.source.ref ?? latestSession.session_name, node.runtime);
+      if (!fork.ok) return fork;
+      forkSource = { kind: "native_id", value: fork.nativeId, pendingIdAllowed: true };
     }
 
     // Already-created successor: route straight through the discovered->commit
@@ -1098,6 +1081,37 @@ export class SeatHandoverService {
       message: `Seat expects runtime "${nodeRuntime}", but discovered successor is "${discoveredRuntime}".`,
       guidance: "Use a discovered successor with a matching runtime hint.",
     };
+  }
+
+  /** The fork source's native conversation id, or the refusal the handover returns. The dry run asks the same question. */
+  private resolveForkSource(forkRef: string, runtime: string | null | undefined):
+    { ok: true; nativeId: string } | Extract<SeatHandoverResult, { ok: false }> {
+    const discovery = discoverResumeToken(this.db, forkRef);
+    if (!discovery.ok) {
+      return {
+        ok: false,
+        code: discovery.failure.code === "session_not_found" ? "fork_source_not_found" : "resume_token_unavailable",
+        message: discovery.failure.message,
+        guidance: "Fork needs a resolvable native conversation id. Inspect the source session with: rig ps --nodes",
+      };
+    }
+    if (!discovery.result.nativeId) {
+      return {
+        ok: false,
+        code: "resume_token_unavailable",
+        message: `No native resume id is discoverable for fork source "${forkRef}" — the conversation may not have produced output yet. No successor was created and the seat is untouched.`,
+        guidance: "Retry after the source session has a native conversation id, or use --source fresh.",
+      };
+    }
+    if (runtime && discovery.result.runtime && runtime !== discovery.result.runtime) {
+      return {
+        ok: false,
+        code: "runtime_mismatch",
+        message: `Seat expects runtime "${runtime}", but fork source "${forkRef}" is "${discovery.result.runtime}".`,
+        guidance: "Fork from a source session that runs the seat's runtime.",
+      };
+    }
+    return { ok: true, nativeId: discovery.result.nativeId };
   }
 
   private lookupNode(status: SeatStatus): NodeRow {

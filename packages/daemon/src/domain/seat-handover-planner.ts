@@ -176,7 +176,7 @@ export function parseHandoverSource(source?: string | null): { ok: true; source:
     ok: false,
     code: "invalid_source",
     message: `Invalid handover source "${raw}".`,
-    guidance: "Use --source fresh, --source rebuild, --source fork:<id>, or --source discovered:<id>.",
+    guidance: "Use --source fresh, --source rebuild, --source fork:<seat>, or --source discovered:<id>.",
   };
 }
 
