@@ -4,6 +4,9 @@ A community harness is a coding harness an outside contributor maintains. You in
 rig member runs it by naming it as its `runtime`. OpenRig doesn't test these harnesses. It shows them as community
 harnesses, and it reads their activity only from what the screen shows.
 
+For what an integration author owns end to end, including a runner's duties and running a harness somewhere else, see
+the draft [integration author contracts](author-contracts.md).
+
 ## What a community harness gets
 
 What OpenRig does for a community-harness seat, capability by capability. **Partly** and **no** mean OpenRig shows that it doesn't know;
@@ -182,6 +185,8 @@ one at a time and in order, without making the agent wait. It finds the address 
 - **The screen still counts,** but only as evidence of work: on its own it never reads the seat idle.
 - **The generation attributes a post; it isn't authentication.** A post with an earlier occupant's generation doesn't
   count for the live seat. The hook token is one local token, so any process that holds it can post for any seat.
+- **A runner's full duties** (liveness, input, cancellation and permissions) are in the draft
+  [harness and runner contract](harness-runner-contract.md).
 
 ## An example: Hermes
 
