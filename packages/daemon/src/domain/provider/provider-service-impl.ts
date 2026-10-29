@@ -242,6 +242,8 @@ export class ProviderServiceImpl implements ProviderService {
    *  running seat uses, and the login must be saved there. Every saved login's sign-in state reads unknown, so an
    *  authorized move isn't refused for that; the restart's uptake evidence settles it. */
   private async seatPrecheck(input: ProviderPrecheckInput, seatRestart: SeatRestart): Promise<SeatCheck> {
+    if (input.apiKeyFile !== undefined) return { ok: false, verdict: { safe: false, reasons: ["invalid_token_reference"],
+      message: "Codex uses a saved API-key login in its existing home. Import/save that native login with rig auth, then select its name with --to-account; --api-key-file is for Claude." } };
     const plan = await seatRestart.plan(input.seat);
     if (!plan.ok) {
       return { ok: false, verdict: { safe: false, reasons: [plan.code === "not_codex" ? "rebind_unsupported_for_runtime" : "seat_restart_refused"],

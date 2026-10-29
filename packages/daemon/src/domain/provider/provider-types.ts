@@ -154,6 +154,7 @@ export interface SeatSwitchView {
 
 /** What a Claude seat's precheck saw: the reference it would get, and what the precedence check read and couldn't read. */
 export interface ClaudeSwitchView {
+  credentialKind?: "api-key";
   label: string;
   tokenFile: string | null;
   checked: string[];

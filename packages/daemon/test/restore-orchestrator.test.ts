@@ -1468,6 +1468,20 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it.each([null, "saved-classic", "different-hook"])("retains a classic Claude resume token after native proof (hook=%s)", async (hook) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "saved-classic" });
+    const listProcesses = async () => {
+      if (hook) db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = ?, resume_provenance = 'hook' WHERE id = (SELECT id FROM sessions ORDER BY id DESC LIMIT 1)").run(hook);
+      return nativeLineage("claude-code", "saved-classic")();
+    };
+    const orch = createOrchestrator({ claude: mockClaudeResume({ ok: true }), listProcesses });
+    const result = await orch.restore(snap.id);
+    expect(result.ok && result.result.nodes[0]?.status).toBe(hook === "different-hook" ? "attention_required" : "resumed");
+    expect(db.prepare("SELECT resume_type, resume_token, resume_provenance FROM sessions ORDER BY id DESC LIMIT 1").get())
+      .toEqual({ resume_type: "claude_id", resume_token: hook ?? "saved-classic", resume_provenance: hook ? "hook" : "scrape" });
+  });
+
   it.each(["full", "subset", "existing-hook", "conflicting-hook"])("A3 proves managed Claude in %s recovery and the next identity sweep", async (mode) => {
     const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-claude" });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "sh") } as unknown as TmuxAdapter;

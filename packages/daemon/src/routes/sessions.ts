@@ -285,7 +285,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
   }
 
-  if (node.podId) {
+  if (node.podId || body.snapshotId !== undefined) {
     if (body.snapshotId === undefined) {
       const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
       const firstStart = await instantiator?.launchFirstMaterializedNode(rigId, node.id);

@@ -815,7 +815,7 @@ export class RigRepository {
   setNodeClaudeTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): boolean {
     if (!this.hasNodeColumn("claude_token_ref")) return false;
     return this.db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?")
-      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile }) : null, nodeId).changes > 0;
+      .run(ref ? JSON.stringify({ label: ref.label, tokenFile: ref.tokenFile, ...(ref.kind ? { kind: ref.kind } : {}) }) : null, nodeId).changes > 0;
   }
 
   /** Persist the resolved Advisor; null removes a previous spec's selection. */

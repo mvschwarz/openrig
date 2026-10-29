@@ -611,6 +611,45 @@ and follow the printed recovery command. Wait until the outcome is known before 
 
 Use `env:` for settings only. Credentials belong in the provider's own login or a secret store the seat reads at run time.
 
+### Switching credentials while keeping the conversation
+
+`rig provider switch` resumes a running seat in its existing home and pane. For Claude Code,
+select an API-key file, a subscription-token file, or the home's stored login:
+
+```sh
+rig provider precheck --seat dev-a@my-rig --to-account api-budget --api-key-file /secure/claude-api-key
+rig provider switch --seat dev-a@my-rig --to-account api-budget --api-key-file /secure/claude-api-key
+rig provider switch --seat dev-a@my-rig --to-account plan --token-file /secure/claude-plan-token
+rig provider switch --seat dev-a@my-rig --stored-login
+```
+
+The API-key file must be private (0600 or 0400), nonempty, and at most 8192 bytes, containing
+one key with optional surrounding whitespace. Only the reference is stored. The child reads the
+key at launch; key bytes never enter command arguments, snapshots or switch reports. Classic
+launches require a supported POSIX pane shell. Missing/invalid API-key files prevent launch.
+Settings that could override the key cause a refusal; OpenRig does not edit those settings.
+Native managed settings and a signed-in Claude gateway cannot be ruled out; Claude may require API-key approval before its
+first turn. Check `/status` after a real tool turn to confirm the authentication method.
+
+For Codex, a saved native API-key login is selected with the existing `--to-account <name>`
+path, exactly like a saved subscription login. Prepare it using native `codex login --with-api-key`
+with the key on stdin, then `rig auth save --codex-home <home> <name>`; never put a key in argv.
+Use the seat's existing home. Preparing a login replaces that home's active credentials, so do it
+before running seats there, or prepare/import a native auth profile separately. Switches preserve
+an outgoing credential copy and report peers sharing the home. A native keyring or administrator
+policy can override `auth.json`; the report remains unverified until native account verification.
+
+Select or clear an account home in a separate operation: `--api-key-file` cannot be combined with
+`--account-home` or `--clear-account-home`. A credential switch inside an already selected home
+keeps that home.
+
+Both paths retain the conversation and launch settings, interrupt in-flight work, and report
+uncertain restarts without retrying. They do not move account homes or start a fresh conversation.
+The caller chooses subscription-first order and configures/enforces the API budget; this command
+neither selects accounts automatically nor imposes a spending limit. Downgrade only after switching
+API-key Claude seats back to subscription credentials: older OpenRig versions cannot read the new
+credential kind correctly.
+
 ### Choosing the Claude instruction file
 
 OpenRig writes its instructions for Claude Code members into managed blocks in

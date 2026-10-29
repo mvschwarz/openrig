@@ -82,6 +82,14 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     asOf: "2026-08-03T12:00:00.000Z",
   };
 
+  it.each([{ selector: ["--account-home", "/accounts/selected"] }, { selector: ["--clear-account-home"] }])("does not silently ignore an API-key selector combined with $selector", async ({ selector }) => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "dev-a@rig", ...(selector.includes("--clear-account-home") ? [] : ["--to-account", "api"]), "--api-key-file", "/synthetic/key",
+      ...selector, "--reason", "Integration test"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(seen.length).toBe(before);
+  });
+
   it("switches to a selected account home without sending credential values", async () => {
     const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "api-account", "--account-home", "/accounts/api",
       "--reason", "Plan limit", "--model", "gpt-5.5", "--json"], runningDeps(port));
@@ -167,6 +175,17 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     const json = JSON.parse((await run([...args, "--json"], runningDeps(port))).logs[0]!);
     expect(json).toMatchObject({ dryRun: true, settings: { model: { value: "gpt-5.5", source: "explicit" } },
       dropped: [{ setting: "Codex profile", value: "old-profile" }], costs: ["A fresh conversation carries only the handover."] });
+  });
+
+  it("sends only an API-key file reference through the existing switch and precheck endpoints", async () => {
+    const args = ["--seat", "dev-a@rig", "--to-account", "cdx-a", "--api-key-file", "/synthetic/api-key", "--json"];
+    await run(["switch", ...args], runningDeps(port));
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ seat: "dev-a@rig", toAccount: "cdx-a", apiKeyFile: "/synthetic/api-key", forceUnsafe: false });
+    await run(["precheck", ...args], runningDeps(port));
+    expect(new URL(seen.at(-1)!.url, "http://localhost").searchParams.get("apiKeyFile")).toBe("/synthetic/api-key");
+    const before = seen.length;
+    expect((await run(["switch", ...args, "--stored-login"], runningDeps(port))).exitCode).toBe(1);
+    expect(seen.length).toBe(before);
   });
 
   beforeAll(async () => {

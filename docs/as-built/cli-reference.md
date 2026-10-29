@@ -794,8 +794,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
-| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--json` |
-| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--reason <text>`<br>`--model <id>`<br>`--codex-config-profile <name>`<br>`--dry-run`<br>`--json` |
+| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--json` |
+| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--reason <text>`<br>`--model <id>`<br>`--codex-config-profile <name>`<br>`--dry-run`<br>`--json` |
 | `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
 | `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 

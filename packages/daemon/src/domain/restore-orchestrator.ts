@@ -48,7 +48,6 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
-import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -1351,7 +1350,8 @@ export class RestoreOrchestrator {
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession);
-    const checked = this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
+    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
+      ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
 
@@ -2064,10 +2064,7 @@ export class RestoreOrchestrator {
     }
     // Legacy resume adapters do not write native metadata. Fill only the
     // launched row's empty token after proof; never overwrite a hook/operator.
-    const provedClaudeWrapper = node.runtime === "claude-code"
-      && classifyPaneRuntimeMatch(identity.command, node.runtime) === "mismatch"
-      && isShellForeground(identity.command?.trim().toLowerCase() ?? "");
-    if ((node.runtime === "codex" || provedClaudeWrapper || managedClaudeResume) && sessionId && resumeToken) {
+    if ((node.runtime === "codex" || node.runtime === "claude-code") && sessionId && resumeToken) {
       const current = this.db.prepare("SELECT node_id, session_name, status, resume_token FROM sessions WHERE id = ?").get(sessionId) as
         { node_id: string; session_name: string; status: string; resume_token: string | null } | undefined;
       const sameSession = current?.node_id === node.id && current.session_name === sessionName && current.status === "running";

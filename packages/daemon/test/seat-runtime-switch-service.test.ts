@@ -158,9 +158,9 @@ describe("live seat runtime switch", () => {
     expect(rigRepo.getRig((db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id)?.nodes.find(n => n.id === nodeId)?.claudeTokenRef?.label).toBe("old");
   });
 
-  it.each([true, false])("an explicit return to configured login stages without the old override and commits only after confirmation (%s)", async confirms => {
+  it.each([{ confirms: true, kind: "plan" }, { confirms: false, kind: "plan" }, { confirms: true, kind: "api-key" }, { confirms: false, kind: "api-key" }])("an explicit return to configured login stages without the old $kind override and commits only after confirmation ($confirms)", async ({ confirms, kind }) => {
     const oldHome = path.join(home, "old-account"); fs.mkdirSync(oldHome);
-    const oldToken = JSON.stringify({ label: "old-account", tokenFile: path.join(home, "old-token") });
+    const oldToken = JSON.stringify({ label: "old-account", tokenFile: path.join(home, "old-token"), ...(kind === "api-key" ? { kind } : {}) });
     db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ?, env_json = ? WHERE id = ?")
       .run(oldHome, oldToken, JSON.stringify({ CODEX_HOME: "/accounts/configured" }), nodeId);
     const target = adapter("codex");
@@ -262,6 +262,12 @@ describe("live seat runtime switch", () => {
     const invalid = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seat: SEAT, clearAccountHome: true, toAccount: "ambiguous", reason: "Invalid" }) });
     expect(invalid.status).toBe(400);
+    for (const selection of [{ accountHome, toAccount: "api" }, { clearAccountHome: true }]) {
+      const conflicting = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seat: SEAT, ...selection, apiKeyFile: "/synthetic/key", reason: "Invalid combined selector", dryRun: true }) });
+      expect(conflicting.status).toBe(400);
+      expect(openSwitch()).toBeUndefined();
+    }
   });
 
   it("a target Claude setup-token reference is staged and committed with its home, replacing any previous token", async () => {

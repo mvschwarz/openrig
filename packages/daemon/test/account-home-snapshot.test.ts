@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 
-it.skipIf(process.platform === "win32")("down with a snapshot and existing-rig up retain the isolated home and Claude plan token", async () => {
+it.skipIf(process.platform === "win32").each(["plan", "api-key"] as const)("down with a snapshot and existing-rig up retain the isolated home and Claude %s credential", async kind => {
   const root = mkdtempSync(path.join(tmpdir(), "account-home-snapshot-"));
   const db = createFullTestDb();
   try {
@@ -18,12 +18,12 @@ it.skipIf(process.platform === "win32")("down with a snapshot and existing-rig u
     writeFileSync(tokenFile, "synthetic-selected-plan", { mode: 0o600 });
     writeFileSync(path.join(bin, "claude"), `#!/bin/sh
 if [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; exit 0; fi
-if [ "$CLAUDE_CODE_OAUTH_TOKEN" = synthetic-selected-plan ]; then token=selected; else token=wrong; fi
+if [ "$${kind === "api-key" ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"}" = synthetic-selected-plan ]; then token=selected; else token=wrong; fi
 printf '%s|%s' "$CLAUDE_CONFIG_DIR" "$token"
 `, { mode: 0o700 });
     const rig = rigRepo.createRig("account-home-snapshot");
     const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: root });
-    const ref = { label: "selected-plan", tokenFile };
+    const ref = { label: "selected-plan", tokenFile, ...(kind === "api-key" ? { kind } : {}) };
     db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?").run(home, JSON.stringify(ref), node.id);
     const session = sessionRegistry.registerSession(node.id, "worker@account-home-snapshot");
     sessionRegistry.updateStatus(session.id, "running");

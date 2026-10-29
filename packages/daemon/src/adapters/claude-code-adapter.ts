@@ -296,7 +296,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A seat's own subscription token: the managed launch carries it; the classic launch gets its step in the staged
     // subshell. A launch that can't apply it still starts, and says so.
     const seatToken = managed ? null : this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId,
-      binding.accountHome !== undefined ? { ref: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null, required: !!binding.accountHome } : {}) ?? null;
+      binding.accountHome !== undefined ? { accountHome: binding.accountHome, ref: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null, required: !!binding.accountHome } : {}) ?? null;
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     const session = binding.tmuxSession;
     const assertSelected = opts.beforeNativeDispatch ? () => {
@@ -305,6 +305,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const beforeManagedInput = opts.beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
     const sendClassic = async (cmd: string) => {
       if (!this.seatLaunchEnvironment) {
+        if (seatToken?.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
         if (seatToken) tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
         if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
         return assertSelected ? this.tmux.sendText(session, cmd, assertSelected) : this.tmux.sendText(session, cmd);
@@ -312,6 +313,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const staged = await this.seatLaunchEnvironment.command(session, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration,
         runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
+        if (seatToken.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This pane cannot apply the selected API key; no Claude process started." };
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };

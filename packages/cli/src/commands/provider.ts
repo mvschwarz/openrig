@@ -23,7 +23,7 @@ export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
 type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "different" | "unknown"; effect: string; step?: string };
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
-type SwitchReport = { home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
+type SwitchReport = { credentialKind?: "api-key"; home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
   restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean };
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
@@ -39,18 +39,19 @@ function printSeat(seat: SeatView): void {
   }
 }
 
-type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean };
+type AccountOpts = { toAccount?: string; tokenFile?: string; apiKeyFile?: string; storedLogin?: boolean };
 
 /** The account a switch names: a Codex login's saved name, a Claude token's label with its file, or a Claude seat's stored
  *  login. Null when neither --to-account nor --stored-login was given. */
-function targetAccount(opts: AccountOpts): { toAccount: string; tokenFile?: string | null } | null {
+function targetAccount(opts: AccountOpts): { toAccount: string; tokenFile?: string | null; apiKeyFile?: string } | null {
+  if (opts.apiKeyFile !== undefined && (opts.tokenFile !== undefined || opts.storedLogin)) return null;
   if (opts.storedLogin) return { toAccount: "stored-login", tokenFile: null };
   if (!opts.toAccount) return null;
-  return { toAccount: opts.toAccount, ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}) };
+  return { toAccount: opts.toAccount, ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}), ...(opts.apiKeyFile !== undefined ? { apiKeyFile: opts.apiKeyFile } : {}) };
 }
 
-function printClaude(claude: { label: string; tokenFile: string | null; checked: string[]; notChecked: string[]; instead?: string }): void {
-  console.log(`Claude token: ${claude.tokenFile ? `"${claude.label}", read from ${claude.tokenFile} when Claude starts` : "none (the config dir's stored login)"}`);
+function printClaude(claude: { credentialKind?: "api-key"; label: string; tokenFile: string | null; checked: string[]; notChecked: string[]; instead?: string }): void {
+  console.log(`Claude ${claude.credentialKind === "api-key" ? "API key" : "token"}: ${claude.tokenFile ? `"${claude.label}", read from ${claude.tokenFile} when Claude starts` : "none (the config dir's stored login)"}`);
   if (claude.instead) console.log(`instead of the stored login, the seat would use ${claude.instead}`);
   if (claude.checked.length) console.log(`checked for anything that outranks it: ${claude.checked.join("; ")}`);
   if (claude.notChecked.length) console.log(`not checked (the seat's /status shows what it uses): ${claude.notChecked.join("; ")}`);
@@ -512,6 +513,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .requiredOption("--seat <s>", "The seat session")
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
+    .option("--api-key-file <path>", "Claude: a file containing its API key; resume the same conversation and settings")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
     .option("--json", "Output as parseable JSON")
     .action(async (opts: AccountOpts & { seat: string; json?: boolean }) => {
@@ -527,7 +529,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       const qs = new URLSearchParams({ seat: opts.seat, toAccount: target.toAccount,
-        ...(target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
+        ...(target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}),
+        ...(target.apiKeyFile !== undefined ? { apiKeyFile: target.apiKeyFile } : {}) });
       const res = await client.get<{ safe: boolean; reasons?: string[]; message?: string; seat?: SeatView;
         claude?: Parameters<typeof printClaude>[0] }>(`/api/provider/precheck?${qs.toString()}`);
       if (handleHttpError(res, "precheck")) return;
@@ -543,10 +546,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
 
   cmd
     .command("switch")
-    .description("Move one seat to another subscription login, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux only), a Claude seat to its own token file")
+    .description("Move one seat to subscription or API credentials, keeping its conversation: a Codex seat to a login saved in its Codex home (Linux only), a Claude seat to its own token file")
     .requiredOption("--seat <s>", "The seat session")
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
+    .option("--api-key-file <path>", "Claude: a file containing its API key; resume the same conversation and settings")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
     .option("--force-unsafe", "Kept for scripts; a seat's checks can't be overridden, since each means nothing safe to restart or no such login")
     .option("--clear-account-home", "Return to member/rig/daemon/native login selection through a fresh successor")
@@ -587,12 +591,22 @@ environment writes it into the transcript. A token-authenticated seat can make m
 connectors or Remote Control; its local MCP servers still work. --stored-login moves it back to the config dir's stored login;
 a CLAUDE_CODE_OAUTH_TOKEN the seat still receives outranks that login, and the report says which token it will use. Claude's
 /status shows token auth with no account email, so the label is yours, not an observed account.
-
+For Claude API billing use --to-account <label> --api-key-file <absolute path to a 0600 file>. The key reaches only the
+resumed child's environment, never command arguments. API credentials fail closed if their file is unavailable. Existing
+model, permissions, config home and conversation are retained; in-flight work is interrupted. Claude may require native
+API-key approval before the first turn. OpenRig does not enforce API budgets or choose when to fall back.
+Codex can select a saved API-key auth profile with --to-account just like a subscription profile. Its shared-home effects
+and native credential-store requirements are unchanged. No fresh account home or conversation is created.
+Do not combine --api-key-file with --account-home or --clear-account-home; select a home and switch credentials separately.
 --clear-account-home returns to the configured member/rig/daemon/native home through a fresh successor with a handover.
 Use it without --to-account, --stored-login, --account-home or --token-file. It removes an account-home token reference
 only after confirmation; it does not restore historical login bytes. Anthropic active/default profiles live outside
 CLAUDE_CONFIG_DIR and are not isolated by an account home; check them before relying on a stored login.`)
     .action(async (opts: AccountOpts & { seat: string; forceUnsafe?: boolean; json?: boolean; accountHome?: string; clearAccountHome?: boolean; reason?: string; model?: string; codexConfigProfile?: string; dryRun?: boolean }) => {
+      if (opts.apiKeyFile !== undefined && (opts.accountHome !== undefined || opts.clearAccountHome)) {
+        console.error("Use --api-key-file for an in-place credential switch; select or clear an account home in a separate switch.");
+        process.exitCode = 1; return;
+      }
       if (opts.clearAccountHome && (opts.accountHome !== undefined || opts.tokenFile !== undefined || opts.toAccount !== undefined || opts.storedLogin)) {
         console.error("Use --clear-account-home alone, without --account-home, --token-file, --to-account or --stored-login.");
         process.exitCode = 1; return;
@@ -718,7 +732,7 @@ CLAUDE_CONFIG_DIR and are not isolated by an account home; check them before rel
             console.log("undo restores saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
           }
         } else if (seat) {
-          console.log(`Claude token: ${seat.tokenFile ? `"${seat.account}", read from ${seat.tokenFile}` : "the config dir's stored login"}${seat.loginChanged
+          console.log(`Claude ${seat.credentialKind === "api-key" ? "API key" : "token"}: ${seat.tokenFile ? `"${seat.account}", read from ${seat.tokenFile}` : "the config dir's stored login"}${seat.loginChanged
             ? seat.tokenApplied === false ? " (reference saved; the token didn't take effect)" : " (set)" : ""}`);
           for (const warning of seat.warnings ?? []) console.log(`warning: ${warning}`);
           if (seat.conversation) console.log(`conversation: ${seat.conversation}`);

@@ -104,6 +104,7 @@ export class ClaudeResumeAdapter {
     }
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
     const seatToken = managed || !nodeId ? null : this.options.claudeManagedLaunch?.seatTokenLaunch?.(nodeId) ?? null;
+    const requiresApiKey = seatToken?.ref.kind === "api-key";
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
@@ -121,6 +122,7 @@ export class ClaudeResumeAdapter {
 
     const sendClassic = async () => {
       if (!this.options.seatLaunchEnvironment) {
+        if (requiresApiKey) return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
         if (seatToken) tokenWarnings.push(this.options.claudeManagedLaunch?.tokenNotApplied?.(nodeId!, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
         if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude resume input" };
         return assertSelected ? this.tmux.sendText(tmuxSessionName, cmd, assertSelected) : this.tmux.sendText(tmuxSessionName, cmd);
@@ -128,6 +130,7 @@ export class ClaudeResumeAdapter {
       const staged = await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: "claude-code", nodeId,
         ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
+        if (requiresApiKey) return { ok: false as const, code: "api_key_unavailable", message: "This pane cannot apply the selected API key; no Claude process started." };
         tokenWarnings.push(this.options.claudeManagedLaunch?.tokenNotApplied?.(nodeId!, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude resume input" };

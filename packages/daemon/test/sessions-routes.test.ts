@@ -208,6 +208,19 @@ describe("Session routes", () => {
     expect(body.binding.tmuxSession).toBe(body.sessionName);
   });
 
+  it("POST .../launch honors an explicit snapshot for a legacy seat instead of starting a blank shell", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("legacy-recovery");
+    rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/worker/launch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshotId: "missing-snapshot" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: "snapshot_not_found" });
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual([]);
+  });
+
   it("POST .../launch already-bound -> 409", async () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("r01");

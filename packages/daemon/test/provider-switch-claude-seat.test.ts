@@ -71,6 +71,18 @@ function harness(opts: {
 const to = (account: string, file: string | null) => ({ seat: SEAT, toAccount: account, tokenFile: file, forceUnsafe: false });
 
 describe("rig provider switch --seat moves a Claude seat to its own subscription token on the same conversation, in its own pane", () => {
+  it("switches to an API-key reference and back without changing the resumed conversation", async () => {
+    const h = harness();
+    const file = tokenFile();
+    const result = await h.svc.switchAccount({ seat: SEAT, toAccount: "api-budget", apiKeyFile: file, forceUnsafe: false }, h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "rebind_in_progress", seat: { account: "api-budget", credentialKind: "api-key", conversation: "conv-1", tokenApplied: true } });
+    expect(h.ref()).toEqual({ label: "api-budget", tokenFile: file, kind: "api-key" });
+    const back = await h.svc.switchAccount(to("plan", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(back).toMatchObject({ outcome: "rebind_in_progress", seat: { conversation: "conv-1", undo: expect.stringContaining("--api-key-file") } });
+    expect(h.ref()).not.toHaveProperty("kind");
+    expect(JSON.stringify(result)).not.toContain("fixture-file-contents");
+  });
+
   it("under the seat's lease, checks what outranks the token, takes a snapshot that resumes the seat, sets the reference and relaunches the seat in its pane from that snapshot", async () => {
     const file = tokenFile();
     const h = harness();
