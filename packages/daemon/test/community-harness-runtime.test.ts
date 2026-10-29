@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter, withCommunityHarnessResolver, withCommunityHarnesses } from "../src/adapters/community-harness-runtime-adapter.js";
 import { migrate } from "../src/db/migrate.js";
@@ -165,12 +166,12 @@ describe("the community harness adapter", () => {
       expect(result.firstInput?.submission).toBe("unconfirmed");
       const file = result.firstInput!.path;
       expect(readFileSync(file, "utf8")).toBe(text);
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(realpathSync(file)).toBe(join(realpathSync(dir), "state", "first-input", encodeURIComponent(session), basename(file)));
+      expectPrivateFile(file);
+      expect(realpathSync.native(file)).toBe(join(realpathSync.native(dir), "state", "first-input", encodeURIComponent(session), basename(file)));
       paths.push(file);
     }
     expect(new Set(paths).size).toBe(3);
-    expect(paths[0]!.split("/").slice(0, -1)).not.toEqual(paths[1]!.split("/").slice(0, -1));
+    expect(dirname(paths[0]!)).not.toBe(dirname(paths[1]!));
     tmux.sendShellCommand.mockClear();
     const resumed = await app.launchHarness(binding, { name: "w@r", resumeToken: "saved", resumeType: "community:synth" });
     expect(resumed.firstInput).toBeUndefined();
@@ -196,7 +197,7 @@ describe("the community harness adapter", () => {
     const outside = presets({ "keep": "unchanged" });
     const root = join(dir, "state", "first-input");
     mkdirSync(root, { recursive: true });
-    symlinkSync(outside, join(root, "w%40r"));
+    symlinkSync(outside, join(root, "w%40r"), process.platform === "win32" ? "junction" : "dir");
     const { tmux } = adapter(dir);
     const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
       launchResultRoot: () => join(dir, "state", "launch-results") });

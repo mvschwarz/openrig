@@ -37,6 +37,8 @@ import { Hono } from "hono";
 import { execFileSync } from "node:child_process";
 import { nodesRoutes } from "../src/routes/sessions.js";
 import { compactNodeProjection } from "../../cli/src/commands/ps.js";
+import { denyWindowsDirectoryCreation } from "./helpers/directory-permissions.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 // -- Mocks --
 
@@ -426,7 +428,8 @@ describe("StartupOrchestrator", () => {
   it.skipIf(process.getuid?.() === 0).each(["codex", "claude-code"] as const)("through the real %s adapter: an unwritable guidance file is unwritable with the real error, and the seat still starts", async (runtime) => { // root ignores file modes
     const seed = seedSession();
     const cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "line-unwritable-"));
-    nodeFs.chmodSync(cwd, 0o555);
+    const restore = process.platform === "win32" ? denyWindowsDirectoryCreation(cwd) : () => nodeFs.chmodSync(cwd, 0o755);
+    if (process.platform !== "win32") nodeFs.chmodSync(cwd, 0o555);
     try {
       const fsOps = {
         readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
@@ -446,10 +449,10 @@ describe("StartupOrchestrator", () => {
         adapter, isRestore: true, binding: { ...makeBinding(), cwd },
         resolvedStartupFiles: [{ path: "openrig-seat-skills.md", absolutePath: asset, ownerRoot: nodePath.dirname(asset), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }],
       }));
-      expect(result).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "unwritable", error: expect.stringMatching(/EACCES|permission denied/i) }] } });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, routerLine: { answer: { state: "yes", by: "saved" }, files: [{ outcome: "unwritable", error: expect.stringMatching(process.platform === "win32" ? /EACCES|EPERM|permission denied/i : /EACCES|permission denied/i) }] } });
       expect(result.warnings?.some((w) => w.startsWith("seat_skills_line_unwritable:"))).toBe(true);
     } finally {
-      nodeFs.chmodSync(cwd, 0o755);
+      restore();
       nodeFs.rmSync(cwd, { recursive: true, force: true });
     }
   });
@@ -762,7 +765,7 @@ describe("StartupOrchestrator", () => {
       const paths = seatSkillPaths({ rigId: rig.id, logicalId, runtime });
       if (layout === "rig") {
         nodeFs.mkdirSync(nodePath.join(home, "state", "seats"), { recursive: true });
-        nodeFs.symlinkSync(moved, nodePath.join(home, "state", "seats", rig.id));
+        nodeFs.symlinkSync(moved, nodePath.join(home, "state", "seats", rig.id), process.platform === "win32" ? "junction" : "dir");
       } else if (layout === "record") {
         nodeFs.mkdirSync(paths.root, { recursive: true });
         nodeFs.writeFileSync(nodePath.join(moved, "record.json"), "{}\n");
@@ -773,14 +776,14 @@ describe("StartupOrchestrator", () => {
           nodeFs.symlinkSync(nodePath.join(moved, "missing.md"), paths.catalogPath);
         } else {
           nodeFs.mkdirSync(paths.pluginDir, { recursive: true });
-          nodeFs.symlinkSync(moved, nodePath.dirname(paths.pluginManifestPath));
+          nodeFs.symlinkSync(moved, nodePath.dirname(paths.pluginManifestPath), process.platform === "win32" ? "junction" : "dir");
         }
       } else if (layout === "unrelated") {
         const marker = runtime === "codex" ? paths.catalogPath : paths.pluginManifestPath;
         nodeFs.mkdirSync(nodePath.dirname(marker), { recursive: true });
         nodeFs.writeFileSync(marker, runtime === "codex" ? "catalog\n" : "{\"name\":\"openrig\"}\n");
         nodeFs.mkdirSync(paths.skillsRoot, { recursive: true });
-        nodeFs.symlinkSync(moved, nodePath.join(paths.skillsRoot, "team-plugin"));
+        nodeFs.symlinkSync(moved, nodePath.join(paths.skillsRoot, "team-plugin"), process.platform === "win32" ? "junction" : "dir");
       }
       const source = nodePath.join(temp("seat-refused-src-"), "review");
       nodeFs.mkdirSync(source);
@@ -1819,7 +1822,7 @@ describe("StartupOrchestrator", () => {
         path = /OPENRIG_FIRST_INPUT='([^']+)'/.exec(command)?.[1];
         if (path) {
           content = nodeFs.readFileSync(path, "utf8");
-          expect(nodeFs.statSync(path).mode & 0o777).toBe(0o600);
+          expectPrivateFile(path);
           expect(command).not.toContain("first role");
         }
         if (uncertain) throw new Error("fixture uncertain launch");
