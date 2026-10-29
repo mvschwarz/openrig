@@ -273,6 +273,28 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Claude adapter native fixture follow-up (2026-10-30)
+
+The 21 Claude runtime-adapter failures in the expanded observation below are
+now reconciled without changing product code. The in-memory filesystem treated
+native backslashes and fixture forward slashes as different keys. Its I/O
+boundary now normalizes using the host path rules while preserving the fixture's
+logical store spelling. The role-warning assertion uses the host-native target.
+
+Argument tests keep the actual POSIX shell on POSIX. Windows instead parses the
+literal builder output through the production parser, then runs the resulting
+arguments through the production PowerShell renderer and an owned Node argv
+witness. The same injection-shaped tokens, whitespace, apostrophes, launch
+additions and dash-led values must reach the child as exact arguments; they are
+not merely compared against a second string builder. No installed Claude runs.
+
+The complete claude-runtime-adapter.test.ts file now passes 110/110 without
+skips, including projection, role separation, permission fragments and retained
+npm prefix cases. The initial corrected fixture run had one remaining warning
+path assertion, subsequently fixed. This supersedes that file's earlier 21
+failures only; the seven restore-orchestrator diagnostic failures below remain
+for follow-up, and full native acceptance is still incomplete.
+
 ## Native npm continuation retains interpreter and script (2026-10-30)
 
 The in-place restore path previously carried only a verified executable. For
