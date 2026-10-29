@@ -32,14 +32,14 @@ are not established by that result. Changes since 0.7.4:
   a continuation and wake. As before, managed refresh preserves replaced
   files under `$OPENRIG_HOME/backups/managed-refresh/<id>/`; reapply any local
   edits you still need from that copy. No setting is added or removed.
-- **Codex hook refresh has a known limit.** The earlier remedy
+- **A Codex hook-refresh refusal remains unresolved.** The earlier remedy
   `rig seat restart <seat> --keep-conversation --reason "refresh hooks"`
-  (preview with `--plan`) refuses a Codex seat launched by a 0.6.x
-  `openrig-tmux-send` script when Codex is a grandchild of the pane's shell.
-  Nothing is stopped by that refusal. This release does not fix
-  [#2200](https://github.com/mvschwarz/openrig/issues/2200); do not treat the
-  refused restart as a completed hook refresh. If Codex asks for hook review,
-  review the hooks you intend to enable.
+  (preview with `--plan`) was reported to refuse one Codex seat upgraded from
+  0.6.x. Its cause is unknown: the inspected 0.7.4 check already accepts the
+  reported process tree. [#2200](https://github.com/mvschwarz/openrig/issues/2200)
+  is not fixed in 0.7.5; this is not an established refusal of all staged-script
+  launches. A refused restart does not complete the hook refresh. If Codex asks
+  for hook review, review the hooks you intend to enable.
 
 ### Follow one task in one workspace
 
@@ -215,8 +215,8 @@ are not established by that result. Changes since 0.7.4:
 - **OpenClaw interrupted local turns are not recovered; Hermes has no declared
   resume or measured idle gateway exit.** `rig down` stops a community harness's pane; survival of independently spawned
   children remains untested. Inspect actual processes before relying on their exit.
-- **The Codex restart limitation in #2200 remains,** as do the other 0.7.4
-  limits unless a change above names them fixed: Codex permission qualification
+- **The reported Codex restart refusal in #2200 remains unresolved,** as do
+  the other 0.7.4 limits unless a change above names them fixed: Codex permission qualification
   only on 0.164.0, earlier removed hook approvals, SSH tiles after a Herdr
   restart, unqualified native cmux, Slack-only shared channels and the existing
   browser-sizing and old Slack-thread limits. Isolated account-home switching
