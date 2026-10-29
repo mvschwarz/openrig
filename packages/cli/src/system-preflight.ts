@@ -189,7 +189,7 @@ export class SystemPreflight {
           ok: false,
           error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
           reason: "The daemon cannot bind to a port that is already occupied.",
-          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
+          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with ${process.platform === "win32" ? `Get-NetTCPConnection -LocalPort ${effectivePort} -State Listen | Select-Object OwningProcess` : `lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN`}.`,
         });
       }
     }

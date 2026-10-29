@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
+import path from "node:path";
 
 export const DESTROY_CONFIRM_TOKEN = "destroy-openrig-state";
 
@@ -276,7 +277,18 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
 }
 
 export function findListeningPidWithLsof(port: number): number | null {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   try {
+    if (process.platform === "win32") {
+      const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; `
+        + `@(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -eq ${port} } | Select-Object -ExpandProperty OwningProcess -Unique) | ConvertTo-Json -Compress`;
+      const output = execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 64 * 1024 });
+      const parsed: unknown = output.trim() ? JSON.parse(output) : [];
+      const pids = Array.isArray(parsed) ? parsed : [parsed];
+      return pids.length === 1 && Number.isSafeInteger(pids[0]) && pids[0] > 0 ? pids[0] as number : null;
+    }
     const output = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8" }).trim();
     if (!output) return null;
     const first = output.split(/\s+/)[0]?.trim();

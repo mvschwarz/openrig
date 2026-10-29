@@ -51,7 +51,15 @@ function readRun(runId: string): RunFile | undefined {
 /** A process's start time, the discriminator the CLI already uses for daemon ownership (pids get reused). `ps` from PATH,
  *  as the other process readers use it: the setuid /bin/ps can't run in a sandbox (macOS CI runs a plain copy). */
 export function processStart(pid: number): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
   try {
+    if (process.platform === "win32") {
+      const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; (Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`;
+      const output = execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 64 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      return /^\d+$/.test(output) ? output : undefined;
+    }
     return processIdentity(execFileSync("ps", ["-o", "uid=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }))?.start;
   } catch { return undefined; }
 }
