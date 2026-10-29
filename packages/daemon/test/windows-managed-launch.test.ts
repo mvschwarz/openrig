@@ -42,6 +42,30 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("queries and launches a recognized owned npm Claude entry with a frozen interpreter and script", async () => {
+    const f = fixture();
+    const node = path.join(f.home, "node.exe"), pkg = path.join(f.home, "node_modules", "@anthropic-ai", "claude-code");
+    fs.copyFileSync(process.execPath, node); fs.mkdirSync(pkg, { recursive: true });
+    const entry = path.join(pkg, "cli.js");
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
+    fs.writeFileSync(path.join(f.home, "claude.cmd"), '@echo off\r\n"%_prog%" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+    fs.writeFileSync(entry, 'console.log(process.argv.includes("--help") ? \'--permission-mode <mode> (choices: "auto", "default")\' : JSON.stringify(process.argv.slice(2)));');
+    f.env.PATHEXT = ".CMD;.EXE";
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    expect(prepared.executable).toBe(fs.realpathSync(node));
+    expect(prepared.selectedScript).toBe(fs.realpathSync(entry));
+    const args = ["--session-id", "owned & %literal%", "--name", "用户 fixture"];
+    const command = prepared.command(args);
+    const output = await new Promise<string>((resolve, reject) => native.execFile(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      { env: { SystemRoot: process.env.SystemRoot, HOME: f.home, USERPROFILE: f.home, TEMP: f.home, TMP: f.home }, encoding: "utf8", windowsHide: true, timeout: 10000 },
+      (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim())).toEqual(args);
+    fs.appendFileSync(entry, "\n// changed after preparation");
+    expect(() => prepared.assertCurrent()).toThrow(/context changed/);
+  });
   it.runIf(process.platform === "win32")("pins selected PATHEXT for capability discovery and the actual child despite pane drift", async () => {
     const f = fixture(); fs.copyFileSync(process.execPath, f.executable);
     f.env.Pathext = ".EXE";

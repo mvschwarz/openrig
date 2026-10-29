@@ -11,7 +11,7 @@ not activate the running daemon or seats.
 | --- | --- | --- |
 | Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
 | Native pane shells | PowerShell/pwsh plus bounded cmd-to-PowerShell staging; owned cmd/runner lineage and Pi record-selection checks | All-provider cmd lifecycle and stock psmux visible-terminal acceptance remain incomplete |
-| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; npm Claude native identity limitations remain |
+| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, frozen managed Claude Node entry/identity, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; unselected/adopted npm Claude identity and installed-provider acceptance remain incomplete |
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
@@ -272,6 +272,39 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Frozen managed npm Claude launch and native identity (2026-10-30)
+
+Managed Windows Claude launches now use the existing recognized npm package/shim
+resolver when PATH selects that installation. Both the interpreter and script
+are resolved and frozen; capability discovery invokes Node with the same script
+prefix as the actual launch command. Script-file identity participates in the
+existing context recheck, so a changed entry is refused before dispatch. Native
+EXE/COM selection and unrecognized-batch refusal remain. The resolver accepts
+the launcher's explicit platform for copied environment lookup.
+
+Native identity has an explicit selected-script input, paired with the frozen
+interpreter. Only an OS-named Node process with matching executable/argv[0] and
+the exact selected script at argv[1] can use that path. Existing ancestry,
+creation-order, unique-candidate and exact conversation checks still apply;
+the script operand is excluded from the conversation-option parser. The managed
+Claude adapter carries this selection into its readiness/occupant observations,
+and the managed Windows resume adapter carries it into its exact identity check.
+Ordinary Node processes without that explicit selection remain unknown.
+
+An actual owned Node/script process fails identity before the repair, then passes
+with negative cases for other scripts, interpreters, tokens and competing rows.
+A separate recognized offline npm fixture performs the real capability query
+and generated PowerShell launch, preserving literal arguments and rejecting a
+changed script. The final five-file managed/identity/adapter selection passes
+84/84 without skips; daemon type checking passes. A separate wrapper/native
+lineage selection passes 40/40. No installed Claude, real login, conversation,
+stock psmux session or deployed seat is used. Foreground-command fields are test
+seams; unselected legacy/adopted npm identity, recorded-entry recovery coverage
+and installed-provider lifecycle acceptance remain incomplete.
+
+This supersedes the earlier managed native-only refusal for a recognized npm
+installation; arbitrary batch launchers remain refused.
 
 ## Explicit empty Claude config selection reaches background commands (2026-10-30)
 

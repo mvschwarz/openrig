@@ -8,11 +8,11 @@ export function resolveCodexCommand(env: NodeJS.ProcessEnv, cwd = process.cwd())
   return resolveWindowsProviderCommand("codex", env, cwd);
 }
 
-export function resolveWindowsProviderCommand(name: "codex" | "claude", env: NodeJS.ProcessEnv, cwd = process.cwd()): { command: string; prefix: string[] } {
-  if (process.platform !== "win32") return { command: name, prefix: [] };
+export function resolveWindowsProviderCommand(name: "codex" | "claude", env: NodeJS.ProcessEnv, cwd = process.cwd(), platform: NodeJS.Platform = process.platform): { command: string; prefix: string[] } {
+  if (platform !== "win32") return { command: name, prefix: [] };
   const packageName = name === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code";
-  const searchPath = readPlatformEnv(env, "PATH") ?? "";
-  const extensions = (readPlatformEnv(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(value => value.toLowerCase());
+  const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
+  const extensions = (readPlatformEnv(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(value => value.toLowerCase());
   for (const value of searchPath.split(path.delimiter)) {
     const directory = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
     for (const extension of extensions) {

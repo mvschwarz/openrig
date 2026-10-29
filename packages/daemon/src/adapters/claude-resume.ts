@@ -162,7 +162,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName, resumeToken!).catch((error): ResumeResult => ({
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!, process.platform === "win32" ? managed : undefined).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -170,7 +170,7 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch, ...(tokenWarnings.length ? { warnings: tokenWarnings } : {}) } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string, selected?: { executable: string; selectedScript?: string }): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
@@ -245,6 +245,8 @@ export class ClaudeResumeAdapter {
         tmux: this.tmux,
         ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}),
         expectedToken: resumeToken,
+        selectedExecutable: selected?.executable,
+        selectedScript: selected?.selectedScript,
       });
       if (identity) {
         const verifiedProbe = assessNativeResumeProbe({

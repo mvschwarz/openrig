@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { readPlatformEnv } from "./platform-env.js";
+import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
@@ -298,10 +299,17 @@ export class ClaudeManagedLaunch {
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
+    let prefix: string[] = [];
     const names = this.platform === "win32"
       ? (readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => "claude" + ext.toLowerCase())
       : ["claude"];
-    const candidates = selectedExecutable ? [selectedExecutable] : search.flatMap(dir => names.map(name => path.join(dir, name)));
+    let candidates = selectedExecutable ? [selectedExecutable] : search.flatMap(dir => names.map(name => path.join(dir, name)));
+    if (this.platform === "win32" && !selectedExecutable) {
+      try {
+        const launch = resolveWindowsProviderCommand("claude", env, cwd, this.platform);
+        candidates = [launch.command]; prefix = launch.prefix;
+      } catch { throw new Error("Claude managed launch executable is unavailable on the intended PATH; a native executable or recognized npm installation is required. No fallback was selected."); }
+    }
     for (const candidate of candidates) {
       if (!path.isAbsolute(candidate)) continue;
       try { accessSync(candidate, constants.X_OK); if (!statSync(candidate).isFile()) continue; }
@@ -316,12 +324,12 @@ export class ClaudeManagedLaunch {
       const s = statSync(file);
       return [realpathSync(file), s.dev, s.ino, s.mode, s.size, s.mtimeMs, s.ctimeMs];
     };
-    return Object.freeze({ env: Object.freeze(env), configDir, executable, executableIsScript: fileStartsWithShebang(executable),
-      fileIdentity: Object.freeze(identity(executable)), cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
+    return Object.freeze({ env: Object.freeze(env), configDir, executable, prefix: Object.freeze(prefix), executableIsScript: fileStartsWithShebang(executable),
+      fileIdentity: Object.freeze(identity(executable)), scriptIdentity: prefix[0] ? Object.freeze(identity(prefix[0])) : null, cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
   }
 
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
-    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean;
+    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean; selectedScript?: string;
     /** Launch notes for the person, such as a seat token that won't apply. */
     warnings: readonly string[];
   }> {
@@ -365,7 +373,7 @@ export class ClaudeManagedLaunch {
       }
     };
     const help = await new Promise<string>((resolve, reject) => {
-      execFile(context.executable, ["--help"], { cwd, env: context.env, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 },
+      execFile(context.executable, [...context.prefix, "--help"], { cwd, env: context.env, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 },
         (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
     });
     assertCurrent();
@@ -416,7 +424,7 @@ export class ClaudeManagedLaunch {
       ...(target.accountHome !== undefined ? { ref: target.accountHome === null ? target.accountToken : target.accountToken ?? null, required: !!target.accountHome } : {}) });
     const tokenStep = token ? `${token.step} && ` : "";
     const warnings = Object.freeze([...(token?.warnings ?? []), ...(token ? await this.tokenPrecedenceWarnings(target.nodeId, token.ref) : [])]);
-    return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
+    return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, selectedScript: context.prefix[0], command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       if (token?.ref.kind === "api-key") this.seatTokenLaunch(target.nodeId, { ref: token.ref, accountHome: target.accountHome });
       if (this.platform === "win32") {
@@ -425,7 +433,7 @@ export class ClaudeManagedLaunch {
           .filter(key => !boundNames.has(nativeName(key)));
         const terminalNames = [...PANE_TERMINAL_KEYS, "EDITOR", "VISUAL"];
         const allowedLaunchEnv = Object.fromEntries(Object.entries(launchEnv).filter(([key]) => !isCredentialKey(key)));
-        return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...allowedLaunchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])], token?.step);
+        return renderWindowsManagedLaunch(context.executable, [...context.prefix, ...args], cwd, { ...context.env, ...publicEnv, ...identity, ...allowedLaunchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])], token?.step);
       }
       const launch = Object.entries(launchEnv).filter(([key]) => !credentialKeys.includes(key)).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
       const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",

@@ -93,7 +93,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; selectedScript?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -449,8 +449,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const launch = { binding, token: opts.resumeToken ?? generatedSessionId!,
       freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable,
-      scriptLaunch: managed?.executableIsScript } as
-      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
+      scriptLaunch: managed?.executableIsScript, selectedScript: managed?.selectedScript } as
+      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; selectedScript?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
@@ -588,7 +588,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
       const observation = { target: binding.tmuxPane, tmux: this.tmux,
         listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable,
-        scriptLaunch: launch.scriptLaunch };
+        scriptLaunch: launch.scriptLaunch, selectedScript: launch.selectedScript };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
       // Pin the first exact process for this launch; retries cannot adopt a replacement. It is also
@@ -660,7 +660,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true, frozenExecutable: launch.executable })))(); } catch { return "unknown"; }
     if (looksReady) return "another";
     const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
-      scriptLaunch: launch.scriptLaunch };
+      scriptLaunch: launch.scriptLaunch, selectedScript: launch.selectedScript };
     if (await observeClaudePaneProcess({ ...observation, expectedToken: launch.token })) return "own";
     const native = await observeClaudePaneRuntime(observation);
     if (native) {
