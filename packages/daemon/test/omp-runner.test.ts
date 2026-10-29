@@ -28,6 +28,18 @@ function runner() {
 }
 
 describe("OMP runner command and child isolation", () => {
+  it("collects explicitly allowed native Windows keys before selecting the child provider", () => {
+    const source = { anthropic_api_key: "selected", openai_api_key: "other", aws_secret_access_key: "excluded" };
+    const collected = collectAllowlistedProviderAuthEnv("ANTHROPIC_API_KEY,OPENAI_API_KEY,AWS_SECRET_ACCESS_KEY", source, "omp", "win32");
+    expect(collected).toEqual({ ANTHROPIC_API_KEY: "selected", OPENAI_API_KEY: "other" });
+    const child = buildPiChildEnv(collected, { runtime: "omp", platform: "win32", agentDir: "/seat/agent", sessionsDir: "/seat/sessions", model: "anthropic/claude-sonnet" });
+    expect(child.ANTHROPIC_API_KEY).toBe("selected");
+    expect(child).not.toHaveProperty("OPENAI_API_KEY");
+    expect(child).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+    expect(collectAllowlistedProviderAuthEnv("ANTHROPIC_API_KEY", source, "omp", "linux")).toEqual({});
+    expect(collectAllowlistedProviderAuthEnv("ANTHROPIC_API_KEY", { ANTHROPIC_API_KEY: "", anthropic_api_key: "shadowed" }, "omp", "win32")).toEqual({});
+    expect(collectAllowlistedProviderAuthEnv("anthropic_api_key", source, "omp", "win32")).toEqual({});
+  });
   it.each(["pi", "omp"] as const)("retains only supplied user names and agent socket in the %s child baseline", runtime => {
     const opts = { runtime, agentDir: "/fixture/agent", sessionsDir: "/fixture/sessions" };
     const source = { HOME: "/fixture/home", PATH: "/fixture/bin", UNRELATED_VALUE: "not-forwarded" };
