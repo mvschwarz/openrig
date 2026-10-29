@@ -361,15 +361,21 @@ export class InboundRouter {
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
       // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
-      const askOpen = correlated?.state === "pending" || (correlated?.state === "blocked" && route.correlationQitemId !== undefined
-        && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true);
+      const parkOpen = correlated?.state === "blocked" && route.correlationQitemId !== undefined
+        && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true;
+      // That answer belongs to the current question, so an earlier park's answer or a plain earlier message never stands in.
+      // Once it resumed the decision, its row still recognizes a redelivery of the same event.
+      const resumedPark = correlated?.state === "in-progress";
+      const askOpen = correlated?.state === "pending" || parkOpen;
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const committedAnswer = (askOpen || closed) && !ev.recoveredThreadReply && !asChannel && route.correlationQitemId
-        ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
+      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined;
+      const committedAnswer = !answerable ? null
+        : parkOpen || resumedPark ? this.deps.queue.getEpisodeAnswer?.(route.correlationQitemId!, who.source) ?? null
+        : askOpen || closed ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId!, who.source) ?? null : null;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const absorbedEventKey = committedAnswer ? `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, committedAnswer.qitemId])}` : null;
       // The footer covers the original typed answer; the marker covers a later event absorbed before close.
-      const replayedAnswer = closed && committedAnswer && (
+      const replayedAnswer = (closed || resumedPark) && committedAnswer && (
         committedAnswer.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ||
         (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
       ) ? committedAnswer : null;

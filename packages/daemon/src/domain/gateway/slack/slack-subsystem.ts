@@ -128,10 +128,10 @@ export function makeHumanReplyResolver(
     }
 
     try {
-      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision });
-      // A question parked on the person it asked takes their reply as its answer, once: a second resolve can't succeed.
+      // A question parked on the person it asked takes their reply as its answer, stored in the resume's own transaction.
       // A reply whose order against the question is uncertain stays words in context, as the agent is told.
-      if (parkedOnAsked && !uncertain) queueRepo.recordParkedTypedReply(input.qitemId, input.decision);
+      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision,
+        ...(parkedOnAsked && !uncertain ? { answerText: input.decision } : {}) });
       return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;

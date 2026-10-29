@@ -75,6 +75,8 @@ export interface InboundQueuePort {
   getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
   /** Whether a decision parked on the person it asked takes this person's reply, sent at `ts`, as its answer. */
   answersPark?(qitemId: string, actorSession: string, ts: string | undefined): boolean;
+  /** This person's returned answer to the current question of a decision parked on them; never an earlier one. */
+  getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -233,6 +235,7 @@ export function makeQueuePorts(
       const item = queueRepo.getById(qitemId);
       return item !== null && queueRepo.answersPark(item, actorSession, ts);
     },
+    getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
@@ -249,7 +252,9 @@ export function makeQueuePorts(
         gatewayInbound: true,
       };
       const created = directAnswer && input.inReplyTo
-        ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo })
+        ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
+          // A parked decision's answer belongs to its current question, so a re-park gets its own.
+          ...(ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
       return (created as unknown as { qitemId: string }).qitemId;
     },

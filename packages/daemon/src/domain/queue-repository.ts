@@ -41,6 +41,11 @@ import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, r
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
 
+/** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
+function humanAnswerId(askId: string, episodeKey?: string): string {
+  return `qitem-human-answer-${createHash("sha256").update(episodeKey ? `${askId}\n${episodeKey}` : askId).digest("hex").slice(0, 20)}`;
+}
+
 export const QUEUE_STATES = [
   "pending",
   "in-progress",
@@ -1830,14 +1835,21 @@ export class QueueRepository {
   }
 
   /** The lookup and create's insert run synchronously before its first delivery await.
-   * Every new surface uses the same ID; old IDs and their original bodies remain intact. */
-  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string }): Promise<QueueItem> {
-    const existing = this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
+   * Every new surface uses the same ID; old IDs and their original bodies remain intact. An answer to a decision parked
+   * on the person it asked belongs to that park's question (`episodeKey`): its ID includes it, and only that ID counts. */
+  async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string }): Promise<QueueItem> {
+    const { episodeKey, ...create } = input;
+    const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
+    const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
-    return this.create({ ...input,
-      qitemId: `qitem-human-answer-${createHash("sha256").update(input.inboundReplyTo).digest("hex").slice(0, 20)}`,
-      tags: [...new Set([...(input.tags ?? []), "human-answer"])],
-    });
+    return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] });
+  }
+
+  /** This person's answer to the current question of a decision parked on them, if one was returned. */
+  currentEpisodeAnswer(qitemId: string, actorSession: string): QueueItem | null {
+    const episode = this.currentHumanRequiredEpisode(qitemId);
+    const row = episode ? this.getById(humanAnswerId(qitemId, episode.key)) : null;
+    return row?.sourceSession === actorSession ? row : null;
   }
 
   async create(input: QueueCreateInput): Promise<QueueItem & {
@@ -3773,7 +3785,8 @@ export class QueueRepository {
     return describeTypedReplyPlacement(question, typedReply);
   }
 
-  /** A typed reply that resumed a decision parked on the person it asked is that decision's answer, as their click is. */
+  /** A typed reply that resumes a decision parked on the person it asked is that decision's answer, as their click is.
+   *  The write contract's resolve runs it inside its own transaction, so the answer is stored exactly when the decision resumes. */
   recordParkedTypedReply(qitemId: string, decision: string): void {
     const item = this.getById(qitemId);
     if (item) this.placeTypedReply(item, decision);
