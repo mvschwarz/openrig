@@ -9,6 +9,7 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import http from "node:http";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
   return {
@@ -25,8 +26,7 @@ function mockLifecycleDeps(): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
     const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
@@ -34,14 +34,14 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     process.exitCode = undefined;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
+    try {
+      await fn();
+      return { logs, exitCode: process.exitCode };
+    } finally {
       console.log = origLog;
       console.error = origErr;
+      process.exitCode = origExitCode;
     }
-    const exitCode = process.exitCode;
-    process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
 }
 
 const OK_RESPONSE = {
@@ -152,6 +152,7 @@ describe("rig add", () => {
   let savedHostSelected: string | undefined;
 
   beforeEach(() => {
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     capturedBody = null;
     capturedUrl = null;
     summaryStatus = 200;
@@ -356,8 +357,9 @@ describe("rig add", () => {
       expect(capturedUrl).toBeNull();
       const output = logs.join("\n");
       expect(output).toContain("'dupe' matches 2 rigs");
-      expect(output).toContain(`rig add ${DUPE_ID_1} infra ${fragmentPath}`);
-      expect(output).toContain(`rig add ${DUPE_ID_2} infra ${fragmentPath}`);
+      const pathArg = process.platform === "win32" ? `'${fragmentPath}'` : fragmentPath;
+      expect(output).toContain(`rig add ${DUPE_ID_1} infra ${pathArg}`);
+      expect(output).toContain(`rig add ${DUPE_ID_2} infra ${pathArg}`);
     });
 
     it("suggested re-run commands quote a fragment path with spaces and keep --rig-root", async () => {
