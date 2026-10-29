@@ -11,6 +11,8 @@ import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME,
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { tmuxAttachCommand } from "../src/adapters/tmux-server.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { makeKernelHookReviewReader } from "../src/domain/kernel-hook-review.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
@@ -249,6 +251,36 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       expect(alerts()[0]!.tags).toContain(`recovery-for:${episodeRows[0]}`);
       await hookTick(port);
       expect(posts).toHaveLength(1);
+    });
+
+    it("adds hook guidance once to an earlier dispatched and exhausted alert without another delivery", async () => {
+      await refusal();
+      const posts: unknown[] = []; const port = engine(posts);
+      await tick(port, { now: observedAt }); // prior tick has no hook observation
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      const alert = alerts()[0]!;
+      expect(alert.body).not.toContain("Hooks need review");
+      await vi.waitFor(() => expect(notes(alert.qitemId).some(n => n.startsWith("slack-owner-notification-posted "))).toBe(true));
+      await tick(port, { now: observedAt });
+      expect(notes(alert.qitemId).some(n => n.startsWith("ladder-exhausted:"))).toBe(true);
+      repo.claim({ qitemId: alert.qitemId, destinationSession: alert.destinationSession });
+      const before = repo.getById(alert.qitemId)!;
+      const receipts = notes(alert.qitemId).filter(n => n.startsWith("slack-owner-notification-") || n.includes("dispatched-to-engine"));
+      await hookTick(port);
+      const updated = repo.getById(alert.qitemId)!;
+      expect(updated.summary).toContain("Hooks need review");
+      expect(updated.summary).toContain(tmuxAttachCommand(shellQuote(seat)));
+      expect(notes(alert.qitemId).filter(n => n.startsWith("hook-review observed:"))).toHaveLength(1);
+      expect(notes(alert.qitemId).join("\n")).toContain("through Codex's hook review");
+      expect(updated.body).toBe(before.body); // retain the original delivered content and receipt
+      expect([updated.qitemId, updated.state, updated.destinationSession, updated.claimedAt])
+        .toEqual([before.qitemId, before.state, before.destinationSession, before.claimedAt]);
+      for (let n = 0; n < 3; n++) await hookTick(port);
+      expect(posts).toHaveLength(1);
+      expect(alerts()).toHaveLength(1);
+      expect(notes(alert.qitemId).filter(n => n.startsWith("hook-review observed:"))).toHaveLength(1);
+      expect(notes(alert.qitemId).filter(n => n.startsWith("slack-owner-notification-") || n.includes("dispatched-to-engine")))
+        .toEqual(receipts);
     });
 
     it("retains unresolved routing without claiming delivery when no person is registered", async () => {
