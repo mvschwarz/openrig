@@ -637,8 +637,12 @@ Use `env:` for settings only. Credentials belong in the provider's own login or 
 
 `rig provider switch` resumes a running seat in its existing home and pane. A stopped Claude Code
 seat isn't relaunched: the switch saves the new reference for its next launch, but only when the
-snapshot that launch would use resumes its conversation. It then prints the
-`rig launch <rig> <seat> --snapshot-id <id>` that does. Otherwise it refuses and changes nothing.
+launch it predicts resumes the seat's conversation. That prediction covers the snapshot that
+launch would use and restore's automatic periodic carry. It then prints the launch that resumes:
+`rig launch <rig> <seat> --snapshot-id <id>` for a saved conversation, or a plain
+`rig launch <rig> <seat>` when the resume comes through the periodic carry, which naming a
+snapshot would turn off. Otherwise it refuses and changes nothing. `rig provider precheck` gives
+the same answer.
 For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
 
 ```sh

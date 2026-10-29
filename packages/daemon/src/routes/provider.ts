@@ -11,7 +11,8 @@ import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
+import { periodicCarryIsCurrent, snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
+import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
@@ -80,13 +81,23 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
     nextLaunch: (rigId, nodeId) => {
       const snapshots = c.get("snapshotRepo" as never) as SnapshotRepository | undefined;
       if (!snapshots) return { snapshotId: null, resumes: false, why: "can't be read: this daemon has no snapshot store" };
-      // The selection a plain `rig launch` makes (restore-orchestrator launchSingleNode).
+      // The selection and decision a plain `rig launch <rig> <seat>` makes (restore-orchestrator launchSingleNode), with its
+      // automatic periodic carry and the carry's launch-time eligibility.
       const selected = snapshots.selectRestoreUsable(rigId);
       if (!selected.ok) return { snapshotId: null, resumes: false, why: `has no usable snapshot (${selected.message})` };
-      const outcome = snapshotLaunchOutcome(selected.snapshot.data, nodeId, "claude-code", "claude-code");
-      if (outcome.kind !== "resume") return { snapshotId: selected.snapshot.id, resumes: false, why: outcome.why };
-      const occupant = resolveActiveSnapshotSession(selected.snapshot.data, nodeId);
-      return { snapshotId: selected.snapshot.id, resumes: true, conversation: occupant.kind === "resolved" ? occupant.session.resumeToken ?? null : null };
+      const { snapshot, selection } = selected;
+      const carry = snapshot.kind === "auto-periodic" && selection.mode === "automatic";
+      const outcome = snapshotLaunchOutcome(snapshot.data, nodeId, "claude-code", "claude-code", carry);
+      if (outcome.kind !== "resume") return { snapshotId: snapshot.id, resumes: false, why: outcome.why };
+      const occupant = resolveActiveSnapshotSession(snapshot.data, nodeId);
+      if (occupant.kind === "resolved") return { snapshotId: snapshot.id, resumes: true, automatic: false, conversation: occupant.session.resumeToken ?? null };
+      const carried = snapshot.data.periodicResumeSourcesByNode?.[nodeId];
+      const sessions = c.get("sessionRegistry" as never) as SessionRegistry | undefined;
+      if (!carried || !sessions || !periodicCarryIsCurrent(rigRepo.db, sessions.getSessionsForRig(rigId), rigId, nodeId, carried,
+        rigRepo.getRig(rigId)?.nodes.find((n) => n.id === nodeId)?.runtime, snapshot.data.nodes.find((n) => n.id === nodeId)?.runtime)) {
+        return { snapshotId: snapshot.id, resumes: false, why: "carries a periodic resume source that is no longer this seat's current resumable session" };
+      }
+      return { snapshotId: snapshot.id, resumes: true, automatic: true, conversation: carried.resumeToken ?? null };
     },
     exclusive: (nodeId, fn) => {
       const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;

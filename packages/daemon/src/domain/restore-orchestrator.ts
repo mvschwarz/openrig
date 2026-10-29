@@ -153,6 +153,20 @@ function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | nu
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
 }
 
+/** Whether an automatic periodic carry is still the seat's current resumable session when `rig launch` uses it: capture-time
+ *  eligibility can have expired without another tick, and a conversation a fresh launch retired is never resumed. */
+export function periodicCarryIsCurrent(db: Database.Database, rigSessions: readonly Session[], rigId: string, nodeId: string,
+  carried: Session, liveRuntime: string | null | undefined, savedRuntime: string | null | undefined): boolean {
+  const newest = rigSessions.filter(row => row.nodeId === nodeId)
+    .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+  const fresh = readFreshOccupantRelations(db, rigId);
+  return !(!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
+    || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
+    || liveRuntime !== savedRuntime
+    || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
+    || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id));
+}
+
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
  *  occupant, then the pre-launch stop-and-ask check, then the resume decision (restoreNodeWithCompensation and the
  *  resume step after it). An exited agent's message offers stop-then-launch as a resume only when this says so. */
@@ -1098,14 +1112,7 @@ export class RestoreOrchestrator {
       // The launch lifecycle lease is held here, before any stale-state cleanup
       // or destination registration. Capture-time eligibility can have expired
       // without another tick; never resume a conversation a fresh launch retired.
-      const newest = this.sessionRegistry.getSessionsForRig(rigId).filter(row => row.nodeId === nodeId)
-        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
-      const fresh = readFreshOccupantRelations(this.db, rigId);
-      if (!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
-        || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
-        || liveNode?.runtime !== node.runtime
-        || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
-        || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id)) {
+      if (!periodicCarryIsCurrent(this.db, this.sessionRegistry.getSessionsForRig(rigId), rigId, nodeId, carried, liveNode?.runtime, node.runtime)) {
         return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
           error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
       }

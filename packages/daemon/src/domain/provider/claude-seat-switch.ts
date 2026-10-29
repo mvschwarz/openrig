@@ -7,15 +7,19 @@ import type { ClaudeCredentialPrecedence, ClaudeSeatRelaunch, ProviderPrecheckIn
 export const STORED_LOGIN = "stored-login";
 
 type ClaudeSeat = NonNullable<ReturnType<ClaudeSeatRelaunch["seat"]>>;
+type NextLaunch = ClaudeSeatRelaunch["nextLaunch"];
 type ClaudeCheck =
   | { ok: false; verdict: Extract<PrecheckResult, { safe: false }> }
-  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null };
+  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null;
+    next?: Extract<ReturnType<NextLaunch>, { resumes: true }> };
 
 /** A Claude seat's checks, before anything changes: the reference it would get, that its file would give Claude the token,
- *  and that nothing Claude Code ranks above the token is set. A move back to the stored login also
+ *  that nothing Claude Code ranks above the token is set, and for a stopped seat that its next launch resumes its
+ *  conversation. A move back to the stored login also
  *  finds a `CLAUDE_CODE_OAUTH_TOKEN` the seat would still receive, and says it's what the seat will use. Managed settings (a
  *  file, MDM or the server) can't be read; the relaunched seat's /status covers them. */
-export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined): Promise<ClaudeCheck> {
+export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined,
+  nextLaunch?: NextLaunch): Promise<ClaudeCheck> {
   const refuse = (reason: PrecheckReason, message: string, claude?: ClaudeSwitchView): ClaudeCheck =>
     ({ ok: false, verdict: { safe: false, reasons: [reason], message, ...(claude ? { claude } : {}) } });
   if (!precedence) return refuse("rebind_unsupported_for_runtime", "This daemon can't check what would outrank a Claude seat's own token, so it doesn't move Claude seats.");
@@ -41,6 +45,14 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
   if (found.conflicts.length) {
     return refuse("credential_outranks_token", "Claude Code would use these instead, so nothing changed: "
       + `${found.conflicts.map((c) => `${c.name} (${c.source}; ${c.remedy})`).join("; ")}.`, claude);
+  }
+  if (!seat.running && nextLaunch) {
+    const next = nextLaunch(seat.rigId, seat.nodeId);
+    if (!next.resumes) {
+      return refuse("conversation_not_resumable", `${input.seat} isn't running, and ${next.snapshotId ? `snapshot ${next.snapshotId}, which its next launch uses,` : "its next launch"} `
+        + `${next.why}, so it wouldn't resume its conversation. Nothing changed.`, claude);
+    }
+    return { ok: true, verdict: { safe: true, claude }, ref, instead, next };
   }
   return { ok: true, verdict: { safe: true, claude }, ref, instead };
 }
@@ -79,7 +91,7 @@ export async function switchClaudeSeat(input: ProviderSwitchInput, relaunch: Cla
 
 async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaunch, seat: ClaudeSeat,
   precedence: ClaudeCredentialPrecedence | undefined, touching: () => void): Promise<ProviderSwitchResult> {
-  const checked = await checkClaudeSeat(input, seat, precedence);
+  const checked = await checkClaudeSeat(input, seat, precedence, (rigId, nodeId) => relaunch.nextLaunch(rigId, nodeId));
   if (!checked.ok) {
     const { reasons, message } = checked.verdict;
     return { outcome: "failed_safely", reasons: reasons as [string, ...string[]], ...(message ? { message } : {}) };
@@ -94,20 +106,23 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
       ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
       : `rig provider switch --seat ${input.seat} --stored-login` });
   if (!seat.running) {
-    // Nothing to relaunch: the reference is saved for the seat's next launch, but only when that launch resumes its
-    // conversation. No snapshot is taken, so the one checked is the one `rig launch` uses.
-    const next = relaunch.nextLaunch(rigId, nodeId);
-    if (!next.resumes) {
-      return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
-        message: `${input.seat} isn't running, and ${next.snapshotId ? `snapshot ${next.snapshotId}, which its next launch uses,` : "its next launch"} ${next.why}, so it wouldn't resume its conversation. Nothing changed.` };
-    }
+    // Nothing to relaunch: the reference is saved for the seat's next launch, which the check found resumes its
+    // conversation. No snapshot is taken, so the one checked is the one `rig launch` selects.
+    const next = checked.next;
+    if (!next) return { outcome: "failed_safely", reasons: ["conversation_not_resumable"], message: `${input.seat} isn't running, and its next launch couldn't be checked. Nothing changed.` };
     relaunch.setTokenRef(nodeId, checked.ref);
     const report = reportFor(next.conversation);
     report.loginChanged = true;
-    const launch = `rig launch ${rigName} ${logicalId} --snapshot-id ${next.snapshotId}`;
-    report.next = `${launch} resumes conversation ${next.conversation ?? "(not recorded in the snapshot)"} with it. Check its /status after a turn with a tool call.`;
+    // A resume through restore's automatic periodic carry needs the plain launch: naming the snapshot turns the carry off.
+    const launch = `rig launch ${rigName} ${logicalId}${next.automatic ? "" : ` --snapshot-id ${next.snapshotId}`}`;
+    const uses = checked.ref ? `its token reference "${account}"`
+      : checked.instead ? `${checked.instead}, which Claude Code ranks above its config dir's stored login` : "its config dir's stored login";
+    report.next = `${launch} resumes conversation ${next.conversation ?? "(not recorded in the snapshot)"} with ${uses}`
+      + `${next.automatic ? ` (it selects the latest usable snapshot, ${next.snapshotId} now, and resumes through its periodic carry)` : ""}. `
+      + (checked.instead ? "After a turn with a tool call, its /status shows the token it uses (CLAUDE_CODE_OAUTH_TOKEN), not the stored login."
+        : "Check its /status after a turn with a tool call.");
     return { outcome: "succeeded", seat: report,
-      message: `${input.seat} isn't running, so nothing was relaunched. Its ${checked.ref ? `token reference is now "${account}"` : "token reference was removed, so it uses its config dir's stored login"}, for its next launch: ${launch}.` };
+      message: `${input.seat} isn't running, so nothing was relaunched. Its next launch uses ${uses}: ${launch}.` };
   }
   if (!seat.pane) {
     return { outcome: "failed_safely", reasons: ["no_bound_pane"], message: `${input.seat} has no bound tmux pane to relaunch it in. Nothing changed.` };

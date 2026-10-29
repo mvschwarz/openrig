@@ -48,7 +48,7 @@ function harness(opts: {
     tokenRef: () => ref,
     setTokenRef: (_nodeId, next) => { calls.push(`setTokenRef ${next ? next.label : "null"}`); ref = next; },
     snapshot: (rigId) => { calls.push(`snapshot ${rigId}`); return { snapshotId: "snap-1", ...(opts.snapshot ?? { resumes: true as const, conversation: "conv-1" }) }; },
-    nextLaunch: (rigId) => { calls.push(`next launch ${rigId}`); return opts.nextLaunch ?? { snapshotId: "snap-0", resumes: true, conversation: "conv-1" }; },
+    nextLaunch: (rigId) => { calls.push(`next launch ${rigId}`); return opts.nextLaunch ?? { snapshotId: "snap-0", resumes: true, automatic: false, conversation: "conv-1" }; },
     // The seat's lifecycle lease: one holder at a time, in arrival order.
     exclusive: <T>(nodeId: string, fn: () => Promise<T>): Promise<T> => {
       calls.push(`exclusive ${nodeId}`);
@@ -198,8 +198,8 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     const r = await h.svc.switchAccount(to("work", file), h.seatRestart, h.claudeSeat);
     expect(r).toMatchObject({ outcome: "succeeded", seat: { account: "work", tokenFile: file, conversation: "conv-1", loginChanged: true,
       undo: "rig provider switch --seat dev-a@rig --to-account retired --token-file '/tokens/retired'",
-      next: expect.stringContaining("rig launch rig dev.a --snapshot-id snap-0 resumes conversation conv-1 with it") } });
-    expect(r.message).toContain("dev-a@rig isn't running, so nothing was relaunched");
+      next: expect.stringContaining(`rig launch rig dev.a --snapshot-id snap-0 resumes conversation conv-1 with its token reference "work". `) } });
+    expect(r.message).toBe(`dev-a@rig isn't running, so nothing was relaunched. Its next launch uses its token reference "work": rig launch rig dev.a --snapshot-id snap-0.`);
     // No snapshot is taken, and the checked one is the one the launch uses.
     expect(h.calls).toEqual(["exclusive node-a", "precedence node-a", "next launch rig-1", "setTokenRef work"]);
     expect(h.ref()).toEqual({ label: "work", tokenFile: file });
@@ -213,6 +213,34 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(r.message).toBe("dev-a@rig isn't running, and snapshot snap-0, which its next launch uses, has no resume token for this seat, so it wouldn't resume its conversation. Nothing changed.");
     expect(h.calls).toEqual(["exclusive node-a", "precedence node-a", "next launch rig-1"]);
     expect(h.ref()).toEqual(retired);
+  });
+
+  it("a stopped seat that resumes through restore's automatic periodic carry is told to launch it plainly, since naming the snapshot turns the carry off", async () => {
+    const h = harness({ running: false, nextLaunch: { snapshotId: "snap-p", resumes: true, automatic: true, conversation: "conv-7" } });
+    const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(r).toMatchObject({ outcome: "succeeded", seat: { conversation: "conv-7",
+      next: expect.stringContaining(`rig launch rig dev.a resumes conversation conv-7 with its token reference "work" (it selects the latest usable snapshot, snap-p now, and resumes through its periodic carry)`) } });
+    expect(r.message).toBe(`dev-a@rig isn't running, so nothing was relaunched. Its next launch uses its token reference "work": rig launch rig dev.a.`);
+    expect(JSON.stringify(r)).not.toContain("--snapshot-id");
+  });
+
+  it("a stopped seat's --stored-login with an inherited CLAUDE_CODE_OAUTH_TOKEN says that token is what its next launch uses", async () => {
+    const inherited = { name: "CLAUDE_CODE_OAUTH_TOKEN", source: "the daemon's environment, which every managed Claude launch receives", remedy: "unset it where the daemon starts" };
+    const h = harness({ running: false, ref: { label: "work", tokenFile: tokenFile() }, precedence: { ...CLEAR, instead: [inherited] } });
+    const r = await h.svc.switchAccount(to("stored-login", null), h.seatRestart, h.claudeSeat);
+    expect(r).toMatchObject({ outcome: "succeeded",
+      message: expect.stringContaining("Its next launch uses the CLAUDE_CODE_OAUTH_TOKEN from the daemon's environment"),
+      seat: { account: "stored-login", next: expect.stringContaining("not the stored login") } });
+    expect(r.message).toContain("which Claude Code ranks above its config dir's stored login");
+    expect(h.ref()).toBeNull();
+  });
+
+  it("precheck on a stopped seat reads the launch it would resume, so it agrees with the switch, and changes nothing", async () => {
+    const h = harness({ running: false, nextLaunch: { snapshotId: "snap-0", resumes: false, why: "has no resume token for this seat" } });
+    expect(await h.svc.precheck(to("work", tokenFile()), h.seatRestart, h.claudeSeat)).toMatchObject({ safe: false, reasons: ["conversation_not_resumable"] });
+    const ok = harness({ running: false });
+    expect(await ok.svc.precheck(to("work", tokenFile()), ok.seatRestart, ok.claudeSeat)).toMatchObject({ safe: true });
+    expect([...h.calls, ...ok.calls].filter((c) => c.startsWith("setTokenRef") || c.startsWith("relaunch") || c.startsWith("snapshot"))).toEqual([]);
   });
 
   it("a stopped seat's token file that wouldn't apply still stops it before anything changes", async () => {

@@ -208,7 +208,7 @@ export class ProviderServiceImpl implements ProviderService {
 
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {
     const claude = claudeSeat?.seat(input.seat);
-    if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence)).verdict;
+    if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence, (rigId, nodeId) => claudeSeat!.nextLaunch(rigId, nodeId))).verdict;
     if (seatRestart) return (await this.seatPrecheck(input, seatRestart)).verdict;
     const model = await this.getReadModel();
     const target = model.accounts.find((a) => a.accountId === input.toAccount);

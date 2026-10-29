@@ -240,7 +240,7 @@ describe("provider routes", () => {
       });
       const insert = db.prepare("INSERT INTO snapshots(id, rig_id, kind, data, created_at) VALUES (?, ?, 'auto-pre-down', ?, ?)");
       insert.run("snap-a", rig.id, saved("conv-9"), "2026-10-29 10:00:00");
-      expect(lent.nextLaunch(rig.id, node.id)).toEqual({ snapshotId: "snap-a", resumes: true, conversation: "conv-9" });
+      expect(lent.nextLaunch(rig.id, node.id)).toEqual({ snapshotId: "snap-a", resumes: true, automatic: false, conversation: "conv-9" });
       // A later snapshot that saved the seat without its conversation is what the launch would use, so it doesn't resume.
       insert.run("snap-b", rig.id, saved(null), "2026-10-29 10:05:00");
       expect(lent.nextLaunch(rig.id, node.id)).toMatchObject({ snapshotId: "snap-b", resumes: false, why: "has no resume token for this seat" });

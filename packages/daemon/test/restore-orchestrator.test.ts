@@ -24,7 +24,7 @@ import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
 import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
-import { RestoreOrchestrator, rollupRestoreRigResult } from "../src/domain/restore-orchestrator.js";
+import { RestoreOrchestrator, rollupRestoreRigResult, snapshotLaunchOutcome } from "../src/domain/restore-orchestrator.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
@@ -34,6 +34,9 @@ import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { Hono } from "hono";
+import { providerRoutes } from "../src/routes/provider.js";
+import type { ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
 import { buildRestorePlanPreview } from "../src/domain/restore-plan-preview.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
@@ -251,6 +254,42 @@ describe("RestoreOrchestrator", () => {
     expect(second.snapshotSelection?.mode).toBe("automatic");
     expect(second.snapshotSelection?.snapshotId).toBe(finalSource.id);
     expect(second.launched?.[0]?.status).toBe("resumed");
+    expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "carried-conversation"]);
+  });
+
+  it("a stopped Claude seat's switch prediction across a periodic capture matches what rig launch then does: the plain launch resumes by carry, a pinned one doesn't", async () => {
+    const original = seedRigAndSnapshot({ nodes: [
+      { logicalId: "lead", role: "lead", runtime: "claude-code" },
+      { logicalId: "worker", role: "worker", runtime: "claude-code" },
+    ], edges: [], resumeType: "claude_id", resumeToken: "carried-conversation" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ claude, listProcesses: nativeLineage("claude-code", "carried-conversation") });
+    expect((await orch.launchSingleNode(original.rigId, "lead")).launched?.[0]?.status).toBe("resumed");
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture, snapshotRepo }).tick();
+    const periodic = snapshotRepo.findLatestRestoreUsable(original.rigId)!;
+    expect(periodic.kind).toBe("auto-periodic");
+    const worker = original.data.nodes.find(node => node.logicalId === "worker")!;
+    // The provider route's prediction, lent to the switch for one call.
+    let lent!: ClaudeSeatRelaunch;
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      for (const [key, value] of Object.entries({ rigRepo, snapshotRepo, sessionRegistry,
+        providerService: { precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+        c.set(key as never, value as never);
+      }
+      await next();
+    });
+    app.route("/api/provider", providerRoutes());
+    await app.request("/api/provider/precheck?seat=worker@rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+    expect(lent.nextLaunch(original.rigId, worker.id)).toEqual({ snapshotId: periodic.id, resumes: true, automatic: true, conversation: "carried-conversation" });
+    // Naming that snapshot makes the selection explicit, which turns the carry off, so a pinned launch wouldn't resume.
+    expect(snapshotLaunchOutcome(periodic.data, worker.id, "claude-code", "claude-code", false).kind).not.toBe("resume");
+    // The plain launch the switch recommends resumes the predicted conversation.
+    const plain = await orch.launchSingleNode(original.rigId, "worker");
+    expect(plain.snapshotSelection?.mode).toBe("automatic");
+    expect(plain.launched?.[0]?.status).toBe("resumed");
     expect(vi.mocked(claude.resume).mock.calls.at(-1)?.slice(1, 3)).toEqual(["claude_id", "carried-conversation"]);
   });
 
