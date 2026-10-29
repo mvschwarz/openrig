@@ -28,6 +28,14 @@ describe.skipIf(process.platform !== "win32")("Windows Claude background command
       await writeFile(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
       await writeFile(path.join(pkg, "cli.js"), "console.log(JSON.stringify({loggedIn:true,authMethod:'claude.ai',email:'fixture@example.test'}))");
       await writeFile(path.join(root, "claude.cmd"), '@echo off\r\n"node" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+      await writeFile(path.join(root, "claude.com"), "selection decoy, never executed");
+      const env = claudeAuthReaderEnv({ launchPath: [root, path.dirname(process.execPath)].join(path.delimiter), home: root, claudeConfigDir: root }, { PathExt: ".CMD;.EXE;.COM", SystemRoot: process.env.SystemRoot });
+      const selected = resolveClaudeExecutable(env);
+      expect(selected).toBe(path.join(root, "claude.cmd"));
+      const run = await runClaudeCommand(selected!, env, root, 2000, 100);
+      expect(run.code).toBe(0);
+      expect(JSON.parse(run.stdout)).toMatchObject({ loggedIn: true, email: "fixture@example.test" });
+      await rm(path.join(root, "claude.com"));
       const answer = await claudeAuthStatusReader({ launchPath: [root, path.dirname(process.execPath)].join(path.delimiter), home: root, claudeConfigDir: root, timeoutMs: 2000, graceMs: 100 })();
       expect(answer).toMatchObject({ ok: true, auth: { email: "fixture@example.test" } });
     } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

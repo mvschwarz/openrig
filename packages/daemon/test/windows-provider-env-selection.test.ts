@@ -15,6 +15,9 @@ it.runIf(process.platform === "win32")("uses selected PATHEXT order and preserve
   expect(resolveWindowsProviderCommand("codex", { PATH: root, pAtHeXt: ".EXE;.COM" }).command).toBe(fs.realpathSync(path.join(root, "codex.exe")));
   expect(resolveWindowsProviderCommand("codex", { PATH: root, PATHEXT: ".COM;.EXE" }).command).toBe(fs.realpathSync(path.join(root, "codex.com")));
   expect(() => resolveWindowsProviderCommand("codex", { PATH: root, PATHEXT: "", pAtHeXt: ".EXE" })).toThrow("No codex executable");
+  for (const ext of ["exe", "com"]) fs.writeFileSync(path.join(root, `claude.${ext}`), "selection only; never executed");
+  expect(resolveClaudeExecutable({ PATH: root, PathExt: ".EXE;.COM" })).toBe(path.join(root, "claude.exe"));
+  expect(resolveClaudeExecutable({ PATH: root, PATHEXT: "" })).toBeNull();
 });
 
 it.runIf(process.platform === "win32")("selects copied home variables with native case and duplicate-key precedence", () => {

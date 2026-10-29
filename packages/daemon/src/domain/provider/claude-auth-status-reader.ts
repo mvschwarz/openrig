@@ -56,9 +56,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The `claude` executable on the reader's own PATH, as an absolute path, or null. */
 export function resolveClaudeExecutable(env: NodeJS.ProcessEnv): string | null {
+  const names = process.platform === "win32"
+    ? (readPlatformEnv(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => `claude${ext.toLowerCase()}`)
+    : ["claude"];
   for (const dir of (readPlatformEnv(env, "PATH") ?? "").split(path.delimiter)) {
-    if (!dir) continue;
-    for (const name of process.platform === "win32" ? ["claude.com", "claude.exe", "claude.bat", "claude.cmd"] : ["claude"]) {
+    if (!dir && process.platform !== "win32") continue;
+    for (const name of names) {
       const candidate = path.join(dir.replace(/^"(.*)"$/, "$1"), name);
       try {
         fs.accessSync(candidate, fs.constants.X_OK);

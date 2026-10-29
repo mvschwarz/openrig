@@ -36,6 +36,13 @@ with a COM decoy and CMD-first selected PATHEXT (canonical and mixed-case keys).
 Daemon typecheck passes. These fixtures do not invoke installed providers or
 establish support for arbitrary script extensions.
 
+The separate Claude background executable locator also had the fixed order.
+Its owned selection fixture failed before the same native PATHEXT treatment;
+it now retains explicit empty selection and Windows empty PATH entries. Six
+checks pass, including an actual offline npm auth command selected ahead of a
+COM decoy, native home/environment readback and owned process-tree timeout.
+The daemon typecheck passes. No real authentication or credential file is used.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen CLI run exposed three failing HOME-fallback assertions: its OS mock
