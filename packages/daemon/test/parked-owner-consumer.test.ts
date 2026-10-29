@@ -15,6 +15,7 @@ import {
   REFUSED_PREFIX,
   FAILED_PREFIX,
   openPromptRefusals,
+  currentParkedOwnerNoInputFailure,
   NUDGE_FAIL_PREFIX,
   PARKED_OWNER_POLICY_NAME,
   type ParkedOwnerConsumerDeps,
@@ -819,6 +820,28 @@ describe("parked-owner machine marker position", () => {
     entry.evaluationNotes = { ...entry.evaluationNotes, ...(phase ? { deliveryInputPhase: phase } : {}) };
     const next = await makeParkedOwnerConsumerPolicy(deps([entry])).evaluate(makeJob());
     expect(next.action).toBe("send");
+    expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+
+describe("leading untyped parked-owner marker text", () => {
+  it.each(["retained_quota_full", "terminal_seat"].flatMap(code => [undefined, "attempted", "written"].map(phase => ({ code, phase }))))("keeps $code text with phase $phase untyped after pruning", async ({ code, phase }) => {
+    const store = new RowStore();
+    const deps = (history: WatchdogHistoryEntry[]) => ({ ...makeDeps([parkedSeat()], store, history), retentionState: () => "unchanged" });
+    const first = await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob());
+    const primary = String(first.notes?.["primaryRow"]);
+    const entry = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: primary, deliveryStatus: "failed", deliveryReason: `code ${code}; input not_reached; detail` });
+    entry.evaluationNotes = { ...entry.evaluationNotes, ...(phase ? { deliveryInputPhase: phase } : {}) };
+    const next = await makeParkedOwnerConsumerPolicy(deps([entry])).evaluate(makeJob());
+    const transitions = store.transitions.get(primary)!;
+    const failed = transitions.findIndex(t => t.transitionNote?.startsWith(FAILED_PREFIX));
+    expect(failed).toBeGreaterThanOrEqual(0);
+    // Restore the durable failure before a subsequent reserve; history can disappear at that boundary.
+    const persisted = transitions.slice(0, failed + 1);
+    expect(currentParkedOwnerNoInputFailure(persisted)).toBeNull();
+    expect(next.action).toBe("send");
+    store.transitions.set(primary, persisted);
     expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
   });
 });

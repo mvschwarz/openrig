@@ -416,7 +416,7 @@ describe("watchdog positive no-input outcomes", () => {
 
 
 describe("blocked parked-owner no-input recovery on the real repository", () => {
-  it.each(["quota", "terminal"] as const)("gives an unhealthy blocked %s failure one existing recovery disposition", async kind => {
+  it.each(["quota", "terminal"].flatMap(kind => ["before", "after"].map(noteTiming => ({ kind, noteTiming }))))("keeps $kind recovery across another seat note $noteTiming creation", async ({ kind, noteTiming }) => {
     const f = fixture();
     if (kind === "quota") {
       await f.hold();
@@ -446,23 +446,36 @@ describe("blocked parked-owner no-input recovery on the real repository", () => 
     const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver: f.deliver, additionalPolicies: [policy] });
     await engine.evaluate(job);
     await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
-    const writes = repo.listTransitions(row.qitemId).length;
+    let writes = repo.listTransitions(row.qitemId).length;
     const nudge = repo.getById(row.qitemId)!.lastNudgeAttempt;
     for (let i = 0; i < 10; i++) expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip");
     expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
     expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(nudge);
     const sweep = () => runStuckSweep({ db: f.db, queueRepo: repo, resolveOrchestrator: () => "orch@test", sessionConfirmedMissing: () => false, log: () => {} });
+    if (noteTiming === "before") {
+      repo.update({ qitemId: row.qitemId, actorSession: "observer@test", transitionNote: "Additional diagnostic context; owner has not responded" });
+      writes++;
+    }
     await sweep();
     const recovery = findQueueRecovery(f.db, row.qitemId);
     expect(recovery).not.toBeNull();
     const finding = repo.getById(recovery!.qitemId)!;
     expect(finding.destinationSession).toBe("orch@test");
     expect(repo.waitingView(finding.qitemId)?.nextBackstop).toMatchObject({ owner: "orch@test", mechanism: "queue-stuck-sweep:unclaimed", dueAt: expect.any(String) });
+    if (noteTiming === "after") {
+      repo.update({ qitemId: row.qitemId, actorSession: "observer@test", transitionNote: "More context; owner still has not responded" });
+      writes++;
+      await sweep();
+      expect(repo.getById(finding.qitemId)?.state).toBe("pending");
+    }
     const count = f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number };
     for (let i = 0; i < 10; i++) { await sweep(); expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip"); }
     expect((f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(count.n);
     expect(findQueueRecovery(f.db, row.qitemId)?.qitemId).toBe(finding.qitemId);
     expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
+    repo.update({ qitemId: row.qitemId, actorSession: seat, transitionNote: "Owner response: I am handling this obligation" });
+    await sweep();
+    expect(repo.getById(finding.qitemId)?.state).toBe("done");
     expect(f.pastes).toHaveLength(0);
     expect(f.submissions).toHaveLength(0);
   });
