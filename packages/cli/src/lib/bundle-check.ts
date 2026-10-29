@@ -53,7 +53,11 @@ export async function checkBundleFolder(folder: string) {
         add("referenced_files", "finding", `Declared file is ${actual}, expected ${wanted}.`, path.relative(root, path.resolve(base, relative)));
         return null;
       }
-      fs.accessSync(full, fs.constants.R_OK);
+      if (kind.isDirectory()) fs.readdirSync(full);
+      else {
+        const fd = fs.openSync(full, "r");
+        fs.closeSync(fd);
+      }
       return full;
     } catch { add("referenced_files", "finding", "Declared file is missing, unreadable or outside the bundle folder.", path.relative(root, path.resolve(base, relative))); return null; }
   };
