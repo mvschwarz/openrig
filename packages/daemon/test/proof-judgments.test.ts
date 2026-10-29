@@ -7,6 +7,7 @@ import YAML from "yaml";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { evidenceAt } from "../src/domain/proof/judgments.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 import { Hono } from "hono";
@@ -38,6 +39,18 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("keeps published receipts private through replay and correction", () => {
+    const f = fixture(), input = f.input();
+    const first = f.judge(input);
+    const home = join(f.alpha, "proof", "judgments"), file = join(home, "00000001.md");
+    expectPrivateFile(file);
+    const bytes = fs.readFileSync(file);
+    expect(f.judge(input)).toMatchObject({ replayed: true, judgment: { id: first.judgment.id } });
+    f.judge(f.input(undefined, "reject"));
+    expectPrivateFile(join(home, "00000002.md"));
+    expect(fs.readFileSync(file)).toEqual(bytes);
+    expect(fs.readdirSync(home).sort()).toEqual(["00000001.md", "00000002.md"]);
+  });
   it("prepares the same evidence identity that judgments use in nested mission roots", async () => {
     const f = fixture(), nested = join(f.root, "work", "initiatives");
     fs.mkdirSync(join(f.root, "work"));
@@ -324,6 +337,8 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
       }; syncBuiltinESMExports();
     }
     if (crash === "before" || crash === "after") { fs.linkSync = (...args) => {
+      // Observe immutable receipt publication, not private staging internals.
+      if (!/^[0-9]{8}[.]md$/.test(String(args[1]).split(String.fromCharCode(92)).join("/").split("/").pop())) return original(...args);
       if (crash === 'after') original(...args);
       pause();
     }; syncBuiltinESMExports(); }

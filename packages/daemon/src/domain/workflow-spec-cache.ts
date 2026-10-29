@@ -12,6 +12,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import { parse as parseYaml } from "yaml";
@@ -874,11 +875,11 @@ export class WorkflowSpecCache {
     // A diagnostic row is named after its file. When another row already holds that name with no
     // version (a retained version a previous writer blanked, or a same-named file in another
     // folder), use the file's path instead, which no other diagnostic row holds (#511).
-    const basename = opts.sourcePath.split("/").pop() ?? opts.sourcePath;
+    const fileName = basename(opts.sourcePath);
     const basenameTaken = this.db
       .prepare(`SELECT 1 FROM workflow_specs WHERE name = ? AND version = '' AND spec_id != ?`)
-      .get(basename, existing?.spec_id ?? "") !== undefined;
-    const fallbackName = basenameTaken ? opts.sourcePath : basename;
+      .get(fileName, existing?.spec_id ?? "") !== undefined;
+    const fallbackName = basenameTaken ? opts.sourcePath : fileName;
     if (existing) {
       this.db
         .prepare(

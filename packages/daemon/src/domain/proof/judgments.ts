@@ -8,6 +8,7 @@ import { validateMissionComposition } from "../lifecycle-manifest.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
 import { resolveNodeFileVia } from "../scope/node-file.js";
 import { parseFrontmatter } from "../slices/slice-indexer.js";
+import { openPrivateTextFile } from "../private-text-file.js";
 
 /** Addressed Markdown owns judgments. These views are rebuilt, never written upstream. */
 export type JudgmentVerdict = "accept" | "reject" | "withdraw";
@@ -277,7 +278,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   const temporary = path.join(home, `.write-${randomUUID()}`), target = path.join(home, `${String(payload.sequence).padStart(8, "0")}.md`);
   // Same-directory temp+fsync follows FileWriteService; link publishes without replacing a receipt.
   // Synchronous in the supported daemon writer. A competing process loses the exclusive publication.
-  const fd = fs.openSync(temporary, "wx", 0o600);
+  const fd = openPrivateTextFile(temporary);
   try {
     try {
       fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`);
