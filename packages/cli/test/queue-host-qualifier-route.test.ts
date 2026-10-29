@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // #1642: what a cross-host queue write actually does, end to end. The compiled CLI runs as its own
 // process against real daemon apps on local ports: the sender's daemon, a receiver standing in for the
 // remote host, and another host. Each run records stdout, stderr, the process exit status, the writes the
@@ -69,6 +70,7 @@ async function startDaemon(validateRig: (ref: string) => boolean): Promise<Daemo
       hostname: "127.0.0.1",
     }, () => resolve(s));
   });
+  allowOwnedHttpFixture(server);
   return { db, repo, server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
 }
 
@@ -259,6 +261,7 @@ describe.skipIf(!fs.existsSync(cliEntry))("#1642: cross-host queue writes throug
         });
       });
       await new Promise<void>((resolve) => hangup.listen(0, "127.0.0.1", () => resolve()));
+      allowOwnedHttpFixture(hangup);
       hangupUrl = `http://127.0.0.1:${(hangup.address() as AddressInfo).port}`;
     });
     afterAll(async () => { await new Promise<void>((resolve) => hangup.close(() => resolve())); });
