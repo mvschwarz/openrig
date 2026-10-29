@@ -30,10 +30,17 @@ export function isFixtureScopedHome(home: string): boolean {
   // 2. Temp-path QA-fixture convention: an `openrig-qa*` home under a
   //    system temp root.
   const tempRoots = [tmpdir(), "/tmp", "/private/tmp", "/var/folders"];
+  const pathKey = (value: string): string => process.platform === "win32"
+    ? value.replace(/\\/g, "/").toLowerCase()
+    : value;
+  const homeKey = pathKey(home);
   const underTemp = tempRoots.some(
-    (root) => home === root || home.startsWith(root.endsWith("/") ? root : `${root}/`),
+    (root) => {
+      const key = pathKey(root);
+      return homeKey === key || homeKey.startsWith(key.endsWith("/") ? key : `${key}/`);
+    },
   );
-  return underTemp && /(^|\/)openrig-qa[^/]*/.test(home);
+  return underTemp && /(^|\/)openrig-qa[^/]*/.test(process.platform === "win32" ? home.replace(/\\/g, "/") : home);
 }
 
 export function getOpenRigHome(env: NodeJS.ProcessEnv = process.env): string {

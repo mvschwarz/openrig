@@ -2024,3 +2024,18 @@ verified: 7,190 cases, 7,017 passed, 96 failed and 77 pending. CLI accounts for
 5,834 passed, 96 failed and 56 skipped; TUI has 1,183 passed and 21 skipped.
 That older frozen head is an investigation receipt, not current-head acceptance
 or runtime activation. Remaining failures still require individual diagnosis.
+
+## Native temporary fixture scope (2026-10-30)
+
+The CLI fixture-home predicate previously compared native `tmpdir()` paths with
+forward-slash-only boundaries and fixture-name matching. Native backslash paths
+therefore missed the existing temporary QA convention. Windows comparisons now
+normalize separators and root casing, retaining the component boundary and the
+existing fixture-name convention. A similarly named sibling temp root remains
+outside the convention; explicit marker behavior is unchanged.
+
+The compatibility file passes 9/9 cases including native separator, root-case
+and sibling-boundary checks; CLI TypeScript checking passes. Its unrelated
+default-path expectation now uses native `join` rather than a POSIX literal.
+This predicate is only one input to caller-side fixture handling, not authority
+to write to an arbitrary daemon or proof of live Windows runtime acceptance.
