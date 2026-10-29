@@ -197,6 +197,82 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       attemptWake: async () => { throw new Error("unexpected seat input"); }, log: () => {}, ...opts });
   }
 
+  describe("kernel hook review without a refused wake", () => {
+    const observedAt = new Date("2030-01-01T00:00:00Z");
+    let hookState: "blocked" | "clear" | "unknown";
+    let sampledAt: string;
+    beforeEach(() => { hookState = "blocked"; sampledAt = observedAt.toISOString(); });
+    function hookTick(port: ReturnType<typeof engine>, opts: Partial<Parameters<typeof runWakeLadderTick>[0]> = {}) {
+      const observation = { destination: seat, episode: "session-1:%1:123", state: hookState, observedAt: sampledAt };
+      return tick(port, { now: observedAt, ...{ readHookReviews: async () => [observation] }, ...opts });
+    }
+
+    it("posts one named hook-review alert with no row or send and retires on a fresh clear", async () => {
+      expect(repo.list({ limit: 1000 })).toHaveLength(0);
+      const posts: unknown[] = []; const port = engine(posts);
+      expect((await hookTick(port)).outcome).not.toBe("failed");
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      const alert = alerts()[0]!;
+      expect(alert.body).toContain(seat);
+      expect(alert.body).toContain("Hooks need review");
+      expect(alert.body).toContain("Codex's hook review");
+      expect(alert.body).toContain("does not approve");
+      for (let n = 0; n < 3; n++) await hookTick(port);
+      expect(posts).toHaveLength(1);
+      expect(alerts()).toHaveLength(1);
+      hookState = "unknown";
+      await hookTick(port);
+      expect(alerts()).toHaveLength(1); // uncertainty cannot resolve or alert again
+      hookState = "clear";
+      await hookTick(port);
+      expect(alerts()).toHaveLength(0);
+      expect(repo.getById(alert.qitemId)?.state).toBe("done");
+      expect(posts).toHaveLength(1);
+    });
+
+    it.each(["unknown", "stale"])("does not create an ask from %s observation", async kind => {
+      if (kind === "unknown") hookState = "unknown";
+      else sampledAt = new Date(observedAt.getTime() - 60_000).toISOString();
+      const posts: unknown[] = [];
+      await hookTick(engine(posts));
+      expect(alerts()).toHaveLength(0);
+      expect(posts).toHaveLength(0);
+    });
+
+    it("joins the existing refused-wake episode rather than posting a second alert", async () => {
+      await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+      const posts: unknown[] = []; const port = engine(posts);
+      await hookTick(port);
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.tags).toContain(`recovery-for:${episodeRows[0]}`);
+      await hookTick(port);
+      expect(posts).toHaveLength(1);
+    });
+
+    it("retains unresolved routing without claiming delivery when no person is registered", async () => {
+      const posts: unknown[] = []; const port = engine(posts, false);
+      await hookTick(port);
+      expect(alerts()).toHaveLength(1);
+      const log = notes(alerts()[0]!.qitemId).join("\n");
+      expect(log).toContain("undeliverable:no-registered-human");
+      expect(log).not.toContain("operator rung resolved");
+      expect(posts).toHaveLength(0);
+    });
+
+    it("honors an intentional suspension and checks the gate again before delivery", async () => {
+      const posts: unknown[] = []; const port = engine(posts);
+      const old = process.env.OPENRIG_WAKE_SUSPEND;
+      process.env.OPENRIG_WAKE_SUSPEND = `${seat}:2030-01-01T01:00:00Z`;
+      try { await hookTick(port); expect(alerts()).toHaveLength(0); }
+      finally { if (old === undefined) delete process.env.OPENRIG_WAKE_SUSPEND; else process.env.OPENRIG_WAKE_SUSPEND = old; }
+      let reads = 0;
+      await hookTick(port, { ...{ readHookReviews: async () => [{ destination: seat, episode: "session-1:%1:123",
+        state: ++reads === 1 ? "blocked" as const : "clear" as const, observedAt: sampledAt }] } });
+      expect(posts).toHaveLength(0);
+    });
+  });
+
   it("several rows share one alert, persisted acceptance and receipt across reconstructed ticks", async () => {
     await refusal(3); const posts: unknown[] = []; const port = engine(posts);
     expect((await tick(port)).outcome).not.toBe("failed");
