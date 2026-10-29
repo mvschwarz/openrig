@@ -18,6 +18,8 @@ import { allowanceLines } from "../../tui/src/usage/usage-model.js";
 import type { UsageReadOutcome } from "../src/domain/provider/usage-windows.js";
 import type { ClaudeTokenAnswer } from "../src/domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "../src/domain/provider/provider-types.js";
+import * as windowsText from "../src/domain/windows-owned-text.js";
+import { createPrivateTextFile } from "../src/domain/private-text-file.js";
 
 const NOW = "2026-10-24T04:16:45.000Z";
 // Sanitized provider event: no credential, account identity, UUID or model text.
@@ -47,6 +49,40 @@ function fake(script: string) {
 }
 
 describe("selected Claude credential usage", () => {
+  it.runIf(process.platform === "win32")("assesses the opened token handle across pathname replacement without consuming bytes", async () => {
+    const f = fake("");
+    fs.unlinkSync(f.tokenFile); createPrivateTextFile(f.tokenFile, "SYNTHETIC-PRIVATE");
+    const fd = fs.openSync(f.tokenFile, "r");
+    try {
+      fs.renameSync(f.tokenFile, `${f.tokenFile}.original`);
+      fs.writeFileSync(f.tokenFile, "SYNTHETIC-BROAD");
+      let timerRan = false; setTimeout(() => { timerRan = true; }, 0);
+      expect(await windowsText.assessWindowsFilePermissions(fd)).toEqual({ owned: true, privateAcl: true });
+      expect(timerRan).toBe(true);
+      expect(fs.readFileSync(fd, "utf8")).toBe("SYNTHETIC-PRIVATE");
+      const replacement = fs.openSync(f.tokenFile, "r");
+      try { expect(await windowsText.assessWindowsFilePermissions(replacement)).toEqual({ owned: true, privateAcl: false }); }
+      finally { fs.closeSync(replacement); }
+    } finally { fs.closeSync(fd); }
+  }, 30_000);
+
+  it.runIf(process.platform === "win32")("uses a private token without POSIX-mode or ownership warnings", async () => {
+    const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    fs.unlinkSync(f.tokenFile); createPrivateTextFile(f.tokenFile, "SYNTHETIC-TEST-ONLY");
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) expect(result.probe.warnings).toBeUndefined();
+  });
+
+  it.runIf(process.platform === "win32")("reports unavailable native permission evidence without refusing the selected readable token", async () => {
+    const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    const assessment = vi.spyOn(windowsText, "assessWindowsFilePermissions").mockRejectedValue(new Error("synthetic internal detail"));
+    try {
+      const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
+      expect(result).toMatchObject({ ok: true, probe: { warnings: ["token file Windows owner/DACL could not be assessed"] } });
+      expect(JSON.stringify(result)).not.toMatch(/synthetic internal detail|SYNTHETIC-TEST-ONLY/);
+    } finally { assessment.mockRestore(); }
+  });
   it.runIf(process.platform === "win32")("creates a native private scratch home before the synthetic CLI starts and removes it afterward", async () => {
     const f = fake("");
     const report = path.join(f.root, "scratch-report.json");
@@ -184,13 +220,17 @@ describe("selected Claude credential usage", () => {
     const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
     let tokenFile = f.tokenFile;
     let uid: ReturnType<typeof vi.spyOn> | undefined;
+    let native: ReturnType<typeof vi.spyOn> | undefined;
     if (concern === "mode") fs.chmodSync(tokenFile, 0o644);
     if (concern === "owner" && process.getuid) { const current = process.getuid(); uid = vi.spyOn(process, "getuid").mockReturnValue(current + 1); }
+    if (concern === "owner" && process.platform === "win32") native = vi.spyOn(windowsText, "assessWindowsFilePermissions").mockResolvedValue({ owned: false, privateAcl: true });
     if (concern === "symlink") { tokenFile = path.join(f.root, "alias.token"); fs.symlinkSync(f.tokenFile, tokenFile); }
     try {
       const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile });
-      expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(concern === "mode" ? "group/others" : concern === "owner" ? "owned by uid" : "symlink")]) } });
-    } finally { uid?.mockRestore(); }
+      const warning = concern === "mode" ? process.platform === "win32" ? "private Windows DACL" : "group/others"
+        : concern === "owner" ? process.platform === "win32" ? "current Windows user" : "owned by uid" : "symlink";
+      expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(warning)]) } });
+    } finally { uid?.mockRestore(); native?.mockRestore(); }
   });
 
   it("bounds an unfinished child and reports possible provider spend", async () => {

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createWindowsPrivateDirectoryAsync } from "../private-text-file.js";
+import { assessWindowsFilePermissions } from "../windows-owned-text.js";
 import { resolveClaudeExecutable, runClaudeCommand } from "./claude-auth-status-reader.js";
 import { UsageWindows, type UsageReadOutcome, type UsageReadingStore } from "./usage-windows.js";
 import type { ClaudeTokenIdentity, ClaudeTokenProbe, ProviderUsageAllowance } from "./provider-types.js";
@@ -65,8 +66,16 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
       try {
         const st = fs.fstatSync(fd);
         if (!st.isFile() || st.size > 8192) return fail("credential_file_unavailable", "token file must be a regular file, at most 8 KiB");
-        if ((st.mode & 0o077) !== 0) warnings.push("token file has group/others permission bits; mode 0600 or 0400 is recommended");
-        if (process.getuid && st.uid !== process.getuid()) warnings.push(`token file is owned by uid ${st.uid}, not the daemon user`);
+        if (process.platform === "win32") {
+          try {
+            const permissions = await assessWindowsFilePermissions(fd);
+            if (!permissions.owned) warnings.push("token file is not owned by the current Windows user");
+            if (!permissions.privateAcl) warnings.push("token file does not have a private Windows DACL; current-user-only access is recommended");
+          } catch { warnings.push("token file Windows owner/DACL could not be assessed"); }
+        } else {
+          if ((st.mode & 0o077) !== 0) warnings.push("token file has group/others permission bits; mode 0600 or 0400 is recommended");
+          if (process.getuid && st.uid !== process.getuid()) warnings.push(`token file is owned by uid ${st.uid}, not the daemon user`);
+        }
         token = fs.readFileSync(fd, "utf8").trim();
       } finally { fs.closeSync(fd); }
       if (!token || /\s/.test(token)) return fail("credential_file_unavailable", "token file must hold one nonempty token");

@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWindowsPrivateDirectory } from "./private-text-file.js";
+import { createWindowsPrivateDirectory, createWindowsPrivateDirectoryAsync } from "./private-text-file.js";
 
 // Open the selected file itself, not the target of a final reparse point. The
 // same handle supplies type, link count, owner and bytes; no path-based ACL race.
@@ -22,6 +22,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="auth-read")Console.Write(ReadAuth(args[1]));
       else if(args[0]=="auth-copy")CopyAuth(args[1],args[2],args[3],args[4]);
       else if(args[0]=="auth-directory")AuthDirectory(args[1]);
+      else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -38,6 +39,7 @@ public static class OpenRigOwnedText {
   static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SecurityAttributes security,uint disposition,uint flags,IntPtr template);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
   [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool MoveFileEx(string source,string dest,uint flags);
   [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
@@ -101,6 +103,24 @@ public static class OpenRigOwnedText {
         using(var stream=new FileStream(file,FileAccess.Write)) { stream.SetLength(0); stream.Write(bytes,0,bytes.Length); }
       }
     } finally { Array.Clear(bytes,0,bytes.Length); }
+  }
+  static string Assess(SafeFileHandle file) {
+    Regular(file,false);
+    IntPtr owner,group,dacl,sacl,descriptor;
+    uint error=GetSecurityInfo(file,1,5,out owner,out group,out dacl,out sacl,out descriptor);
+    if(error!=0)throw new Win32Exception((int)error);
+    try {
+      var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);
+      var sd=new RawSecurityDescriptor(bytes,0);var acl=sd.DiscretionaryAcl;
+      using(var identity=WindowsIdentity.GetCurrent()) {
+        bool owned=new SecurityIdentifier(owner).Value==identity.User.Value;
+        var ace=acl!=null && acl.Count==1?acl[0] as CommonAce:null;
+        bool restricted=(sd.ControlFlags & ControlFlags.DiscretionaryAclProtected)!=0 && ace!=null
+          && ace.AceQualifier==AceQualifier.AccessAllowed && !ace.IsInherited
+          && ace.SecurityIdentifier.Value==identity.User.Value && (ace.AccessMask & 0x1f01ff)==0x1f01ff;
+        return "{\"owned\":"+(owned?"true":"false")+",\"privateAcl\":"+(restricted?"true":"false")+"}";
+      }
+    } finally { LocalFree(descriptor); }
   }
   static FileInformation Private(SafeFileHandle file) {
     var info=Regular(file,false,true);
@@ -193,14 +213,56 @@ public static class OpenRigOwnedText {
 `;
 
 let executable: string | undefined;
+let compiling: Promise<string> | undefined;
+async function nativeHelperAsync(): Promise<string> {
+  if (executable) return executable;
+  if (!compiling) compiling = (async () => {
+    const directory = await createWindowsPrivateDirectoryAsync(tmpdir());
+    const file = join(directory, "owned-text.exe");
+    const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication";
+    await new Promise<void>((resolveRun, reject) => {
+      const compiler = execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000 },
+        error => error ? reject(error) : resolveRun());
+      compiler.stdin!.end(FILE_SOURCE);
+    });
+    executable = file;
+    process.once("exit", () => {
+      try { unlinkSync(file); rmdirSync(directory); } catch { /* retain the exact owned helper if cleanup is unavailable */ }
+    });
+    return file;
+  })().catch(error => { compiling = undefined; throw error; });
+  return compiling;
+}
+
+/** Inspect the caller's already-open file through inherited stdin. The helper
+ * reads security metadata only; no pathname is reopened and no bytes or SIDs
+ * leave it. Compilation and inspection do not block the serving event loop. */
+export async function assessWindowsFilePermissions(fd: number): Promise<{ owned: boolean; privateAcl: boolean }> {
+  const helper = await nativeHelperAsync();
+  return new Promise((resolveAssessment, reject) => {
+    const child = spawn(helper, ["assess-stdin"], { windowsHide: true, stdio: [fd, "pipe", "ignore"] });
+    let output = "";
+    child.stdout!.on("data", (data: Buffer) => { output += data.toString("utf8"); });
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Windows file permission assessment timed out")); }, 10_000);
+    child.once("error", error => { clearTimeout(timer); reject(error); });
+    child.once("close", code => {
+      clearTimeout(timer);
+      if (code !== 0) { reject(new Error("Windows file permission assessment unavailable")); return; }
+      try { resolveAssessment(JSON.parse(output) as { owned: boolean; privateAcl: boolean }); }
+      catch (error) { reject(error); }
+    });
+  });
+}
 function nativeHelper(): string {
   if (executable) return executable;
   const directory = createWindowsPrivateDirectory(tmpdir());
   const file = join(directory, "owned-text.exe");
-  const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'\nAdd-Type -TypeDefinition @'\n${FILE_SOURCE}\n'@ -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication`;
+  const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication";
   execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000, stdio: "pipe" });
+    { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
   executable = file;
   process.once("exit", () => {
     try { unlinkSync(file); rmdirSync(directory); } catch { /* retain the exact owned helper if cleanup is unavailable */ }
