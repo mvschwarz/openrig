@@ -95,8 +95,8 @@ export function buildStaleMessage(changes) {
   ].join("\n");
 }
 
-// Every copy and comparison goes through rsync. macOS ships it; many Linux installs don't, and a
-// bare `spawnSync rsync ENOENT` stack doesn't say what to install.
+// POSIX copies/comparisons use rsync; native Windows uses filesystem operations.
+// A bare `spawnSync rsync ENOENT` stack doesn't say what to install on POSIX.
 export const RSYNC_MISSING_MESSAGE =
   "mirror-skills needs rsync on PATH. macOS includes it; on Debian or Ubuntu run `sudo apt-get install rsync`, " +
   "on Fedora `sudo dnf install rsync`, on Alpine `apk add rsync`.";
@@ -125,12 +125,47 @@ function ensureTargetExists() {
 
 export function checkMode(exec = execFileSync) {
   ensureTargetExists();
+  if (process.platform === "win32" && exec === execFileSync) return checkModeAbsolute(SOURCE_DIR, TARGET_DIR);
   const output = runRsync({ dryRun: true }, exec);
   const changes = parseChanges(output);
   return { stale: changes.length > 0, changes, output };
 }
 
 export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
+  if (process.platform === "win32" && exec === execFileSync) {
+    const sourceStat = lstatSync(sourceDir);
+    if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) throw new Error(`${sourceDir}: expected a real source directory`);
+    const targetStat = lstatSync(targetDir, { throwIfNoEntry: false });
+    if (targetStat && (!targetStat.isDirectory() || targetStat.isSymbolicLink())) throw new Error(`${targetDir}: expected a real target directory`);
+    const inventory = (root, source) => new Map(walkFiles(root)
+      .map(file => [relative(root, file).replaceAll("\\", "/"), file])
+      .filter(([name]) => !source || !isExcludedPath(name)));
+    const expected = inventory(sourceDir, true), actual = inventory(targetDir, false);
+    const changes = [];
+    for (const [name, file] of expected) {
+      if (!actual.has(name)) changes.push(`>f+++++++++ ${name}`);
+      else if (!readFileSync(file).equals(readFileSync(actual.get(name)))) changes.push(`>fc........ ${name}`);
+    }
+    for (const name of actual.keys()) if (!expected.has(name)) changes.push(`*deleting ${name}`);
+    const directories = (root, source) => {
+      const result = new Set();
+      const visit = dir => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const full = join(dir, entry.name), name = relative(root, full).replaceAll("\\", "/");
+          if (source && isExcludedPath(name)) continue;
+          result.add(name); visit(full);
+        }
+      };
+      if (existsSync(root)) visit(root);
+      return result;
+    };
+    const expectedDirs = directories(sourceDir, true), actualDirs = directories(targetDir, false);
+    for (const name of expectedDirs) if (!actualDirs.has(name)) changes.push(`cd+++++++++ ${name}/`);
+    for (const name of actualDirs) if (!expectedDirs.has(name)) changes.push(`*deleting ${name}/`);
+    changes.sort();
+    return { stale: changes.length > 0, changes, output: changes.join("\n") + (changes.length ? "\n" : "") };
+  }
   const output = rsync(rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }), exec);
   const changes = parseChanges(output);
   return { stale: changes.length > 0, changes, output };

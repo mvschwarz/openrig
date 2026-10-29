@@ -7,6 +7,22 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native runtime mirror drift comparison, 2026-10-29
+
+The failure log revealed that authoring regeneration's native filesystem backend
+did not cover the older `checkModeAbsolute` API still imported by the daemon's
+runtime skill-drift check. On Windows that API now compares exact file bytes and
+file/directory inventories without rsync or writes. It preserves source exclusions,
+reports excluded target material as extra, refuses linked roots/descendants and
+fails for an absent source. POSIX and explicitly injected rsync callers retain
+their existing implementation. Native Windows permission-bit equivalence remains
+limited by the filesystem and is not claimed as Unix mode acceptance.
+
+Three targeted script checks passed, covering the actual source mirror, native
+content/extra/empty-directory drift, no mutation, missing source, junction refusal
+and the injected rsync contract. The daemon's six mirror-drift tests also passed.
+The complete repository script suite has not yet been rerun after this change.
+
 ## First-run references and byte-bound guards, 2026-10-29
 
 The refreshed native script log exposed a first-run reference bug: joining
