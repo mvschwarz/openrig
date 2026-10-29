@@ -10,6 +10,7 @@ import {
   type RestoreCheckDeps,
   type NodeInventoryEntry,
 } from "../src/domain/restore-check-service.js";
+import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 
 const RELAY_PATH = "/custom-instance/state/claude-activity-hooks/activity-relay.cjs";
 
@@ -130,6 +131,28 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  it.runIf(process.platform === "win32")("recognizes the same native relay through slash variants without accepting another script", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-native-relay-"));
+    try {
+      const cwd = path.join(root, "seat"), settingsPath = path.join(cwd, ".claude", "settings.local.json");
+      const relay = claudeActivityRelayPath(root);
+      fs.mkdirSync(path.dirname(relay), { recursive: true });
+      fs.writeFileSync(relay, "// owned synthetic relay\n");
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+      const service = new RestoreCheckService(mockDeps({
+        stateDir: root, getNodeInventory: () => [claudeNode({ cwd })],
+        exists: fs.existsSync, readFile: file => fs.readFileSync(file, "utf8"),
+        getStartupContext: () => startupContextProbe({ projectionEntries: [{ absolutePath: root, effectiveId: "shared:activity", category: "runtime_resource", resourceType: "claude_activity_hooks" }] }),
+      }));
+      for (const [target, expected] of [[relay, "green"], [relay.replaceAll("\\", "/"), "green"], [relay + ".other", "yellow"]] as const) {
+        fs.writeFileSync(settingsPath, JSON.stringify({ hooks: Object.fromEntries(["SessionStart", "UserPromptSubmit"].map(event => [event, [{ hooks: [{ type: "command", command: `${quote(process.execPath)} ${quote(target)}` }] }]])) }));
+        const hook = service.check({ noQueue: true }).checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+        expect(hook?.status, target).toBe(expected);
+      }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("finds a configured instance spec without HOME or a literal tilde directory", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-native-home-"));
     const previousHome = process.env.HOME, previousInstance = process.env.OPENRIG_HOME;
