@@ -922,6 +922,32 @@ test("authoring regeneration writes each generated copy from the skill's one hom
   }
 });
 
+test("Windows native regeneration handles file/directory changes and refuses junction targets before writing", { skip: process.platform !== "win32" }, async () => {
+  const mirror = await import("./mirror-skills.mjs");
+  const root = mkdtempSync(join(tmpdir(), "openrig-native-mirror-"));
+  try {
+    const { repoRoot, inputs } = homeFixture(root);
+    const source = join(repoRoot, "spec/core/two/references/change.txt");
+    const target = join(repoRoot, "canonical/core/two/references/change.txt");
+    write(source, "first file\n");
+    await mirror.regeneratePublicSkills(inputs);
+    assert.equal(readFileSync(target, "utf8"), "first file\n");
+    rmSync(source); write(join(source, "nested.txt"), "now a directory\n");
+    await mirror.regeneratePublicSkills(inputs);
+    assert.equal(readFileSync(join(target, "nested.txt"), "utf8"), "now a directory\n");
+    rmSync(source, { recursive: true }); write(source, "file again\n");
+    await mirror.regeneratePublicSkills(inputs);
+    assert.equal(readFileSync(target, "utf8"), "file again\n");
+    const outside = join(root, "outside"); write(join(outside, "canary.txt"), "preserve outside\n");
+    const linked = join(repoRoot, "canonical/core/two/linked");
+    symlinkSync(outside, linked, "junction");
+    write(source, "pending update\n");
+    await assert.rejects(mirror.regeneratePublicSkills(inputs), /symlink entries are not allowed/);
+    assert.equal(readFileSync(target, "utf8"), "file again\n");
+    assert.equal(readFileSync(join(outside, "canary.txt"), "utf8"), "preserve outside\n");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("authoring regeneration repairs permission-only drift in generated copies from the home's modes", async () => {
   const mirror = await import("./mirror-skills.mjs");
   const root = mkdtempSync(join(tmpdir(), "openrig-authoring-modes-"));

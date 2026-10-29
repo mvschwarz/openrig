@@ -11,7 +11,10 @@ import {
   rmSync,
   lstatSync,
   writeFileSync,
+  realpathSync,
+  rmdirSync,
 } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
@@ -555,7 +558,9 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   }
 }
 
-if (import.meta.url === `file://${resolve(process.argv[1])}`) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); } catch { /* imported without an existing entry file */ }
+if (invokedDirectly) {
   try {
     await main();
   } catch (err) {
@@ -828,6 +833,39 @@ function treeDifferences(expectedRoot, actualRoot) {
 }
 
 function syncTree(sourceRoot, targetRoot, edge, prefix, exec) {
+  if (process.platform === "win32" && exec === execFileSync) {
+    // Validate both complete trees (including link refusal) before mutating
+    // the declared output. No rsync/cmd shell or traversal through a link.
+    const differences = treeDifferences(sourceRoot, targetRoot);
+    const directories = (root) => {
+      const result = [];
+      const visit = (folder) => {
+        for (const name of readdirSync(folder)) {
+          const path = join(folder, name);
+          if (lstatSync(path).isDirectory()) { result.push(relative(root, path)); visit(path); }
+        }
+      };
+      visit(root); return result;
+    };
+    const sourceDirectories = directories(sourceRoot), wantedDirectories = new Set(sourceDirectories);
+    const removedDirectories = directories(targetRoot).filter(path => !wantedDirectories.has(path))
+      .sort((left, right) => right.length - left.length);
+    for (const { path, kind } of differences) if (kind === "extra") rmSync(join(targetRoot, path));
+    for (const path of removedDirectories) rmdirSync(join(targetRoot, path));
+    for (const path of sourceDirectories) mkdirSync(join(targetRoot, path), { recursive: true });
+    for (const difference of differences) {
+      const target = join(targetRoot, difference.path);
+      if (difference.kind !== "extra") {
+        const source = join(sourceRoot, difference.path);
+        mkdirSync(dirname(target), { recursive: true });
+        copyFileSync(source, target);
+        chmodSync(target, lstatSync(source).mode & 0o777);
+      }
+    }
+    return [...differences.map(({ path, kind }) => ({
+      edge, path: prefix ? `${prefix}/${path}` : path, reason: kind === "extra" ? "delete" : "write",
+    })), ...removedDirectories.map(path => ({ edge, path: `${prefix ? prefix + "/" : ""}${path.replaceAll("\\", "/")}/`, reason: "delete" }))];
+  }
   return parseChanges(runRsyncAbsolute(sourceRoot, targetRoot, exec)).map((line) => {
     const path = rsyncChangePath(line);
     return {

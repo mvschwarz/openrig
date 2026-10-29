@@ -1,0 +1,5 @@
+# Skill-edge digests bind published bytes. Keep checkout text identical to Git
+# on Windows too; auto detection preserves binary helper/assets verbatim.
+skills/_canonical/** text=auto eol=lf
+packages/daemon/specs/agents/shared/skills/** text=auto eol=lf
+packages/daemon/assets/plugins/openrig-core/skills/** text=auto eol=lf

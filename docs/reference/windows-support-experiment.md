@@ -7,6 +7,44 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Guard execution and mirrored bytes correction, 2026-10-29
+
+Earlier Windows docs/mirror “passed” reports relied on exit status from entry
+checks that manually constructed `file://` URLs. Those checks did not match a
+native Windows script path, so they could return zero without executing. Those
+exit-only reports do not establish guard execution. The docs, leak and mirror
+entry checks now compare native real paths; imports without argv remain inert.
+Real child tests prove execution from spaced, hash/Unicode and junction paths,
+including `--preserve-symlinks-main`. Seeded blocked docs/leak data and a missing
+mirror manifest produce the expected nonzero result. The artifact scanner also
+uses native relative-path containment instead of a POSIX separator prefix.
+
+The actual mirror check then exposed CRLF digest differences and a stale
+canonical upgrade helper. Git attributes now keep text in the three skill roots
+at LF with automatic binary detection; a checkout fixture with autocrlf enabled
+verifies text and binary bytes. Existing bytes were normalized only when their
+LF hash matched the recorded digest; the remaining upgrade source was compared
+with committed source before normalization. Windows authoring now uses native
+filesystem synchronization, retaining whole-tree link refusal, source/output
+separation, declared-output deletion and undeclared-home preservation. It needs
+no rsync. The actual regeneration updated the one stale helper copy and hashes;
+the real `mirror-skills --check` passes. Windows POSIX permission-bit semantics
+and unrestricted file-symlink fixtures are still not accepted.
+
+Seventeen leak/lineage script tests, six targeted mirror tests, two native
+entry/checkout tests and three cross-surface lineage tests passed. The generator
+normalizes CRLF only, while content edits still fail drift checks. Actual docs
+and mirror checks plus 57 context-pack checks passed after these corrections.
+These replace the earlier exit-only guard evidence, not the outstanding full
+suite/provider/deployment work.
+
+The subsequent repository-script sweep ran 341 tests: 259 passed, 79 failed,
+three skipped, zero cancelled. The four additional cases cover native entry
+execution, Git checkout bytes, native mirror transitions and EOL regeneration.
+This remains a non-green script-suite result from the source working tree, not
+full workspace/npm-test acceptance. The remaining 79 failures are retained for
+diagnosis; the reduction from 96 was not achieved by skipping their assertions.
+
 ## Python CLI lookup, 2026-10-29
 
 The historical composer and refocusing scripts now execute the full path from
