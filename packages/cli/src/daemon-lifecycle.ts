@@ -842,6 +842,13 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       if (unverified) {
         throw new StartupChildPendingError(`Daemon child ${pid} responds at ${healthzUrl}, but listener verification is incomplete: ${lastProbe} Child left running; startup reservation retained. Inspect 'rig daemon status', daemon-start.lock and daemon.log before recovery.`);
       }
+      // Expiring the readiness budget is not evidence that this owned child failed.
+      // Keep launch exclusion until an operator can inspect a slow pre-bind startup.
+      assertChild();
+      if (deps.isProcessAlive(pid!)) {
+        assertChild();
+        throw new StartupChildPendingError(`Daemon startup is pending after the readiness deadline (child PID ${pid}). Readiness is not confirmed; child left running and startup reservation retained. Last probe: ${lastProbe}. Launch endpoint: ${healthzUrl}. Inspect that URL and ${LOG_FILE}; this check does not publish readiness, adopt the child or release the reservation. To restart manually, stop child PID ${pid} and wait for exit; inspect ${path.join(OPENRIG_DIR, "daemon-start.lock")}, and only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'. 'rig daemon stop' cannot target this unpublished child, and another start remains blocked by the reservation.`);
+      }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
     }
     assertChild();
