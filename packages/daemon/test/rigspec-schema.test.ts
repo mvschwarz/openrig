@@ -37,6 +37,26 @@ const VALID_RIG = {
 };
 
 describe("RigSpec schema (pod-aware)", () => {
+  it.each(["model", "label"])("rejects non-string member %s values in canonical validation", field => {
+    for (const value of [null, 7, {}, [], true]) {
+      const rig = structuredClone(VALID_RIG);
+      (rig.pods[0]!.members[0] as Record<string, unknown>)[field] = value;
+      const result = RigSpecSchema.validate(rig);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain(`pods[0].members[0].${field}: must be a string`);
+    }
+  });
+
+  it.each(["model", "label"])("keeps optional and string member %s values unchanged", field => {
+    for (const value of [undefined, "", "selected-value"]) {
+      const rig = structuredClone(VALID_RIG);
+      const member = rig.pods[0]!.members[0] as Record<string, unknown>;
+      if (value === undefined) delete member[field]; else member[field] = value;
+      expect(RigSpecSchema.validate(rig).valid).toBe(true);
+      expect(RigSpecSchema.normalize(rig).pods[0]!.members[0]![field as "model" | "label"]).toBe(value);
+    }
+  });
+
   // T1: valid rig with embedded pods passes validation
   it("valid rig with embedded pods passes validation", () => {
     const result = RigSpecSchema.validate(VALID_RIG);

@@ -87,6 +87,15 @@ describe("expansion member fidelity", () => {
     expect(setup.rigRepo.getRig(rig.id)!.nodes).toHaveLength(0); expect(bindings).toHaveLength(0);
   });
 
+  it.each(["model", "label"])("returns 400 for a non-string %s before creating a member", async field => {
+    const rig = setup.rigRepo.createRig("invalid-text-field");
+    const response = await routeExpand(rig.id, { ...member(), [field]: {} });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(await response.json())).toContain(`.${field}: must be a string`);
+    expect(setup.rigRepo.getRig(rig.id)!.nodes).toHaveLength(0);
+    expect(bindings).toHaveLength(0);
+  });
+
   it("preserves unknown member keys for the existing canonical typo check", async () => {
     const rig = setup.rigRepo.createRig("unknown-key");
     const response = await routeExpand(rig.id, { ...member(), unknown_member_key: "not silently erased" });
