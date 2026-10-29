@@ -1,3 +1,4 @@
+import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -193,6 +194,7 @@ export function startWakeLadderScheduler(deps: {
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  tmuxAdapter?: Pick<import("./adapters/tmux.js").TmuxAdapter, "listPanes" | "readAllPaneProcesses" | "capturePaneScreen">;
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
@@ -217,6 +219,7 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
+      ...(deps.tmuxAdapter ? { readHookReviews: makeKernelHookReviewReader({ db, tmux: deps.tmuxAdapter }) } : {}),
       readPromptState: makePromptStateReader({
         db,
         getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),

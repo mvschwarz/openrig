@@ -11,6 +11,7 @@ import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME,
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { makeKernelHookReviewReader } from "../src/domain/kernel-hook-review.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -271,6 +272,49 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
         state: ++reads === 1 ? "blocked" as const : "clear" as const, observedAt: sampledAt }] } });
       expect(posts).toHaveLength(0);
     });
+  });
+
+  it("routes a real kernel binding's current hook screen through the production observation reader", async () => {
+    const rigs = new RigRepository(db); const sessions = new SessionRegistry(db);
+    const rig = rigs.createRig("kernel"); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
+    const destination = "operator@kernel";
+    const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
+    sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
+    let screen: string | null = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
+    let dead: boolean | undefined = false;
+    let pane = "%17";
+    let changeBinding = false;
+    const tmux = {
+      listPanes: vi.fn(async () => [{ id: pane, index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      readAllPaneProcesses: vi.fn(async () => new Map([["%17", { pid: 123, command: "codex", dead }]])),
+      capturePaneScreen: vi.fn(async () => {
+        if (changeBinding) sessions.updateBinding(node.id, { tmuxPane: "%18" });
+        return screen;
+      }),
+    };
+    const now = new Date("2030-01-01T00:00:00Z");
+    const readHookReviews = makeKernelHookReviewReader({ db, tmux, now: () => now });
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now, readHookReviews });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(alerts()[0]!.body).toContain(destination);
+    for (const unavailable of [null, "unrecognised screen"]) {
+      screen = unavailable;
+      await tick(port, { now, readHookReviews });
+      expect(alerts()).toHaveLength(1);
+      expect(posts).toHaveLength(1);
+    }
+    screen = "OpenAI Codex (v0.164.0)\nmodel: gpt-5\n› ";
+    expect((await readHookReviews())[0]?.state).toBe("clear");
+    await tick(port, { now, readHookReviews });
+    expect(alerts()).toHaveLength(0);
+    screen = "Hooks need review\nTrust all and continue";
+    for (dead of [true, undefined]) expect((await readHookReviews())[0]?.state).toBe("unknown");
+    dead = false; pane = "%18";
+    expect((await readHookReviews())[0]?.state).toBe("unknown");
+    pane = "%17"; changeBinding = true;
+    expect((await readHookReviews())[0]?.state).toBe("unknown");
+    expect(posts).toHaveLength(1);
   });
 
   it("several rows share one alert, persisted acceptance and receipt across reconstructed ticks", async () => {
