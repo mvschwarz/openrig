@@ -7,6 +7,16 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native resume fixture mutation on CRLF checkouts, 2026-10-29
+
+A structured rerun isolated the workspace log's two native-resume-probe failures.
+Both were negative fixture mutations removing a whole LF-terminated line from a
+CRLF checkout: removal did nothing, so the test still supplied a complete login
+panel. The two removals now accept LF or CRLF; the actual screen parser is
+unchanged. Before/after JSON receipts show the entire file moving from 277/279
+to 279/279 passed, with no skips. This is fixture portability evidence, not real
+provider authentication or conversation acceptance.
+
 ## Native telemetry migration inventory, 2026-10-29
 
 The lexical audit found a second shipped upgrade helper still directly spawning
