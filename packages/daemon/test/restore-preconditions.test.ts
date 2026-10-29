@@ -19,6 +19,13 @@ function services(): RigServicesRecord {
   return { rigId: "rig-1", kind: "compose", specJson: "{}", rigRoot: "/services", composeFile: "/services/compose.yaml", projectName: "test", latestReceiptJson: null, createdAt: "", updatedAt: "" };
 }
 
+it.each(["C:\\files\\notes.md", "\\\\server\\share\\notes.md", ".\\notes.md", "..\\notes.md"])("blocks a missing required Windows startup path: %s", (absolutePath) => {
+  const snapshot = data();
+  snapshot.nodeStartupContext!["node-1"].resolvedStartupFiles![0].absolutePath = absolutePath;
+  const result = validatePreRestore(snapshot, { fsOps: { exists: (p) => p !== absolutePath } });
+  expect(result.blockers).toContainEqual(expect.objectContaining({ code: "required_startup_file_missing", path: absolutePath }));
+});
+
 function node(rigId = "rig-1", running = false): NodeInventoryEntry {
   return {
     nodeId: "node-1", logicalId: "seat", rigId, rigName: rigId,

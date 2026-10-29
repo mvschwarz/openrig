@@ -273,6 +273,24 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native restore precondition path coverage (2026-10-30)
+
+Restore pre-validation recognized only slash-led, tilde and forward-slash
+relative paths. A required built-in re-anchored to a native drive path could
+therefore be missing without blocking restore. The shared path recognizer now
+accepts native absolute paths, Windows absolute paths (including UNC), and
+backslash relative paths. Existing replay eligibility and refusal order remain
+unchanged; the same recognizer covers startup owners, projected resources and
+Compose paths. Four missing-required-file cases cover drive, UNC and both
+relative backslash forms without reading host resources.
+
+The complete restore-preconditions and restore-orchestrator files pass 337/337;
+daemon typecheck passes. Six earlier restore failures were native-path fixture
+issues; the seventh exposed this product defect. The Codex continuation fixture
+also now supplies a host-absolute CODEX_HOME. Separately, built-in re-anchoring
+expectations use native path joins and pass 32/32. These are owned fixtures and
+restore mocks, not a fleet restart or full native-runtime acceptance.
+
 ## Claude adapter native fixture follow-up (2026-10-30)
 
 The 21 Claude runtime-adapter failures in the expanded observation below are

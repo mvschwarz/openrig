@@ -15,13 +15,13 @@ describe("reanchorBuiltinStartupFile", () => {
     ["openrig-onboarding-02.md", "onboarding/02-self-and-competent-action.md"],
   ])("re-anchors %s from an old packaged install, preserving metadata", (name, rel) => {
     const stored = { path: name, absolutePath: `${OLD}/${rel}`, ownerRoot: OLD, ...meta, kind: "file" as const };
-    expect(reanchorBuiltinStartupFile(stored, RUNNING)).toEqual({ ...stored, absolutePath: `${RUNNING}/${rel}`, ownerRoot: RUNNING });
+    expect(reanchorBuiltinStartupFile(stored, RUNNING)).toEqual({ ...stored, absolutePath: path.join(RUNNING, rel), ownerRoot: RUNNING });
   });
 
   it("re-anchors a built-in stored from a dev checkout (packages/daemon/assets)", () => {
     const dev = "/src/openrig/packages/daemon/assets";
     const stored = { path: "openrig-start.md", absolutePath: `${dev}/guidance/openrig-start.md`, ownerRoot: dev, ...meta };
-    expect(reanchorBuiltinStartupFile(stored, RUNNING).absolutePath).toBe(`${RUNNING}/guidance/openrig-start.md`);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING).absolutePath).toBe(path.join(RUNNING, "guidance/openrig-start.md"));
   });
 
   it("leaves a custom rig file with the same basename unchanged", () => {
@@ -66,20 +66,20 @@ describe("reanchorShippedProjectionEntry", () => {
   it("re-anchors a shipped resource (source and resource under an old install's daemon/specs), preserving every other field", () => {
     const stored = { ...base, sourcePath: `${OLD_SPECS}/agents/shared`, absolutePath: `${OLD_SPECS}/agents/shared/runtime/claude-settings.fragment.json` };
     expect(reanchorShippedProjectionEntry(stored, RUN_SPECS)).toEqual({
-      ...base, sourcePath: `${RUN_SPECS}/agents/shared`, absolutePath: `${RUN_SPECS}/agents/shared/runtime/claude-settings.fragment.json`,
+      ...base, sourcePath: path.join(RUN_SPECS, "agents/shared"), absolutePath: path.join(RUN_SPECS, "agents/shared/runtime/claude-settings.fragment.json"),
     });
   });
 
   it("re-anchors kernel agent guidance stored under the rig's own shipped spec directory", () => {
     const dir = `${OLD_SPECS}/rigs/launch/kernel/agents/advisor/lead`;
     const stored = { ...base, category: "guidance", effectiveId: "role", sourceSpec: "advisor.lead", sourcePath: dir, absolutePath: `${dir}/guidance/role.md` };
-    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(`${RUN_SPECS}/rigs/launch/kernel/agents/advisor/lead/guidance/role.md`);
+    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(path.join(RUN_SPECS, "rigs/launch/kernel/agents/advisor/lead/guidance/role.md"));
   });
 
   it("re-anchors from a dev checkout (packages/daemon/specs)", () => {
     const dev = "/src/openrig/packages/daemon/specs";
     const stored = { ...base, sourcePath: `${dev}/agents/shared`, absolutePath: `${dev}/agents/shared/runtime/claude-mcp.fragment.json` };
-    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(`${RUN_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(path.join(RUN_SPECS, "agents/shared/runtime/claude-mcp.fragment.json"));
   });
 
   it("leaves a plugin projected from ~/.openrig/plugins unchanged even though its sourcePath is a shipped spec", () => {
@@ -110,7 +110,7 @@ describe("reanchorBuiltinStartupFile — shipped-spec startup files", () => {
   it("re-anchors the kernel rig culture (pre-launch guidance_merge), preserving metadata", () => {
     const stored = { path: "culture/CULTURE.md", absolutePath: `${OLD_SPECS}/${KERNEL}/culture/CULTURE.md`, ownerRoot: `${OLD_SPECS}/${KERNEL}`, ...meta };
     expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS)).toEqual({
-      ...stored, absolutePath: `${RUN_SPECS}/${KERNEL}/culture/CULTURE.md`, ownerRoot: `${RUN_SPECS}/${KERNEL}`,
+      ...stored, absolutePath: path.join(RUN_SPECS, KERNEL, "culture/CULTURE.md"), ownerRoot: path.join(RUN_SPECS, KERNEL),
     });
   });
 
@@ -119,7 +119,7 @@ describe("reanchorBuiltinStartupFile — shipped-spec startup files", () => {
     for (const rel of ["guidance/role.md", "startup/context.md"]) {
       const stored = { path: rel, absolutePath: `${agent}/${rel}`, ownerRoot: agent, deliveryHint: "send_text" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const] };
       expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS)).toMatchObject({
-        absolutePath: `${RUN_SPECS}/${KERNEL}/agents/advisor/lead/${rel}`, ownerRoot: `${RUN_SPECS}/${KERNEL}/agents/advisor/lead`, deliveryHint: "send_text",
+        absolutePath: path.join(RUN_SPECS, KERNEL, "agents/advisor/lead", rel), ownerRoot: path.join(RUN_SPECS, KERNEL, "agents/advisor/lead"), deliveryHint: "send_text",
       });
     }
   });
@@ -146,24 +146,24 @@ describe("dev-checkout layouts re-anchor only when the stored file is missing", 
   it("built-in from a present dev checkout stays as stored; a missing one re-anchors", () => {
     const stored = { path: "openrig-start.md", absolutePath: `${DEV}/assets/guidance/openrig-start.md`, ownerRoot: `${DEV}/assets`, ...meta };
     expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present)).toBe(stored);
-    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(`${RUNNING}/guidance/openrig-start.md`);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(path.join(RUNNING, "guidance/openrig-start.md"));
   });
 
   it("shipped-spec startup file from a present dev checkout stays as stored; a missing one re-anchors", () => {
     const stored = { path: "culture/CULTURE.md", absolutePath: `${DEV}/specs/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${DEV}/specs/rigs/launch/kernel`, ...meta };
     expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present)).toBe(stored);
-    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(`${RUN_SPECS}/rigs/launch/kernel/culture/CULTURE.md`);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(path.join(RUN_SPECS, "rigs/launch/kernel/culture/CULTURE.md"));
   });
 
   it("projection resource from a present dev checkout stays as stored; a missing one re-anchors", () => {
     const entry = { sourcePath: `${DEV}/specs/agents/shared`, absolutePath: `${DEV}/specs/agents/shared/runtime/claude-mcp.fragment.json`, effectiveId: "shared:claude-default-mcp" };
     expect(reanchorShippedProjectionEntry(entry, RUN_SPECS, present)).toBe(entry);
-    expect(reanchorShippedProjectionEntry(entry, RUN_SPECS, missing).absolutePath).toBe(`${RUN_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+    expect(reanchorShippedProjectionEntry(entry, RUN_SPECS, missing).absolutePath).toBe(path.join(RUN_SPECS, "agents/shared/runtime/claude-mcp.fragment.json"));
   });
 
   it("packaged installs re-anchor even while the stored file is present", () => {
     const stored = { path: "CULTURE-default.md", absolutePath: `${OLD}/guidance/CULTURE-default.md`, ownerRoot: OLD, ...meta };
-    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present).absolutePath).toBe(`${RUNNING}/guidance/CULTURE-default.md`);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present).absolutePath).toBe(path.join(RUNNING, "guidance/CULTURE-default.md"));
   });
 
   it("an unrecognized daemon/assets layout is not treated as an OpenRig install", () => {
