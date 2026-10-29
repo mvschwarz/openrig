@@ -64,6 +64,18 @@ describe("the documented Hermes launcher and preset", () => {
     expect(parse(config())).toMatchObject({ model: "openai/gpt-4o-mini" });
   });
 
+  it.each([['"model": "owner/model"'], ['model : "owner/model"'], ["'model':   owner/model"]])(
+    "leaves a seat's config byte-for-byte unchanged when it already sets a model, however the key is written (%s)", (line) => {
+      const dir = mkdtempSync(join(tmpdir(), "hermes-example-")); dirs.push(dir);
+      const fake = join(dir, "hermes"); writeFileSync(fake, "#!/bin/sh\nexit 0\n"); chmodSync(fake, 0o755);
+      const home = join(dir, "home", "state", "hermes", "node-1"); mkdirSync(home, { recursive: true });
+      const owned = `agent:\n  max_turns: 1\n${line}\n`;
+      writeFileSync(join(home, "config.yaml"), owned);
+      spawnSync(join(EXAMPLE, "openrig-hermes-launch"), [], { timeout: 20_000, env: { PATH: process.env["PATH"]!, OPENRIG_HERMES: fake,
+        OPENRIG_HOME: join(dir, "home"), OPENRIG_NODE_ID: "node-1", OPENRIG_CONVERSATION: "openrig-a", OPENRIG_MODEL: "vendor/other" } });
+      expect(readFileSync(join(home, "config.yaml"), "utf8")).toBe(owned);
+    });
+
   it("is a preset this OpenRig loads, declaring names_conversation and not resume, and doesn't yet take a model", () => {
     expect(loadCommunityHarnessPreset("hermes", EXAMPLE)).toMatchObject({ ok: true, preset: { namesConversation: true, launchResult: false, resume: false, passesModel: false } });
   });

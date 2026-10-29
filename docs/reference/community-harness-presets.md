@@ -296,8 +296,8 @@ Presets without `first_input` and built-in runtimes keep their existing behavior
 
 ## Pass the seat's declared model at launch
 
-A format-1 preset may set `passes_model: true` (a boolean, default false). Then a model declared for the seat in the rig
-spec reaches its launcher as `OPENRIG_MODEL`, on new and resumed launches alike. A seat that declares no model gets none,
+A format-1 preset may set `passes_model: true` (a boolean, default false). Then a model declared for the seat (in the rig
+spec, or set later with `rig seat set-model`) reaches its launcher as `OPENRIG_MODEL`, on new and resumed launches alike. A seat that declares no model gets none,
 and an inherited `OPENRIG_MODEL` is cleared. The launcher maps it into its harness's own setting; Core knows no harness's
 model flag or config key.
 
@@ -317,7 +317,8 @@ model a resumed session runs stays unknown unless the harness's own evidence say
 - **Cursor:** `--model "$OPENRIG_MODEL"` for a new chat. What a resumed chat runs hasn't been checked: the launcher leaving
   out `--model` doesn't show that it keeps its earlier model.
 - **Hermes:** Hermes takes its model only from the seat's `config.yaml`, so for a new session the launcher writes
-  `model: "<id>"` there when the file names no model yet; a model already set there is left alone. Hermes v0.22.4 fixes a
+  `model: "<id>"` there when no line in the file could already set a model (quoted, spaced or indented keys count); otherwise
+  the file is left byte-for-byte as it is. Hermes v0.22.4 fixes a
   session's launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was
   created with.
 

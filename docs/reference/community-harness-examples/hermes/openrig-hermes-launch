@@ -31,8 +31,10 @@ fi
 if [ -n "${OPENRIG_MODEL:-}" ] && [ -z "${OPENRIG_RESUME_REF:-}" ]; then
   case "$OPENRIG_MODEL" in
     ''|*[!A-Za-z0-9._:/@+-]*) echo "openrig-hermes-launch: not writing unusual model id \"$OPENRIG_MODEL\" into $HERMES_HOME/config.yaml" >&2 ;;
-    *) if grep -qs '^model:' "$HERMES_HOME/config.yaml"; then
-         echo "openrig-hermes-launch: $HERMES_HOME/config.yaml already names a model; leaving it, not $OPENRIG_MODEL" >&2
+    # Any line that could set a model (quoted or not, spaces before the colon, indented or not) means the config may
+    # already name one, so it's left byte-for-byte as it is.
+    *) if grep -Eqs "^[[:space:]]*[\"']?model[\"']?[[:space:]]*:" "$HERMES_HOME/config.yaml"; then
+         echo "openrig-hermes-launch: $HERMES_HOME/config.yaml may already name a model; leaving it, not $OPENRIG_MODEL" >&2
        else
          printf '\nmodel: "%s"\n' "$OPENRIG_MODEL" >> "$HERMES_HOME/config.yaml"
        fi ;;
