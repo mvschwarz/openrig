@@ -58,6 +58,9 @@ export interface ClaudeSeatRelaunch {
   setTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): void;
   /** A snapshot taken now, and whether restoring this seat from it resumes its conversation. */
   snapshot(rigId: string, nodeId: string): { snapshotId: string; resumes: true; conversation: string | null } | { snapshotId: string; resumes: false; why: string };
+  /** For a stopped seat: the snapshot its next `rig launch` selects, read without taking a new one, and whether launching
+   *  this seat from it resumes its conversation. */
+  nextLaunch(rigId: string, nodeId: string): { snapshotId: string; resumes: true; conversation: string | null } | { snapshotId: string | null; resumes: false; why: string };
   /** Runs `fn` holding the seat's lifecycle lease (the one its stop, launch and restore take), so no other one runs on the
    *  seat in between. A wait for it ends with the seat as it is then. */
   exclusive<T>(nodeId: string, fn: () => Promise<T>): Promise<T>;

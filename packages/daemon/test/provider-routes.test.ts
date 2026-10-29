@@ -4,6 +4,7 @@ import { providerRoutes } from "../src/routes/provider.js";
 import type { ClaudeSeatRelaunch, ProviderService } from "../src/domain/provider/provider-service.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import type { FourBlockReadModel } from "../src/domain/provider/provider-types.js";
 
@@ -205,6 +206,45 @@ describe("provider routes", () => {
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
+    } finally { db.close(); }
+  });
+
+  it("a stopped Claude seat's next launch is read from the snapshot `rig launch` selects, and no snapshot is taken", async () => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code" });
+      registry.updateStatus(registry.registerSession(node.id, "dev-a@fixture-rig").id, "exited");
+      const capture = { captureSnapshot: vi.fn() };
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, snapshotRepo: new SnapshotRepository(db), snapshotCapture: capture,
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ running: false });
+      expect(lent.nextLaunch(rig.id, node.id)).toMatchObject({ snapshotId: null, resumes: false, why: expect.stringContaining("has no usable snapshot") });
+      const saved = (resumeToken: string | null) => JSON.stringify({
+        rig: { id: rig.id, name: "fixture-rig", createdAt: "2026-10-29", updatedAt: "2026-10-29" },
+        nodes: [{ id: node.id, logicalId: "dev.a", runtime: "claude-code" }], edges: [], checkpoints: {},
+        sessions: [{ id: "saved", nodeId: node.id, sessionName: "dev-a@fixture-rig", status: "running", createdAt: "2026-10-29T10:00:00.000Z",
+          lastSeenAt: null, resumeType: resumeToken ? "claude_id" : "none", resumeToken, restorePolicy: "resume_if_possible", origin: "launched",
+          startupStatus: "ready", startupCompletedAt: "2026-10-29T10:00:00.000Z" }],
+        activeSessionIdByNode: { [node.id]: "saved" }, activeOccupantsByNode: { [node.id]: { kind: "resolved", sessionId: "saved" } },
+      });
+      const insert = db.prepare("INSERT INTO snapshots(id, rig_id, kind, data, created_at) VALUES (?, ?, 'auto-pre-down', ?, ?)");
+      insert.run("snap-a", rig.id, saved("conv-9"), "2026-10-29 10:00:00");
+      expect(lent.nextLaunch(rig.id, node.id)).toEqual({ snapshotId: "snap-a", resumes: true, conversation: "conv-9" });
+      // A later snapshot that saved the seat without its conversation is what the launch would use, so it doesn't resume.
+      insert.run("snap-b", rig.id, saved(null), "2026-10-29 10:05:00");
+      expect(lent.nextLaunch(rig.id, node.id)).toMatchObject({ snapshotId: "snap-b", resumes: false, why: "has no resume token for this seat" });
+      expect(capture.captureSnapshot).not.toHaveBeenCalled();
     } finally { db.close(); }
   });
 

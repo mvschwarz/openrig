@@ -8,6 +8,7 @@ import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
 import type { ClaudeSeatRelaunch, ProviderService, SeatRestart } from "../domain/provider/provider-service.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
+import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
@@ -75,6 +76,17 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       if (outcome.kind !== "resume") return { snapshotId: snapshot.id, resumes: false, why: outcome.why };
       const occupant = resolveActiveSnapshotSession(snapshot.data, nodeId);
       return { snapshotId: snapshot.id, resumes: true, conversation: occupant.kind === "resolved" ? occupant.session.resumeToken ?? null : null };
+    },
+    nextLaunch: (rigId, nodeId) => {
+      const snapshots = c.get("snapshotRepo" as never) as SnapshotRepository | undefined;
+      if (!snapshots) return { snapshotId: null, resumes: false, why: "can't be read: this daemon has no snapshot store" };
+      // The selection a plain `rig launch` makes (restore-orchestrator launchSingleNode).
+      const selected = snapshots.selectRestoreUsable(rigId);
+      if (!selected.ok) return { snapshotId: null, resumes: false, why: `has no usable snapshot (${selected.message})` };
+      const outcome = snapshotLaunchOutcome(selected.snapshot.data, nodeId, "claude-code", "claude-code");
+      if (outcome.kind !== "resume") return { snapshotId: selected.snapshot.id, resumes: false, why: outcome.why };
+      const occupant = resolveActiveSnapshotSession(selected.snapshot.data, nodeId);
+      return { snapshotId: selected.snapshot.id, resumes: true, conversation: occupant.kind === "resolved" ? occupant.session.resumeToken ?? null : null };
     },
     exclusive: (nodeId, fn) => {
       const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;

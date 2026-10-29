@@ -12,7 +12,7 @@ type ClaudeCheck =
   | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null };
 
 /** A Claude seat's checks, before anything changes: the reference it would get, that its file would give Claude the token,
- *  that the seat is running, and that nothing Claude Code ranks above the token is set. A move back to the stored login also
+ *  and that nothing Claude Code ranks above the token is set. A move back to the stored login also
  *  finds a `CLAUDE_CODE_OAUTH_TOKEN` the seat would still receive, and says it's what the seat will use. Managed settings (a
  *  file, MDM or the server) can't be read; the relaunched seat's /status covers them. */
 export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: ClaudeSeat, precedence: ClaudeCredentialPrecedence | undefined): Promise<ClaudeCheck> {
@@ -33,9 +33,6 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
     const fileProblem = claudeSeatTokenFileProblem(ref);
     if (fileProblem) return refuse("token_file_unusable", `${fileProblem}, so Claude would start without it. Nothing changed.`);
   }
-  if (!seat.running) {
-    return refuse("seat_not_running", `${input.seat} isn't running, so there's no conversation to resume. Launch it first: rig launch ${seat.rigName} ${seat.logicalId}.`);
-  }
   const found = await precedence(seat.nodeId, ref?.kind === "api-key" ? { apiKey: true } : ref ? {} : { storedLogin: true });
   const instead = found.instead?.length
     ? `the CLAUDE_CODE_OAUTH_TOKEN from ${found.instead.map((c) => `${c.source} (${c.remedy})`).join("; ")}` : null;
@@ -52,7 +49,8 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
  *  now that resumes the seat, its token reference set, then only that seat relaunched from that snapshot in its pane (its
  *  process ended in place, the pane and its scrollback kept), which reruns `claude --resume <its conversation>` with the
  *  seat's token step. Only a refusal before the seat's process was touched reads as unchanged; anything after it that
- *  doesn't report a resumed conversation reads `unknown`, with the snapshot's recovery, and is never retried. */
+ *  doesn't report a resumed conversation reads `unknown`, with the snapshot's recovery, and is never retried. A stopped seat
+ *  isn't relaunched: its reference is set for its next launch, only when that launch resumes its conversation. */
 export async function switchClaudeSeat(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaunch, seat: ClaudeSeat,
   precedence: ClaudeCredentialPrecedence | undefined): Promise<ProviderSwitchResult> {
   let touched = false;
@@ -87,6 +85,30 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     return { outcome: "failed_safely", reasons: reasons as [string, ...string[]], ...(message ? { message } : {}) };
   }
   const { nodeId, rigId, rigName, logicalId } = seat;
+  const before = relaunch.tokenRef(nodeId);
+  const account = checked.ref?.label ?? STORED_LOGIN;
+  const reportFor = (conversation: string | null): SeatSwitchReport => ({ seat: input.seat, account, ...(checked.ref?.kind ? { credentialKind: checked.ref.kind } : {}),
+    ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}), conversation, loginChanged: false, peers: [],
+    // The label's characters are limited; a path can hold any but a newline, so it's quoted.
+    undo: before
+      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
+      : `rig provider switch --seat ${input.seat} --stored-login` });
+  if (!seat.running) {
+    // Nothing to relaunch: the reference is saved for the seat's next launch, but only when that launch resumes its
+    // conversation. No snapshot is taken, so the one checked is the one `rig launch` uses.
+    const next = relaunch.nextLaunch(rigId, nodeId);
+    if (!next.resumes) {
+      return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
+        message: `${input.seat} isn't running, and ${next.snapshotId ? `snapshot ${next.snapshotId}, which its next launch uses,` : "its next launch"} ${next.why}, so it wouldn't resume its conversation. Nothing changed.` };
+    }
+    relaunch.setTokenRef(nodeId, checked.ref);
+    const report = reportFor(next.conversation);
+    report.loginChanged = true;
+    const launch = `rig launch ${rigName} ${logicalId} --snapshot-id ${next.snapshotId}`;
+    report.next = `${launch} resumes conversation ${next.conversation ?? "(not recorded in the snapshot)"} with it. Check its /status after a turn with a tool call.`;
+    return { outcome: "succeeded", seat: report,
+      message: `${input.seat} isn't running, so nothing was relaunched. Its ${checked.ref ? `token reference is now "${account}"` : "token reference was removed, so it uses its config dir's stored login"}, for its next launch: ${launch}.` };
+  }
   if (!seat.pane) {
     return { outcome: "failed_safely", reasons: ["no_bound_pane"], message: `${input.seat} has no bound tmux pane to relaunch it in. Nothing changed.` };
   }
@@ -95,14 +117,7 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
       message: `Snapshot ${snapshot.snapshotId} ${snapshot.why}, so relaunching ${input.seat} wouldn't resume its conversation. Nothing changed.` };
   }
-  const before = relaunch.tokenRef(nodeId);
-  const account = checked.ref?.label ?? STORED_LOGIN;
-  const report: SeatSwitchReport = { seat: input.seat, account, ...(checked.ref?.kind ? { credentialKind: checked.ref.kind } : {}), ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}),
-    conversation: snapshot.conversation, loginChanged: false, peers: [],
-    // The label's characters are limited; a path can hold any but a newline, so it's quoted.
-    undo: before
-      ? `rig provider switch --seat ${input.seat} --to-account ${before.label} ${before.kind === "api-key" ? "--api-key-file" : "--token-file"} ${shellQuote(before.tokenFile)}`
-      : `rig provider switch --seat ${input.seat} --stored-login` };
+  const report = reportFor(snapshot.conversation);
   touching();
   relaunch.setTokenRef(nodeId, checked.ref);
   let relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>;

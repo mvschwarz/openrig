@@ -635,8 +635,11 @@ Use `env:` for settings only. Credentials belong in the provider's own login or 
 
 ### Switching credentials while keeping the conversation
 
-`rig provider switch` resumes a running seat in its existing home and pane. For Claude Code,
-select an API-key file, a subscription-token file, or the home's stored login:
+`rig provider switch` resumes a running seat in its existing home and pane. A stopped Claude Code
+seat isn't relaunched: the switch saves the new reference for its next launch, but only when the
+snapshot that launch would use resumes its conversation. It then prints the
+`rig launch <rig> <seat> --snapshot-id <id>` that does. Otherwise it refuses and changes nothing.
+For Claude Code, select an API-key file, a subscription-token file, or the home's stored login:
 
 ```sh
 rig provider precheck --seat dev-a@my-rig --to-account api-budget --api-key-file /secure/claude-api-key

@@ -35,6 +35,7 @@ const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) =
 function harness(opts: {
   runtime?: string; running?: boolean; pane?: string | null; ref?: ClaudeSeatTokenRef | null; precedence?: CredentialPrecedence;
   snapshot?: { resumes: true; conversation: string | null } | { resumes: false; why: string };
+  nextLaunch?: ReturnType<ClaudeSeatRelaunch["nextLaunch"]>;
   relaunch?: Relaunched | (() => Promise<Relaunched>);
   exclusive?: (fn: () => Promise<unknown>) => Promise<unknown>;
 } = {}) {
@@ -47,6 +48,7 @@ function harness(opts: {
     tokenRef: () => ref,
     setTokenRef: (_nodeId, next) => { calls.push(`setTokenRef ${next ? next.label : "null"}`); ref = next; },
     snapshot: (rigId) => { calls.push(`snapshot ${rigId}`); return { snapshotId: "snap-1", ...(opts.snapshot ?? { resumes: true as const, conversation: "conv-1" }) }; },
+    nextLaunch: (rigId) => { calls.push(`next launch ${rigId}`); return opts.nextLaunch ?? { snapshotId: "snap-0", resumes: true, conversation: "conv-1" }; },
     // The seat's lifecycle lease: one holder at a time, in arrival order.
     exclusive: <T>(nodeId: string, fn: () => Promise<T>): Promise<T> => {
       calls.push(`exclusive ${nodeId}`);
@@ -190,10 +192,33 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(r.message).not.toContain("on its config dir's stored login");
   });
 
-  it("a stopped seat isn't relaunched: it says to launch it first, and nothing changes", async () => {
-    const h = harness({ running: false });
+  it("a stopped seat gets the new token file for the launch that resumes its conversation: nothing is relaunched or captured", async () => {
+    const h = harness({ running: false, pane: null, ref: { label: "retired", tokenFile: "/tokens/retired" } });
+    const file = tokenFile();
+    const r = await h.svc.switchAccount(to("work", file), h.seatRestart, h.claudeSeat);
+    expect(r).toMatchObject({ outcome: "succeeded", seat: { account: "work", tokenFile: file, conversation: "conv-1", loginChanged: true,
+      undo: "rig provider switch --seat dev-a@rig --to-account retired --token-file '/tokens/retired'",
+      next: expect.stringContaining("rig launch rig dev.a --snapshot-id snap-0 resumes conversation conv-1 with it") } });
+    expect(r.message).toContain("dev-a@rig isn't running, so nothing was relaunched");
+    // No snapshot is taken, and the checked one is the one the launch uses.
+    expect(h.calls).toEqual(["exclusive node-a", "precedence node-a", "next launch rig-1", "setTokenRef work"]);
+    expect(h.ref()).toEqual({ label: "work", tokenFile: file });
+  });
+
+  it("a stopped seat whose next launch wouldn't resume its conversation refuses, and keeps its reference", async () => {
+    const retired = { label: "retired", tokenFile: "/tokens/retired" };
+    const h = harness({ running: false, ref: retired, nextLaunch: { snapshotId: "snap-0", resumes: false, why: "has no resume token for this seat" } });
     const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
-    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["seat_not_running"] });
+    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["conversation_not_resumable"] });
+    expect(r.message).toBe("dev-a@rig isn't running, and snapshot snap-0, which its next launch uses, has no resume token for this seat, so it wouldn't resume its conversation. Nothing changed.");
+    expect(h.calls).toEqual(["exclusive node-a", "precedence node-a", "next launch rig-1"]);
+    expect(h.ref()).toEqual(retired);
+  });
+
+  it("a stopped seat's token file that wouldn't apply still stops it before anything changes", async () => {
+    const h = harness({ running: false });
+    const r = await h.svc.switchAccount(to("work", path.join(tmpdir(), "no-such-dir-claude-switch", "work.token")), h.seatRestart, h.claudeSeat);
+    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["token_file_unusable"] });
     expect(h.calls).toEqual(["exclusive node-a"]);
   });
 
