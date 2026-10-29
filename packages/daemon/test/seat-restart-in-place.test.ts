@@ -398,6 +398,18 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
+  it("recognizes a MainThread-named npm launcher only when its OS executable is Node", async () => {
+    for (const exe of ["/usr/local/bin/node", "/usr/bin/python3", "", null]) {
+      const w = world({ between: "node /usr/local/bin/codex", betweenName: "MainThread",
+        facts: { 150: exe === null ? null : facts({ exe }) } });
+      const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+      expect(result).toMatchObject(exe?.endsWith("/node")
+        ? { ok: true, paneShape: "shell_backed" }
+        : { ok: false, code: "pane_shape_unknown" });
+      expect(w.calls).toEqual([]);
+    }
+  });
+
   it("refuses when the running Codex is on another conversation, or none can be proven", async () => {
     const other = world({ runningArgs: "-m gpt-5.5 -s workspace-write resume 019a-other" });
     expect(await other.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "resume_binding_unverified" });

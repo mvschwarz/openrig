@@ -443,8 +443,23 @@ export class CodexInPlaceRestart {
         : `not established: ${evidence.reason ?? "no_log_row"}`;
     }
 
+    // Resolve ambiguous launcher names before classifying the observed process chain.
+    const byPid = new Map(rows.map(row => [row.pid, row]));
+    const launcherExecutables = new Map<number, string | null>();
+    const visited = new Set<number>([process.pid]);
+    let ancestor = process;
+    while (ancestor.pid !== panePid) {
+      const parent = byPid.get(ancestor.ppid);
+      if (!parent || visited.has(parent.pid)) break;
+      visited.add(parent.pid);
+      if (executableBase(parent) === "MainThread") {
+        launcherExecutables.set(parent.pid, (await this.io.readProcess(parent.pid))?.exe ?? null);
+      }
+      ancestor = parent;
+    }
+
     // Pane shape: the pane's root is Codex itself, or a shell whose child chain is Codex.
-    const chain = codexChain(rows, process, panePid);
+    const chain = codexChain(rows, process, panePid, launcherExecutables);
     const top = chain.at(-1)!;
     const root = rows.find((row) => row.pid === panePid);
     let paneShape: PaneShape;
@@ -851,7 +866,8 @@ function isStagedLaunchScript(row: NativeProcessRow): boolean {
 }
 
 /** The Codex process and its Codex launcher ancestors, deepest first, up to the pane root. */
-function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid: number): NativeProcessRow[] {
+function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid: number,
+  launcherExecutables: ReadonlyMap<number, string | null>): NativeProcessRow[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const chain = [deepest];
   let current = deepest;
@@ -860,7 +876,10 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     if (!parent) break;
     const name = executableBase(parent);
     // A Codex launcher above the native binary: codex itself, or node running Codex's launcher script.
-    const launcher = /^codex/i.test(name) || (name === "node" && processArgv(parent.command).some((arg) => /codex/i.test(arg)));
+    // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
+    const node = name === "node" || (name === "MainThread"
+      && nodePath.basename(launcherExecutables.get(parent.pid) ?? "") === "node");
+    const launcher = /^codex/i.test(name) || (node && processArgv(parent.command).some((arg) => /codex/i.test(arg)));
     if (!launcher) break;
     chain.push(parent);
     current = parent;
