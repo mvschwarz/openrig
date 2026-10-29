@@ -2155,3 +2155,24 @@ pass. The broader ACP check remains 21/22 with EPERM in detached-fixture cleanup
 Waiting for fixture PID disappearance and bounded deletion retries did not
 resolve that failure; those speculative cleanup changes were withdrawn. Its
 cause remains unresolved rather than being labeled a confirmed exit race.
+
+## Native compaction packet consumers (2026-10-30)
+
+The shipped hook's Windows output directory had already moved to the native
+temporary directory, but daemon managed-read grants still defaulted to /tmp,
+and fallback restore prompts always named /tmp even with an explicit output
+root. This left the packet producer and its consumers inconsistent.
+
+The grant builder and both fallback prompt variants now share output-root
+selection matching the hook: explicit OPENRIG_COMPACTION_OUT_ROOT, otherwise
+native tmpdir on Windows and the existing /tmp default on POSIX. Paths resolve
+before use. Grants remain constrained to the selected native conversation UUID
+and existing packet filenames; an unknown UUID still receives no packet grant.
+
+Both default/override regressions failed before repair and now pass, including
+the prompt with and without a session-id hint. These checks inspect generated
+settings and prompts without reading actual packets or launching a provider.
+Daemon TypeScript checking passes. The adjacent enforcer run has 63 cases,
+57 passed and 6 failed; it is not green acceptance. The failures include native
+path expectations and manual-preparation transport outcomes still requiring
+separate diagnosis. The detached ACP cleanup EPERM also remains unresolved.
