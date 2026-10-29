@@ -527,3 +527,27 @@ argv out of public diagnostics. Runtime state stays outside the source checkout.
 
 Prior WSL evidence (a separate deployment, not native acceptance):
 https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546
+
+### Native inspection follow-up, 2026-10-29
+
+The setup/doctor capture probe now selects `NUL` on Windows instead of
+`/dev/null`. A real pinned psmux 3.4.0 fixture created a unique namespace,
+captured its pane, stopped that namespace and confirmed it no longer listed
+sessions. The focused suite passed four tests with one POSIX-only skip.
+Upgrade inspection also executes Windows npm command shims; its native fixture
+preserves probe arguments, Unicode output and a failing command's exit status.
+History search now reports a directory-listing failure rather than treating it
+as an empty transcript set; the four history suites passed 19 tests.
+Workspace lint/typecheck passed after these changes. These checks do not establish
+full-suite acceptance or activation of this revision in the existing deployment.
+
+The initial private-config environment experiment remains incomplete. In a
+verified warm-standby claim with psmux 3.4.0, session/global metadata no longer
+contained the synthetic value, but a child of the already-running adopted shell
+still inherited it. Explicitly respawning that fixture's shell removed the value.
+This is a counterexample to using cleared metadata as isolation proof, not a
+production recovery mechanism: automatically respawning an arbitrary live pane
+would be unsafe. Initial `new-session -e` and `respawn-pane -e` values still use
+argv in production. The separate dynamic-update fixture passed only the tested
+ordering where standby creation preceded the update; later standby replacement
+and every timing are not proven isolated.
