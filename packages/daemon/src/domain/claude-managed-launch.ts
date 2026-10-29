@@ -152,7 +152,7 @@ export class ClaudeManagedLaunch {
         if (found.conflicts.length || found.notChecked) throw new Error("Claude credential settings could override the selected API key or could not be checked; no Claude process started.");
       }
     }
-    return { ref, step: claudeSeatTokenStep(ref, shellQuote, { ...opts, required }), warnings: Object.freeze(problem ? [required ? "The selected account token is unusable; no agent will start."
+    return { ref, step: claudeSeatTokenStep(ref, shellQuote, { ...opts, required, platform: this.platform }), warnings: Object.freeze(problem ? [required ? "The selected account token is unusable; no agent will start."
       : this.tokenNotApplied(nodeId, ref, problem)] : []) };
   }
 
@@ -336,18 +336,19 @@ export class ClaudeManagedLaunch {
     const accountHome = target.accountHome !== undefined ? target.accountHome : seatAccountHome(this.db, target.nodeId, "claude-code");
     if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
     const credentialKeys: readonly string[] = accountHome ? ACCOUNT_HOME_PROVIDER_ENV : [];
+    const isCredentialKey = (key: string) => credentialKeys.includes(this.platform === "win32" ? key.toUpperCase() : key);
     const context = this.context(cwd, target.nodeId, accountHome, target.executable);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-      && !MANAGED_LAUNCH_KEYS.includes(key) && !credentialKeys.includes(key));
+      && !MANAGED_LAUNCH_KEYS.includes(key) && !isCredentialKey(key));
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
       if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
       if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
         || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key) && !credentialKeys.includes(key))) !== JSON.stringify(inherited)) {
+          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key) && !isCredentialKey(key))) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }
     };
@@ -361,7 +362,7 @@ export class ClaudeManagedLaunch {
     const identity: Record<string, string> = { OPENRIG_NODE_ID: target.nodeId, OPENRIG_RUNTIME: "claude-code",
       ...(before.session ? { OPENRIG_SESSION_NAME: before.session } : {}),
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
-    const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !credentialKeys.includes(key));
+    const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !isCredentialKey(key));
     const publicEnv = publicSeatEnvironment(this.sessionEnv);
     const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
     const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `export ${key}="\${${key}-}"`);
@@ -409,8 +410,9 @@ export class ClaudeManagedLaunch {
       if (this.platform === "win32") {
         const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
           .filter(key => !(key in identity) && !(key in publicEnv));
-        const terminalNames = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"];
-        return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...launchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])]);
+        const terminalNames = [...PANE_TERMINAL_KEYS, "EDITOR", "VISUAL"];
+        const allowedLaunchEnv = Object.fromEntries(Object.entries(launchEnv).filter(([key]) => !isCredentialKey(key)));
+        return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...allowedLaunchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])], token?.step);
       }
       const launch = Object.entries(launchEnv).filter(([key]) => !credentialKeys.includes(key)).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
       const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",

@@ -41,6 +41,43 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("does not reintroduce credentials through launch overrides for an isolated account", async () => {
+    const f = fixture();
+    fs.copyFileSync(process.execPath, f.executable);
+    f.db.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT");
+    f.db.prepare("UPDATE nodes SET account_home=? WHERE id='node'").run(f.home);
+    const receiver = path.join(f.home, "isolated-receiver.cjs");
+    fs.writeFileSync(receiver, `console.log(JSON.stringify({keyAbsent:process.env.ANTHROPIC_API_KEY===undefined,tokenAbsent:process.env.CLAUDE_CODE_OAUTH_TOKEN===undefined}));`);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const command = prepared.command([receiver], { ANTHROPIC_API_KEY: "must-not-forward", claude_code_oauth_token: "must-not-forward" });
+    expect(command).not.toContain("must-not-forward");
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+      env: { ...process.env, ANTHROPIC_API_KEY: "synthetic-key", CLAUDE_CODE_OAUTH_TOKEN: "synthetic-old" }, encoding: "utf8", windowsHide: true, timeout: 10000,
+    }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim())).toEqual({ keyAbsent: true, tokenAbsent: true });
+  });
+
+  it.runIf(process.platform === "win32")("carries the stored seat token into the managed child without putting its value in the command", async () => {
+    const f = fixture();
+    fs.copyFileSync(process.execPath, f.executable);
+    const tokenFile = path.join(f.home, "subscription token.txt");
+    fs.writeFileSync(tokenFile, "synthetic-selected-token\r\n");
+    f.db.exec("ALTER TABLE nodes ADD COLUMN claude_token_ref TEXT");
+    f.db.prepare("UPDATE nodes SET claude_token_ref=? WHERE id='node'").run(JSON.stringify({ label: "test", tokenFile }));
+    const receiver = path.join(f.home, "token-receiver.cjs");
+    fs.writeFileSync(receiver, `console.log(JSON.stringify({selected:process.env.CLAUDE_CODE_OAUTH_TOKEN==='synthetic-selected-token',keyAbsent:process.env.ANTHROPIC_API_KEY===undefined}));`);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const command = prepared.command([receiver]);
+    expect(command).not.toContain("synthetic-selected-token");
+    expect(command).not.toContain("/bin/cat");
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+      env: { ...process.env, ANTHROPIC_API_KEY: "synthetic-key" }, encoding: "utf8", windowsHide: true, timeout: 10000,
+    }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim())).toEqual({ selected: true, keyAbsent: true });
+  });
+
   it.runIf(process.platform === "win32")("forwards rig, member and one-off env through the managed child without exposing pane-only variables", async () => {
     const f = fixture(undefined, { rigEnv: { RIG_FLAG: "declared-rig", HOME: "wrong-home", DECLARED_UNSET: "not-in-pane" }, memberEnv: { MEMBER_FLAG: "declared-member" }, sessionMarker: "ONCE_FLAG", corePlugin: true });
     fs.copyFileSync(process.execPath, f.executable);
@@ -91,8 +128,8 @@ describe("managed Windows launch", () => {
   it.runIf(process.platform === "win32")("executes the native child with exact argv and isolated environment without changing its parent", async () => {
     const f = fixture();
     const argv = ["", "中文 space", 'quote"value', "trailing\\", "apostrophe's", "$literal; %PATH%"];
-    const source = "console.log(JSON.stringify({args:process.argv.slice(1),cwd:process.cwd(),home:process.env.HOME,auth:process.env.ANTHROPIC_API_KEY,unapproved:process.env.UNAPPROVED,parent:process.env.PARENT_ONLY}))";
-    const command = renderWindowsManagedLaunch(process.execPath, ["-e", source, ...argv], f.cwd, { HOME: f.home, SYSTEMROOT: process.env.SystemRoot!, PATH: path.dirname(process.execPath) }, ["ANTHROPIC_API_KEY"]);
+    const source = "console.log(JSON.stringify({args:process.argv.slice(1),cwd:process.cwd(),home:process.env.HOME,auth:process.env.ANTHROPIC_API_KEY,empty:process.env.DECLARED_EMPTY,unapproved:process.env.UNAPPROVED,parent:process.env.PARENT_ONLY}))";
+    const command = renderWindowsManagedLaunch(process.execPath, ["-e", source, ...argv], f.cwd, { HOME: f.home, SYSTEMROOT: process.env.SystemRoot!, PATH: path.dirname(process.execPath) }, ["ANTHROPIC_API_KEY", "DECLARED_EMPTY"]);
     expect(command).not.toContain("synthetic-only-never-in-script");
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     const script = "[Console]::Error.WriteLine('fixture: PowerShell ready'); " + command
@@ -102,11 +139,11 @@ describe("managed Windows launch", () => {
         encoding: "utf8", timeout: 30000, windowsHide: true,
         // PowerShell is the parent pane, not the isolated runtime. Keep its OS
         // profile/environment; renderWindowsManagedLaunch isolates only its child.
-        env: { ...process.env, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY!, UNAPPROVED: "must-not-forward", PARENT_ONLY: "parent-preserved" },
+        env: { ...process.env, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY!, DECLARED_EMPTY: "", UNAPPROVED: "must-not-forward", PARENT_ONLY: "parent-preserved" },
       }, (error, out, stderr) => error ? reject(new Error(`Native fixture failed: killed=${error.killed}, signal=${error.signal}, code=${error.code}; stderr=${stderr}; stdout=${out}`)) : resolve(out));
     });
     const [child, parent] = output.trim().split(/\r?\n/);
-    expect(JSON.parse(child!)).toEqual({ args: argv, cwd: f.cwd, home: f.home, auth: "synthetic-only-never-in-script" });
+    expect(JSON.parse(child!)).toEqual({ args: argv, cwd: f.cwd, home: f.home, auth: "synthetic-only-never-in-script", empty: "" });
     expect(parent).toBe("parent-preserved");
   }, 40000);
 });

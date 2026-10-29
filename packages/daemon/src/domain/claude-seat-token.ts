@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { OUTRANKING_TOKEN_ENV, type CredentialConflict } from "./claude-credential-precedence.js";
+import { powershellQuote } from "../adapters/windows-launch.js";
 
 // Read at launch through a private pipe, with fixed errors and a bounded non-blocking fd read.
 const API_KEY_READER = `const fs=require('node:fs'); let fd; const data=Buffer.alloc(8193); try {
@@ -93,7 +94,18 @@ export function claudeSeatTokenFallbackNotice(ref: ClaudeSeatTokenRef, problem: 
  *  exported. API-key references instead fail closed and scrub other auth/routing variables. A pane shell with tracing on
  *  (set -x) would print a subscription token as it's read and assigned, so tracing is suspended for those and restored
  *  afterwards. */
-export function claudeSeatTokenStep(ref: ClaudeSeatTokenRef, quote: (value: string) => string, opts: { removeOnFailure?: boolean; required?: boolean } = {}): string {
+export function claudeSeatTokenStep(ref: ClaudeSeatTokenRef, quote: (value: string) => string, opts: { removeOnFailure?: boolean; required?: boolean; platform?: NodeJS.Platform } = {}): string {
+  if (opts.platform === "win32") {
+    if (ref.kind === "api-key") throw new Error("Native API-key file privacy verification is unavailable; no Claude process started.");
+    const notice = opts.required ? "OpenRig: the selected account's token could not be read; no agent started."
+      : `OpenRig: ${claudeSeatTokenFallbackNotice(ref, `${ref.tokenFile} couldn't be read when Claude started`)}`;
+    return `try {\n$openrigToken=$null\ntry { $openrigToken=[IO.File]::ReadAllText(${powershellQuote(ref.tokenFile)}).TrimEnd([char[]]"\u0060r\u0060n") } catch {}\n`
+      + `if (![String]::IsNullOrEmpty($openrigToken)) {\n${OUTRANKING_TOKEN_ENV.map(name => `$openrigStart.EnvironmentVariables.Remove(${powershellQuote(name)})`).join("\n")}\n`
+      + `$openrigStart.EnvironmentVariables['CLAUDE_CODE_OAUTH_TOKEN']=$openrigToken\n} else {\n`
+      + `${opts.removeOnFailure || opts.required ? "$openrigStart.EnvironmentVariables.Remove('CLAUDE_CODE_OAUTH_TOKEN')\n" : ""}`
+      + `[Console]::Error.WriteLine(${powershellQuote(notice)})\n${opts.required ? `throw ${powershellQuote(notice)}\n` : ""}`
+      + `}\n} finally { $openrigToken=$null }`;
+  }
   if (ref.kind === "api-key") {
     // A missing API key must never silently fall back to a subscription or another account.
     const file = quote(ref.tokenFile);

@@ -135,8 +135,8 @@ export class SeatLaunchEnvironment {
     /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
     codexHome?: string;
     accountHome?: string | null;
-    /** A Claude seat's own token step (claude-seat-token.ts), run before Claude in the staged subshell. A POSIX pane only:
-     *  a caller whose command comes back without it knows the token wasn't applied. */
+    /** A Claude seat's own platform-specific token step (claude-seat-token.ts), run before Claude in the staged pane.
+     *  A caller whose command comes back without it knows the token wasn't applied. */
     claudeTokenStep?: string } = {}): Promise<string> {
     const accountHome = target.accountHome !== undefined ? target.accountHome : (target.nodeId && target.runtime ? this.selectedAccountHome?.(target.nodeId, target.runtime) : undefined);
     const clearing = target.accountHome === null;
@@ -153,14 +153,14 @@ export class SeatLaunchEnvironment {
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
-      if (shell === "nu" || shell === "nu.exe" || ((accountHome || clearing) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
+      if (shell === "nu" || shell === "nu.exe" || (this.launchPlatform !== "win32" && (accountHome || clearing) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
       if (this.launchPlatform !== "win32" && target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
         throw new Error("Unsupported Pi pane shell");
       }
       const identity: Record<string, string | undefined> = {};
       for (const key of ["OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION"]) {
-        identity[key] = await this.tmux.getSessionEnv(session, key);
+        identity[key] = (await this.tmux.getSessionEnv(session, key)) ?? undefined;
       }
       if (!identity.OPENRIG_NODE_ID || !identity.OPENRIG_SESSION_NAME) {
         throw new Error("Seat launch requires the session's OpenRig identity.");
@@ -196,7 +196,11 @@ export class SeatLaunchEnvironment {
           }
           command = words.map(shellQuote).join(" ");
         }
-        return renderWindowsLaunch(command, env);
+        if (clearing && homeVar && configuredHome !== undefined) env[homeVar] = configuredHome;
+        return renderWindowsLaunch(command, env, {
+          remove: [...(accountHome ? ACCOUNT_HOME_PROVIDER_ENV : []), ...(clearing && homeVar ? [homeVar] : [])],
+          ...(target.claudeTokenStep ? { beforeStart: target.claudeTokenStep } : {}),
+        });
       }
       // Classic Claude may be an rc alias or function, not a PATH executable.
       // Its caller sources the staged command in a pane-shell subshell. Leading

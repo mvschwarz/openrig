@@ -7,7 +7,26 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Native capability follow-up, 2026-10-29
+## Native Claude token follow-up, 2026-10-29
+
+Windows classic and managed Claude launches now read a seat token file inside
+the staged PowerShell command, directly into the child ProcessStartInfo
+environment. The value is absent from command text and never assigned to the
+pane's environment. A required unreadable/empty token stops before child start;
+optional failure retains the existing warning and removal policy. Isolated
+account selection clears inherited provider credentials, and managed launch
+overrides cannot restore them through Windows case variants. Declared empty
+environment values are retained. Missing optional tmux identity fields are
+normalized from null before rendering.
+
+The four Windows launch/token suites passed 25 tests, including real child
+processes with synthetic credentials, stored-reference plumbing and unchanged
+pane values. Workspace lint/typecheck passed. A broader seat-launch regression
+selection passed 18 tests and failed seven POSIX Bash/symlink fixtures on this
+host; those failures remain recorded. This is native plumbing validation, not
+a real provider authentication, billing or conversation acceptance claim.
+
+## Earlier native capability follow-up, 2026-10-29
 
 Based on main `0fcb7040e1abb45061b134de2738f3e7f40af92c`, code revision
 `a7f4823d33fdcfb2ce0bde613befe5c86a1e0e78` adds native listener PID queries,
@@ -34,7 +53,7 @@ that owned fixture was manually ended, and the deadline path was then fixed and
 retested. The failed run also includes Bash/npm-shim fixtures, symlink permission
 assumptions, Windows-invalid filenames and generated-lineage drift. It is not
 reported green. General orphan cleanup after a probe root has already exited,
-remote file transfer without rsync, Claude token launch, every-provider hooks,
+remote file transfer without rsync, live provider token acceptance, every-provider hooks,
 desktop/reboot and Linux/macOS acceptance remain incomplete. The database holder
 test uses mocked HTTP confirmation, not a real competing-daemon acceptance test.
 Known-home holder records are checked; an unknown holder home stays unknown.
