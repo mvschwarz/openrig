@@ -119,7 +119,7 @@ PATH entries resolve against the seat cwd. The native fixture exercises literal
 arguments, help and usage RPC without a real provider. Together with existing
 opt-out/auth tests, 38 tests passed; seven network-reader tests passed separately.
 The existing parent-exited process-group cleanup case was excluded from that
-selection because native orphan cleanup remains unresolved. Initial regression
+selection at that revision because native orphan cleanup was unresolved. Initial regression
 attempts exposed a POSIX-only fake PATH and unintentionally reached the installed
 Codex in temporary homes; those results are not acceptance evidence. The fixture
 now uses the native PATH delimiter and an isolated recognized npm layout.
@@ -137,7 +137,7 @@ the declared npm entry using the same provider-command resolver as Codex. Reader
 environments remove case-variant seat variables, replace duplicate home/path keys,
 and set USERPROFILE alongside HOME. Explicit token probes additionally isolate
 APPDATA, LOCALAPPDATA and temporary paths. A live timed-out child tree uses native
-taskkill; a tree whose root already exited still lacks equivalent containment.
+taskkill; that revision still lacked containment after the root exited.
 Native reader/Codex/cache regressions passed 43 tests. Three selected synthetic
 token tests separately passed, including native homedir isolation and timeout.
 The full token selection still has three failing POSIX uid/symlink/path fixtures
@@ -150,6 +150,29 @@ session JSONL, keeps ANSI cleanup and whole-character excerpt truncation, and
 reports file-read failures as unknown/unreadable. Four native/history regression
 suites passed 18 tests, including actual Unicode/CRLF files and a read error.
 This follow-up has not been packaged or deployed.
+
+Background-probe containment now uses a native kill-on-close Windows Job Object.
+The PowerShell/.NET helper supplies `PROC_THREAD_ATTRIBUTE_JOB_LIST` at process
+creation, preventing the launch-to-assignment race. Only standard handles are
+inherited; target argv and its explicit Unicode environment are reconstructed
+without shell interpolation or payload files. Node/libuv's required Windows
+environment additions are retained, and helper metadata is absent from the target.
+An owning helper closes the job when the root exits, ending descendants even if
+they closed stdio. Owner Node exit or helper termination also ends the job.
+This applies to bounded runtime probes, Codex help/network/usage readers and Claude
+background commands, never to persistent seat processes.
+
+Six native/probe/reader regression suites passed 52 tests, including owner exit,
+root exit with closed-stdio descendants, pipe holders, timeout, literal argv,
+environment parity, shell builtins and survival of an unrelated process. All eight
+network-reader tests now pass, including the previously excluded orphan case.
+The installed Codex `--help` also returned supported through the Job path. Workspace
+lint/typecheck passed. Windows PowerShell/.NET startup adds measured helper cost
+(roughly 0.4 seconds on this host); an enforced policy that denies compilation or
+Job creation fails the probe. Windows 10+ and nested Job support are required;
+x86/ARM64 and real provider turns remain unverified. This is not a recovery
+mechanism for arbitrary trees launched outside the helper, and does not establish
+the cause of previous daemon exits. See [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
 
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
@@ -167,7 +190,7 @@ It exposed a real scenario timeout hang from POSIX group signalling on Windows;
 that owned fixture was manually ended, and the deadline path was then fixed and
 retested. The failed run also includes Bash/npm-shim fixtures, symlink permission
 assumptions, Windows-invalid filenames and generated-lineage drift. It is not
-reported green. General orphan cleanup after a probe root has already exited,
+reported green. General cleanup of processes launched without native containment,
 real remote SSH authentication acceptance, live provider token acceptance, every-provider hooks,
 desktop/reboot and Linux/macOS acceptance remain incomplete. The database holder
 test uses mocked HTTP confirmation, not a real competing-daemon acceptance test.

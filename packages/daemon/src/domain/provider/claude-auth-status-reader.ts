@@ -17,6 +17,7 @@ import path from "node:path";
 import type { UsageReadOutcome } from "./usage-windows.js";
 import { killWindowsChildTree } from "../windows-child-tree.js";
 import { resolveWindowsProviderCommand } from "../windows-provider-command.js";
+import { spawnWindowsJobProcess } from "../windows-job-process.js";
 
 export type ClaudeAuthFailureReason = "binary_not_found" | "auth_status_failed" | "not_logged_in" | "not_subscription_login";
 
@@ -125,7 +126,7 @@ export function runClaudeCommand(file: string, env: NodeJS.ProcessEnv, cwd: stri
       const executable = process.platform === "win32" && /\.(cmd|bat)$/i.test(file)
         ? resolveWindowsProviderCommand("claude", { ...env, PATH: [path.dirname(file), env.PATH ?? env.Path ?? ""].join(path.delimiter) }, cwd)
         : { command: file, prefix: [] };
-      child = spawn(executable.command, [...executable.prefix, ...args], { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
+      child = (process.platform === "win32" ? spawnWindowsJobProcess : spawn)(executable.command, [...executable.prefix, ...args], { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
     } catch (error) {
       resolve({ code: null, stdout: "", error: error as NodeJS.ErrnoException, timedOut: false });
       return;

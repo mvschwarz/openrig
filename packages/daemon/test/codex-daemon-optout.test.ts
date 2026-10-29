@@ -12,6 +12,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 // These tests replace the executor; native executable discovery is covered by
 // windows-codex-command.test.ts rather than the host's real installations.
 vi.mock("../src/domain/windows-provider-command.js", () => ({ resolveCodexCommand: () => ({ command: "codex", prefix: [] }) }));
+vi.mock("../src/domain/windows-job-process.js", () => ({ prepareWindowsJobProcess: (file: string, args: string[], options: object) => ({ file, args, options, dispose: () => {} }) }));
 
 // #69 — Codex versions using a shared app-server daemon can run tool shells there, so a seat's tools
 // can inherit another seat's OpenRig identity. Supported binaries must launch with

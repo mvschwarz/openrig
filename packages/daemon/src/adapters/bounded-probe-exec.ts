@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { stopGroup } from "../domain/codex-network-default.js";
 import { killWindowsChildTreeSync } from "../domain/windows-child-tree.js";
+import { spawnWindowsJobProcess } from "../domain/windows-job-process.js";
+import { join } from "node:path";
 import type { ExecFn } from "./tmux.js";
 
 /** How long a runtime's `--version` or `--help` probe may take before it is ended and recorded as an error.
@@ -86,13 +88,13 @@ export class ProbeStoppedError extends Error {
  * one before it listens). Unlike execCommand: stdin is closed (a probe never needs input), the command runs in
  * its own process group, and after `timeoutMs` that whole group is ended (TERM, then KILL, then a bounded wait
  * for the reap; the Codex readers' stopGroup) and the promise rejects with ProbeTimeoutError. Where a group
- * can't be signalled (Windows), native taskkill ends the still-running probe and its tree. Windows cannot
- * recover a tree by an already-exited root PID; such orphan cleanup remains a separate limitation.
+ * can't be signalled (Windows), the probe starts atomically inside a kill-on-close native Job, so its
+ * descendants are ended even when its root exits first. Native taskkill handles a still-live helper.
  * Otherwise it answers when the probe exits: what it wrote (after a short drain) on exit 0, or a rejection like
  * execCommand's on any other exit. Only if that 200 ms drain times out (the output pipes are still held open, by
  * a descendant) is the group ended then, so that descendant can't turn a finished probe into a timeout; a healthy
- * probe whose pipes end within the drain never reaches stopGroup. A descendant that closed its stdio is left
- * running, as execCommand leaves it.
+ * probe whose pipes end within the drain never reaches stopGroup. On POSIX a descendant that closed its stdio
+ * is left running, as execCommand leaves it; the Windows Job ends all descendants of this temporary probe.
  */
 export function boundedProbeExec(
   timeoutMs = RUNTIME_PROBE_TIMEOUT_MS,
@@ -111,7 +113,10 @@ export function boundedProbeExec(
       return;
     }
     try {
-      child = spawn(cmd, { shell: true, stdio: ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd) });
+      const options = { stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd) };
+      child = process.platform === "win32"
+        ? spawnWindowsJobProcess(process.env.ComSpec ?? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"), ["/d", "/s", "/c", `"${cmd}"`], { ...options, windowsVerbatimArguments: true })
+        : spawn(cmd, { ...options, shell: true });
     } catch (err) {
       reject(err);
       return;
