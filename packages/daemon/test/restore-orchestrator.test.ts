@@ -2368,7 +2368,10 @@ describe("RestoreOrchestrator", () => {
       // A current refusal blocks; the persistent not-logged-in footer under the input box does not (#1405).
       const screen = `${gates[mode] ?? "Restored conversation"}\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`
         + (mode === "login-footer" ? "\n                                   Not logged in · Run /login" : "");
-      let launched = false, samples = 0;
+      let launched = false, samples = 0, sent = 0;
+      // In `error`, Claude reports the conversation missing; the second command sent is the fresh start, and Claude opens.
+      const freshId = "00000000-0000-4000-8000-000000000087";
+      const freshUp = () => mode === "error" && sent >= 2;
       const protectedSource = mode.startsWith("hook-") ? "hook" : mode.startsWith("operator-") ? "operator" : null;
       const protectedToken = mode.endsWith("-equal") || mode === "hook-wrong-type" ? token : "protected-other-token";
       const identitySql = "SELECT resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?";
@@ -2386,7 +2389,8 @@ describe("RestoreOrchestrator", () => {
       const listProcesses = vi.fn(async () => {
         samples++;
         const observed = mode.startsWith("join-native-loss") && joinSessionId ? rows.slice(0, 2) : rows;
-        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
+        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt,
+          ...(freshUp() && row.pid === 1236 ? { command: `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --session-id ${freshId} --name dev-owner@headerless` } : {}) }));
       });
       const tmux = {
         ...mockTmux(),
@@ -2426,10 +2430,11 @@ describe("RestoreOrchestrator", () => {
           }
           return "2.1.287";
         }),
-        capturePaneContent: vi.fn(async () => screen),
+        capturePaneContent: vi.fn(async () => freshUp() ? "Restored conversation\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)" : screen),
         listPanes: vi.fn(async () => [{ id: mode === "replaced-pane" && samples > 0 ? "%2" : "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+        sendText: vi.fn(async () => { sent++; return { ok: true as const }; }),
       } as unknown as TmuxAdapter;
-      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, sessionIdFactory: () => freshId,
         fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
       });
       const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { "claude-code": adapter } });
@@ -2471,8 +2476,12 @@ describe("RestoreOrchestrator", () => {
         if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
         else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
       } else if (mode === "error") {
-        expect(outcome.status).toBe("awaiting-decision");
-        expect(outcome.error).toContain("Original session unresumable");
+        // Claude's own report: the blank attempt is rolled back and only this seat starts fresh, saying so.
+        expect(outcome.status).toBe("fresh-primed");
+        expect(result.result.warnings).toEqual(expect.arrayContaining([
+          expect.stringContaining(`Claude reported that its saved conversation ${token} doesn't exist, so it started fresh`),
+        ]));
+        expect({ token: latest.resumeToken, startup: latest.startupStatus }).toEqual({ token: freshId, startup: "ready" });
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
@@ -2485,11 +2494,14 @@ describe("RestoreOrchestrator", () => {
         expect(tmux.killSession).not.toHaveBeenCalled();
       }
       if (mode !== "missing-token") {
-        expect(tmux.createSession).toHaveBeenCalledTimes(1);
-        if (!lostOwnership && mode !== "error") expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
-        expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
-        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
-        expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+        // `error` launches twice: the resume Claude refused, then the fresh start.
+        const launches = mode === "error" ? 2 : 1;
+        expect(tmux.createSession).toHaveBeenCalledTimes(launches);
+        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        expect(tmux.sendText).toHaveBeenCalledTimes(launches); // launch commands only, no startup replay
+        expect(tmux.sendText).toHaveBeenNthCalledWith(1, "dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
+        if (mode === "error") expect(tmux.sendText).toHaveBeenNthCalledWith(2, "dev-owner@headerless", expect.stringContaining(`--session-id ${freshId}`));
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(launches);
       }
     });
 
