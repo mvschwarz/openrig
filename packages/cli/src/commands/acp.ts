@@ -9,6 +9,7 @@ import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
+import { watchCancelRequest } from "../acp/cancel-request.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -125,6 +126,11 @@ Guide: rig context get reference/acp-agents.md`)
         if (interrupts === 1) { console.error("\n[rig acp] cancel requested; Ctrl-C again to detach without waiting"); cancel(); } else detach();
       };
       process.on("SIGINT", onInterrupt);
+      const stopCancelWatch = process.platform === "win32"
+        ? watchCancelRequest(join(runsDir(), `${runId}.cancel.json`), runFile.processStart, () => {
+          console.error("\n[rig acp] cancel requested; waiting for the agent's acknowledgement");
+          cancel();
+        }) : () => {};
       console.error(`[rig acp] run ${runId} for ${qitemId}; cancel with Ctrl-C or rig acp cancel ${runId}`);
       try {
         const outcome = await runAcpAssignment(daemonAcpQueue(client), {
@@ -138,6 +144,7 @@ Guide: rig context get reference/acp-agents.md`)
         console.error(`rig acp run: ${(error as Error).message}`);
         process.exitCode = 1;
       } finally {
+        stopCancelWatch();
         process.removeListener("SIGINT", onInterrupt);
         writeRun({ ...runFile, endedAt: new Date().toISOString() });
       }
@@ -149,7 +156,9 @@ Guide: rig context get reference/acp-agents.md`)
     .action((runId: string) => {
       const run = readRun(runId);
       if (!run || !liveConnector(run)) { console.error(`No running rig acp run ${runId}`); process.exitCode = 1; return; }
-      process.kill(run.pid, "SIGINT");
+      if (process.platform === "win32") {
+        writeFileSync(join(runsDir(), `${runId}.cancel.json`), JSON.stringify({ processStart: run.processStart }));
+      } else process.kill(run.pid, "SIGINT");
       console.log(`Cancel requested for ${runId}; its row ${run.qitemId} records what the agent acknowledges`);
     });
 
