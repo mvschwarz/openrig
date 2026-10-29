@@ -59,10 +59,11 @@ describe("retained pane liveness", () => {
     expect(getNodeInventory(db,"rig")[0]).toMatchObject({ sessionStatus: "running", startupStatus: "ready", identityVerdict: null });
   });
   it("the existing batch carries explicit pane death without losing a separator in the command", async () => {
-    const run = vi.fn(async () => "%1|4242|1|old|command\n%2|4343|0|claude\n");
+    const run = vi.fn(async () => "%1|4242|1|old|command\n%2|4343|0|claude\n%3|0|1|sh\n");
     const batch = await new TmuxAdapter(run as never).readAllPaneProcesses();
     expect(batch!.get("%1")).toEqual({ pid: 4242, command: "old|command", dead: true });
     expect(batch!.get("%2")).toEqual({ pid: 4343, command: "claude", dead: false });
+    expect(batch!.get("%3")).toEqual({ pid: null, command: "sh", dead: true });
     expect(run).toHaveBeenCalledTimes(1);
   });
 });
