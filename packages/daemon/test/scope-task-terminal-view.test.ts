@@ -178,7 +178,11 @@ describe("mission placement of colliding slice aliases", () => {
     expect(f.read(selector)).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
     expect(f.read(`slice:${alias}`)).toMatchObject({ code: "scope_ambiguous" });
   });
-  it.each([[], ["mission:release", "mission:other-mission"], ["mission:not-a-claimant"]])("retains known owners and reports an unplaceable colliding row with mission tags %j", tags => {
+  it.each([
+    { label: "no mission", tags: [] },
+    { label: "contradictory missions", tags: ["mission:release", "mission:other-mission"] },
+    { label: "non-claimant mission", tags: ["mission:not-a-claimant"] },
+  ])("retains known owners and reports an unplaceable colliding row with $label", ({ tags }) => {
     const f = fixture(); f.addSlice("other-mission", "03-build", "OTHER");
     f.add("known", "a", "pending", ["slice:OPR.3"]);
     f.add("unplaced", "b", "blocked", ["slice:03-build", ...tags]);
