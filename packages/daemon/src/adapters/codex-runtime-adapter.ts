@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
+import { tmuxAttachCommand } from "./tmux-server.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
@@ -1246,7 +1247,28 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (probe.status === "resumed") return { ready: true };
+    if (probe.code === "hook_trust_gate" && this.ownHooksNeverApproved(this.homeFor(binding))) {
+      return { ready: false, code: probe.code, reason: "Codex is waiting for hook review before the session can become interactive. "
+        + `The hooks include OpenRig's own (${CODEX_CORE_PLUGIN_KEY}), which an older install left unapproved: this seat's Codex `
+        + "config enables the plugin but records no approval for its hooks. Approve them once in the seat's pane, through Codex's "
+        + `hook review (${tmuxAttachCommand(binding.tmuxSession)}); later launches then renew that approval on their own when the plugin updates.` };
+    }
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  /** The user config enables openrig-core and no readable layer holds a choice for any of its hooks: what an install older
+   *  than the first-install grant leaves (#17). Reported only; a decline also writes no state, so nothing is granted here. */
+  private ownHooksNeverApproved(home: string | undefined): boolean {
+    const prefix = `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json:`;
+    const hasChoice = (doc: unknown): boolean => !!doc && typeof doc === "object"
+      && (Object.keys((doc as { hooks?: { state?: object } }).hooks?.state ?? {}).some((key) => key.startsWith(prefix))
+        || Object.values(doc).some(hasChoice));
+    try {
+      const layers = codexReadableConfigLayers(nodePath.dirname(this.resolveCodexConfigPath(home)), this.codexSystemConfigDir)
+        .filter((layer) => this.fs.exists(layer.path)).map((layer) => ({ ...layer, content: this.fs.readFile(layer.path) }));
+      const user = layers.find((layer) => layer.name === "user config")?.content ?? null;
+      return userLayerEnablesCorePlugin(user) && !layers.some((layer) => hasChoice(parseToml(layer.content)));
+    } catch { return false; } // An unreadable layer may hold a choice.
   }
 
   async captureForkIdentity(binding: NodeBinding, parentToken: string): Promise<{ resumeToken: string; resumeType: string } | null> {
