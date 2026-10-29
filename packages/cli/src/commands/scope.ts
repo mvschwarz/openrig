@@ -419,8 +419,8 @@ function buildSliceCreateCommand(): Command {
           const readmeOnly = Boolean(opts.readmeOnly);
           if (readmeOnly) {
             const markerBody = body.replace(
-              /^(---\n)/,
-              `---\nprogress_rail: readme-only\n`,
+              /^(---)(\r?\n)/,
+              (_match, delimiter: string, newline: string) => `${delimiter}${newline}progress_rail: readme-only${newline}`,
             );
             fs.writeFileSync(readmePath, markerBody, "utf8");
           } else {

@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseDocument } from "yaml";
 import { ScopeCliError } from "./types.js";
+import { replaceScopeFile } from "./replace-file.js";
 import { pendingCompletedSliceRefs, markSliceRegistrationsVerified } from "./slice-claims.js";
 import {
   LifecycleManifestValidationError,
@@ -150,7 +151,7 @@ export function applyMissionCompositionEdits(edits: MissionCompositionEdit[]): v
       staged.push({ edit, temporary });
     }
     for (const item of staged) {
-      fs.renameSync(item.temporary, item.edit.manifestPath);
+      replaceScopeFile(item.temporary, item.edit.manifestPath);
       applied.push(item.edit);
     }
   } catch (error) {

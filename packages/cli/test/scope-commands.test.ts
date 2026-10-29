@@ -1383,12 +1383,15 @@ describe("rig scope audit ordinal naming", () => {
   async function publicScope(args: string[]): Promise<CaptureResult> {
     const home = path.join(root, "owned-cli-home");
     fs.mkdirSync(home, { recursive: true });
+    const gitConfig = path.join(home, "empty.gitconfig");
+    fs.writeFileSync(gitConfig, "");
     const command = [fileURLToPath(new URL("../dist/index.js", import.meta.url)), "scope", ...args,
       "--workspace", path.join(root, "workspace"), "--json"];
     const options = { encoding: "utf8" as const, timeout: 15000, env: {
       PATH: process.env.PATH, HOME: home, TMPDIR: root,
+      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: home, TEMP: root, TMP: root } : {}),
       OPENRIG_HOME: path.join(home, ".openrig"), CODEX_HOME: path.join(home, "codex"),
-      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: gitConfig,
     } };
     try {
       const result = await promisify(execFile)(process.execPath, command, options);
