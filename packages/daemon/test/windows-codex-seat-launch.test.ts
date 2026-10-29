@@ -22,8 +22,9 @@ it.runIf(process.platform === "win32").each([false, true])("launches a recognize
     vi.spyOn(tmux, "getSessionEnv").mockImplementation(async (_session, key) => identity[key]);
     const home = path.join(root, "selected home"), output = path.join(root, "result.json");
     const selectedPath = [bin, path.dirname(process.execPath)].join(path.delimiter);
-    const env = mixed ? { Path: selectedPath, OpenRig_Home: path.join(root, "instance"), openrig_transcripts_lines: "123" }
-      : { PATH: selectedPath, OPENRIG_HOME: path.join(root, "instance"), OPENRIG_TRANSCRIPTS_LINES: "123" };
+    fs.writeFileSync(path.join(bin, "codex.com"), "decoy: never execute; selected PATHEXT puts CMD first");
+    const env = mixed ? { Path: selectedPath, PathExt: ".CMD;.COM;.EXE", OpenRig_Home: path.join(root, "instance"), openrig_transcripts_lines: "123" }
+      : { PATH: selectedPath, PATHEXT: ".CMD;.COM;.EXE", OPENRIG_HOME: path.join(root, "instance"), OPENRIG_TRANSCRIPTS_LINES: "123" };
     const launch = new SeatLaunchEnvironment(tmux, env, root, cli, home, "win32");
     const args = [output, "space word", "中文;$literal", "a'b", 'double"quote', "", "trailing\\", "%OPENRIG_NODE_ID%", "amp&word"];
     const command = await launch.command("owned@fixture", `codex ${args.map(shellQuote).join(" ")}`, { codexCwd: root, runtime: "codex", nodeId: "owned", generation: "generation" });

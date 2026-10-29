@@ -9,6 +9,14 @@ import { resolveClaudeExecutable } from "../src/domain/provider/claude-auth-stat
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
 
+it.runIf(process.platform === "win32")("uses selected PATHEXT order and preserves an explicitly empty list", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-native-ext-")); dirs.push(root);
+  for (const ext of ["exe", "com"]) fs.writeFileSync(path.join(root, `codex.${ext}`), "selection only; never executed");
+  expect(resolveWindowsProviderCommand("codex", { PATH: root, pAtHeXt: ".EXE;.COM" }).command).toBe(fs.realpathSync(path.join(root, "codex.exe")));
+  expect(resolveWindowsProviderCommand("codex", { PATH: root, PATHEXT: ".COM;.EXE" }).command).toBe(fs.realpathSync(path.join(root, "codex.com")));
+  expect(() => resolveWindowsProviderCommand("codex", { PATH: root, PATHEXT: "", pAtHeXt: ".EXE" })).toThrow("No codex executable");
+});
+
 it.runIf(process.platform === "win32")("selects copied home variables with native case and duplicate-key precedence", () => {
   const root = path.join(os.tmpdir(), "synthetic-home"), chosen = path.join(root, "chosen");
   expect(resolveCodexHome({ home: root }).codexHome).toBe(path.join(root, ".codex"));

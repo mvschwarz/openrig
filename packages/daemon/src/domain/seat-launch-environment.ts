@@ -57,9 +57,9 @@ function pairedCli(): string {
  * Child tools still inherit the pane PATH. Unrecognised env shebang syntax
  * falls back to the old literal-PATH command instead of guessing its meaning.
  */
-function codexEntry(searchPath: string, cwd: string, windows = false): string {
+function codexEntry(searchPath: string, cwd: string, windows = false, env: Readonly<Record<string, string | undefined>> = {}): string {
   if (windows) {
-    const selected = resolveWindowsProviderCommand("codex", { PATH: searchPath }, cwd);
+    const selected = resolveWindowsProviderCommand("codex", { ...env, PATH: searchPath }, cwd);
     return [selected.command, ...selected.prefix].map(shellQuote).join(" ");
   }
   const executable = launchExecutable("codex", searchPath, cwd, windows);
@@ -187,7 +187,7 @@ export class SeatLaunchEnvironment {
       // interpreter selection while child tools retain the user's PATH.
       if (target.codexCwd !== undefined) {
         if (!searchPath || !command.startsWith("codex ")) throw new Error("Expected a Codex launch command and PATH.");
-        command = codexEntry(searchPath, target.codexCwd, this.launchPlatform === "win32") + command.slice(5);
+        command = codexEntry(searchPath, target.codexCwd, this.launchPlatform === "win32", this.sessionEnv) + command.slice(5);
       }
       const binDir = this.rigBin();
       const env: Record<string, string> = { OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...publicSeatEnvironment(this.sessionEnv, platform), ...publicSeatEnvironment(identity, platform) };

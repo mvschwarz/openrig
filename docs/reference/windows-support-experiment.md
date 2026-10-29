@@ -24,6 +24,18 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Provider selected PATHEXT (2026-10-30)
+
+The shared native Codex/Claude resolver used a fixed extension order, while
+Codex seat launch discarded the selected environment except PATH. An owned
+selection fixture failed with EXE before COM. The resolver now reads native-cased
+PATHEXT, preserves its order and explicit empty value, and defaults only when
+undefined. Codex seat selection receives the complete selected environment.
+Ten adjacent checks pass, plus two actual PowerShell/offline npm Codex launches
+with a COM decoy and CMD-first selected PATHEXT (canonical and mixed-case keys).
+Daemon typecheck passes. These fixtures do not invoke installed providers or
+establish support for arbitrary script extensions.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen CLI run exposed three failing HOME-fallback assertions: its OS mock

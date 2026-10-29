@@ -12,9 +12,10 @@ export function resolveWindowsProviderCommand(name: "codex" | "claude", env: Nod
   if (process.platform !== "win32") return { command: name, prefix: [] };
   const packageName = name === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code";
   const searchPath = readPlatformEnv(env, "PATH") ?? "";
+  const extensions = (readPlatformEnv(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(value => value.toLowerCase());
   for (const value of searchPath.split(path.delimiter)) {
     const directory = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
-    for (const extension of [".com", ".exe", ".bat", ".cmd"]) {
+    for (const extension of extensions) {
       const candidate = path.join(directory, `${name}${extension}`);
       if (!existsSync(candidate) || !statSync(candidate).isFile()) continue;
       if (extension === ".exe" || extension === ".com") return { command: realpathSync(candidate), prefix: [] };
