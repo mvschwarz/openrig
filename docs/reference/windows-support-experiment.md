@@ -247,6 +247,19 @@ passes with empty CODEX_HOME and records no stop/relaunch effects. Daemon
 typecheck passes. Native logs, credentials and signals in that plan are mocked;
 only the separate owned native child is actually observed and stopped.
 
+## Verified native directory aliases in restart plans (2026-10-30)
+
+The public restart-plan consumer rejected the same owned Windows Codex home
+under alternate separators as settings drift. Windows comparisons now accept
+identical normalized spellings, or positive directory identity from nonzero
+BigInt file IDs on the same device. Case folding alone is not proof; unreadable
+or distinct directories remain different. This is used for restart cwd/home
+drift and peer-home reporting; POSIX retains exact comparison. Owned-directory
+plans verify slash aliases, native case aliases and refusal of another
+directory before any stop/relaunch effect. The full restart file reports
+146 passed and one pending; daemon typecheck passes. Only temporary directory
+metadata was used; credential and conversation reads in the plan remain mocked.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

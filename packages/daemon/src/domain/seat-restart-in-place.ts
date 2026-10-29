@@ -51,8 +51,19 @@ export interface InPlaceCodexLauncher {
   sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
 }
 
-/** What one process shows about itself, read without touching any credential: cwd, executable, and only
- *  the named environment values below. Other environment values are never kept. */
+/** Native spelling or positive directory identity, never case folding alone. */
+function sameRestartDirectory(first: string | null | undefined, second: string | null | undefined): boolean {
+  if (first === second) return true;
+  if (process.platform !== "win32" || !first || !second) return false;
+  // Separator normalization is exact even in a case-sensitive Windows directory.
+  if (nodePath.normalize(first) === nodePath.normalize(second)) return true;
+  try {
+    const a = fs.statSync(first, { bigint: true }), b = fs.statSync(second, { bigint: true });
+    return a.isDirectory() && b.isDirectory() && a.ino !== 0n && a.dev === b.dev && a.ino === b.ino;
+  } catch { return false; }
+}
+
+/** Observed cwd, executable and named environment values; unrelated values are never kept. */
 export interface ProcessFacts {
   cwd: string | null;
   exe: string | null;
@@ -517,8 +528,8 @@ export class CodexInPlaceRestart {
     const applyChoice = effort.changes && effort.source === "seat_choice";
     const drift = [
       ...settingsDrift(effective, relaunched).filter((key) => key !== "effort" || !applyChoice),
-      ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
-      ...(relaunchHome !== codexHome ? ["codex home"] : []),
+      ...(facts.cwd && !sameRestartDirectory(facts.cwd, cwd) ? ["cwd"] : []),
+      ...(!sameRestartDirectory(relaunchHome, codexHome) ? ["codex home"] : []),
     ];
     if (drift.length > 0) {
       return { ok: false, code: "settings_drift", detail: { differs: drift },
@@ -782,7 +793,7 @@ export class CodexInPlaceRestart {
         const observed = await this.observeCodex(row.tmux_pane, null).catch(() => null);
         const facts = observed ? await this.io.readProcess(observed.process.pid) : null;
         const peerHome = facts?.env.CODEX_HOME || (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
-        if (peerHome) home = peerHome === codexHome ? "same" : "different";
+        if (peerHome) home = sameRestartDirectory(peerHome, codexHome) ? "same" : "different";
       }
       reports.push({ logicalId: row.logical_id, sessionName: row.tmux_session, home,
         effect: home === "same"

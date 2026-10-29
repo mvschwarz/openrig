@@ -275,6 +275,21 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it.runIf(process.platform === "win32")("accepts proven native home aliases but refuses a different owned directory before stopping", async () => {
+    const root = fs.mkdtempSync(path.join(process.env.TEMP ?? process.cwd(), "restart-directory-identity-"));
+    const home = path.join(root, "home"), other = path.join(root, "other");
+    fs.mkdirSync(home); fs.mkdirSync(other);
+    try {
+      for (const relaunchHome of [home.replaceAll("\\", "/"), home.toUpperCase()]) {
+        const w = world({ relaunchHome, facts: { 200: facts({ env: { CODEX_HOME: home } }) } });
+        expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, codexHome: home });
+        expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+      }
+      const w = world({ relaunchHome: other, facts: { 200: facts({ env: { CODEX_HOME: home } }) } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "settings_drift" });
+      expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it("plans from the default process home when CODEX_HOME is explicitly empty without stopping the seat", async () => {
     const root = path.join(path.parse(process.cwd()).root, "synthetic-restart-home"), home = path.join(root, ".codex");
     const w = world({ relaunchHome: home, facts: { 200: facts({ env: { HOME: root, CODEX_HOME: "" } }), 100: facts({ env: { HOME: root, CODEX_HOME: "" } }) } });
