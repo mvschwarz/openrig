@@ -1,3 +1,4 @@
+import { isBoundTerminalSeat } from "./domain/terminal-seat.js";
 import { seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
 import { reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
@@ -2238,6 +2239,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       eventBus,
       deliver: makeWatchdogDeliver({
         sessionTransport,
+        isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
         hasPendingPostCompactStage: (sessionName) => deps.compactionEnforcer?.hasPendingPostCompactStage(sessionName) ?? false,
         createContinuityAction: (action) => createContinuityCutoverBaton(action, queueRepoInstance).then(() => {}),
       }),
@@ -2332,6 +2334,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
               queueRepoInstance.recordNudgeAttempt(qitemId, result),
             listOpenIds: (destinationSession: string) =>
               queueRepoInstance.listOpenObligations(destinationSession, 500).map((r) => r.qitemId),
+          },
+          isTerminalSeat: (sessionName) => isBoundTerminalSeat(db, sessionName),
+          retentionState: (sessionName) => {
+            const target = resolveGuardTarget(db, sessionName);
+            if (!target) return null;
+            const guard = deliveryGuard.configuration(target.nodeId);
+            return JSON.stringify([target.nodeId, guard.desired.revision, guard.effective.revision, outboxHandlerInstance.retentionUsage(target.nodeId)]);
           },
           occupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
           // The enforcer is constructed below; read its shared instance at evaluation time.

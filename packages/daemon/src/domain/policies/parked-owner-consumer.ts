@@ -9,7 +9,8 @@
 //
 // Row notes describe attempts and preserve positive prompt-refusal recovery. They
 // do not veto an undelivered reminder. Recorded success and actual prompt holds
-// still apply. The engine owns cadence; attempts rotate eligible owners.
+// still apply. A typed quota refusal waits for admission or obligation changes while existing recovery keeps custody.
+// The engine owns cadence; attempts rotate eligible owners.
 //
 // One-oracle law (mini-req 2): the parked verdict, held-health classification,
 // indeterminate arm, and obligation join all come from diagnoseRigParked — this
@@ -66,6 +67,10 @@ export interface ParkedOwnerConsumerDeps {
   occupantGeneration?: (sessionName: string) => string | null;
   /** The same enforcer's owed turn-boundary/restore/audit state, not an idle-time inference. */
   hasPendingPostCompactStage?: (sessionName: string) => boolean;
+  /** Existing bound-terminal authority; only a positive result excludes automated reminders. */
+  isTerminalSeat?: (sessionName: string) => boolean;
+  /** Opaque current node/guard revision/retained quota inputs, not a parked-state oracle. */
+  retentionState?: (sessionName: string) => string | null;
   /** The clock the waiting grace is measured on; the wall clock when absent. */
   now?: () => number;
 }
@@ -95,6 +100,8 @@ export const FAILED_PREFIX = "parked-owner wake delivery failed:";
 /** A recorded ok wake to the same known occupant waits for a change to its obligations. */
 export const DELIVERED_PREFIX = "parked-owner wake delivered:";
 export const NUDGE_FAIL_PREFIX = "failed: parked-owner wake delivery";
+const QUOTA_NO_INPUT = "; code retained_quota_full; input not_reached;";
+const TERMINAL_NO_INPUT = "; code terminal_seat; input not_reached;";
 export const PARKED_OWNER_COMPACTION_PENDING = "[managed-compaction-pending] Parked-owner reminder deferred until the existing post-compact stages clear.";
 
 /** Only the transport's interactive-prompt refusal counts — a generic failed
@@ -207,9 +214,12 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           if (isRefusedInteractive(reason)) {
             deps.rows.appendNote(primary, `${REFUSED_PREFIX} ${key}; ${reason}`);
           } else {
-            deps.rows.appendNote(primary, `${FAILED_PREFIX} ${key}; ${reason}`);
+            const typedNoInput = n["deliveryInputPhase"] === "not_reached" && n["deliveryCode"] === "retained_quota_full";
+            const terminal = n["deliveryInputPhase"] === "not_reached" && n["deliveryCode"] === "terminal_seat";
+            const admission = typedNoInput ? QUOTA_NO_INPUT : terminal ? TERMINAL_NO_INPUT : ";";
+            deps.rows.appendNote(primary, `${FAILED_PREFIX} ${key}${admission} ${reason}`);
             const uncertain = n["deliveryInputPhase"] === "attempted" || n["deliveryInputPhase"] === "written";
-            deps.rows.recordNudgeResult(primary, `${uncertain ? "indeterminate: parked-owner wake delivery" : NUDGE_FAIL_PREFIX} — ${reason}`);
+            deps.rows.recordNudgeResult(primary, `${uncertain ? "indeterminate: parked-owner wake delivery" : NUDGE_FAIL_PREFIX}${typedNoInput ? QUOTA_NO_INPUT : terminal ? TERMINAL_NO_INPUT : ""} — ${reason}`);
           }
         } catch { /* reporting failure is not permission to lose the next message */ }
       }
@@ -315,14 +325,42 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           skipped.push({ seat: seat.sessionName, why: "unchanged-since-last-wake" });
           continue;
         }
+        let retentionState: string | null = null;
+        try { retentionState = deps.retentionState?.(seat.sessionName) ?? null; } catch { /* unknown is not evidence that admission recovered */ }
+        const encodedRetentionState = Buffer.from(retentionState ?? "unknown").toString("base64url");
+        const open = lastKey != null && openKeysOnRow(transitions).includes(lastKey);
+        const sameGeneration = generation === null || generationOf(reserve) === null || generationOf(reserve) === generation;
+        const quotaFailed = open && sameGeneration && transitions.some(t => t.transitionNote?.startsWith(FAILED_PREFIX)
+          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.includes(QUOTA_NO_INPUT));
+        const priorRetentionState = reserve?.transitionNote?.match(/; retention-state ([^;\s]+);/)?.[1];
+        if (quotaFailed && reserve && (retentionState === null || priorRetentionState === encodedRetentionState)
+          && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, reserve)) {
+          // The existing row failure/recovery keeps custody. Do not recreate attempts or row notes every tick.
+          skipped.push({ seat: seat.sessionName, why: "retention-quota-unchanged" });
+          continue;
+        }
+        const terminal = deps.isTerminalSeat?.(seat.sessionName) === true;
+        if (terminal && open && sameGeneration && transitions.some(t => t.transitionNote?.startsWith(FAILED_PREFIX)
+          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.includes(TERMINAL_NO_INPUT))) {
+          skipped.push({ seat: seat.sessionName, why: "terminal-seat" });
+          continue;
+        }
         const episodeKey = `${seat.sessionName}|${idsHash}#${randomUUID()}`;
         let noted = false;
         try {
           noted = deps.rows.appendNote(primaryRow,
-            `${RESERVE_PREFIX} ${episodeKey}; ${generation === null ? "" : `generation ${generation}; `}obligations ${namedIds.join(",")}`).ok;
+            `${RESERVE_PREFIX} ${episodeKey}; ${generation === null ? "" : `generation ${generation}; `}retention-state ${encodedRetentionState}; obligations ${namedIds.join(",")}`).ok;
         } catch { /* the current row, not the receipt write, governs the wake */ }
         if (!noted && !deps.rows.listOpenIds(seat.sessionName).includes(primaryRow)) {
           skipped.push({ seat: seat.sessionName, why: "obligation-closed-between-derive-and-wake" });
+          continue;
+        }
+
+        if (terminal) {
+          const reason = "Automated reminders cannot be consumed by a terminal seat; route it to an agent seat. No input was written.";
+          try { deps.rows.appendNote(primaryRow, `${FAILED_PREFIX} ${episodeKey}${TERMINAL_NO_INPUT} ${reason}`); } catch { /* keep the obligation visible if reporting is unavailable */ }
+          try { deps.rows.recordNudgeResult(primaryRow, `failed:terminal-seat: ${reason}`); } catch { /* no reporting failure permits terminal input */ }
+          skipped.push({ seat: seat.sessionName, why: "terminal-seat" });
           continue;
         }
 

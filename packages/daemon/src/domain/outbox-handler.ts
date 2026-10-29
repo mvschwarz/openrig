@@ -204,13 +204,18 @@ export class OutboxHandler {
   assertRetentionCapacity(nodeId: string, body: string): void {
     // Provisional bounded defaults. Historical/retired rows and already committed
     // overflow are deliberately not evicted to make these active quotas fit.
-    const usage = this.db.prepare(`SELECT count(*) AS count, coalesce(sum(length(CAST(body AS BLOB))),0) AS bytes
-      FROM outbox_entries WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`)
-      .get(nodeId) as { count: number; bytes: number };
+    const usage = this.retentionUsage(nodeId);
     const size = Buffer.byteLength(body, "utf8");
     if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
       throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
     }
+  }
+
+  /** Current active quota inputs; reading them neither retires nor retries retained custody. */
+  retentionUsage(nodeId: string): { count: number; bytes: number } {
+    return this.db.prepare(`SELECT count(*) AS count, coalesce(sum(length(CAST(body AS BLOB))),0) AS bytes
+      FROM outbox_entries WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`)
+      .get(nodeId) as { count: number; bytes: number };
   }
 
   retire(outboxId: string, actor: string, reason: string): OutboxEntry {
