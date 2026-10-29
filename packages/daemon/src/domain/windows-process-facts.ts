@@ -81,6 +81,9 @@ public static class OpenRigRunProcesses {
     return Pointer(process,IntPtr.Add(peb,width==8?0x20:0x10),width);
   }
   static bool HasMarker(IntPtr process, string marker) {
+    int markerEquals=marker.IndexOf('=');
+    if(markerEquals<=0) return false;
+    string markerKey=marker.Substring(0,markerEquals), markerValue=marker.Substring(markerEquals+1);
     int width; var parameters=Parameters(process,out width);
     var environment=Pointer(process,IntPtr.Add(parameters,width==8?0x80:0x48),width);
     var entry=new StringBuilder();
@@ -95,7 +98,9 @@ public static class OpenRigRunProcesses {
         char c=(char)(bytes[i]|(bytes[i+1]<<8));
         if(c!='\\0') { entry.Append(c); continue; }
         if(entry.Length==0) return false;
-        if(String.Equals(entry.ToString(),marker,StringComparison.Ordinal)) return true;
+        string value=entry.ToString(); int equals=value.IndexOf('=');
+        if(equals>0 && String.Equals(value.Substring(0,equals),markerKey,StringComparison.OrdinalIgnoreCase)
+          && String.Equals(value.Substring(equals+1),markerValue,StringComparison.Ordinal)) return true;
         entry.Length=0;
       }
       offset+=size;

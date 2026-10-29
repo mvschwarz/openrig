@@ -2137,3 +2137,21 @@ EXE that must not be selected. No shell fallback or unrecognized batch execution
 was added. CLI TypeScript checking passes. An earlier broader connector run
 also encountered an EPERM during cleanup of its detached-process fixture; that
 run is not recorded as green acceptance, and this change does not resolve it.
+
+## Windows ACP run-marker casing (2026-10-30)
+
+The native process marker query compared the entire environment entry with
+case-sensitive equality. A same-account synthetic child using a lowercase
+`openrig_acp_run` key was therefore omitted, although Windows environment keys
+are case-insensitive. The query now compares only the key without case, while
+retaining exact ordinal comparison of the complete run-id value. The helper
+still returns only matching PIDs; unrelated environment content stays inside
+the existing read-only helper, with no cross-account reads or process stopping.
+
+The regression failed before repair. Two owned children with run IDs differing
+only in case are now distinguished correctly, and the process-facts file passes
+3/3, including existing bounded argv/home facts. Daemon type checking and build
+pass. The broader ACP check remains 21/22 with EPERM in detached-fixture cleanup.
+Waiting for fixture PID disappearance and bounded deletion retries did not
+resolve that failure; those speculative cleanup changes were withdrawn. Its
+cause remains unresolved rather than being labeled a confirmed exit race.

@@ -9,8 +9,32 @@ import { readNativeExecutablePaths } from "../src/domain/native-process-executab
 import { readNativeProcessArguments } from "../src/domain/native-process-arguments.js";
 import { defaultInPlaceRestartIo } from "../src/domain/seat-restart-in-place.js";
 import { defaultResolveHomeDirByPid } from "../src/domain/codex-thread-id.js";
+import { findWindowsRunProcesses } from "../src/domain/windows-process-facts.js";
+import { randomUUID } from "node:crypto";
 
 describe.skipIf(process.platform !== "win32")("native Windows restart process facts", () => {
+  it("matches run-marker keys with Windows casing while retaining exact marker values", async () => {
+    const run = `Owned-Case-${randomUUID()}`;
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) if (key.toUpperCase() === "OPENRIG_ACP_RUN") delete env[key];
+    const children = [run, run.toLowerCase()].map(value => spawn(process.execPath,
+      ["-e", "console.log('ready');setInterval(()=>{},1000)"],
+      { windowsHide: true, stdio: ["ignore", "pipe", "ignore"], env: { ...env, openrig_acp_run: value } }));
+    try {
+      await Promise.all(children.map(child => once(child.stdout!, "data")));
+      const found = await findWindowsRunProcesses(`OPENRIG_ACP_RUN=${run}`);
+      expect(found).toContainEqual({ pid: children[0]!.pid });
+      expect(found).not.toContainEqual({ pid: children[1]!.pid });
+      const lower = await findWindowsRunProcesses(`OPENRIG_ACP_RUN=${run.toLowerCase()}`);
+      expect(lower).toContainEqual({ pid: children[1]!.pid });
+      expect(lower).not.toContainEqual({ pid: children[0]!.pid });
+    } finally {
+      await Promise.all(children.map(async child => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        const closed = once(child, "close"); child.kill(); await closed;
+      }));
+    }
+  }, 20_000);
   it("reads target cwd, exact argv and whitelisted homes without leaking unrelated environment", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-process-facts-"));
     const cwd = path.join(root, "中文 cwd"), home = path.join(root, "own home"), codexHome = path.join(root, "own codex");
