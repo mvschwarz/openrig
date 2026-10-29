@@ -18,8 +18,8 @@ it.runIf(process.platform === "win32")("joins owned native Codex/Claude witnesse
   const compile = `Add-Type -TypeDefinition ${powershellQuote(source)} -OutputAssembly ${powershellQuote(witness)} -OutputType ConsoleApplication`;
   try {
     execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(compile, "utf16le").toString("base64")], { windowsHide: true, timeout: 15000, stdio: "pipe" });
-    for (const runtime of ["codex", "claude"] as const) {
-      const executable = path.join(root, runtime + ".exe"); fs.copyFileSync(witness, executable);
+    for (const [runtime, extension] of [["codex", "exe"], ["claude", "exe"], ["codex", "com"], ["claude", "com"]] as const) {
+      const executable = path.join(root, runtime + "." + extension); fs.copyFileSync(witness, executable);
       const ops = defaultTmuxFileOps(), script = ops.tmpName();
       const token = "owned-exact-conversation";
       const words = [executable, ...(runtime === "codex" ? ["resume", token] : ["--session-id", token])];
@@ -36,7 +36,7 @@ it.runIf(process.platform === "win32")("joins owned native Codex/Claude witnesse
         await expect.poll(() => output.includes("OWNED_PROVIDER_READY"), { timeout: 8000 }).toBe(true);
         let rows = await listNativeProcesses();
         await expect.poll(async () => { rows = await listNativeProcesses(); return rows.some(row => row.executablePath === executable); }, { timeout: 6000 }).toBe(true);
-        const tmux = { getPanePid: async () => child.pid!, getPaneCommand: async () => runtime };
+        const tmux = { getPanePid: async () => child.pid!, getPaneCommand: async () => runtime + "." + extension };
         const input = { target: "owned", tmux, listProcesses: async () => rows, expectedToken: token, requireResume: true, selectedExecutable: executable };
         const verify = runtime === "codex" ? verifyCodexPaneProcess : verifyClaudePaneProcess;
         const found = await verify(input);

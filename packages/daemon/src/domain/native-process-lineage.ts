@@ -65,6 +65,10 @@ function executableName(token: string): string {
   return (token.split(/[\\/]/).pop() ?? token).toLowerCase().replace(/\.exe$/, "");
 }
 
+function windowsExecutableName(token: string): string {
+  return executableName(token).replace(/\.com$/, "");
+}
+
 function rowArgv(row: NativeProcessRow): string[] {
   return row.platform === "win32" ? parseWindowsCommandLine(row.command) : tokens(row.command);
 }
@@ -254,7 +258,7 @@ export function codexProcessArgv(row: Pick<NativeProcessRow, "argv"> & Partial<N
     const argv = parseWindowsCommandLine(row.command);
     const normalize = (value: string) => value.replace(/\//g, "\\").toLowerCase();
     return argv[0] && normalize(argv[0]) === normalize(row.executablePath)
-      && executableName(argv[0]) === "codex" && validCodexArgv({ argv }) ? argv : null;
+      && windowsExecutableName(argv[0]) === "codex" && validCodexArgv({ argv }) ? argv : null;
   }
   return validCodexArgv(row) && executableName(row.argv[0]!) === "codex" ? row.argv : null;
 }
@@ -666,8 +670,8 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
     const matches: NativeProcessObservation[] = [];
     const expectedName = runtime === "claude-code" ? "claude" : "codex";
     for (const row of rows) {
-      if (row.platform !== "win32" || executableName(row.executableName ?? "") !== expectedName
-        || !row.executablePath || executableName(row.executablePath) !== expectedName
+      if (row.platform !== "win32" || windowsExecutableName(row.executableName ?? "") !== expectedName
+        || !row.executablePath || windowsExecutableName(row.executablePath) !== expectedName
         || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
         || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
       const chain: NativeProcessRow[] = [];
@@ -825,7 +829,7 @@ async function observeNativePaneProcess(input: {
     if (!pid) return null;
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
-      const foreground = executableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
+      const foreground = windowsExecutableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
       if (!(runtime === "claude-code" ? ["claude"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
     }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,

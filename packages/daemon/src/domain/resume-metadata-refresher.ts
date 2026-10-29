@@ -566,7 +566,7 @@ function commandLooksLikeCodex(row: ProcessRow): boolean {
   if (row.platform === "win32") {
     const executable = row.executablePath;
     const first = parseWindowsCommandLine(command)[0];
-    return !!executable && !!first && nodePath.win32.basename(executable).toLowerCase() === "codex.exe"
+    return !!executable && !!first && /^codex\.(exe|com)$/i.test(nodePath.win32.basename(executable))
       && nodePath.win32.normalize(first).toLowerCase() === nodePath.win32.normalize(executable).toLowerCase();
   }
   const tokens = command.trim().split(/\s+/).filter(Boolean);

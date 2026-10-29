@@ -45,6 +45,7 @@ describe("S11 Codex capture diagnostics and retry", () => {
     const row = { pid: 901, ppid: 900, command: `"${executablePath}" resume owned`, platform: "win32" as const, executablePath, startedAt: identity };
     const capture = (candidate: typeof row) => f.refresher.captureCodexThreadId(session.sessionName, { attempts: 1, listProcesses: async () => [candidate] });
     expect(await capture(row)).toBe(token);
+    expect(await capture({ ...row, command: '"C:\\Owned Provider\\codex.com" resume owned', executablePath: "C:\\Owned Provider\\codex.com" })).toBe(token);
     expect(await capture({ ...row, executablePath: "C:\\Owned Provider\\other.exe" })).toBeUndefined();
     expect(await capture({ ...row, command: '"C:\\Owned Provider\\other.exe" "C:\\Owned Provider\\codex.exe"', executablePath: "C:\\Owned Provider\\other.exe" })).toBeUndefined();
   });

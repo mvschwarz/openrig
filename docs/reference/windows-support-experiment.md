@@ -273,6 +273,25 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native COM provider identity matches launcher support (2026-10-30)
+
+The native launcher resolver already accepts executable COM files according to
+PATHEXT, but process identity and Codex resume capture recognized EXE alone.
+Windows-specific executable-name matching now covers both native suffixes in
+OS-name/path checks, Codex argv validation, foreground-name interpretation and
+lightweight resume discovery. Exact OS-path/argv agreement, selected executable,
+conversation token, creation ordering and competing-process refusal remain.
+POSIX matching is unchanged; batch files do not become native providers.
+
+Owned offline Codex/Claude console witnesses are compiled locally and run with
+both EXE and COM names through actual cmd staging and native process census.
+The COM case fails before the repair. Afterward the four lineage/capture files
+pass 61/61 without skips; daemon type checking passes. Codex's owned SQLite
+capture fixture additionally accepts the corresponding COM row. The foreground
+field is still a supplied tmux seam, so stock psmux foreground reporting and
+installed-provider lifecycle acceptance remain unverified. No real provider,
+credential, conversation or deployed seat is used.
+
 ## Codex resume capture recognizes native executable rows (2026-10-30)
 
 ResumeMetadataRefresher's lightweight descendant discovery still split command
