@@ -127,7 +127,7 @@ describe("child-bound startup", () => {
       expect(f.deps.kill).not.toHaveBeenCalled();
       expect(f.lock.release).toHaveBeenCalledWith(true);
       expect((outcome as Error).message).toMatch(/pending.*12345/);
-      expect((outcome as Error).message).toContain("rig daemon status");
+      expect((outcome as Error).message).toContain("Launch endpoint: http://127.0.0.1:19873/healthz");
       expect((outcome as Error).message).toContain("daemon.log");
     });
     // Synchronous work crossing the deadline is modelled by a clock jump inside one fetch, before
