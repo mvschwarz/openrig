@@ -21,8 +21,15 @@ Windows console windows.
 The native scenario and executable-fixture tests passed 8/8 with no skips.
 They verify remote-server platform receipts and refusal before build as well
 as the existing deadline and exact-ID settlement contracts. This does not prove
-a real remote Docker run. The separate image-build wrapper fixture still uses
-POSIX-only executable and shell assumptions and remains unfinished work.
+a real remote Docker run.
+
+The image-build wrapper's integration fixture now also uses native executables
+and the selected Git Bash, with explicit POSIX shell paths and a Windows PATH
+for shell-free Node children. Its 13 tests passed on Windows, including repeated
+success, nonzero load, deadline expiry, confirmed exact-ID removal and retained
+cidfile refusal after uncertain removal. The fake client also checks that the
+container health-check command survives the shell/native boundary. This is a
+client-contract test with marker files, not an image build or container proof.
 
 ## Isolated native install and installed shim, 2026-10-29
 
