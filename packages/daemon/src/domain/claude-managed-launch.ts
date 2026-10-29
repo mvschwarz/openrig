@@ -14,7 +14,7 @@ import { validateNativePermissionSelection } from "./native-permission-selection
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { NO_SESSION_BUS } from "./seat-runtime-dir.js";
 import { ACCOUNT_HOME_PROVIDER_ENV, seatAccountHome, effectiveRuntimeHome } from "./seat-runtime-home.js";
-import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, claudeSeatTokenStep, readClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, claudeSeatTokenOutrankedNotice, claudeSeatTokenStep, readClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem, OUTRANKING_TOKEN_ENV, projectRootForLocalSettings, settingsFileConflicts, type CredentialConflict, type CredentialPrecedence } from "./claude-credential-precedence.js";
 
 export interface ClaudeLaunchTarget {
@@ -140,6 +140,19 @@ export class ClaudeManagedLaunch {
     const problem = claudeSeatTokenFileProblem(ref);
     return { ref, step: claudeSeatTokenStep(ref, shellQuote, { ...opts, required }), warnings: Object.freeze(problem ? [required ? "The selected account token is unusable; no agent will start."
       : this.tokenNotApplied(nodeId, ref, problem)] : []) };
+  }
+
+  /** The switch's credential-precedence check, said as a launch warning for a seat with its own token reference, such as a
+   *  spec's `claude_token`: what Claude Code would use ahead of it. The launch goes ahead, so it's never a refusal. An
+   *  account-home seat is skipped: its home is the selection, checked when it was made. */
+  async tokenPrecedenceWarnings(nodeId: string, ref: ClaudeSeatTokenRef): Promise<string[]> {
+    if (this.accountHome(nodeId)) return [];
+    try {
+      const found = await this.credentialPrecedence(nodeId);
+      return found.conflicts.length ? [claudeSeatTokenOutrankedNotice(ref, found.conflicts)] : [];
+    } catch (error) {
+      return [`This seat's Claude subscription token (${ref.label}): what would take precedence over it couldn't be checked (${(error as Error).message}).`];
+    }
   }
 
   /** Where a launch that didn't apply the seat's token is recorded (the daemon's event log); unset, it's only reported. */
@@ -367,7 +380,7 @@ export class ClaudeManagedLaunch {
     const token = this.seatTokenLaunch(target.nodeId, { removeOnFailure: !tokenKept,
       ...(target.accountHome !== undefined ? { ref: target.accountHome === null ? target.accountToken : target.accountToken ?? null, required: !!target.accountHome } : {}) });
     const tokenStep = token ? `${token.step} && ` : "";
-    const warnings = token?.warnings ?? Object.freeze([]);
+    const warnings = Object.freeze([...(token?.warnings ?? []), ...(token ? await this.tokenPrecedenceWarnings(target.nodeId, token.ref) : [])]);
     return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       const launch = Object.entries(launchEnv).filter(([key]) => !credentialKeys.includes(key)).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);

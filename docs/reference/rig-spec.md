@@ -538,12 +538,15 @@ with no conversation to switch first. Name the token file beside its config dir:
 ```
 
 The label and the absolute path are stored on the seat when the rig is created, as `rig provider switch --seat <seat>
---to-account <label> --token-file <path>` stores them, and each launch runs the same token step, which reads the file as
-Claude starts. The file's contents never pass through OpenRig: validation doesn't read it, and they don't reach the spec,
-the seat's record or the launch command. A missing, empty or unreadable file doesn't refuse the spec; the seat starts on
-its config dir's stored login and says so. `rig export` writes the seat's current reference, so a later switch shows
-there, and `rig provider switch --stored-login` removes it. Only `claude-code` members and legacy flat nodes accept it,
-and there's no rig-level default.
+--to-account <label> --token-file <path>` stores them. Its launches run the same token step, which reads the file as
+Claude starts; a launch path that can't run it (a pane shell other than a POSIX one, for example) starts without it and
+warns. The file's contents never pass through OpenRig: validation doesn't read it, and they don't reach the spec, the
+seat's record or the launch command. A missing, empty or unreadable file doesn't refuse the spec; the seat starts on its
+config dir's stored login (or a token the daemon gives every seat) and says so. A launch also warns when a setting Claude
+Code ranks above the token would be used instead: an `apiKeyHelper`, or an outranking `env` entry in the user, project
+or local settings. Managed settings aren't inspected. `rig export` writes the seat's current reference, except for a seat
+with an account home, so a later switch shows there, and `rig provider switch --stored-login` removes it. Only
+`claude-code` members and legacy flat nodes accept it, and there's no rig-level default.
 
 **Switching to an isolated account home.** A running Codex or Claude Code seat can change its native account home
 while staying in its rig:

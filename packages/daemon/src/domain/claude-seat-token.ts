@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
-import { OUTRANKING_TOKEN_ENV } from "./claude-credential-precedence.js";
+import { OUTRANKING_TOKEN_ENV, type CredentialConflict } from "./claude-credential-precedence.js";
 
 /** A Claude seat's own subscription credential: an operator label and an absolute token-file path. A reference only: the
  *  launch script reads the file when Claude starts, so the value never passes through OpenRig. The label is the
@@ -76,14 +76,24 @@ export function claudeSeatTokenFallbackNotice(ref: ClaudeSeatTokenRef, problem: 
  *  names Claude Code ranks above it are unset for this process only (the pane shell's own exports included), so it's the
  *  token Claude uses. When the file can't be read or is empty, Claude still starts, on the config dir's stored login, and
  *  the pane says so; any token the launch already carried is kept unless `removeOnFailure`, and an empty one is never
- *  exported. */
+ *  exported. A pane shell with tracing on (set -x) would print the token as it's read and assigned, so tracing is suspended
+ *  for those and restored afterwards. */
 export function claudeSeatTokenStep(ref: ClaudeSeatTokenRef, quote: (value: string) => string, opts: { removeOnFailure?: boolean; required?: boolean } = {}): string {
   const notice = opts.required ? "OpenRig: the selected account's token could not be read; no agent started."
     : `OpenRig: ${claudeSeatTokenFallbackNotice(ref, `${ref.tokenFile} couldn't be read when Claude started`)}`;
-  return `{ __openrig_token=$(/bin/cat -- ${quote(ref.tokenFile)} 2>/dev/null); if [ -n "$__openrig_token" ]; `
-    + `then unset ${OUTRANKING_TOKEN_ENV.join(" ")}; CLAUDE_CODE_OAUTH_TOKEN=$__openrig_token; export CLAUDE_CODE_OAUTH_TOKEN; unset __openrig_token; `
-    + `else ${opts.removeOnFailure || opts.required ? "unset CLAUDE_CODE_OAUTH_TOKEN; " : ""}printf '%s\\n' ${quote(notice)} >&2; unset __openrig_token; ${opts.required ? "false;" : ""} fi; }`;
+  const restore = 'if [ -n "$__openrig_x" ]; then set -x; fi; unset __openrig_x; ';
+  return `{ case $- in *x*) __openrig_x=1; set +x;; *) __openrig_x=;; esac; `
+    + `__openrig_token=$(/bin/cat -- ${quote(ref.tokenFile)} 2>/dev/null); if [ -n "$__openrig_token" ]; `
+    + `then unset ${OUTRANKING_TOKEN_ENV.join(" ")}; CLAUDE_CODE_OAUTH_TOKEN=$__openrig_token; export CLAUDE_CODE_OAUTH_TOKEN; unset __openrig_token; ${restore}`
+    + `else ${opts.removeOnFailure || opts.required ? "unset CLAUDE_CODE_OAUTH_TOKEN; " : ""}printf '%s\\n' ${quote(notice)} >&2; unset __openrig_token; ${restore}${opts.required ? "false;" : ""} fi; }`;
 
+}
+
+/** What a launch says when a setting would make Claude Code use another credential ahead of the seat's token, in the
+ *  switch's words. The launch goes ahead: it's a warning, not a refusal. */
+export function claudeSeatTokenOutrankedNotice(ref: ClaudeSeatTokenRef, conflicts: readonly CredentialConflict[]): string {
+  return `This seat's Claude subscription token (${ref.label}) may not be the credential Claude uses. Claude Code would use these instead: `
+    + `${conflicts.map((c) => `${c.name} (${c.source}; ${c.remedy})`).join("; ")}.`;
 }
 
 /** Whether a launch warning is the one a launch that couldn't apply the seat's token gives. */

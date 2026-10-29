@@ -105,6 +105,7 @@ export class ClaudeResumeAdapter {
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
     const seatToken = managed || !nodeId ? null : this.options.claudeManagedLaunch?.seatTokenLaunch?.(nodeId) ?? null;
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);

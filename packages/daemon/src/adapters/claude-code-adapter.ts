@@ -298,6 +298,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const seatToken = managed ? null : this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId,
       binding.accountHome !== undefined ? { ref: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null, required: !!binding.accountHome } : {}) ?? null;
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    if (seatToken) tokenWarnings.push(...(await this.claudeManagedLaunch?.tokenPrecedenceWarnings?.(binding.nodeId, seatToken.ref) ?? []));
     const session = binding.tmuxSession;
     const assertSelected = opts.beforeNativeDispatch ? () => {
       if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Claude input");
