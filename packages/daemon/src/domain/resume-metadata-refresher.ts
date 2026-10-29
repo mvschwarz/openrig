@@ -19,7 +19,9 @@ import {
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
-import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudePaneRuntime, verifyPaneIdleShell, verifyClaudePaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { renderWindowsLaunch } from "../adapters/windows-launch.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
@@ -398,8 +400,21 @@ export class ResumeMetadataRefresher {
     if (!resume) {
       return "not_resumable";
     }
-    // A leading assignment, as the classic launch uses, so an rc alias or function for `claude` still resolves.
-    const command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
+    // Classic shells retain alias/function resolution. Native probes freeze the
+    // executable and apply the selected home only to the launched child.
+    let nativeExecutable: string | undefined;
+    let command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
+    if (this.tmuxAdapter.isNativeWindows) {
+      try {
+        const selected = resolveWindowsProviderCommand("claude", process.env, resolveProbeCwd(cwd, this.homeDir));
+        // The existing native Claude identity proof recognises native binaries,
+        // not a Node npm launcher. Do not start an unprovable probe.
+        if (selected.prefix.length) return "inconclusive";
+        nativeExecutable = selected.command;
+        command = renderWindowsLaunch(`${shellQuote(nativeExecutable)}${resume.slice("claude".length)}`,
+          { CLAUDE_CONFIG_DIR: configDir ?? this.claudeConfigDir });
+      } catch { return "inconclusive"; }
+    }
 
     const probeSession = `rigged-refresh-${sanitizeTmuxName(sessionName)}-${Date.now().toString(36)}`;
     const create = this.tmuxAdapter.deliveryGuard
@@ -415,11 +430,13 @@ export class ResumeMetadataRefresher {
         return "inconclusive";
       }
 
-      const send = await this.tmuxAdapter.sendText(probeSession, command);
+      const send = nativeExecutable
+        ? await this.tmuxAdapter.sendShellCommand(probeSession, command)
+        : await this.tmuxAdapter.sendText(probeSession, command);
       if (!send.ok) {
         return "inconclusive";
       }
-      const enter = await this.tmuxAdapter.sendKeys(probeSession, ["Enter"]);
+      const enter = nativeExecutable ? { ok: true } : await this.tmuxAdapter.sendKeys(probeSession, ["Enter"]);
       if (!enter.ok) {
         return "inconclusive";
       }
@@ -428,11 +445,22 @@ export class ResumeMetadataRefresher {
       for (let attempt = 0; attempt < attempts; attempt++) {
         const paneCommand = await this.tmuxAdapter.getPaneCommand(probeSession);
         const paneContent = (await this.tmuxAdapter.capturePaneContent(probeSession, 80)) ?? "";
+        const identity = nativeExecutable ? await verifyClaudePaneProcess({ target: probeSession, tmux: this.tmuxAdapter,
+          listProcesses: this.listClaudeProcesses, selectedExecutable: nativeExecutable,
+          expectedToken: resumeToken, requireResume: true }) : undefined;
         const result = assessNativeResumeProbe({
           runtime: "claude-code",
           paneCommand,
           paneContent,
+          ...(nativeExecutable ? { claudeResumeIdentityVerified: !!identity } : {}),
         });
+
+        if (nativeExecutable && (result.status === "resumed" || result.status === "failed")) {
+          if (!identity) {
+            if (attempt < attempts - 1) await this.sleep(250);
+            continue;
+          }
+        }
 
         if (result.status === "resumed") {
           return "resumable";
@@ -458,7 +486,10 @@ export class ResumeMetadataRefresher {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
       const paneContent = (await this.tmuxAdapter.capturePaneContent(sessionName, 20)) ?? "";
-      if (isProbeShellReady({ paneCommand, paneContent })) {
+      const ready = this.tmuxAdapter.isNativeWindows
+        ? await verifyPaneIdleShell({ target: sessionName, tmux: this.tmuxAdapter, listProcesses: this.listClaudeProcesses })
+        : isProbeShellReady({ paneCommand, paneContent });
+      if (ready) {
         return true;
       }
       if (attempt < attempts - 1) {

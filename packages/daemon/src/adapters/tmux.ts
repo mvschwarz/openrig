@@ -478,7 +478,9 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(this.onServer(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`));
+      const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", name];
+      if (cwd != null) argv.push("-c", cwd);
+      const out = await this.run(argv, `tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -511,7 +513,8 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(this.onServer(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`));
+      const out = await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
+        `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
