@@ -317,10 +317,10 @@ model a resumed session runs stays unknown unless the harness's own evidence say
 - **Cursor:** `--model "$OPENRIG_MODEL"` for a new chat. What a resumed chat runs hasn't been checked: the launcher leaving
   out `--model` doesn't show that it keeps its earlier model.
 - **Hermes:** Hermes takes its model only from the seat's `config.yaml`, so for a new session the launcher writes
-  `model: "<id>"` there when no line in the file could already set a model (quoted, spaced or indented keys count); otherwise
-  the file is left byte-for-byte as it is. Hermes v0.22.4 fixes a
-  session's launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was
-  created with.
+  `model: "<id>"` there only when that file is absent or empty. A seat that has its own `config.yaml` keeps it
+  byte-for-byte, and the launcher says the model wasn't applied: set it in that file. A seat set up from
+  `config.yaml.example` already has a config, so set its model there. Hermes v0.22.4 fixes a session's
+  launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was created with.
 
 Both example presets ship with `passes_model: false` until that mapping has been checked with the real harness. Presets
 without the field and built-in runtimes are unchanged, and older OpenRig versions reject it as unknown.

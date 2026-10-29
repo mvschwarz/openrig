@@ -26,17 +26,15 @@ fi
 
 # The seat's declared model (OPENRIG_MODEL, when the preset sets passes_model): Hermes takes it only from config.yaml, and
 # Hermes v0.22.4 fixes a session's launch settings when it creates it. So it's written for a new session only, and only
-# when the seat's config.yaml names no model yet: a model already set there is the seat's own and is left alone. On a
+# into a config.yaml that is absent or empty: a seat's own config is left byte-for-byte as it is, whatever it says. On a
 # resume this launcher applies no OpenRig model.
 if [ -n "${OPENRIG_MODEL:-}" ] && [ -z "${OPENRIG_RESUME_REF:-}" ]; then
   case "$OPENRIG_MODEL" in
     ''|*[!A-Za-z0-9._:/@+-]*) echo "openrig-hermes-launch: not writing unusual model id \"$OPENRIG_MODEL\" into $HERMES_HOME/config.yaml" >&2 ;;
-    # Any line that could set a model (quoted or not, spaces before the colon, indented or not) means the config may
-    # already name one, so it's left byte-for-byte as it is.
-    *) if grep -Eqs "^[[:space:]]*[\"']?model[\"']?[[:space:]]*:" "$HERMES_HOME/config.yaml"; then
-         echo "openrig-hermes-launch: $HERMES_HOME/config.yaml may already name a model; leaving it, not $OPENRIG_MODEL" >&2
+    *) if [ -s "$HERMES_HOME/config.yaml" ]; then
+         echo "openrig-hermes-launch: the seat has its own $HERMES_HOME/config.yaml; OPENRIG_MODEL was not applied; set the model there" >&2
        else
-         printf '\nmodel: "%s"\n' "$OPENRIG_MODEL" >> "$HERMES_HOME/config.yaml"
+         printf 'model: "%s"\n' "$OPENRIG_MODEL" >> "$HERMES_HOME/config.yaml"
        fi ;;
   esac
 fi
