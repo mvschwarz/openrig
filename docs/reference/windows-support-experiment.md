@@ -273,6 +273,24 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native paths in recorded-client input-box layouts (2026-10-30)
+
+The Codex status/path footer and fresh-session path rows in both clients only
+recognized home/POSIX prefixes. Windows drive and UNC paths therefore prevented
+the supported input-box layouts from being recognized. These exact layout slots
+now also recognize absolute drive paths with either separator and UNC paths
+with a server/share. Drive-relative and incomplete UNC locations remain unknown.
+The path hint does not bypass client-version, layout, turn, queue or draft checks.
+
+Recorded Codex/Claude fixtures are explicitly edited to native paths, not claimed
+as new Windows captures. Before the repair, native Codex idle cases fail. Afterward
+both complete native-path/input-box files pass 225/225 without skips; daemon type
+checking passes. Cases cover idle and exact staged text, populated drafts staying
+unknown, invalid location refusal, and native Claude fresh-session headers. The
+initial new draft expectation was corrected to the existing unknown result;
+production draft semantics were not relaxed. No provider, paste, Enter or live
+terminal is used, so native visual acceptance remains incomplete.
+
 ## OMP identity registration accepts the same native file (2026-10-30)
 
 The activity identity route still required literal equality between an OMP
