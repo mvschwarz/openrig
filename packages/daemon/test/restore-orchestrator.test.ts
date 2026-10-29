@@ -1876,7 +1876,7 @@ describe("RestoreOrchestrator", () => {
     if (keepPane) {
       expect(tmux.killSession).not.toHaveBeenCalled();
       const rows = sessionRegistry.getSessionsForRig(snap.rigId);
-      expect(rows.some(row => row.status === "running")).toBe(false);
+      expect(rows.some(row => ["running", "idle", "unknown"].includes(row.status))).toBe(false);
       expect(rows.find(row => row.id === snap.data.sessions[0]!.id)?.status).toBe("superseded");
       expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.binding?.tmuxPane).toBe("%1");
     } else expect(tmux.killSession).toHaveBeenCalled();

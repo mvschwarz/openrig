@@ -98,7 +98,7 @@ it.skipIf(process.platform === "win32")("compiled provider switch resumes plan â
     writeFileSync(apiFile, "synthetic-api", { mode: 0o600 });
     // Failed in-place resume preserves the reused pane; follow the reported stop-before-recovery step.
     expect(tmux("display-message", "-p", "-t", seat, "#{pane_id}")).toBe(paneBeforeFailure);
-    expect(sessions.getSessionsForRig(rig.id).filter(row => row.nodeId === node.id && row.status === "running")).toEqual([]);
+    expect(sessions.getSessionsForRig(rig.id).filter(row => row.nodeId === node.id && ["running", "idle", "unknown"].includes(row.status))).toEqual([]);
     await cli(["seat", "stop", seat, "--reason", "retire failed resume shell before snapshot recovery", "--json"]);
     // Follow the exact recovery command returned by the switch, with JSON output for assertions.
     const recoveryArgs = recovery.seat.restart.recoveryCommand.split(" ").slice(1);
