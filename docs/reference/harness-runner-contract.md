@@ -11,12 +11,12 @@
 >
 > No harness has been run end to end under this contract yet. The first candidate is dsh over ACP.
 >
-> Candidate scope and pinned references are in the [joined author guide](README.md). The
+> Candidate scope and pinned references are in the [joined author guide](author-contracts.md). The
 > [community presets reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md)
 > describes the implemented fields at that base; this chapter also labels proposed author behavior.
 
 This chapter covers **which agent runs in a seat and how OpenRig talks to it**. *Where* that agent runs (a host, a
-sandbox, another machine) is the [execution platform chapter](EXECUTION-PLATFORM.md). The two are separate on purpose:
+sandbox, another machine) is the [execution platform chapter](execution-platform-contract.md). The two are separate on purpose:
 the same harness can run in many places, and one place can host many harnesses.
 
 ## 1. Plain preset or runner preset?
@@ -43,7 +43,7 @@ format: 1
 name: dsh
 command: dsh-seat              # your runner; it starts the agent itself
 maintainer: <you>
-runner: true                   # on main, not yet released
+runner: true                   # in the 0.7.6 candidate
 launch_result: true            # required with runner
 resume: true                   # only after you've checked a real reopen and a refused missing one
 limits:
@@ -80,14 +80,15 @@ limits:
 - **`producer` is free text** for your versions. There are no structured version or capability fields.
 - **The launch record is the only identity channel.** Don't report identity on the activity endpoint.
 - **No record means attention.** For a runner preset, a launch with no record within OpenRig's wait leaves the seat
-  needing attention, not ready.
+  needing attention, not ready. So does a launch where OpenRig can't create the record's folder: the runner still starts,
+  without `OPENRIG_LAUNCH_RESULT`.
 - **OpenRig shows this identity as launcher-reported.** It doesn't observe the conversation itself.
 
 ## 4. Activity: report turn boundaries
 
 Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer <token>`.
-- **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`,
-  or else from `$OPENRIG_HOME/activity-endpoint.json`.
+- **Finding the base and token:** take them from `OPENRIG_URL` (or `OPENRIG_PORT`, with `OPENRIG_HOST` defaulting to
+  `127.0.0.1`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else from `$OPENRIG_HOME/activity-endpoint.json`.
 - **Posting:** post one at a time, in order, with a short timeout. Never make the agent wait on a post.
 
 ```json
@@ -101,10 +102,16 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
 | You gave the agent the prompt for a submitted message | `UserPromptSubmit` / `accepted`, `turnId` = your prompt number | working |
 | The agent is working (message chunks, tool calls) | `active` / `agent_message`; `PreToolUse` / `<tool kind>` | working |
 | You refused a permission request (section 7) | `Notification` / `permission_prompt` | needs input |
-| The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle, unless you're holding attention |
+| The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle. While you hold attention (section 7), don't post it: OpenRig reads any `Stop` as idle and clears needs input |
 | Optional idle heartbeat | `Stop` / `idle_heartbeat`, with `livenessSeconds` | idle while beats keep coming |
 | The agent process ended | `Stop` / `<preset name>_exited` | unknown, **never idle** |
-| Your runner or the agent hit an error | `Notification` / `runtime_error` | unknown (not needs input) |
+| Your runner or the agent hit an error | `Notification` / `runtime_error` | recorded, but not used as activity: the prior activity evidence keeps its usual lifetime. It doesn't itself request or clear attention |
+
+- **Liveness:** state `livenessSeconds` (a whole number of seconds, at most 3600) on every idle `Stop`, the turn's end as
+  well as each beat. OpenRig stops reading the seat idle after 2 × `livenessSeconds` without a newer idle report. Without
+  it, an idle report holds until your next post, even if your runner has died. Never send a `Stop` or a beat while holding
+  permission attention.
+- **Exit:** post `Stop` / `<preset name>_exited` only when you observe the agent's process exit.
 
 - **The screen still counts,** but only as evidence of work. On its own it never reads a runner seat idle.
 - **"Accepted" means your runner submitted its Nth prompt.** It isn't the agent's own acknowledgement, and it isn't
@@ -145,8 +152,10 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 - **Refuse at once:** answer every permission request immediately with a refusal (for ACP,
   `{"outcome": {"outcome": "cancelled"}}`).
 - **Make it visible:** show what was asked in the pane, and post `Notification` / `permission_prompt`.
-- **Hold that attention** as your last post through the end of the turn, so the seat reads needs input.
-- **It clears** when your next prompt is accepted, or when an operator clears it (`rig seat clear-attention`).
+- **Hold that attention** as your last post through the end of the turn, so the seat reads needs input. Don't post the
+  turn's `Stop` or idle beats while holding it.
+- **It clears** when your next prompt is accepted, or when an operator clears it
+  (`rig seat clear-attention <session> --reason "…"`).
 - **Never leave a request pending.**
 - **Not in the first version:**
   - answering from the seat's permission setting;
@@ -168,6 +177,7 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 | The agent says it doesn't exist | `error: "missing"` | reports it missing; nothing new starts |
 | Anything else: a timeout, an error, or the working folder no longer matches the conversation's | no record, or an error other than `missing` | **unconfirmed**: the seat keeps its conversation and needs attention |
 | A different conversation opened | the other id | a mismatch; OpenRig doesn't switch to it |
+| OpenRig couldn't create the record's folder | (nothing to write) | nothing starts |
 
 - **Never start a new conversation on a resume.**
 - A conversation saved under another harness's runtime is never handed to your launcher.
@@ -179,8 +189,8 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 | **First startup turn** | Writes it to a private file and passes `OPENRIG_FIRST_INPUT` (with `first_input: true`) | Gives those exact bytes to the agent through its own first-prompt route |
 | **Guidance, skills, startup files** | Doesn't place them for community harnesses; a launch warns that they weren't delivered | Puts whatever the agent needs where *your* harness reads it, or says in `limits` that it isn't supported |
 | **Model** | Passes the seat's declared model as `OPENRIG_MODEL` (with `passes_model: true`); never substitutes one | Maps it to the harness's own setting. OpenRig shows the effective model as unknown |
-| **Placing the agent somewhere else** (a sandbox, another machine) | See the [execution platform chapter](EXECUTION-PLATFORM.md) | Keeps the runner independent of where it runs |
-| **Shutdown** | `rig seat stop` and `rig down` end the seat's tmux session | **(Proposed)** When the runner's pane closes or it's asked to stop, it sends a cancel for any running turn, ends the agent process it started, and lists in `limits` anything that keeps running |
+| **Placing the agent somewhere else** (a sandbox, another machine) | See the [execution platform chapter](execution-platform-contract.md) | Keeps the runner independent of where it runs |
+| **Shutdown** | `rig seat stop` and `rig down` end the seat's tmux session at once: no graceful stop handshake reaches the runner, its pane just closes. OpenRig ends nothing outside that session, and does no external provider cleanup | **(Proposed)** When the runner's pane closes (a hangup) or it's asked to stop, it attempts where possible to cancel any running turn and end the agent process it started, and lists in `limits` anything that may keep running. Cleanup of external compute needs the platform owner to reconcile it |
 
 ## 10. What counts as evidence
 

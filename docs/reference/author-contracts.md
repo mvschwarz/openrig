@@ -2,8 +2,8 @@
 
 OpenRig composes agents into a team. An integration author supplies the pieces that let a new harness participate, or let an existing harness run in a new environment. This guide divides that work into two contracts:
 
-1. **[Harness and runner](HARNESS-RUNNER.md):** launch the agent, report its conversation identity and activity, deliver input, handle permission requests and cancellation, and reopen the requested conversation.
-2. **[Execution and platform](EXECUTION-PLATFORM.md):** choose placement, deliver files and credential references, distinguish owned from attached resources, preserve native state, return artifacts and reconcile shutdown.
+1. **[Harness and runner](harness-runner-contract.md):** launch the agent, report its conversation identity and activity, deliver input, handle permission requests and cancellation, and reopen the requested conversation.
+2. **[Execution and platform](execution-platform-contract.md):** choose placement, deliver files and credential references, distinguish owned from attached resources, preserve native state, return artifacts and reconcile shutdown.
 
 These are draft author responsibilities. Some use implemented OpenRig interfaces; others describe a proposed integration whose code remains with its author. Including the guide in release documentation does not make every described capability available.
 
@@ -52,9 +52,9 @@ The queue records who owns work. It does not prove that an old provider process 
 
 For a terminal harness, begin with the pinned [community preset reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md) and the [Cursor](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/cursor) or [Hermes](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-examples/hermes) directory. Their presence is source guidance, not an effective-model or complete integration guarantee.
 
-For a structured runner, the [runner chapter](HARNESS-RUNNER.md#2-declare-it-what-the-preset-says-fixed-at-launch) supplies a minimal preset, launch record and activity message. The executable named by the preset must still be implemented and installed by its author.
+For a structured runner, the [runner chapter](harness-runner-contract.md#2-declare-it-what-the-preset-says-fixed-at-launch) supplies a minimal preset, launch record and activity message. The executable named by the preset must still be implemented and installed by its author.
 
-For a contained worker, the [platform composition](EXECUTION-PLATFORM.md#a-minimal-composition-using-existing-surfaces) pairs an ordinary coordinator with a worker preset. It uses existing member and preset fields. The wrapper must prepare or attach to the selected environment explicitly; declaring a runtime does not provision it. Its illustrated member list is a fragment, and its launcher is a skeleton, not a ready-to-run provider package.
+For a contained worker, the [platform composition](execution-platform-contract.md#a-minimal-composition-using-existing-surfaces) pairs an ordinary coordinator with a worker preset. It uses existing member and preset fields. The wrapper must prepare or attach to the selected environment explicitly; declaring a runtime does not provision it. Its illustrated member list is a fragment, and its launcher is a skeleton, not a ready-to-run provider package.
 
 A rig bundle can carry declarations, roles and supporting scripts. Do not confuse those files with hydrated image layers, installed binaries, registered presets, credentials or live sessions. State what the recipient must supply.
 
