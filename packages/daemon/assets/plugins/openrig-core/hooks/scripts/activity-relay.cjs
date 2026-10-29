@@ -244,16 +244,17 @@ function settingsRelayPath(command) {
   const executable = decode(m[1]);
   const relay = decode(m[2]);
   if (m.slice(1).some(token => token.startsWith("'") && quote(decode(token)) !== token)) return null;
-  if (!path.isAbsolute(relay) || !relay.endsWith(`/${SETTINGS_RELAY_TAIL}`)) return null;
+  if (!path.isAbsolute(relay) || !path.normalize(relay).endsWith(path.sep + SETTINGS_RELAY_TAIL.split("/").join(path.sep))) return null;
   if (executable !== "node" && (!path.isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(path.basename(executable)))) return null;
   return { executable, relay };
 }
 
 function interpreterAvailable(executable, env) {
   const candidates = executable === "node"
-    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", "node")) : []
+    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", process.platform === "win32" ? "node.exe" : "node")) : []
     : [executable];
   return candidates.some(candidate => {
+    if (process.platform === "win32" && !/^node\.exe$/i.test(path.basename(candidate))) return false;
     try { fs.accessSync(candidate, fs.constants.X_OK); return fs.statSync(candidate).isFile(); }
     catch { return false; }
   });
