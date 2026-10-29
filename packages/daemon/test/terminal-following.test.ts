@@ -107,3 +107,14 @@ describe("scope selector lifetime", () => {
     await vi.advanceTimersByTimeAsync(600000); expect(f.render).toHaveBeenCalledTimes(before + 1);
   });
 });
+
+
+it("restores a mission selector and retains complete-empty following through later queue events", async () => {
+  vi.useFakeTimers(); const f = fixture(), first = f.create(), mission = { ...selector, view: "mission:work" };
+  f.render.mockResolvedValue({ ...answer(), opened: [], following: { ...answer().following!, state: "empty", enabled: true } });
+  await first.open(mission, { enabled: true }); await first.stop();
+  const restored = f.create(); await vi.advanceTimersByTimeAsync(100);
+  expect(restored.list()).toHaveLength(1); expect(restored.list()[0]).toMatchObject({ view: "mission:work", enabled: true });
+  const before = f.render.mock.calls.length; f.emit("queue.created"); await vi.advanceTimersByTimeAsync(100);
+  expect(f.render).toHaveBeenCalledTimes(before + 1);
+});

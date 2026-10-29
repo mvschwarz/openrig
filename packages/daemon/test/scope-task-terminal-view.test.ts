@@ -151,3 +151,74 @@ it("rereads identities for an existing unwatched legacy root and after a scope e
   f.addSlice("another", "new");
   expect(f.resolver.resolve("slice:new")).toMatchObject({ task: { complete: true } });
 });
+
+
+describe("mission union over the same authoritative scope snapshot", () => {
+  it("unions directly tagged work and indexed slices once per row, with every current owner's obligation", () => {
+    const f = fixture(); f.addSlice("release", "04-review", "OPR.4"); f.addSlice("other", "05-other", "OPR.5");
+    const flat = path.join(f.root, "legacy-flat"); mkdirSync(flat); writeFileSync(path.join(flat, "SPEC.md"), "# Flat scope\n");
+    f.add("mission", "a", "pending", ["mission:release"]);
+    f.add("slice", "a", "blocked", ["slice:OPR.3"]);
+    f.add("both", "b", "in-progress", ["mission:release", "slice:04-review"]);
+    f.add("unavailable", "remote", "pending", ["slice:OPR.4"]);
+    f.add("wrong-mission", "wrong", "pending", ["mission:release-extra"]);
+    f.add("other-slice", "wrong", "pending", ["slice:OPR.5"]);
+    f.add("flat", "wrong", "pending", ["slice:legacy-flat"]);
+    f.add("untagged-child", "wrong", "pending", [], ["mission"]);
+    f.add("closed", "wrong", "done", ["mission:release"]);
+    const result = f.read("mission:release"); if ("code" in result) throw new Error(result.error);
+    expect(result.task).toMatchObject({ kind: "mission", id: "release", name: "release", complete: true,
+      members: [{ seat: "remote", availability: "unresolved" }, { seat: "a", obligations: [{ qitemId: "mission" }, { qitemId: "slice" }] },
+        { seat: "b", obligations: [{ qitemId: "both" }] }] });
+    expect(result.task).not.toHaveProperty("qitemId");
+  });
+  it("follows inherited tags through handoff, remains known empty, and sees later direct work", () => {
+    const f = fixture(); f.add("old", "a", "pending", ["mission:release"]);
+    f.db.prepare("UPDATE queue_items SET state='handed-off' WHERE qitem_id='old'").run();
+    f.add("next", "b", "blocked", ["mission:release"]);
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "b" }] } });
+    f.db.prepare("UPDATE queue_items SET state='done'").run();
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: true, members: [] } });
+    f.add("later", "a", "pending", ["mission:release"]);
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+  });
+  it.each(["empty-slices", "manifest-only"])("recognizes a known mission with %s without inventing it from queue tags", mode => {
+    const f = fixture(), dir = path.join(f.root, "planning"); mkdirSync(dir);
+    if (mode === "empty-slices") mkdirSync(path.join(dir, "slices")); else writeFileSync(path.join(dir, "mission.yaml"), "kind: mission\n");
+    expect(f.read("mission:planning")).toMatchObject({ task: { kind: "mission", id: "planning", complete: true, members: [] } });
+    f.add("direct", "b", "pending", ["mission:planning"]);
+    expect(f.read("mission:planning")).toMatchObject({ task: { complete: true, members: [{ seat: "b" }] } });
+    f.add("ghost", "a", "pending", ["mission:unknown"]);
+    expect(f.read("mission:unknown")).toMatchObject({ code: "scope_not_found" });
+  });
+  it.each(["name-name", "id-id", "id-name", "name-id"])("rejects a child %s collision instead of importing another mission's work", mode => {
+    const f = fixture();
+    f.addSlice("other", mode === "name-name" ? "03-build" : mode === "id-name" ? "OPR.3" : "other",
+      mode === "id-id" ? "OPR.3" : mode === "name-id" ? "03-build" : "OTHER");
+    expect(f.read("mission:release")).toMatchObject({ code: "scope_ambiguous" });
+  });
+  it("refuses duplicate mission directory IDs across distinct physical index roots", () => {
+    const f = fixture(), extra = mkdtempSync(path.join(tmpdir(), "mission-index-")); cleanup.push(() => rmSync(extra, { recursive: true, force: true }));
+    mkdirSync(path.join(extra, "release", "slices"), { recursive: true }); f.index.additionalSliceRoots.push(extra);
+    expect(f.read("mission:release")).toMatchObject({ code: "scope_ambiguous" });
+  });
+  it("retains named known owners while malformed active tags make the union incomplete", () => {
+    const f = fixture(); f.add("good", "b", "pending", ["mission:release"]); f.add("bad", "a", "pending", {});
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: false, members: [{ seat: "b" }] } });
+  });
+  it("uses literal Unicode mission IDs and keeps the explicit project association", () => {
+    const f = fixture("chosen"), id = "révision + 7"; mkdirSync(path.join(f.root, id, "slices"), { recursive: true });
+    f.add("ours", "b", "pending", ["project:chosen", `mission:${id}`]);
+    f.add("other-project", "a", "pending", ["project:other", `mission:${id}`]);
+    expect(f.read(`mission:${id}`)).toMatchObject({ task: { kind: "mission", id, complete: true, members: [{ seat: "b" }] } });
+  });
+  it("reuses one watched identity generation for mission slices while queue work stays fresh", () => {
+    const f = cachedFixture();
+    expect(f.resolver.resolve("mission:release")).toMatchObject({ task: { complete: true, members: [] } });
+    f.addSlice("release", "04-new", "NEW"); f.add("new-slice-work", "b", "pending", ["slice:NEW"]);
+    f.add("direct", "a", "pending", ["mission:release"]);
+    expect(f.resolver.resolve("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+    f.resolver.invalidate();
+    expect(f.resolver.resolve("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }, { seat: "b" }] } });
+  });
+});

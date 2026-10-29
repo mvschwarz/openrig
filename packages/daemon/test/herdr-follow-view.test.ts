@@ -254,7 +254,7 @@ describe("slice follower policy", () => {
 });
 
 
-function scopeCoreFixture(kind: "qitem" | "slice") {
+function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
   const f = fixture(), component = f.create();
   let failed = false;
   const callbacks = new Set<Parameters<EventBus["subscribe"]>[0]>();
@@ -289,5 +289,16 @@ it("preserves the resolver's renamed-slice explanation in the real provider noti
     await expect.poll(async () => (await f.service.status()).following?.[0]?.status?.events.join(" ")).toContain("reopen the view under its current key");
     expect((await f.service.status()).following?.[0]?.enabled).toBe(true);
     expect(f.calls.some(call => call[1] === "close")).toBe(false);
+  } finally { await f.service.stop(); }
+});
+
+
+it("keeps a real empty mission workspace enabled through Core with a mission waiting notice", async () => {
+  const f = scopeCoreFixture("mission");
+  try {
+    const result = await f.service.followView({ view: f.selector, provider: "herdr", enabled: true });
+    expect(result).toMatchObject({ ok: true, following: { state: "empty", enabled: true, maxTiles: 4 }, viewDescriptor: { kind: "following" } });
+    expect(result.following?.events.join(" ")).toContain("following this mission");
+    expect((await f.service.status()).following).toHaveLength(1);
   } finally { await f.service.stop(); }
 });

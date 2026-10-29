@@ -795,3 +795,13 @@ it("keeps unsupported ensure as a client error and maps unknown/ambiguous scope 
   Object.assign(deps, { resolveScopeView: () => ({ code: "scope_ambiguous", error: "Ambiguous scope" }) });
   expect((await app.request("/terminal/preview?view=slice:duplicate")).status).toBe(409);
 });
+
+
+it("previews mission owners and ensure capability through the same scoped resolver", async () => {
+  const { deps, herdr } = makeDeps();
+  Object.assign(herdr, { ensureViewer: async () => { throw new Error("Preview is passive"); } });
+  Object.assign(deps, { resolveScopeView: () => ({ task: { kind: "mission", id: "work", name: "work", complete: true, issues: [], members: [] }, members: [] }) });
+  const preview = await new TerminalService(deps).previewView({ view: "mission:work" });
+  expect(preview).toMatchObject({ task: { kind: "mission", id: "work", complete: true, members: [] }, capabilities: { ensureViewer: true } });
+  expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
+});
