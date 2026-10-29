@@ -224,6 +224,16 @@ home variables and seat/account precedence still win. The complete status
 file passes 13/13 and daemon typecheck passes, without reading credentials or
 changing any live launch environment.
 
+## Observed process empty-HOME fallback (2026-10-30)
+
+An owned native Node child with empty HOME and a synthetic USERPROFILE
+reproduced defaultResolveHomeDirByPid returning an empty string. The Windows
+branch now falls through empty HOME to nonempty USERPROFILE, and returns
+undefined when neither is usable. Explicit nonempty HOME still wins. Native
+process-fact and Codex thread-id checks pass, with daemon typecheck passing.
+Only the owned child was observed/stopped; no authentication file, existing
+provider process, thread database or fleet session was read or changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

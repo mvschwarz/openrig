@@ -13,6 +13,18 @@ import { findWindowsRunProcesses } from "../src/domain/windows-process-facts.js"
 import { randomUUID } from "node:crypto";
 
 describe.skipIf(process.platform !== "win32")("native Windows restart process facts", () => {
+  it("resolves an owned process's profile when its HOME is explicitly empty", async () => {
+    const profile = path.join(os.tmpdir(), "synthetic-observed-profile");
+    const child = spawn(process.execPath, ["-e", "console.log('ready');setInterval(()=>{},1000)"], {
+      windowsHide: true, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, HOME: "", USERPROFILE: profile },
+    });
+    try {
+      await once(child.stdout!, "data");
+      expect(await defaultResolveHomeDirByPid(child.pid!)).toBe(profile);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) { const closed = once(child, "close"); child.kill(); await closed; }
+    }
+  }, 20_000);
   it("matches run-marker keys with Windows casing while retaining exact marker values", async () => {
     const run = `Owned-Case-${randomUUID()}`;
     const env = { ...process.env };

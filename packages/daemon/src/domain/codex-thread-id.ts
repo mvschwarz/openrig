@@ -34,7 +34,7 @@ export async function defaultResolveHomeDirByPid(pid: number): Promise<string | 
   try {
     if (process.platform === "win32") {
       const facts = await readWindowsProcessFacts(pid);
-      return facts?.env.HOME ?? facts?.env.USERPROFILE;
+      return facts?.env.HOME || facts?.env.USERPROFILE || undefined;
     }
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.
