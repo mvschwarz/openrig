@@ -996,7 +996,9 @@ export class TmuxAdapter {
    * an identity, so it reports a warning (the launch still goes ahead). */
   private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
     const inherited = await this.globalEnvironment();
-    const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
+    const compare = (key: string) => process.platform === "win32" ? key.toUpperCase() : key;
+    const kept = new Set(keep.map(compare));
+    const keys = parentSessionEnvKeys(inherited).filter((key) => !kept.has(compare(key)));
     for (const key of keys) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
       await this.run(argv, posixJoinArgv(argv));
@@ -1735,10 +1737,12 @@ export class TmuxAdapter {
   async unsetSessionEnv(session: string, key: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const parentIdentity = parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
-    const flag = parentIdentity ? "-r" : "-u";
-    await this.run(["tmux", "set-environment", "-t", target, flag, key],
-      `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
+    const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key : name === key);
+    const flag = parents.length ? "-r" : "-u";
+    for (const name of new Set([key, ...parents])) {
+      await this.run(["tmux", "set-environment", "-t", target, flag, name],
+        `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(name)}`);
+    }
   }
 
   private async globalEnvironment(): Promise<Record<string, string>> {
