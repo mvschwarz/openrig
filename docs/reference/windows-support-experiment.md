@@ -7,6 +7,21 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Case-variant Git environment isolation, 2026-10-29
+
+Review of the current platform-call inventory found that bundleGit removed only
+uppercase GIT_ keys. On Windows Git also reads a mixed-case configuration key.
+An actual local Git test first proved that a mixed-case invalid config count
+breaks Git, then failed through bundleGit before the fix. The environment filter
+now removes GIT_ keys case-insensitively. The three targeted real-Git checks
+passed: configuration isolation, error sanitization and missing-executable
+reporting. The other 38 cases in that file were outside this selection, not
+claimed green. No remote fetch, credentials or provider login was used.
+
+The full lint command passed before this follow-up. A full workspace test run
+started at the preceding head is still in flight and may observe later source
+changes; its eventual result must not be presented as exact-head acceptance.
+
 ## Native plugin snapshot refresh and isolated build follow-up, 2026-10-29
 
 The published plugin baseline refresh command now uses the Node CLI's

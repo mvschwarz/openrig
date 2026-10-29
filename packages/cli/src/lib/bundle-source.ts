@@ -92,7 +92,7 @@ export async function localBundleClient(deps: StatusDeps, host?: string): Promis
 const execFileAsync = promisify(execFile);
 export async function bundleGit(cwd: string, args: string[]): Promise<string> {
   // Public HTTPS only, with no global credential helpers, URL rewrites, hooks or injected Git config.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")));
   try {
     const result = await execFileAsync("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", ...args], {
       cwd, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
