@@ -330,6 +330,20 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r, the row's creator");
   });
 
+  it("a retained exited pane sends its finding to the existing live recovery floor and preserves the original work", async () => {
+    seedMissingSession("worker@r");
+    const store = new SeatIdentityStore(db);
+    store.upsert({ ...store.getForNode("node-dead")!, evidenceSource: "pane_process", reason: "pane_exited" as never });
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId,60);
+    await runSweep({ resolveOperatorSeat: () => "operator@kernel" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("operator@kernel");
+    expect(repo.getById(row.qitemId)).toMatchObject({ qitemId:row.qitemId, body:"work", destinationSession:"worker@r", state:"in-progress" });
+    expect(finding!.body).toContain("pane_exited");
+  });
+
   it("with an operator seat set, a dead claimant's finding goes there, as the ladder's floor does", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });

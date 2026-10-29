@@ -201,6 +201,16 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     expect(result.message).not.toContain("OPR.0.5.5.1");
   });
 
+  it("a no-longer-parked episode closure does not claim that its agent resumed", async () => {
+    const store = new RowStore();
+    await makeParkedOwnerConsumerPolicy(makeDeps([parkedSeat()],store)).evaluate(makeJob());
+    await makeParkedOwnerConsumerPolicy(makeDeps([parkedSeat({parked:false})],store)).evaluate(makeJob());
+    const closed = store.appended.filter(x => x.note.startsWith(CLOSE_PREFIX));
+    expect(closed.length).toBeGreaterThan(0);
+    expect(closed.every(x => x.note.includes("no longer observed parked"))).toBe(true);
+    expect(closed.some(x => x.note.includes("seat resumed"))).toBe(false);
+  });
+
   it("B1 hard check: an obligation set closed between derive and the delivery boundary skips with the exact reason and ZERO reserve", async () => {
     const store = new RowStore();
     store.openIds = () => []; // the boundary read — closed after diagnosis
