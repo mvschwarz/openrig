@@ -10,6 +10,7 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
+import { sameSessionFile } from "./same-session-file.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
@@ -161,7 +162,7 @@ export class PiResumeAdapter {
           } as ResumeResult;
         }
         if (state.ready) {
-          if (state.sessionFile !== sessionFile) {
+          if (!sameSessionFile(state.sessionFile, sessionFile)) {
             return {
               ok: false,
               code: "resume_failed",

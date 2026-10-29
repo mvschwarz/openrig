@@ -10,6 +10,7 @@
 // future contract, never a hidden mode here (BR-2).
 
 import nodePath from "node:path";
+import { sameSessionFile } from "./same-session-file.js";
 import { randomUUID } from "node:crypto";
 import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
@@ -341,13 +342,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (!sessionFile) {
       return { ok: false, error: `${this.runtime} launch: the runner became ready but reported no session file` };
     }
-    if (this.runtime === "omp" && opts.resumeToken && sessionFile !== opts.resumeToken) {
+    if (this.runtime === "omp" && opts.resumeToken && !sameSessionFile(sessionFile, opts.resumeToken)) {
       // An exact OMP resume must continue the requested history; a runner
       // that came up on any other file started a different session. Same
       // contract as the separate resume adapter's verifyResume.
       return { ok: false, error: "omp resume: the runner is ready but does not report the requested session file" };
     }
-    if (forkRef && sessionFile === forkRef) {
+    if (forkRef && sameSessionFile(sessionFile, forkRef)) {
       // The adapter contract requires the NEW post-fork token, never the
       // parent's (runtime-adapter.ts fork rule).
       return { ok: false, error: `${this.runtime} fork: the runner reported the parent session file instead of the post-fork child` };

@@ -273,6 +273,26 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native session aliases preserve resume and fork identity (2026-10-30)
+
+Pi-family resume verification and OMP launch verification compared session-file
+strings, so native aliases of the same history could be refused. The shared
+fork guard could also accept an alias of the parent as a distinct child. These
+consumers now retain exact matches and, only on Windows for differing paths,
+require both operands to be existing regular files with the same nonzero native
+file ID and volume. They do not infer identity from lowercased spelling or equal
+contents. POSIX comparisons and unavailable-file behavior remain exact.
+
+An owned actual directory junction and session file reproduce the restore
+failure before the repair. The fixture drives OMP launch, its inherited Pi-family
+resume consumer, parent-alias fork refusal and different-file refusal with
+launch-scoped synthetic sidecars. File contents stay unchanged. That fixture
+plus the complete OMP adapter file pass 6/6; the separate Pi runtime-adapter file
+passes 51/51; daemon type checking passes. No provider or real runner starts.
+Directory junction evidence does not establish file-symlink or full provider
+restore acceptance. The requested pi-resume.test.ts operand does not exist; the
+51-case receipt covers pi-runtime-adapter.test.ts only.
+
 ## Native session tokens accept literal short-name tildes (2026-10-30)
 
 The native Pi/OMP session-file format validator rejected a literal tilde, even
