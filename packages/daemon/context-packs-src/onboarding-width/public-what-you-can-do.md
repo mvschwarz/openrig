@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.4`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.5`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -211,14 +211,24 @@ unseen — which makes messages the one delivery channel that never gets skipped
   type. Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback; explain
   the failure. In the window's `--json` output, `reusedWorkspace` with no new tiles means an
   existing view was reused, which is success. `--provider herdr` or `--provider cmux` opens the
-  view in a provider that is already running, without opening a window; each such open adds a new
-  workspace, so to come back to a view, focus its open space.
+  view in a provider that is already running, without opening a window. Ordinary opens add a new
+  workspace, so to come back to a fixed view, focus its open space; task follow mode reuses one.
   **`qitem:<id>` as the view** previews or opens the current local owners of that task: its
   pending, in-progress and blocked rows through explicitly linked successors, without closed
   predecessors or past senders. It's a read-only membership view: stopped, missing, external and
-  unresolved owners are named, and incomplete lineage is reported rather than cut short. It doesn't
-  follow the task as it moves, and an explicit open still has the provider's usual workspace
-  effects. Preview and open responses carry `viewDescriptor` (`kind`, `name`).
+  unresolved owners are named, and incomplete lineage is reported rather than cut short. Ordinary
+  open is one-shot. Add **`--follow --provider herdr`** to keep one workspace as the task's owners
+  join and leave (Linux Herdr 0.9.5 / protocol 22 only). Joining viewers do not request focus;
+  departures close viewers, not agents or conversations. Typed drafts and unreadable composers
+  retain departed tiles, including unconfirmed Pi, terminal and community-harness input.
+  `--pin`, `--suppress` and `--max-tiles` adjust the view; `--no-follow` keeps the fixed layout.
+  A complete empty task drains removable tiles and stops following once none remain; an explicit
+  `--follow` resumes that workspace. `rig terminal views --json` shows saved active selectors.
+  The exercised journey used shell stand-ins, not native agents, and active render cost remains
+  unmeasured. See `reference/terminal-sessions.md` for controls and limits. Preview and open
+  responses carry `viewDescriptor` (`kind`, `name`); membership grants no input authority.
+  An unconfirmed pane is reported as `pane_unconfirmed`, not counted as opened. Inspect before
+  retrying: an unconfirmed result does not prove that nothing opened.
   Add `--session <name>` to select a Herdr session for that request; `--session default`
   explicitly selects its default session. `rig terminal status --session <name>` inspects
   the same endpoint. Omitting the flag keeps the daemon's configured endpoint. Herdr tiles come
@@ -1319,6 +1329,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
   with secret names, never values): OpenRig then POSTs a pointer to the row when work lands, and a
   2xx records only that the ring was accepted, not that anything woke. When work waits for a
   member nothing can wake, or a rung member doesn't claim it in time, its person is told.
+  **Internet-facing hosted members are experimental, unsupported, off by default and at your
+  own risk.** Local assistants can connect locally. Internet access needs your own TLS tunnel or
+  proxy and a narrowly scoped, revocable token; see `reference/hosted-members.md`. Task terminal
+  following does not require internet exposure.
 - **`rig skill loadout --runtime <claude-code|codex>`** — inspect the exact catalog revision,
   selectors, target, and current/missing/shadowed/conflicting state for one working directory.
   `--apply` writes only the managed ownership set, is idempotent, and refuses local edits or
