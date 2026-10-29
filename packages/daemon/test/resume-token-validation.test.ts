@@ -82,13 +82,13 @@ describe("validateResumeToken", () => {
 // tests above must keep passing unchanged).
 describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () => {
   it.each(["pi", "omp"])("accepts native Windows session paths for %s", runtime => {
-    for (const token of [String.raw`C:\Users\测试 user\.openrig\seat@rig\session.jsonl`, "D:/OpenRig data/session.jsonl", String.raw`\\server\share\seat\session.jsonl`]) {
+    for (const token of [String.raw`C:\Users\测试 user\.openrig\seat@rig\session.jsonl`, String.raw`C:\Users\USERNA~1\AppData\Local\Temp\session.jsonl`, "D:/OpenRig data/session.jsonl", String.raw`\\server\share\seat\session.jsonl`]) {
       expect(validateResumeToken(runtime, token, "win32")).toMatchObject({ ok: true, token });
       expect(validateResumeToken(runtime, token, "linux").ok).toBe(false);
     }
   });
   it("rejects Windows relative, traversal, device and alternate-stream paths without echoing them", () => {
-    for (const token of [String.raw`C:session.jsonl`, String.raw`\seat\session.jsonl`, String.raw`C:\seat\..\session.jsonl`, String.raw`\\?\C:\seat\session.jsonl`, String.raw`C:\seat\file:stream.jsonl`, String.raw`C:\seat\x;secret.jsonl`]) {
+    for (const token of ["~/session.jsonl", String.raw`C:session.jsonl`, String.raw`\seat\session.jsonl`, String.raw`C:\seat\..\session.jsonl`, String.raw`\\?\C:\seat\session.jsonl`, String.raw`C:\seat\file:stream.jsonl`, String.raw`C:\seat\x;secret.jsonl`]) {
       const result = validateResumeToken("pi", token, "win32");
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error).not.toContain(token);

@@ -77,7 +77,7 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
   }
   const safeWindowsPath = windowsPath && !/^\\\\[?.]\\/.test(token)
-    && /^[\p{L}\p{N}\p{M} ._/@\\-]+$/u.test(token.replace(/^[A-Za-z]:/, ""));
+    && /^[\p{L}\p{N}\p{M} ._/@~\\-]+$/u.test(token.replace(/^[A-Za-z]:/, ""));
   if (!(windowsPath ? safeWindowsPath : SESSION_FILE_CHARSET_RE.test(token))) {
     return {
       ok: false,

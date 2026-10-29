@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native session tokens accept literal short-name tildes (2026-10-30)
+
+The native Pi/OMP session-file format validator rejected a literal tilde, even
+though Windows 8.3 path components such as USERNA~1 contain it. Native absolute
+paths now admit that character without expansion. Relative ~/ paths, traversal,
+device namespaces, alternate data streams and existing metacharacter refusals
+remain rejected; POSIX token character rules are unchanged.
+
+Owned Pi and OMP local route fixtures write a temporary session file with a
+literal tilde path, reproduce HTTP 422 before the repair, then verify exact SQLite
+token persistence without token content in responses/events or changes to file
+bytes. A separate format fixture covers the 8.3 spelling. This does not create
+or prove a distinct filesystem short-name alias. Both complete route/validation
+files pass 38/38 without skips; daemon type checking passes. No real session,
+provider, credential, live daemon or deployed task is used. The before selection
+contained two failures and 13 filtered cases, not platform skips.
+
 ## Managed native PATHEXT remains selected through launch (2026-10-30)
 
 The selected PATHEXT participated in native executable lookup but was absent
