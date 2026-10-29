@@ -2,6 +2,31 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
+
+// SeatLaunchEnvironment also supplies a rig-only bin for the CLI paired with
+// the launching daemon. Recognize that exact generated form, never execute it.
+function pairedSeatRig(candidate) {
+  const text = fs.readFileSync(candidate, "utf8");
+  const words = /^@echo off\r?\n"([^"%\r\n]+)" "([^"%\r\n]+)" %\*\r?\n$/.exec(text);
+  if (!words) return null;
+  const interpreter = fs.realpathSync(words[1]);
+  const cli = fs.realpathSync(words[2]);
+  const directory = path.dirname(candidate);
+  const digest = createHash("sha256").update(cli).digest("hex");
+  if (path.relative(interpreter, fs.realpathSync(process.execPath)) !== ""
+    || path.basename(directory) !== digest
+    || path.basename(path.dirname(directory)) !== "seat-bin"
+    || path.basename(path.dirname(path.dirname(directory))) !== "run") throw new Error("Unrecognized Windows seat rig shim");
+  const root = path.resolve(path.dirname(cli), "..");
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.rig;
+  if (manifest.name !== "@openrig/cli" || typeof entry !== "string" || path.isAbsolute(entry)) throw new Error("Unrecognized paired rig package");
+  const declared = path.resolve(root, entry), relative = path.relative(root, declared);
+  if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)
+    || path.relative(fs.realpathSync(declared), cli) !== "" || !fs.statSync(cli).isFile()) throw new Error("Unrecognized paired rig entry");
+  return { command: process.execPath, prefix: [cli] };
+}
 
 // npm's Windows cmd shim is not directly spawnable. Keep PATH order and invoke
 // only its recognized OpenRig package entry, through this hook's Node, without a shell.
@@ -18,6 +43,8 @@ function resolveRigCommand(env = process.env, cwd = process.cwd()) {
       if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
       if (ext === ".com" || ext === ".exe") return { command: fs.realpathSync(candidate), prefix: [] };
       if (ext !== ".cmd") throw new Error("Windows rig requires a native executable or recognized npm installation");
+      const paired = pairedSeatRig(candidate);
+      if (paired) return paired;
       const root = path.join(dir, "node_modules", "@openrig", "cli");
       const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
       const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.rig;

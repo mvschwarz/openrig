@@ -273,6 +273,27 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Generated seat CLI through native hooks (2026-10-30)
+
+SeatLaunchEnvironment places a daemon-paired rig-only bin before the launch
+PATH, but the native hook resolver admitted only npm-style rig.cmd shims.
+The actual generated seat shim therefore failed with ENOENT while the hook
+looked for node_modules under seat-bin. The resolver now recognizes that exact
+generated command form, its run/seat-bin/path-hash layout, this Node interpreter
+and the paired package's declared CLI entry. It invokes Node plus that entry
+directly; it never executes or broadly interprets the batch file. These are
+layout/metadata checks, not package-authenticity attestation.
+
+An owned fixture uses the real seat generator, then the real hook resolver and
+refocus child to obtain content from an offline paired CLI. Literal arguments,
+empty argv and cwd are retained. Wrong directory digest, extra batch text,
+another interpreter, a changed declared entry and an unrelated package are
+refused. Native npm/PATHEXT behavior remains covered by the adjacent fixtures.
+Five hook/environment/plugin/trust files pass 48/48 and daemon typecheck passes.
+The complete context collector file also passes 54/54 at the inspected source;
+that observation required no additional product change. No installed CLI,
+provider, real hook, daemon or work seat was invoked or changed.
+
 ## Native plugin migration and skill-ignore replacement (2026-10-30)
 
 Retiring obsolete plugin hook registrations and rewriting managed skill ignore
