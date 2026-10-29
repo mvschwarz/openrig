@@ -1,5 +1,26 @@
 # Native Windows support experiment
 
+## Native listener lookup deadline (2026-10-29)
+
+The complete CLI run at `8ad49dd2bc5e2d1ea35a26a00713c0a9db96ac04`
+kept its source stable: 5950 tests, 5001 passed, 892 failed and 57 pending.
+This is a failing full-workspace receipt, not native acceptance. An isolated
+reproduction confirmed that an owned TCP listener was reported as unknown after
+the existing 10-second `Get-NetTCPConnection` deadline; even a filtered CIM query
+took 22.7 seconds on this host.
+
+Windows listener lookup now reads `System32/netstat.exe -ano` directly. Parsing
+selects exact TCP listening ports, deduplicates IPv4/IPv6 rows for one PID, and
+keeps absent, malformed or multiple-owner results unknown. The existing destroy
+flow still checks for an OpenRig HTTP listener before consulting this PID lookup.
+No running daemon was destroyed or restarted by this verification.
+
+The owned native listener regression and destroy command tests passed 18/18;
+the listener lifecycle check completed in 855 ms. This exercises the OS boundary
+with an owned socket rather than a stub-agent scenario: stub agents cannot
+reproduce CIM query latency or the Windows socket table. Installed destructive
+recovery and the remaining CLI failures are not established by these tests.
+
 Tracking: https://github.com/mvschwarz/openrig/issues/88
 
 This branch implements native Windows headless Codex/Pi launch, message delivery,

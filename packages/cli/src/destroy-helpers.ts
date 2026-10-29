@@ -280,14 +280,11 @@ export function findListeningPidWithLsof(port: number): number | null {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   try {
     if (process.platform === "win32") {
-      const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; `
-        + `@(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -eq ${port} } | Select-Object -ExpandProperty OwningProcess -Unique) | ConvertTo-Json -Compress`;
-      const output = execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-        ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-        { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 64 * 1024 });
-      const parsed: unknown = output.trim() ? JSON.parse(output) : [];
-      const pids = Array.isArray(parsed) ? parsed : [parsed];
-      return pids.length === 1 && Number.isSafeInteger(pids[0]) && pids[0] > 0 ? pids[0] as number : null;
+      // CIM-backed Get-NetTCPConnection can exceed the query deadline on a busy
+      // host. Read the native table directly, including IPv4 and IPv6 listeners.
+      const output = execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "netstat.exe"),
+        ["-ano"], { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+      return parseWindowsListeningPid(output, port);
     }
     const output = execFileSync("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { encoding: "utf-8" }).trim();
     if (!output) return null;
@@ -298,6 +295,20 @@ export function findListeningPidWithLsof(port: number): number | null {
   } catch {
     return null;
   }
+}
+
+export function parseWindowsListeningPid(output: string, port: number): number | null {
+  const pids = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length !== 5 || fields[0] !== "TCP" || fields[3] !== "LISTENING") continue;
+    if (fields[1]?.slice(fields[1].lastIndexOf(":") + 1) !== String(port)) continue;
+    if (!/^\d+$/.test(fields[4] ?? "")) return null;
+    const pid = Number(fields[4]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    pids.add(pid);
+  }
+  return pids.size === 1 ? [...pids][0]! : null;
 }
 
 export function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): boolean {
