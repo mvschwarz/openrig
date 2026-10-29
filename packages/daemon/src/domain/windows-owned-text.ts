@@ -25,6 +25,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="append-private")AppendPrivate(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       else if(args[0]=="seal-private") { using(var file=Open(args[1],true,false,true))SealPrivate(file); }
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
+      else if(args[0]=="directory-write-access")DirectoryWriteAccess(args[1]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -68,6 +69,17 @@ public static class OpenRigOwnedText {
       }
       return file;
     } finally { if(pinned.IsAllocated)pinned.Free(); }
+  }
+  static void DirectoryWriteAccess(string path) {
+    var security=new SecurityAttributes(); security.length=Marshal.SizeOf(security);
+    // FILE_ADD_FILE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS. Windows checks
+    // the calling token against the directory DACL without creating a child.
+    using(var file=CreateFile(path,2u,7u,ref security,3u,0x02000000u,IntPtr.Zero)) {
+      if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+      FileInformation info;
+      if(!GetFileInformationByHandle(file,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
+      if((info.attributes & 0x10u)==0)throw new InvalidOperationException("state path must be a directory");
+    }
   }
   static FileInformation Regular(SafeFileHandle file,bool write,bool owned=false) {
     FileInformation info;
@@ -300,6 +312,14 @@ function nativeHelper(): string {
 /** Stage the native assembly once before a worker's synchronous log barrier.
  * The worker receives only the executable path and performs all log I/O. */
 export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
+
+/** Ask Windows for FILE_ADD_FILE on the existing directory, without creating
+ * a child or changing its metadata. The OS evaluates the actual process token. */
+export function checkWindowsDirectoryWriteAccess(directory: string): void {
+  execFileSync(nativeHelper(), ["directory-write-access", directory], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
 
 /** Synchronous append for existing synchronous receipt writers: native owner,
  * one-link and DACL checks/tightening precede append and durable flush. */

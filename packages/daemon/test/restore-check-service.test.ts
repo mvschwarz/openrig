@@ -338,7 +338,18 @@ describe("RestoreCheckService", () => {
       expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
       // Check itself ran and produced a result
       const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
-      expect(stateDir).toBeDefined();
+      expect(stateDir).toMatchObject({ status: "green" });
+      if (process.platform === "win32") {
+        const restore = denyWindowsDirectoryCreation(tmpDir);
+        try {
+          const denied = service.check({ noQueue: true, noHooks: true }).checks.find(c => c.check === "host.state-dir-writable");
+          expect(denied).toMatchObject({ status: "red", remediationSafe: false });
+          expect(denied?.remediation).toContain("Windows Security");
+          expect(denied?.remediation).not.toContain("chmod");
+          expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
+          expect(fs.readdirSync(tmpDir)).toEqual([]);
+        } finally { restore(); }
+      }
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -2076,3 +2087,4 @@ describe("RestoreCheckService", () => {
     expect(result.continuity.status).toBe("not_proven");
   });
 });
+import { denyWindowsDirectoryCreation } from "./helpers/directory-permissions.js";

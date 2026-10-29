@@ -1703,3 +1703,21 @@ The new native doctor case passed. Existing preflight and setup suites passed;
 the combined preflight/setup/doctor run had 130 passed and two existing daemon
 distribution fixture path failures in doctor. Those failures are also present
 in the earlier frozen CLI report and are not reported as resolved here.
+
+## Read-only restore directory access (2026-10-30)
+
+Restore checks previously trusted `access(W_OK)` on Windows and suggested
+`chmod` on failure. They now request `FILE_ADD_FILE` on an existing directory
+handle with `OPEN_EXISTING` and `FILE_FLAG_BACKUP_SEMANTICS`, then close it.
+No child is created and the directory's modification time is unchanged. This
+preserves restore-check's read-only target contract; it is an access-rights
+observation, not proof that a future write will succeed under changed state.
+Windows failures suggest inspecting Windows Security properties.
+See [Microsoft's directory permission example](https://devblogs.microsoft.com/oldnewthing/20251203-00/?p=111836).
+
+An actual deny-create DACL fails the native check; restoring it passes. Missing
+paths and regular files are refused. The restore-service consumer reports red
+for the denied directory while retaining its contents and mtime. Both focused
+cases passed, and daemon TypeScript checking passed. The broader 119-case run
+had 101 passed and 18 previously observed activity-hook fixture failures; those
+remain unresolved. No live restore, restart or runtime deployment was performed.
