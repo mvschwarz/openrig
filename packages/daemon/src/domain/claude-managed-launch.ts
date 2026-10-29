@@ -155,13 +155,14 @@ export class ClaudeManagedLaunch {
   }
 
   /** The switch's credential-precedence check, said as a launch warning for a seat with its own token reference, such as a
-   *  spec's `claude_token`: what Claude Code would use ahead of it. The launch goes ahead, so it's never a refusal. An
-   *  account-home seat is skipped: its home is the selection, checked when it was made. So is an API-key reference, which
-   *  Claude Code ranks above an apiKeyHelper and whose step scrubs the outranking names itself. */
+   *  spec's `claude_token`: what Claude Code would use ahead of it. The launch goes ahead, so it's never a refusal. Only
+   *  the settings files count: the token step unsets the outranking names in the launch environment before Claude starts.
+   *  An account-home seat is skipped: its home is the selection, checked when it was made. So is an API-key reference,
+   *  which Claude Code ranks above an apiKeyHelper and whose step scrubs the outranking names itself. */
   async tokenPrecedenceWarnings(nodeId: string, ref: ClaudeSeatTokenRef): Promise<string[]> {
     if (ref.kind === "api-key" || this.accountHome(nodeId)) return [];
     try {
-      const found = await this.credentialPrecedence(nodeId);
+      const found = await this.credentialPrecedence(nodeId, { settingsOnly: true });
       return found.conflicts.length ? [claudeSeatTokenOutrankedNotice(ref, found.conflicts)] : [];
     } catch (error) {
       return [`This seat's Claude subscription token (${ref.label}): what would take precedence over it couldn't be checked (${(error as Error).message}).`];
@@ -184,13 +185,14 @@ export class ClaudeManagedLaunch {
    *  the settings files it loads. When the token applies, the launch unsets those names for Claude's process, so a pane
    *  shell's own exports can't outrank it. With `storedLogin`, also a `CLAUDE_CODE_OAUTH_TOKEN` it would receive, which Claude
    *  uses ahead of the stored login; a pane shell's own exports can't be read then. Managed settings (a file, MDM or the
-   *  server) aren't read; the restarted seat's /status is the evidence for those. */
-  async credentialPrecedence(nodeId: string, opts: { storedLogin?: boolean; apiKey?: boolean } = {}): Promise<CredentialPrecedence> {
+   *  server) aren't read; the restarted seat's /status is the evidence for those. With `settingsOnly`, the launch
+   *  environment isn't read either. */
+  async credentialPrecedence(nodeId: string, opts: { storedLogin?: boolean; apiKey?: boolean; settingsOnly?: boolean } = {}): Promise<CredentialPrecedence> {
     const target = this.target(nodeId);
     const cwd = target.cwd!;
     const conflicts: CredentialConflict[] = [];
     const instead: CredentialConflict[] = [];
-    const names = opts.apiKey ? [] : opts.storedLogin ? [...OUTRANKING_TOKEN_ENV, "CLAUDE_CODE_OAUTH_TOKEN"] : OUTRANKING_TOKEN_ENV;
+    const names = opts.apiKey || opts.settingsOnly ? [] : opts.storedLogin ? [...OUTRANKING_TOKEN_ENV, "CLAUDE_CODE_OAUTH_TOKEN"] : OUTRANKING_TOKEN_ENV;
     const found = (name: string) => name === "CLAUDE_CODE_OAUTH_TOKEN" ? instead : conflicts;
     for (const name of names) {
       if (this.sessionEnv[name]) {
@@ -204,7 +206,7 @@ export class ClaudeManagedLaunch {
         found(name).push({ name, source: "this seat's env: (member or rig) or a one-off launch name", remedy: `remove ${name} from this seat's env: in its rig spec` });
       }
     }
-    const checked = [opts.storedLogin ? "the launch environment"
+    const checked: string[] = opts.settingsOnly ? [] : [opts.storedLogin ? "the launch environment"
       : "the launch environment (a pane shell's own exports are unset for Claude's process when the token applies)"];
     const notChecked = ["managed settings (a managed-settings.json file, MDM or the server)",
       ...(opts.storedLogin ? ["the pane shell's own exports (its startup files), which a launch without an explicit permission mode keeps"] : [])];
