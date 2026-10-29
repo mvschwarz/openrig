@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { checkPackagedPluginVersions, snapshotPlugins } from './check-packaged-plugin-versions.mjs';
 
 test('changed packaged plugin content requires a strictly newer version', t => {
@@ -69,6 +70,21 @@ test('plugin roots and consumed manifests are not followed through links', t => 
   assert.throws(() => snapshotPlugins(join(dir, 'package')), /directory/);
 });
 
+test('snapshot refresh rejects symlinked package metadata without replacing the baseline', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'plugin-refresh-link-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pkg = join(dir, 'input/package');
+  mkdirSync(join(pkg, 'daemon/assets/plugins/core/.claude-plugin'), { recursive: true });
+  writeFileSync(join(pkg, 'daemon/assets/plugins/core/.claude-plugin/plugin.json'), '{"version":"0.1.18"}');
+  writeFileSync(join(dir, 'metadata.json'), '{"version":"0.7.1"}');
+  symlinkSync(join(dir, 'metadata.json'), join(pkg, 'package.json'));
+  execFileSync('tar', ['-czf', join(dir, 'release.tgz'), '-C', join(dir, 'input'), 'package']);
+  const baseline=join(dir,'baseline.json'); writeFileSync(baseline,'original baseline');
+  const run=spawnSync(process.execPath,[fileURLToPath(new URL('./check-packaged-plugin-versions.mjs',import.meta.url)),join(dir,'release.tgz'),'--snapshot','--out',baseline],{encoding:'utf8',windowsHide:true});
+  assert.notEqual(run.status,0); assert.match(run.stderr,/package.json: expected a regular file/);
+  assert.equal(readFileSync(baseline,'utf8'),'original baseline');
+});
+
 test('documented CLI snapshot refresh preserves the old fixture on failure', t => {
   const dir = mkdtempSync(join(tmpdir(), 'plugin-refresh-test-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -85,7 +101,9 @@ test('documented CLI snapshot refresh preserves the old fixture on failure', t =
   const source = readFileSync(new URL('./check-packaged-plugin-versions.mjs', import.meta.url), 'utf8');
   const command = source.slice(source.indexOf('// node scripts/'), source.indexOf('// Check an exact candidate'))
     .trim().split('\n').map(line => line.replace(/^\/\/ ?/, '')).join('\n');
-  const run = () => spawnSync('sh', ['-c', command], { cwd: dir, encoding: 'utf8' });
+  const words = command.split(/\s+/);
+  assert.equal(words.shift(), 'node');
+  const run = () => spawnSync(process.execPath, words, { cwd: dir, encoding: 'utf8', windowsHide: true });
   assert.equal(run().status, 0, 'documented refresh must generate a usable replacement');
   const refreshed = readFileSync(join(dir, fixture));
   assert.equal(JSON.parse(refreshed).plugins.core.version, '0.1.18');
@@ -93,12 +111,10 @@ test('documented CLI snapshot refresh preserves the old fixture on failure', t =
   rmSync(join(dir, 'release.tgz'));
   assert.notEqual(run().status, 0);
   assert.deepEqual(readFileSync(join(dir, fixture)), refreshed, 'failed generation must retain the previous baseline');
-  rmSync(join(pkg, 'package.json'));
-  writeFileSync(join(dir, 'metadata.json'), '{"version":"0.7.1"}');
-  symlinkSync(join(dir, 'metadata.json'), join(pkg, 'package.json'));
+  writeFileSync(join(pkg, 'package.json'), 'invalid package metadata');
   execFileSync('tar', ['-czf', join(dir, 'release.tgz'), '-C', join(dir, 'input'), 'package']);
   const linked = run();
   assert.notEqual(linked.status, 0);
-  assert.match(linked.stderr, /package.json: expected a regular file/);
+  assert.match(linked.stderr, /JSON/);
   assert.deepEqual(readFileSync(join(dir, fixture)), refreshed);
 });

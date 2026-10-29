@@ -7,6 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native plugin snapshot refresh and isolated build follow-up, 2026-10-29
+
+The published plugin baseline refresh command now uses the Node CLI's
+`--snapshot --out file` instead of shell redirection, validation and mv. It builds
+and validates the snapshot before writing an exclusive temporary sibling and
+renaming it over the destination. Missing archives or invalid package metadata
+leave the previous baseline intact. The documented native command passed its
+actual archive-generation and failure-preservation test. The package-metadata
+file-symlink rejection control remains a separate unwaived test, alongside the
+other file-link cases that this Windows host cannot create.
+
+The previously failed resident install test passed when run alone at b567195c1:
+the real native package build and fresh temporary-prefix install completed and
+the complete better-sqlite3 package was present. That is additional evidence,
+not a root-cause diagnosis or erasure of the earlier Node/npm crash. No automatic
+retry was added and the full repository aggregate remains the earlier run.
+
 ## Linked script entries and refreshed failure inventory, 2026-10-29
 
 At `5dc3ea549`, the full repository-script sweep ran 355 tests: 335 passed,
