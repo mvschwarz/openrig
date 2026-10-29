@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import type { SeatEnv } from "./seat-env.js";
+import { readPlatformEnv } from "./platform-env.js";
 
 // What a Claude seat needs so it loads the vendored openrig-core plugin (its refocus, compaction-restore and
 // activity hooks). Claude reads CLAUDE_CODE_PLUGIN_DIRS with the native path delimiter, so this has to be the vendored copy
@@ -34,7 +35,9 @@ export function vendoredCorePluginDir(pluginsDir: string = getDefaultOpenRigPath
 
 function canonical(path: string): string {
   const absolute = resolve(path);
-  try { return realpathSync(absolute); } catch { return absolute; }
+  let resolved = absolute;
+  try { resolved = realpathSync(absolute); } catch { /* Compare the absolute spelling when not yet present. */ }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 /** The resolved plugin locations in a node's persisted startup context (what the profile resolver selected for it). */
@@ -106,22 +109,30 @@ export function withCorePlugin(seatEnv: SeatEnv, dir: string | undefined): SeatE
   return withPluginDirs(seatEnv, [dir]);
 }
 
+function withPluginList(env: SeatEnv, value: string): SeatEnv {
+  const next = { ...env };
+  if (process.platform === "win32") {
+    for (const key of Object.keys(next)) if (key.toUpperCase() === CLAUDE_PLUGIN_DIRS_ENV) delete next[key];
+  }
+  return { ...next, [CLAUDE_PLUGIN_DIRS_ENV]: value };
+}
+
 /** The seat's declared env with OpenRig's plugin directories (the vendored openrig-core, the seat's own skill plugin)
  *  added, in order, after any list the seat declared itself. */
 export function withPluginDirs(seatEnv: SeatEnv, dirs: ReadonlyArray<string | undefined>): SeatEnv {
   let env = seatEnv;
   for (const dir of dirs) {
     if (!dir) continue;
-    const own = env[CLAUDE_PLUGIN_DIRS_ENV];
+    const own = readPlatformEnv(env, CLAUDE_PLUGIN_DIRS_ENV);
     if (!own) {
-      env = { ...env, [CLAUDE_PLUGIN_DIRS_ENV]: dir };
+      env = withPluginList(env, dir);
       continue;
     }
     // Claude skips a relative entry in the list, so only an absolute one can already be this plugin. The seat's
     // entries stay as written and the plugin's absolute path goes after them.
     const want = canonical(dir);
     if (own.split(delimiter).some((entry) => isAbsolute(entry) && canonical(entry) === want)) continue;
-    env = { ...env, [CLAUDE_PLUGIN_DIRS_ENV]: `${own}${delimiter}${dir}` };
+    env = withPluginList(env, `${own}${delimiter}${dir}`);
   }
   return env;
 }

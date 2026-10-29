@@ -2265,3 +2265,25 @@ and suppression of replay after the recorded source changes. All operations
 use this test's synthetic files only. Combined storage checks pass 23/23 and
 daemon TypeScript checking passes. This covers the exercised record/replay
 paths, not a claim that all skill or Windows parity work is complete.
+
+## Native plugin selection and declared environment (2026-10-30)
+
+Core-plugin selection and list deduplication compared canonical paths with
+case-sensitive equality. A selected existing Windows plugin with alternate
+casing was missed; an already-declared copy could also be appended again.
+The canonical comparison key now uses native Windows casing semantics while
+retaining POSIX case sensitivity and the original emitted path spelling.
+
+The plugin-list builder separately read only the uppercase env key from a
+plain declared environment object. A lowercase Windows key's own plugins were
+lost when adding the core plugin under an uppercase key. It now uses the
+existing platform-aware env lookup, preserving the selected list and removing
+case-equivalent keys only when writing the new canonical value. Explicit empty
+key precedence and unchanged/unselected environments retain their semantics.
+
+Both regressions failed before repair. Owned fixtures verify selected plugin
+recognition, nonmatching sibling refusal, deduplication, declared-list retention
+in an actual Node child's environment and explicit-empty-key precedence. The
+focused file passes 2/2; the adjacent storage combination passes 23/23. Daemon
+TypeScript checking passes. This verifies selection/env delivery boundaries,
+not actual Claude/Codex hook activation or live fleet deployment.
