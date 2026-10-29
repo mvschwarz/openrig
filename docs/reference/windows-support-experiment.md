@@ -273,6 +273,17 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Requirement lookup preserves empty native PATH entries (2026-10-30)
+
+The native requirement probe discarded empty PATH entries, unlike native command
+lookup and the permission observer. A tool in the current directory could be
+reported missing and receive an unnecessary install plan. The filesystem-only
+probe now retains those entries. An exclusively created, uniquely named inert
+cmd fixture proves discovery and the actual planner's already-installed result;
+explicitly empty PATHEXT still finds no extensionless command. No target command
+or installer executes. Both requirement files pass 16/16, and daemon type checking
+passes. Only the owned fixture is removed; deployed queues remain untouched.
+
 ## Codex and Claude cmd ancestry consumer evidence (2026-10-30)
 
 An owned native console executable, compiled locally without provider credentials,

@@ -237,7 +237,7 @@ export class RequirementsProbeRegistry {
     const extensions = (readPlatformEnv(this.env, "PATHEXT", "win32") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
     const names = path.extname(name) ? [name] : extensions.map(extension => name + extension);
     const explicit = /[\\/]/.test(name);
-    const dirs = explicit ? [""] : (readPlatformEnv(this.env, "PATH", "win32") ?? "").split(path.delimiter).filter(Boolean);
+    const dirs = explicit ? [""] : (readPlatformEnv(this.env, "PATH", "win32") ?? "").split(path.delimiter);
     for (const dir of dirs) for (const file of names) {
       const candidate = path.resolve(dir.replace(/^"(.*)"$/, "$1"), file);
       try { if ((await stat(candidate)).isFile()) return candidate; }
