@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Headless wake resolves native provider launchers (2026-10-30)
+
+The default `ask --wake` runner still passed bare Codex/Claude names to execFile,
+so recognized npm cmd installations could not execute on Windows. It now uses
+the existing provider resolver through the daemon's Windows launch surface,
+retaining native executables, declared npm Node entries and selected PATH/PATHEXT
+ordering. Resolution failures become ordinary failed wake outcomes; unrelated
+batch scripts are not executed. Other command names keep existing behavior.
+
+Owned offline npm fixtures for both providers run through a copied Node binary
+and prove the actual runWake consumer preserves token and question arguments,
+including Unicode, quotes, CRLF and cmd metacharacters. Replacing the Codex shim
+with an unrelated batch file produces a failed outcome. The three wake files
+pass 29/29; daemon build and CLI type checking pass. No installed provider,
+credential, real conversation or live seat is used. This does not establish
+provider response quality or full lifecycle acceptance.
+
 ## Native heartbeat send uses its paired CLI entry (2026-10-30)
 
 The default heartbeat nudge sender used `execFile("rig", ...)`, which cannot
