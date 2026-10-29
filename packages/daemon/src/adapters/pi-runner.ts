@@ -184,7 +184,7 @@ function errorNotice(details: unknown[], runtime: RunnerRuntime): string {
   const text = details.map(detail => typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "").find(Boolean) ?? "";
-  const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
+  const marker = runtime === "prime-agent" ? "[prime-agent-runner] ERROR" : runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
   return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
 
@@ -944,7 +944,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       case "--session-name": args.sessionName = next(); break;
       case "--runtime": {
         const runtime = next();
-        if (runtime !== "pi" && runtime !== "omp") throw new Error(`unsupported runtime: ${runtime}`);
+        if (runtime !== "pi" && runtime !== "omp" && runtime !== "prime-agent") throw new Error(`unsupported runtime: ${runtime}`);
         args.runtime = runtime;
         break;
       }
@@ -975,6 +975,12 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
   if (args.runtime === "omp") {
     if (!flags.has("--approval-mode") || flags.has("--approve") || flags.has("--no-approve")) {
       throw new Error("OMP requires --approval-mode yolo or always-ask, not Pi trust flags");
+    }
+  } else if (args.runtime === "prime-agent") {
+    // prime-agent identities are isolated by --session-dir; approvals flow over the RPC
+    // extension bridge, so neither Pi trust flags nor OMP approval modes apply.
+    if (flags.has("--approval-mode") || flags.has("--approve") || flags.has("--no-approve")) {
+      throw new Error("prime-agent takes no trust flags (approvals flow over RPC)");
     }
   } else if (!args.trust || flags.has("--approval-mode")) {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
@@ -1183,6 +1189,23 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // shim) cannot find its target there, so resolve the real binary first,
   // with the runner's own environment.
   let command: string = runtime;
+  if (runtime === "prime-agent") {
+    const resolved = resolveRuntimeExecutable("prime-agent", process.env);
+    if (!resolved.ok) {
+      console.error(`[prime-agent-runner] ERROR launch: ${resolved.error}`);
+      // Record the exit for this launch so the adapter fails it now instead
+      // of waiting out its readiness timeout. The durable cursor survives.
+      const at = new Date().toISOString();
+      try {
+        const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+        const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+      } catch { /* the pane ERROR marker still fails readiness */ }
+      process.exitCode = 127;
+      return;
+    }
+    command = resolved.path;
+  }
   if (runtime === "omp") {
     const resolved = resolveRuntimeExecutable("omp", process.env);
     if (!resolved.ok) {
@@ -1373,7 +1396,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
-  if (runtime === "pi") {
+  if (runtime === "pi" || runtime === "prime-agent") {
+    // prime-agent is a Pi fork with intact --mode rpc: same child lifecycle and
+    // unconditional RPC handshake (get_state drives the transport `ready` frame).
     child.on("error", (err) => {
       console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
       const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;

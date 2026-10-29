@@ -18,7 +18,7 @@
 
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
-export type RunnerRuntime = "pi" | "omp";
+export type RunnerRuntime = "pi" | "omp" | "prime-agent";
 
 // ── Seat state layout ────────────────────────────────────────────────────────
 // <stateRoot>/<sessionName>/agent     → PI_CODING_AGENT_DIR (auth.json, models.json, skills, …)
@@ -290,9 +290,11 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     "--state-root", shellQuote(opts.stateRoot),
     "--cwd", shellQuote(opts.cwd),
     "--launch-id", shellQuote(opts.launchId),
-    ...(opts.runtime === "omp"
-      ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : [`--${opts.trust}`]),
+    ...(opts.runtime === "prime-agent"
+      ? ["--runtime", "prime-agent"]
+      : opts.runtime === "omp"
+        ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
+        : [`--${opts.trust}`]),
   ];
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
@@ -307,7 +309,7 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
   if (opts.forkRef) {
     parts.push("--fork", shellQuote(opts.forkRef));
   }
-  if (opts.usageFacts && opts.runtime !== "omp") {
+  if (opts.usageFacts && (opts.runtime ?? "pi") === "pi") {
     parts.push("--usage-facts");
     if (opts.openRouterCharge) parts.push("--openrouter-charge");
   }
@@ -331,9 +333,11 @@ export function buildPiChildArgs(opts: {
   const args = [
     "--mode", "rpc",
     "--session-dir", opts.sessionsDir,
-    ...(opts.runtime === "omp"
-      ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
-      : ["--name", opts.sessionName, `--${opts.trust}`]),
+    ...(opts.runtime === "prime-agent"
+      ? []
+      : opts.runtime === "omp"
+        ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
+        : ["--name", opts.sessionName, `--${opts.trust}`]),
   ];
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());
@@ -345,7 +349,7 @@ export function buildPiChildArgs(opts: {
   if (opts.sessionFile) {
     // Exact file resume — NEVER --resume (interactive picker; forbidden in
     // managed paths, PRD FR-6).
-    args.push("--session", opts.sessionFile);
+    args.push(...(opts.runtime === "prime-agent" ? ["--resume", opts.sessionFile] : ["--session", opts.sessionFile]));
   } else if (opts.forkRef) {
     // Whole-session fork with parentSession linkage — CLI --fork, NOT RPC
     // fork (which is by-entryId on the active session; a different operation).

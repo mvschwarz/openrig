@@ -9,7 +9,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file" | "prime_agent_session_file";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -48,6 +48,7 @@ export function resumeTypeForRuntime(runtime: string | null): ResumeType | null 
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
   if (runtime === "omp") return "omp_session_file";
+  if (runtime === "prime-agent") return "prime_agent_session_file";
   return null;
 }
 
@@ -64,8 +65,8 @@ function validateIdShapedToken(resumeType: ResumeType, token: string): ResumeTok
   return { ok: true, resumeType, token };
 }
 
-function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
-  const label = resumeType === "pi_session_file" ? "Pi" : "OMP";
+function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file" | "prime_agent_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
+  const label = resumeType === "pi_session_file" ? "Pi" : resumeType === "omp_session_file" ? "OMP" : "prime-agent";
   if (token.length > MAX_SESSION_FILE_LEN) {
     return { ok: false, error: `${label} session-file token is too long (max ${MAX_SESSION_FILE_LEN} characters).` };
   }
@@ -95,7 +96,7 @@ export function validateResumeToken(
   if (!resumeType) {
     return {
       ok: false,
-      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, and omp have resume tokens).`,
+      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, omp, and prime-agent have resume tokens).`,
     };
   }
   if (typeof rawToken !== "string") {
@@ -105,7 +106,7 @@ export function validateResumeToken(
   if (token.length === 0) {
     return { ok: false, error: "Resume token is empty." };
   }
-  if (resumeType === "pi_session_file" || resumeType === "omp_session_file") {
+  if (resumeType === "pi_session_file" || resumeType === "omp_session_file" || resumeType === "prime_agent_session_file") {
     return validateSessionFileToken(resumeType, token);
   }
   return validateIdShapedToken(resumeType, token);
