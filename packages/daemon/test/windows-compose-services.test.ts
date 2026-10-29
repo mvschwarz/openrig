@@ -35,7 +35,7 @@ describe.skipIf(process.platform !== "win32")("native Windows Compose services",
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it.each([0, 6000])("probes an owned HTTP server without curl and does not follow redirects (port %s)", async port => {
+  it.each([{ host: "127.0.0.1", port: 0 }, { host: "127.0.0.1", port: 6000 }, { host: "::1", port: 0 }])("probes owned HTTP without curl or redirect following (%s)", async ({ host, port }) => {
     let forbidden = 0;
     const server = createServer((req, res) => {
       if (req.url === "/redirect") { res.writeHead(302, { location: "/must-not-follow" }); res.end(); }
@@ -43,8 +43,9 @@ describe.skipIf(process.platform !== "win32")("native Windows Compose services",
       else if (req.url === "/hang") { /* abort deadline owns this socket */ }
       else { res.writeHead(req.url === "/bad" ? 503 : 204); res.end(); }
     });
-    server.listen(port, "127.0.0.1"); await once(server, "listening");
-    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    server.listen(port, host); await once(server, "listening");
+    const authority = `${host.includes(":") ? `[${host}]` : host}:${(server.address() as { port: number }).port}`;
+    const origin = `http://${authority}`;
     allowFetchTarget(origin);
     const adapter = new ComposeServicesAdapter(noShell, noShell);
     try {
@@ -52,8 +53,12 @@ describe.skipIf(process.platform !== "win32")("native Windows Compose services",
       expect(await adapter.probeHttp(origin + "/redirect")).toBe(true);
       expect(forbidden).toBe(0);
       expect(await adapter.probeHttp(origin + "/bad")).toBe(false);
+      expect(await evaluateWaitTargets([{ url: origin }, { url: origin + "/bad" }], adapter)).toEqual([
+        { target: { url: origin }, status: "healthy", detail: null },
+        { target: { url: origin + "/bad" }, status: "unhealthy", detail: `HTTP probe failed: ${origin}/bad` },
+      ]);
       expect(await adapter.probeHttp(origin + "/hang", 50)).toBe(false);
-      expect(await adapter.probeTcp(`127.0.0.1:${(server.address() as { port: number }).port}`)).toBe(true);
+      expect(await adapter.probeTcp(authority)).toBe(true);
       expect(await adapter.checkTcp("127.0.0.1:openrig-fixture-no-such-service")).toEqual({ ok: false, reason: "named_port_unknown" });
       expect((await evaluateWaitTargets([{ tcp: "127.0.0.1:openrig-fixture-no-such-service" }], adapter))[0]?.detail).toContain("Windows services database");
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }

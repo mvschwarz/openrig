@@ -117,6 +117,12 @@ Owned ephemeral and port-6000 fixtures verify success, redirect non-following,
 503 refusal and timeout, alongside TCP checks. Daemon typecheck passes. No
 Docker service, remote target, installed provider or fleet process was used.
 
+Expanded owned checks pass 5/5: IPv4 ephemeral, IPv4 port 6000 and IPv6 loopback
+each exercise HTTP/TCP and the shared evaluateWaitTargets consumer's healthy
+and unhealthy results. This consumer supplies boot gating and environment
+receipt capture; the fixtures do not start Docker or prove a complete service
+orchestrator lifecycle. Redirect non-following and bounded hangs remain checked.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:
