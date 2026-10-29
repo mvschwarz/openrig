@@ -1689,4 +1689,3 @@ passed on Windows. This does not establish desktop or provider acceptance.
 The separate frozen e36cef0 CLI run completed with stable source: 5,983 tests,
 5,830 passed, 97 failed and 56 pending. It predates subsequent source fixes;
 these counts are retained as that exact snapshot rather than current-head acceptance.
-
