@@ -234,7 +234,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
   Associate rows with `rig queue create --slice <name-or-id>`; handoffs inherit tags unless replaced.
   New slice views default to four automatic tiles (`--max-tiles` overrides it). Known empty slices
   stay following; incomplete reads keep prior viewers, and draft/focus protection still applies.
-  A join refused before a pane split can join on a later refresh, with the original hold reason retained.
+  A join refused before a pane split can join on a later refresh. Hold notices keep the seat and phase.
+  The first notice keeps the original reason; later notices can show a generic reason, while the
+  original failure remains in the journal.
   An attach that ran and then exited to a shell is not restarted automatically; the whole slice view
   can hold until that tile is resolved. No tested workaround is offered for that case.
   Slice following targets the Linux Herdr 0.9.5 / protocol 22 path. Mission following is not included in 0.7.6.

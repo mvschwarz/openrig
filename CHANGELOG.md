@@ -60,8 +60,10 @@ queue and Slack delivery paths.
   ([#2261](https://github.com/mvschwarz/openrig/pull/2261))
 
 - **A join refused before a pane split can join on a later refresh.** Hold
-  notices retain the original seat, phase and reason. A created viewer whose
-  attach has not yet run can continue without replacing its pane.
+  notices keep the seat and phase. The first notice keeps the original reason;
+  later notices can show a generic reason, while the original failure remains
+  in the journal. A created viewer whose attach has not yet run can continue
+  without replacing its pane.
   ([#2271](https://github.com/mvschwarz/openrig/pull/2271))
 
 ### Seats, accounts and harnesses
