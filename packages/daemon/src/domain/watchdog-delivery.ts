@@ -40,7 +40,8 @@ export function makeWatchdogDeliver(deps: {
       if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
       return result.ok
         ? { status: "ok", continuityActionCompleted }
-        : { status: "failed", error: result.error, ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}), continuityActionCompleted };
+        : { status: "failed", error: result.error, ...(result.inputPhase ? { inputPhase: result.inputPhase } : {}),
+          ...(result.sent === false && result.inputPhase === "not_reached" && result.noInputCode ? { code: result.noInputCode } : {}), continuityActionCompleted };
     } catch (err) {
       // Only these typed refusals establish the input boundary. Matching error text never does.
       const code = err instanceof OutboxHandlerError && err.code === "retained_quota_full" ? "retained_quota_full"

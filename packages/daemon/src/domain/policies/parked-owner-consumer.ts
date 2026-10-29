@@ -131,6 +131,19 @@ function keyOfNote(note: string): string | null {
   return null;
 }
 
+/** The current machine-authored failure only: free-text suffixes never establish no-input. */
+export function currentParkedOwnerNoInputFailure(transitions: RowTransitionView[]):
+  { code: "retained_quota_full" | "terminal_seat"; ts: string; transitionId?: number } | null {
+  const reserve = [...transitions].reverse().find(t => t.transitionNote?.startsWith(RESERVE_PREFIX));
+  const key = reserve?.transitionNote && keyOfNote(reserve.transitionNote);
+  if (!key || !openKeysOnRow(transitions).includes(key)) return null;
+  for (const t of [...transitions].reverse()) {
+    if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${QUOTA_NO_INPUT}`)) return { code: "retained_quota_full", ts: t.ts, transitionId: t.transitionId };
+    if (t.transitionNote?.startsWith(`${FAILED_PREFIX} ${key}${TERMINAL_NO_INPUT}`)) return { code: "terminal_seat", ts: t.ts, transitionId: t.transitionId };
+  }
+  return null;
+}
+
 /** Whether what the seat holds changed after `since`: on any of the rows, a transition by the seat
  *  itself or a state change. Notes by other seats and system bookkeeping (this consumer's own
  *  reserve and close notes) aren't changes. A transition the view can't attribute counts as one, and
@@ -331,7 +344,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         const open = lastKey != null && openKeysOnRow(transitions).includes(lastKey);
         const sameGeneration = generation === null || generationOf(reserve) === null || generationOf(reserve) === generation;
         const quotaFailed = open && sameGeneration && transitions.some(t => t.transitionNote?.startsWith(FAILED_PREFIX)
-          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.includes(QUOTA_NO_INPUT));
+          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.startsWith(`${FAILED_PREFIX} ${lastKey}${QUOTA_NO_INPUT}`));
         const priorRetentionState = reserve?.transitionNote?.match(/; retention-state ([^;\s]+);/)?.[1];
         if (quotaFailed && reserve && (retentionState === null || priorRetentionState === encodedRetentionState)
           && !changedSince(deps.rows.listTransitions, namedIds, seat.sessionName, reserve)) {
@@ -341,7 +354,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
         }
         const terminal = deps.isTerminalSeat?.(seat.sessionName) === true;
         if (terminal && open && sameGeneration && transitions.some(t => t.transitionNote?.startsWith(FAILED_PREFIX)
-          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.includes(TERMINAL_NO_INPUT))) {
+          && keyOfNote(t.transitionNote) === lastKey && t.transitionNote.startsWith(`${FAILED_PREFIX} ${lastKey}${TERMINAL_NO_INPUT}`))) {
           skipped.push({ seat: seat.sessionName, why: "terminal-seat" });
           continue;
         }
