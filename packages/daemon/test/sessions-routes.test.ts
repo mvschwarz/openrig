@@ -221,6 +221,28 @@ describe("Session routes", () => {
     expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual([]);
   });
 
+  it.each([false, true])("POST .../launch rejects a recreated snapshot seat before dispatch (pod: %s)", async pod => {
+    const tmux = mockTmuxAdapter();
+    const createSession = vi.spyOn(tmux, "createSession");
+    const { app, rigRepo, snapshotCapture, sessionRegistry } = createTestApp(db, { tmux });
+    const rig = rigRepo.createRig("recreated");
+    if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "Dev");
+    const logicalId = pod ? "dev.worker" : "worker";
+    const first = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", ...(pod ? { podId: "pod" } : {}) });
+    const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(first.id);
+    const current = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", ...(pod ? { podId: "pod" } : {}) });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/${logicalId}/launch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshotId: snapshot.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "selection_changed" });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getSessionsForRig(rig.id)).toEqual([]);
+    expect(rigRepo.getRig(rig.id)!.nodes[0]!.id).toBe(current.id);
+  });
+
   it("POST .../launch already-bound -> 409", async () => {
     const { app, rigRepo, sessionRegistry } = createTestApp(db);
     const rig = rigRepo.createRig("r01");

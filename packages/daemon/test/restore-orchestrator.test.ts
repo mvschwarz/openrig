@@ -208,6 +208,21 @@ describe("RestoreOrchestrator", () => {
     return updated;
   }
 
+  it("refuses an explicit snapshot for a recreated logical seat before changing state", async () => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [],
+      resumeType: "claude_id", resumeToken: "old-conversation" });
+    db.prepare("DELETE FROM nodes WHERE id = ?").run(snap.data.nodes[0]!.id);
+    const replacement = rigRepo.addNode(snap.rigId, "worker", { runtime: "claude-code" });
+    const before = JSON.stringify(rigRepo.getRig(snap.rigId));
+    const tmux = mockTmux();
+    const result = await createOrchestrator({ tmux }).launchSingleNode(snap.rigId, "worker", { snapshotId: snap.id });
+    expect(result).toMatchObject({ ok: false, code: "selection_changed" });
+    expect(JSON.stringify(rigRepo.getRig(snap.rigId))).toBe(before);
+    expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.id).toBe(replacement.id);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   it.each(["intact ledger", "pruned predecessor"])("#1822 resumes the second named agent after a periodic capture between separate launches (%s)", async (mode) => {
     const original = seedRigAndSnapshot({ nodes: [
       { logicalId: "lead", role: "lead", runtime: "claude-code" },
@@ -1830,7 +1845,7 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
 
-  it("legacy Claude resume verification failure -> status 'failed'", async () => {
+  it.each([false, true])("legacy failed resume preserves an existing pane only when requested: %s", async keepPane => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
       edges: [],
@@ -1843,12 +1858,25 @@ describe("RestoreOrchestrator", () => {
       "No conversation found with session ID: missing-session\nuser@example.test %"
     );
     const claude = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0, sleep: async () => {} });
+    const node = snap.data.nodes[0]!;
+    if (keepPane) sessionRegistry.updateBinding(node.id, { tmuxSession: "r99-worker", tmuxPane: "%1" });
+    Object.assign(tmux, {
+      setRemainOnExit: vi.fn(async () => ({ ok: true })),
+      signalPaneProcess: vi.fn(async () => ({ ok: true })),
+      isPaneDead: vi.fn(async () => true),
+      getDefaultShell: vi.fn(async () => "/bin/sh"),
+      respawnPane: vi.fn(async () => ({ ok: true })),
+    });
     const orch = createOrchestrator({ tmux, claude });
 
-    const result = await orch.restore(snap.id);
+    const result = await orch.launchSingleNode(snap.rigId, "worker", { snapshotId: snap.id, keepPane });
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
+    expect(result.launched?.[0]?.status).toBe("awaiting-decision");
+    if (keepPane) {
+      expect(tmux.killSession).not.toHaveBeenCalled();
+      expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.binding?.tmuxPane).toBe("%1");
+    } else expect(tmux.killSession).toHaveBeenCalled();
   });
 
   it("restore_policy=relaunch_fresh -> resume NOT attempted", async () => {
@@ -2877,7 +2905,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Claude restore returns awaiting-decision when resume launch proves the saved session is gone", async () => {
+  it.each([false, true])("pod-aware missing conversation preserves a reused pane: %s", async keepPane => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -2901,12 +2929,21 @@ describe("RestoreOrchestrator", () => {
       launchHarness,
     };
 
-    const orch = createOrchestrator();
-    const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+    const tmux = mockTmux();
+    Object.assign(tmux, {
+      setRemainOnExit: vi.fn(async () => ({ ok: true })),
+      signalPaneProcess: vi.fn(async () => ({ ok: true })),
+      isPaneDead: vi.fn(async () => true),
+      getDefaultShell: vi.fn(async () => "/bin/sh"),
+      respawnPane: vi.fn(async () => ({ ok: true })),
+    });
+    if (keepPane) sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@test-rig", tmuxPane: "%1" });
+    const orch = createOrchestrator({ tmux });
+    const result = await orch.launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, keepPane, adapters: { "claude-code": mockAdapter } });
 
     expect(result.ok).toBe(true);
     if (result.ok) {
-      const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+      const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
       expect(nodeResult!.status).toBe("awaiting-decision");
       expect(nodeResult!.error).toContain("Original session unresumable");
       expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
@@ -2923,7 +2960,9 @@ describe("RestoreOrchestrator", () => {
       const superseded = launchedSessions.filter((s) => s.status === "superseded");
       expect(superseded.length).toBeGreaterThan(0);
       const binding = sessionRegistry.getBindingForNode(node.id);
-      expect(binding?.tmuxSession).toBeUndefined();
+      expect(binding?.tmuxSession).toBe(keepPane ? "dev-impl@test-rig" : undefined);
+      if (keepPane) expect(tmux.killSession).not.toHaveBeenCalled();
+      else expect(tmux.killSession).toHaveBeenCalled();
     }
   });
 

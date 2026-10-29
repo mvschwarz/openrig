@@ -86,6 +86,7 @@ it.skipIf(process.platform === "win32")("compiled provider switch resumes plan â
     expect(back).toMatchObject({ outcome: "rebind_in_progress", seat: { conversation, restart: { outcome: "resumed" } } });
     await until(() => launches().length === 4);
     expect(launches()[3]).toMatchObject({ conversation, auth: "plan", remembered: true, model: "fixture-model", permission: "acceptEdits" });
+    const paneBeforeFailure = tmux("display-message", "-p", "-t", seat, "#{pane_id}");
     // Lose the key only once precheck has succeeded and the old process receives TERM.
     writeFileSync(join(scaffold.openrigHome, `remove-key-on-stop-${launches()[3].pid}`), "");
     const interrupted = await runRig(["provider", "switch", "--seat", seat, "--to-account", "api", "--api-key-file", apiFile, "--json"], daemon.readEnv, rigBin, 60_000);
@@ -95,8 +96,9 @@ it.skipIf(process.platform === "win32")("compiled provider switch resumes plan â
     expect(launches()).toHaveLength(4);
     expect(existsSync(apiFile)).toBe(false);
     writeFileSync(apiFile, "synthetic-api", { mode: 0o600 });
-    // Failed resume rolled its blank session back, so there is no leftover shell to stop.
-    expect(() => tmux("has-session", "-t", seat)).toThrow();
+    // Failed in-place resume preserves the reused pane; follow the reported stop-before-recovery step.
+    expect(tmux("display-message", "-p", "-t", seat, "#{pane_id}")).toBe(paneBeforeFailure);
+    await cli(["seat", "stop", seat, "--reason", "retire failed resume shell before snapshot recovery", "--json"]);
     // Follow the exact recovery command returned by the switch, with JSON output for assertions.
     const recoveryArgs = recovery.seat.restart.recoveryCommand.split(" ").slice(1);
     await cli([...recoveryArgs, "--json"]);

@@ -629,6 +629,9 @@ export class RestoreOrchestrator {
     const matchedIds = new Set(targetNodes.map((n) => n.logicalId));
     const unmatchedIds = logicalIds.filter((id) => !matchedIds.has(id));
     if (targetNodes.length === 0) return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
+    if (targetNodes.some(saved => !allNodes.some(current => current.id === saved.id && current.logicalId === saved.logicalId))) {
+      return { ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." };
+    }
     if (opts.selectedHistory && (targetNodes.length !== 1 || targetNodes[0]!.id !== opts.selectedHistory.nodeId
       || !allNodes.some(node => node.id === opts.selectedHistory!.nodeId && node.logicalId === logicalIds[0]))) {
       return { ok: false, code: "selection_changed", message: "The selected node is no longer this seat." };
@@ -1410,8 +1413,8 @@ export class RestoreOrchestrator {
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
-   *  the awaiting-decision outcome: kill the live blank session, mark its row
-   *  superseded, and restore the prior binding/session state (the existing
+   *  the awaiting-decision outcome: remove a new blank terminal (preserving a
+   *  reused pane), mark its row superseded, and restore the prior state (the existing
    *  launch-failure compensating action). The caller fires this ONLY on a
    *  POSITIVE determination the session is fresh/blank — never for
    *  unknown-but-possibly-valid continuity. */
@@ -1421,11 +1424,14 @@ export class RestoreOrchestrator {
     launchedSessionId: string | undefined,
     priorState: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } | undefined,
     assertCurrent?: () => boolean,
+    keepPane = false,
   ): Promise<boolean> {
     if (assertCurrent && !assertCurrent()) return false;
-    try {
-      await this.tmuxAdapter.killSession(sessionName);
-    } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
+    if (!keepPane) {
+      try {
+        await this.tmuxAdapter.killSession(sessionName);
+      } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
+    }
     if (assertCurrent && !assertCurrent()) return false;
     if (launchedSessionId) {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
@@ -1465,7 +1471,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1507,6 +1513,7 @@ export class RestoreOrchestrator {
     const rollbackOwnBlank = async (): Promise<boolean> => this.rollbackToZeroSession(
       node.id, sessionName, launchResult?.session.id, priorState,
       selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+      opts?.keepPane,
     );
     const changedDuringRollback = (): RestoreNodeResult => ({ nodeId: node.id, logicalId: node.logicalId,
       status: "attention_required", error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." });
