@@ -29,7 +29,9 @@
 // (resources.plugins[].id + profile.uses.plugins[]) is exactly what batch 1
 // produces, so post-merge the service continues to work unchanged.
 
-import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 import { join, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 
@@ -692,6 +694,12 @@ function hasHookRegistrations(registry: Record<string, unknown>): boolean {
 
 function writeJsonAtomically(path: string, value: Record<string, unknown>): void {
   const tempPath = `${path}.openrig-migration-${process.pid}-${Date.now()}.tmp`;
+  if (process.platform === "win32" && lstatSync(path).isFile()) {
+    createPrivateTextFile(tempPath, `${JSON.stringify(value, null, 2)}\n`);
+    try { replaceWindowsFilePreservingMetadata(path, tempPath); }
+    finally { try { unlinkSync(tempPath); } catch { /* Published or retained private staging. */ } }
+    return;
+  }
   const mode = statSync(path).mode & 0o777;
   writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode });
   renameSync(tempPath, path);

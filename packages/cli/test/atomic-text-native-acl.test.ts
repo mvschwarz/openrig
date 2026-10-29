@@ -18,6 +18,8 @@ import { ActiveLensStore } from "../../daemon/src/domain/active-lens-store.js";
 import { TerminalViewsStore } from "../../daemon/src/domain/terminal/terminal-views-store.js";
 import { listRecapChain, writeSeatRecap } from "../../daemon/src/domain/context-packs/seat-recap-store.js";
 import { ChannelCoverageStore, DeadLetterStore, ThreadCoverageStore } from "../../daemon/src/domain/gateway/slack/state-store.js";
+import { PluginDiscoveryService } from "../../daemon/src/domain/plugin-discovery-service.js";
+import { reconcileSkillLoadout, resolveSkillLoadout } from "../../daemon/src/domain/skill-catalog.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -27,6 +29,51 @@ function accessPolicy(file: string): string {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_TEST_ACL_FILE: file }, encoding: "utf8", windowsHide: true }).trim();
 }
+it.runIf(process.platform === "win32")("preserves protected plugin migration files while retiring obsolete registrations", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-plugin-migration-acl-"));
+  const plugins = join(root, "plugins"), lab = join(plugins, "openrig-lab");
+  const manifest = join(lab, ".claude-plugin", "plugin.json"), hooks = join(lab, "hooks", "claude.json");
+  mkdirSync(join(lab, ".claude-plugin"), { recursive: true }); mkdirSync(join(lab, "hooks"));
+  createPrivateTextFile(manifest, JSON.stringify({ name: "openrig-lab", version: "0.1.0", hooks: "./hooks/claude.json" }));
+  createPrivateTextFile(hooks, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"' }] }] } }));
+  const beforeManifest = accessPolicy(manifest), beforeHooks = accessPolicy(hooks);
+  const options = { openrigPluginsDir: plugins, claudeCacheDir: join(root, "claude-cache"), codexCacheDir: join(root, "codex-cache"), specLibraryDir: join(root, "specs") };
+  expect(new PluginDiscoveryService(options).listPlugins().map(p => p.id)).toEqual(["openrig-lab"]);
+  expect(JSON.parse(readFileSync(manifest, "utf8"))).not.toHaveProperty("hooks");
+  expect(JSON.parse(readFileSync(hooks, "utf8"))).toEqual({ hooks: {} });
+  expect(accessPolicy(manifest)).toBe(beforeManifest); expect(accessPolicy(hooks)).toBe(beforeHooks);
+  expect(() => new PluginDiscoveryService(options)).not.toThrow();
+  expect(readdirSync(join(lab, ".claude-plugin"))).toEqual(["plugin.json"]);
+  expect(readdirSync(join(lab, "hooks"))).toEqual(["claude.json"]);
+});
+it.runIf(process.platform === "win32").each(["codex", "claude-code"] as const)("preserves protected skill ignore files during %s reconciliation", runtime => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-skill-ignore-acl-")));
+  const catalog = join(root, "catalog"), project = join(root, "project"), harness = runtime === "codex" ? ".agents" : ".claude";
+  mkdirSync(catalog, { recursive: true }); mkdirSync(join(project, harness, "skills"), { recursive: true });
+  writeFileSync(join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+  for (const id of ["owned", "other"]) {
+    mkdirSync(join(catalog, id));
+    writeFileSync(join(catalog, id, "SKILL.md"), `---\nname: ${id}\ndescription: Use for owned fixture.\n---\n# Owned ${id} skill\n`);
+  }
+  const ignore = join(project, harness, "skills", ".gitignore");
+  const git = (...args: string[]) => execFileSync("git", ["-C", root!, ...args], { encoding: "utf8", windowsHide: true });
+  git("init", "-q"); git("config", "user.name", "Owned Fixture"); git("config", "user.email", "fixture@openrig.invalid");
+  git("add", "."); git("commit", "-qm", "owned fixture");
+  const selected = resolveSkillLoadout({ catalogRoot: catalog, projectSkills: ["owned"] });
+  expect(selected.ok).toBe(true); if (!selected.ok) return;
+  expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime, cwd: project, apply: true }).ok).toBe(true);
+  const managedIgnore = readFileSync(ignore, "utf8");
+  rmSync(ignore); createPrivateTextFile(ignore, managedIgnore);
+  const before = accessPolicy(ignore);
+  const switched = resolveSkillLoadout({ catalogRoot: catalog, projectSkills: ["other"] });
+  expect(switched.ok).toBe(true); if (!switched.ok) return;
+  const result = reconcileSkillLoadout({ loadout: switched.loadout, runtime, cwd: project, apply: true });
+  expect(result.errors, JSON.stringify(result.errors)).toEqual([]); expect(result.ok).toBe(true);
+  expect(readFileSync(ignore, "utf8")).toContain("other");
+  expect(readFileSync(join(project, harness, "skills", "other", "SKILL.md"), "utf8")).toContain("# Owned other skill");
+  expect(accessPolicy(ignore)).toBe(before);
+  expect(reconcileSkillLoadout({ loadout: switched.loadout, runtime, cwd: project, apply: true })).toMatchObject({ ok: true, applied: false });
+});
 it.runIf(process.platform === "win32").each(["dead-letter", "channel", "thread"])("retains protected Slack %s state access across actual store replacement", kind => {
   root = mkdtempSync(join(tmpdir(), "openrig-slack-state-acl-"));
   const file = join(root, "state.json");

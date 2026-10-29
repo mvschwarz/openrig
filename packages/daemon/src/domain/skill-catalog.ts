@@ -16,6 +16,8 @@ import {
 import nodePath from "node:path";
 import { parse as parseYaml } from "yaml";
 import { memoizeScan, parseSkillFrontmatter, type ScanCache } from "./skill-discovery.js";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 
 const CATALOG_SCHEMA = "openrig.skill-catalog/v1";
 const canonicalPath = process.platform === "win32" ? realpathSync.native : realpathSync;
@@ -802,6 +804,11 @@ function writeFileAtomic(path: string, content: string): void {
   mkdirSync(nodePath.dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
+    if (process.platform === "win32" && existsSync(path) && lstatSync(path).isFile()) {
+      createPrivateTextFile(temporary, content);
+      replaceWindowsFilePreservingMetadata(path, temporary);
+      return;
+    }
     writeFileSync(temporary, content, "utf8");
     if (existsSync(path)) chmodSync(temporary, lstatSync(path).mode & 0o777);
     renameSync(temporary, path);

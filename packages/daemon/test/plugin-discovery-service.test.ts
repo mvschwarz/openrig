@@ -193,12 +193,17 @@ describe("PluginDiscoveryService", () => {
       writeHookManifest(core, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
       writeHookManifest(rogue, "claude", "Stop", 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
 
-      expect(() => new PluginDiscoveryService({
+      const construct = () => new PluginDiscoveryService({
         openrigPluginsDir: dirs.openrigPluginsDir,
         claudeCacheDir: dirs.claudeCacheDir,
         codexCacheDir: dirs.codexCacheDir,
         specLibraryDir: dirs.specLibraryDir,
-      })).toThrow(new RegExp(`${core}/hooks/claude\\.json.*${rogue}/hooks/claude\\.json`));
+      });
+      let error: unknown;
+      try { construct(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(join(core, "hooks", "claude.json"));
+      expect((error as Error).message).toContain(join(rogue, "hooks", "claude.json"));
     });
 
     it("fails loud with both Codex manifest paths when unknown vendored plugins duplicate a hook identity", () => {
@@ -209,12 +214,17 @@ describe("PluginDiscoveryService", () => {
       writeHookManifest(core, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
       writeHookManifest(rogue, "codex", "Stop", 'node "${PLUGIN_ROOT}/hooks/scripts/refocus.cjs"');
 
-      expect(() => new PluginDiscoveryService({
+      const construct = () => new PluginDiscoveryService({
         openrigPluginsDir: dirs.openrigPluginsDir,
         claudeCacheDir: dirs.claudeCacheDir,
         codexCacheDir: dirs.codexCacheDir,
         specLibraryDir: dirs.specLibraryDir,
-      })).toThrow(new RegExp(`${core}/hooks/codex\\.json.*${rogue}/hooks/codex\\.json`));
+      });
+      let error: unknown;
+      try { construct(); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(join(core, "hooks", "codex.json"));
+      expect((error as Error).message).toContain(join(rogue, "hooks", "codex.json"));
     });
 
     it("discovers a vendored OpenRig plugin (dual-manifest)", () => {

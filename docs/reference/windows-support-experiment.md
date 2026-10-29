@@ -273,6 +273,27 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native plugin migration and skill-ignore replacement (2026-10-30)
+
+Retiring obsolete plugin hook registrations and rewriting managed skill ignore
+files retained POSIX mode bits but lost existing Windows access policy. Owned
+fixtures reproduce both failures through actual PluginDiscoveryService and
+Codex/Claude skill reconciliation. Existing regular Windows files now use
+private staging and metadata-preserving replacement. New/final-link and POSIX
+paths, migration ordering and skill ownership/admission rules remain unchanged.
+
+The skill fixture first lets reconciliation generate its managed ignore file,
+then protects that file and switches the selected skill. An unmanaged ignore
+file is still refused; its earlier fixture refusal was not a permissions bug.
+Three native ACL cases pass, checking both migrated plugin files, resulting
+skill contents, retained access and idempotent follow-up (18 other ACL cases
+filtered). Complete plugin discovery/wiring checks pass 27/27 after replacing
+two Windows-path regex assertions with literal native-path assertions. Skill
+loadout checks pass 46/47; the remaining case fails at host-denied file-symlink
+creation before its boundary is exercised. It remains unverified. Daemon
+typecheck passes. Only synthetic plugins and owned Git fixture repositories
+were used; no installed plugin, real skill catalog or running seat was changed.
+
 ## Native Slack durable-state replacement (2026-10-30)
 
 Actual dead-letter replacement, channel checkpoint updates and thread checkpoint
