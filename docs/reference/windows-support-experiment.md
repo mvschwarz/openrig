@@ -273,6 +273,18 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Starter registry falls back from an empty HOME (2026-10-30)
+
+The starter resolver treated an empty HOME as a selected directory, producing a
+relative `.openrig/agent-starters` path instead of the Windows USERPROFILE
+registry. Empty home values now fall through to USERPROFILE and then the OS home;
+explicit registry and home-directory overrides retain their precedence. A real
+owned temporary registry with Unicode path and CRLF YAML is read through
+resolveStarter using mixed-case native environment keys. The selected startup
+file and owner root are checked without launching a seat. Both resolver files
+pass 19/19, and daemon type checking passes. No personal starter or deployed
+runtime is read or changed.
+
 ## Headless wake resolves native provider launchers (2026-10-30)
 
 The default `ask --wake` runner still passed bare Codex/Claude names to execFile,

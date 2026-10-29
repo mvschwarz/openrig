@@ -113,8 +113,8 @@ export class AgentStarterResolver {
     }
     const homeBase = opts.homeDirRoot
       ?? join(readPlatformEnv(env, "HOME")
-        ?? (process.platform === "win32" ? readPlatformEnv(env, "USERPROFILE") : undefined)
-        ?? os.homedir(), DEFAULT_HOME_SUBPATH);
+        || (process.platform === "win32" ? readPlatformEnv(env, "USERPROFILE") : undefined)
+        || os.homedir(), DEFAULT_HOME_SUBPATH);
     if (exists(homeBase)) {
       return homeBase;
     }
