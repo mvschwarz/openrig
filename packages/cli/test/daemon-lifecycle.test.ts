@@ -1202,6 +1202,7 @@ describe("Daemon Lifecycle", () => {
   it("start: surfaces native module runtime mismatch inline when healthz never comes up", async () => {
     vi.useFakeTimers();
     const deps = mockDeps({
+      isProcessAlive: vi.fn(() => false), // Crash diagnostics require observed process absence.
       fetch: vi.fn(async () => { throw new Error("connection refused"); }),
       readFile: vi.fn((p: string) => {
         if (p === LOG_FILE) {
@@ -1232,6 +1233,7 @@ describe("Daemon Lifecycle", () => {
   it("start: surfaces the recent daemon log line when startup crashes for another reason", async () => {
     vi.useFakeTimers();
     const deps = mockDeps({
+      isProcessAlive: vi.fn(() => false), // Crash diagnostics require observed process absence.
       fetch: vi.fn(async () => { throw new Error("connection refused"); }),
       readFile: vi.fn((p: string) => {
         if (p === LOG_FILE) {
