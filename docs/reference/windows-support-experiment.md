@@ -1850,3 +1850,19 @@ credential-refusal/redaction assertions. All 18 resolver/native-home cases pass;
 daemon TypeScript checking passed. The two separately attempted Claude/Codex
 adapter integration cases remain failing on their synthetic path fixtures, so
 end-to-end starter delivery is not claimed by this change.
+
+## Native starter consumers and TUI spec references (2026-10-30)
+
+The two starter adapter fixtures now construct native absolute rig/agent paths
+and use native in-memory directory separators; the Claude transport fixture
+also supplies its native shell-command boundary. Both real-adapter guidance
+merge cases pass for CLAUDE.md/AGENTS.md and retain their managed-block and
+onboarding assertions. Transport remains mocked: actual provider startup is
+not established by these cases. This supersedes the two fixture failures above.
+
+Separately, the TUI reduced agent references using only `/`, although the daemon
+resolves local/path references with native filesystem paths. It now recognizes
+backslashes too, including trailing separators and YAML filename references,
+while retaining exact known-name priority and unknown references verbatim.
+All 73 hydrate cases passed, including native local/path joins and unavailable
+spec preservation; TUI TypeScript checking passed.
