@@ -156,9 +156,10 @@ export class ClaudeManagedLaunch {
 
   /** The switch's credential-precedence check, said as a launch warning for a seat with its own token reference, such as a
    *  spec's `claude_token`: what Claude Code would use ahead of it. The launch goes ahead, so it's never a refusal. An
-   *  account-home seat is skipped: its home is the selection, checked when it was made. */
+   *  account-home seat is skipped: its home is the selection, checked when it was made. So is an API-key reference, which
+   *  Claude Code ranks above an apiKeyHelper and whose step scrubs the outranking names itself. */
   async tokenPrecedenceWarnings(nodeId: string, ref: ClaudeSeatTokenRef): Promise<string[]> {
-    if (this.accountHome(nodeId)) return [];
+    if (ref.kind === "api-key" || this.accountHome(nodeId)) return [];
     try {
       const found = await this.credentialPrecedence(nodeId);
       return found.conflicts.length ? [claudeSeatTokenOutrankedNotice(ref, found.conflicts)] : [];

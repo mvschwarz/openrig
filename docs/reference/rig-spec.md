@@ -545,7 +545,7 @@ seat's record or the launch command. A missing, empty or unreadable file doesn't
 config dir's stored login (or a token the daemon gives every seat) and says so. A launch also warns when a setting Claude
 Code ranks above the token would be used instead: an `apiKeyHelper`, or an outranking `env` entry in the user, project
 or local settings. Managed settings aren't inspected. `rig export` writes the seat's current reference, except for a seat
-with an account home, so a later switch shows there, and `rig provider switch --stored-login` removes it. Only
+with an account home or an API-key selection (select those again after import), so a later switch shows there, and `rig provider switch --stored-login` removes it. Only
 `claude-code` members and legacy flat nodes accept it, and there's no rig-level default.
 
 **Switching to an isolated account home.** A running Codex or Claude Code seat can change its native account home
