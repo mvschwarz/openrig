@@ -69,8 +69,8 @@ function missingFileOperand(line: string): string | undefined {
 }
 
 function claudeNotFoundReason(line: string): string {
-  return `claude wasn't found when the launch ran (the pane shows: ${line}). Claude Code may have been updating or being reinstalled `
-    + "at that moment; relaunch this seat once claude is back.";
+  return `the pane shows that claude wasn't found (${line}). If that line is from this launch, Claude Code may have been updating or `
+    + "being reinstalled at that moment; relaunch this seat once claude is back.";
 }
 
 /**

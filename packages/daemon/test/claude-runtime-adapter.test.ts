@@ -356,7 +356,7 @@ describe("Claude Code runtime adapter", () => {
   ])("checkReady names a missing claude when %s, and keeps waiting", async (_label, line, claudeExecutable) => {
     expect(await idleShellAfter(line, claudeExecutable)).toEqual({
       ready: false,
-      reason: `claude wasn't found when the launch ran (the pane shows: ${line}). Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.`,
+      reason: `the pane shows that claude wasn't found (${line}). If that line is from this launch, Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.`,
       code: "returned_to_shell",
     });
   });
@@ -854,7 +854,7 @@ describe("Claude Code runtime adapter", () => {
 
     expect(result).toMatchObject({
       ok: false,
-      error: "Claude resume failed: claude wasn't found when the launch ran (the pane shows: zsh: command not found: claude). Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.",
+      error: "Claude resume failed: the pane shows that claude wasn't found (zsh: command not found: claude). If that line is from this launch, Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.",
       recovery: "retry_fresh",
     });
   });
