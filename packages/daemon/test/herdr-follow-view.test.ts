@@ -94,13 +94,8 @@ function fixture() {
     const directory = path.join(root, readdirSync(root)[0]!, "viewers");
     return path.join(directory, readdirSync(directory).find(name => name.endsWith(".json"))!);
   };
-  const phase = (seat: string, value: "created" | "starting") => {
-    const file = journal(), saved = JSON.parse(readFileSync(file, "utf8"));
-    const entry = saved.entries[JSON.stringify(["self", seat])];
-    entry.phase = value; panes.get(entry.pane.pane_id)!.argv = ["/bin/bash"];
-    writeFileSync(file, JSON.stringify(saved));
-  };
-  return { follow, create, panes, calls, rpc, inputs, frames, phase, journal,
+  const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
+  return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
     hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
@@ -110,29 +105,29 @@ function fixture() {
 }
 
 describe("stable task-following workspace", () => {
-  it("advances a retained created viewer once in the same journal without changing drafts or focus", async () => {
-    const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b"); f.phase("a", "created");
-    const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length;
-    expect(await f.follow()).toMatchObject({ ok: true, opened: ["a", "b", "c"] });
-    expect(await f.follow()).toMatchObject({ ok: true });
+  it("resumes a join paused before attach dispatch through its existing journal without changing drafts or focus", async () => {
+    const f = fixture(); await f.follow(); f.inputs.set("b", "text"); f.focusSeat("b");
+    const before = [...f.panes.values()].map(p => [p.pane_id, p.terminal_id]); const count = f.calls.length; let reads = 0;
+    const paused = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 4);
+    expect(paused.opened).toEqual(["a", "b", "c"]);
+    const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+    expect(entry.phase).toBe("created"); expect(entry.pane).toBeTruthy();
+    expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
     expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(1);
-    expect(f.calls.slice(count).some(c => ["create", "split", "close"].includes(c[1]!))).toBe(false);
-    expect([...f.panes.values()].map(p => [p.pane_id, p.terminal_id])).toEqual(before);
+    expect([...f.panes.values()].slice(0, 4).map(p => [p.pane_id, p.terminal_id])).toEqual(before);
     expect([...f.panes.values()].find(p => p.focused)?.argv.at(-1)).toBe("$b");
     expect(f.inputs.get("b")).toBe("text"); expect(f.rpc).toHaveLength(0);
   });
-  it("does not start a retained created viewer for a departed member", async () => {
-    const f = fixture(); await f.follow(); f.phase("c", "created"); const count = f.calls.length;
-    expect(await f.follow(["a", "b"])).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
-    expect(f.calls.slice(count).some(c => ["run", "close", "split"].includes(c[1]!))).toBe(false);
-  });
-  it("rechecks membership before advancing a retained created viewer", async () => {
-    const f = fixture(); await f.follow(); f.phase("a", "created"); const count = f.calls.length; let reads = 0;
-    expect(await f.follow(undefined, {}, true, async () => ++reads === 1)).toMatchObject({ ok: false });
-    expect(f.calls.slice(count).some(c => ["run", "close", "split"].includes(c[1]!))).toBe(false);
+  it("an unconfirmed older viewer holds the whole view before a new join", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("c"); const count = f.calls.length;
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, opened: ["a", "b", "c"], following: { state: "retained" } });
+    expect(f.calls.slice(count).some(c => ["run", "close", "split", "create"].includes(c[1]!))).toBe(false);
   });
   it("keeps an already dispatched attach unconfirmed with its original seat, phase and reason", async () => {
-    const f = fixture(); await f.follow(); f.phase("a", "starting"); const count = f.calls.length;
+    const f = fixture(); await f.follow(); f.exitViewer("a"); const count = f.calls.length;
     const held = await f.follow();
     expect(held).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
     expect(held.error).toContain("a:"); expect(held.error).toContain("starting");
@@ -148,6 +143,20 @@ describe("stable task-following workspace", () => {
     expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
     expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
   });
+  it("a known pre-split refusal retires its unused intent even when directory cleanup fails", async () => {
+    const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0, retainedFile = "";
+    const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => {
+      if (++reads !== 3) return true;
+      const entry = JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])];
+      retainedFile = path.join(entry.cwd, "retained-note"); writeFileSync(retainedFile, "keep this file");
+      return false;
+    });
+    expect(held.following!.events.join("\n")).toContain("d: creating: Membership changed before the split.");
+    expect(JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])]).toBeUndefined();
+    expect(readFileSync(retainedFile, "utf8")).toBe("keep this file");
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
+    expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
+  });
   it("an uncertain dispatched split keeps its intent even when enumeration is empty", async () => {
     const f = fixture(); await f.follow(); f.loseCreate(); f.hideViewers(); const count = f.calls.length;
     const held = await f.follow(["a", "b", "c", "d"]);
@@ -158,11 +167,11 @@ describe("stable task-following workspace", () => {
     expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
     expect(f.calls.slice(count).filter(c => c[1] === "run")).toHaveLength(0);
   });
-  it("a changed terminal identity cannot authorize advancing a created viewer", async () => {
-    const f = fixture(); await f.follow(); f.phase("a", "created");
+  it("a changed terminal identity holds the whole view before joining another member", async () => {
+    const f = fixture(); await f.follow();
     [...f.panes.values()].find(p => p.cwd.includes("/viewers/"))!.terminal_id = "other-generation";
     const count = f.calls.length;
-    expect(await f.follow()).toMatchObject({ ok: false, following: { state: "retained" } });
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" } });
     expect(f.calls.slice(count).some(c => ["run", "split", "close"].includes(c[1]!))).toBe(false);
   });
   it.each(["", "\x1b[2mAsk Codex to do anything\x1b[22m"])("closes only a departed viewer when the real reader confirms its two-footer Codex composer is empty (%s)", async body => {
