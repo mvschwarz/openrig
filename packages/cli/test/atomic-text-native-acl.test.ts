@@ -10,6 +10,8 @@ import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-st
 import { replaceArtifactFile } from "../src/commands/proof.js";
 import { FileWriteService, sha256Hex } from "../../daemon/src/domain/files/file-write-service.js";
 import { realpathSync } from "node:fs";
+import { registerBundleProject } from "../../daemon/src/domain/workspace/project-registration.js";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -110,4 +112,20 @@ it.runIf(process.platform === "win32")("retains protected file access through th
   expect(accessPolicy(file)).toBe(before);
   expect(JSON.parse(readFileSync(audit, "utf8")).actor).toBe("fixture@rig");
   expect(readdirSync(root).sort()).toEqual(["audit.jsonl", "notes.md"]);
+});
+it.runIf(process.platform === "win32")("preserves protected workspace catalog access while registering and associating a bundle project", () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-catalog-acl-")));
+  const bundle = join(root, "bundle"), workspace = join(root, "workspace"), catalog = join(workspace, "workspace.yaml");
+  mkdirSync(bundle); mkdirSync(workspace);
+  writeFileSync(join(bundle, "project.yaml"), "schema: openrig.project/v0alpha1\nid: bundled\n");
+  const original = "schema: openrig.workspace/v0alpha1\n# retain this comment\nprojects:\n  - id: own\n    root: .\n";
+  createPrivateTextFile(catalog, original);
+  const before = accessPolicy(catalog);
+  const input = { bundleProjectDir: bundle, workspaceRoot: workspace, catalogPath: catalog, projectsRoot: join(workspace, "projects"), projectId: "bundled", rigName: "first" };
+  expect(registerBundleProject(input).status).toBe("registered");
+  expect(accessPolicy(catalog)).toBe(before);
+  expect(registerBundleProject({ ...input, rigName: "second" }).status).toBe("associated");
+  expect(accessPolicy(catalog)).toBe(before);
+  expect(readFileSync(catalog, "utf8")).toContain("# retain this comment");
+  expect(readdirSync(workspace).sort()).toEqual(["projects", "workspace.yaml"]);
 });

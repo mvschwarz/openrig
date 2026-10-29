@@ -2202,3 +2202,30 @@ creation under the synthetic USERPROFILE and OS-home path resolution without
 reading or writing actual user state. Home/route checks pass 20 with 1 existing
 platform skip. The broader review-freeze check still encounters host file-link
 creation EPERM. Daemon TypeScript checking passes; no runtime deployment occurs.
+
+## Native workspace catalog registration (2026-10-30)
+
+The bundle project-registration writer also preserved only POSIX mode bits
+when replacing an existing workspace catalog. Actual registration against an
+owned protected-DACL catalog reproduced access-policy loss. Windows now stages
+the edited text privately and uses metadata-preserving replacement for existing
+catalogs. New-catalog and POSIX publication retain their prior paths. Existing
+comment, minimal textual edit and symlink-target selection behavior remains.
+The native fixture verifies registration and subsequent rig association, DACL
+retention, preserved comment and absence of staging leftovers.
+
+Registration separately compared canonical root strings with case-sensitive
+equality. With a catalog supporting the existing minimal rig-list edit, an
+uppercase spelling of the same existing Windows project root incorrectly
+reported a different-root conflict. Native path-relative comparison now treats
+it as the same root while retaining POSIX case sensitivity. The corrected
+regression fails before repair and passes afterward, with one project entry
+and both associated rigs. A first draft of that fixture used a catalog whose
+rig-list syntax deliberately refuses minimal edits; that unrelated refusal was
+kept, and the fixture was corrected rather than widening the writer's scope.
+
+The ACL/project check before adding the casing case passed 29/32; its three
+failures were two host-denied file-symlink creations and one POSIX mode-bit
+assertion. The corrected casing case passes independently. Daemon TypeScript
+checking passes. These are source fixtures, not live workspace registration or
+runtime deployment; the full Windows parity goal remains incomplete.
