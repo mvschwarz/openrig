@@ -7,6 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native scenario subprocess fixtures, 2026-10-29
+
+The repository script failure log exposed two scenario tests that could not
+exercise their intended behavior on Windows: a Unix shebang-only fake Docker
+client and a fixed `/bin/bash` path. The tests now use the explicitly selected
+build shell and a real, temporary Windows executable forwarding literal argv,
+stdin, stdout, stderr and exit status to an owned Node fixture. The executable
+is compiled using the existing Windows .NET Framework compiler; no installation
+or Docker daemon is involved. Background scenario subprocesses hide their
+Windows console windows.
+
+The native scenario and executable-fixture tests passed 8/8 with no skips.
+They verify remote-server platform receipts and refusal before build as well
+as the existing deadline and exact-ID settlement contracts. This does not prove
+a real remote Docker run. The separate image-build wrapper fixture still uses
+POSIX-only executable and shell assumptions and remains unfinished work.
+
 ## Isolated native install and installed shim, 2026-10-29
 
 The package-install checks now ask the same npm CLI for its global root under

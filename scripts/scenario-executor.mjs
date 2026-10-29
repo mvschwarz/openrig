@@ -15,7 +15,7 @@ export function dockerPlatform(server) {
 // A client timeout does not establish that its engine-side container stopped.
 // Unknown identity or settlement leaves the container for its owner to reconcile.
 export function settleContainer({ id, name, image }, invoke = args => {
-  const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 35000, maxBuffer: 1024 * 1024 });
+  const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 35000, maxBuffer: 1024 * 1024, windowsHide: true });
   if (result.error || result.status !== 0) throw new Error(result.error?.message ?? result.stderr);
   return result.stdout;
 }) {
@@ -48,7 +48,7 @@ export async function runWithDeadline(argv, { timeoutMs, killAfterMs = 15000 }) 
     throw new Error('Command and positive finite deadline required');
   }
   return new Promise(resolveResult => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', detached: true });
+    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', detached: true, windowsHide: true });
     let forced, escalation, finished = false;
     const signalChild = signal => {
       if (!child.pid) return;
@@ -97,7 +97,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const [operation, ...args] = process.argv.slice(2);
     if (operation === 'platform') {
-      const version = spawnSync('docker', ['version', '--format', '{{json .Server}}'], { encoding: 'utf8', timeout: 30000 });
+      const version = spawnSync('docker', ['version', '--format', '{{json .Server}}'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
       if (version.error || version.status !== 0) throw new Error(version.error?.message ?? version.stderr);
       const server = JSON.parse(version.stdout);
       const platform = dockerPlatform(server);
