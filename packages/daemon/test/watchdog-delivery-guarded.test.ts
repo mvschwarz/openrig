@@ -448,7 +448,7 @@ describe("blocked parked-owner no-input recovery on the real repository", () => 
     await engine.evaluate(jobs.getByIdOrThrow(job.jobId));
     const writes = repo.listTransitions(row.qitemId).length;
     const nudge = repo.getById(row.qitemId)!.lastNudgeAttempt;
-    for (let i = 0; i < 10; i++) expect((await policy.evaluate(job)).action).toBe("skip");
+    for (let i = 0; i < 10; i++) expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip");
     expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
     expect(repo.getById(row.qitemId)!.lastNudgeAttempt).toBe(nudge);
     const sweep = () => runStuckSweep({ db: f.db, queueRepo: repo, resolveOrchestrator: () => "orch@test", sessionConfirmedMissing: () => false, log: () => {} });
@@ -459,7 +459,7 @@ describe("blocked parked-owner no-input recovery on the real repository", () => 
     expect(finding.destinationSession).toBe("orch@test");
     expect(repo.waitingView(finding.qitemId)?.nextBackstop).toMatchObject({ owner: "orch@test", mechanism: "queue-stuck-sweep:unclaimed", dueAt: expect.any(String) });
     const count = f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number };
-    for (let i = 0; i < 10; i++) { await sweep(); expect((await policy.evaluate(job)).action).toBe("skip"); }
+    for (let i = 0; i < 10; i++) { await sweep(); expect((await engine.evaluate(jobs.getByIdOrThrow(job.jobId))).outcome.action).toBe("skip"); }
     expect((f.db.prepare("SELECT count(*) AS n FROM queue_items").get() as { n: number }).n).toBe(count.n);
     expect(findQueueRecovery(f.db, row.qitemId)?.qitemId).toBe(finding.qitemId);
     expect(repo.listTransitions(row.qitemId)).toHaveLength(writes);
