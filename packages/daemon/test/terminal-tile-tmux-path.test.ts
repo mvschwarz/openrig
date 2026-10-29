@@ -80,7 +80,7 @@ function service(resolveLocalTmux?: TerminalServiceDeps["resolveLocalTmux"]): { 
     viewsStore: { get: () => null, list: () => [] },
     listRigSeats: (r: string) => (r === "r" ? rows : null),
     listPodSeats: () => null,
-    
+
     listRigNames: () => ["r"],
     resolveHost: () => null,
     hasSession: () => true,

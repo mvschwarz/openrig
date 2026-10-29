@@ -76,7 +76,7 @@ function service(herdr: TerminalProvider, cmux = new RecordingCmux()): { svc: Te
     viewsStore: { get: () => null, list: () => [] },
     listRigSeats: (r) => (r === RIG ? rows : null),
     listPodSeats: () => null,
-    
+
     listRigNames: () => [RIG],
     resolveHost: () => null,
     hasSession: () => true,
