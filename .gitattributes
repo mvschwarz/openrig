@@ -5,3 +5,5 @@ packages/daemon/specs/agents/shared/skills/** text=auto eol=lf
 packages/daemon/assets/plugins/openrig-core/skills/** text=auto eol=lf
 # Built-in policy hashes attest the exact shipped authority bytes.
 packages/daemon/policies/builtin/*.policy.md text eol=lf
+# The thin startup overlay has a fixed size budget on every checkout.
+packages/daemon/assets/guidance/openrig-start.md text eol=lf

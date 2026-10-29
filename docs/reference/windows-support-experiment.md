@@ -1330,3 +1330,11 @@ The file passes 144/144 tests without skips, including two added LF/CRLF project
 Nine daemon fixture/helper files now register exact loopback origins only after their own listeners bind. This includes selection/history transport, cross-host usage readers and relays, browser/identity boundaries, notification transport, request observation, WebSocket recovery health checks and the owned child-process stress fixture. The browser fixture also registers the localhost alias it explicitly exercises. Production requests and the outbound-fetch guard are unchanged.
 
 Thirteen fixture, consumer and guard files pass 224/224 tests without skips. The earlier full baseline had 131 direct guard failures across these nine files. Two earlier focused observations each had one ordinary fetch connection failure on different cases; an isolated case passed, and an owned 30-cycle port-reuse experiment did not reproduce the error. The cause remains unknown; no retry, timeout or transport behavior was changed. This is a focused fixture receipt, not a replacement full-workspace or native-provider acceptance result.
+
+### Pod paths and startup asset checkout (2026-10-30)
+
+Pod instantiation and bundle fixtures now key their in-memory files and output assertions by native absolute paths. Directory-link containment and redirected state-root cases use Windows junctions on Windows and directory symlinks elsewhere. File-symlink cases remain unchanged. These fixture corrections retain the outside-root refusal and failed-reconciliation cleanup checks.
+
+The thin startup asset was expanded by checkout CRLF conversion from its canonical 2,464 bytes to 2,518 bytes, exceeding its existing size bound. Its Git attributes now require LF. The checked-out asset matches the existing Git blob exactly; neither content nor the size bound changed.
+
+The two Pod files report 149 passed and three failed out of 152 tests. All remaining failures occur while creating file-symlink fixtures with host-denied EPERM; they remain unwaived and their later assertions are unverified here. The first-run reference checker passes 525 checks across ten files, with six external references unchecked. This does not establish a passing full suite or privileged file-symlink acceptance.
