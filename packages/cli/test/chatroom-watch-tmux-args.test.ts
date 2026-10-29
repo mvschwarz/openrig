@@ -41,7 +41,7 @@ describe("chatroom watch --tmux arguments", () => {
 
 const TMUX_SOCKET = `openrig-chatroom-test-${process.pid}`;
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
-const names = ["my-rig", "my rig", "it's", 'say "hi"', "$(echo pwned)", "`id`", "a;b", "a$HOME", "-rig",
+const names = ["my-rig", "my rig", "it's", 'say "hi"', "$(echo pwned)", "`id`", "a;b", "-rig",
   "a#b", "a##b", "a#{b}", "a#[fg=red]b", "a##[b", "a;", ";"];
 
 describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server (private socket)", () => {
@@ -72,14 +72,18 @@ describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server 
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
   });
 
-  // Whether tmux changes a `.` depends on its version (3.5a writes `_`; the tmux CI runs keeps the `.`), so the CLI
-  // prints the name tmux reports, which is always the session tmux has.
-  it("reports the name tmux used for a rig name with a ., whichever form its version keeps", async () => {
-    const out = path.join(dir, "argv-dot.json");
-    const reported = start("release-0.7", out);
-    expect(["chatroom@release-0.7", "chatroom@release-0_7"]).toContain(reported);
+  // tmux versions differ in how they normalize dots and literal dollars in session names.
+  // The reported name must address the real session, while the watcher still gets the original rig name.
+  it.each([
+    ["release-0.7", ["chatroom@release-0.7", "chatroom@release-0_7"]],
+    ["a$HOME", ["chatroom@a$HOME", "chatroom@a\\$HOME"]],
+  ] as const)("reports the name tmux used for %s", async (rig, expected) => {
+    const out = path.join(dir, `argv-normalized-${rig}.json`);
+    const reported = start(rig, out);
+    expect(expected).toContain(reported);
     expect(execFileSync("tmux", ["-L", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"], { encoding: "utf8" }).split("\n"))
       .toContain(reported);
-    await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", "release-0.7"]), { timeout: 5000 });
+    expect(spawnSync("tmux", ["-L", TMUX_SOCKET, "has-session", "-t", `=${reported}:`]).status).toBe(0);
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
   });
 });
