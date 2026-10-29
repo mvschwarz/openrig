@@ -40,3 +40,9 @@ function spawnRig(args, options = {}) {
 }
 
 module.exports = { resolveRigCommand, spawnRig };
+
+if (require.main === module) {
+  const result = spawnRig(process.argv.slice(2), { stdio: "inherit", env: process.env });
+  if (result.error) process.stderr.write(result.error.message + "\n");
+  process.exitCode = result.status ?? 1;
+}

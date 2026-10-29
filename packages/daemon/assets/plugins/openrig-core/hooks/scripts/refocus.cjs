@@ -10,8 +10,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
 const { spawnRig } = require("./rig-command.cjs");
+const { spawnPython } = require("./python-command.cjs");
 const { recordRefocusResult } = require("./refocus-health.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
@@ -212,7 +212,7 @@ function renderRole(result) {
 // start, after reserving python's cap and, when a content ref is configured, the content lookup
 // that runs after python; with 250 ms or less left it is skipped.
 function traceEnv(trees) {
-  const env = { ...childEnv };
+  const env = { ...childEnv, OPENRIG_NODE: process.execPath, PYTHONIOENCODING: "utf-8" };
   const missing = [
     ["OPENRIG_TOPOLOGY_ROOT", "topology", "topology"],
     ["OPENRIG_WORKSPACE_ROOT", "workspace", "work"],
@@ -285,7 +285,7 @@ function renderTrace() {
   const timeout = lookupTimeout(contentReserveMs());
   const result = timeout <= MIN_LOOKUP_MS
     ? { error: new Error("no time left in the refocus budget"), status: null, stdout: "", stderr: "" }
-    : spawnSync(process.env.PYTHON || "python3", args, {
+    : spawnPython(args, {
       encoding: "utf8",
       ...(evidence ? { input: evidence } : {}),
       env,
