@@ -94,6 +94,15 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it("identifies the account home selected by a switch rather than the native default", async () => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, runtime_home: {
+      variable: "CODEX_HOME", home: "/accounts/api", source: "account-switch",
+    } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(result.logs.join("\n")).toContain("/accounts/api (the seat's selected account home;");
+    expect(result.logs.join("\n")).not.toContain("the native default");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);

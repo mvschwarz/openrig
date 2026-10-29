@@ -412,7 +412,9 @@ export interface PostChatMessageInput {
 }
 
 export type PostChatMessageResult =
-  | { ok: true; status: number; ts: string }
+  /** `threadTs`: where Slack placed the message, from the posted message in its answer: the thread's parent, or null for a
+   *  top-level message. Absent when the answer doesn't include the posted message. */
+  | { ok: true; status: number; ts: string; threadTs?: string | null }
   | { ok: false; status: number; error?: string };
 
 /** The longest Retry-After `postChatMessage` waits for inline. A 429 means Slack
@@ -451,5 +453,10 @@ export async function postChatMessage(
   if (!ts) {
     return { ok: false, status: r.status, error: "chat.postMessage returned ok without a message ts" };
   }
-  return { ok: true, status: r.status, ts };
+  // #2234: Slack can accept a reply to a deleted thread root as a new top-level message, with no thread_ts.
+  const message = (r.json as { message?: unknown }).message;
+  if (!message || typeof message !== "object") return { ok: true, status: r.status, ts };
+  const parent = (message as { thread_ts?: unknown }).thread_ts;
+  const threadTs = typeof parent === "string" && parent.trim() && parent.trim() !== ts ? parent.trim() : null;
+  return { ok: true, status: r.status, ts, threadTs };
 }

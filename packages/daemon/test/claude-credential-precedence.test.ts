@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { isolatedClaudeAccountProblem } from "../src/domain/claude-credential-precedence.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 
 // Before a Claude seat moves to its own subscription token, OpenRig finds what Claude Code would rank above that token
@@ -84,5 +85,25 @@ describe("what would outrank a Claude seat's own subscription token", () => {
     writeFileSync(path.join(f.home, ".claude", "settings.json"), "{ not json");
     const found = await f.managed.credentialPrecedence("node");
     expect(found.notChecked).toContain(`user settings ${path.join(f.home, ".claude", "settings.json")} (not valid JSON)`);
+  });
+});
+
+
+describe("isolated Claude account profile selection", () => {
+  it("checks home and project profile selectors for stored-login homes but permits the home's API helper", async () => {
+    const f = fixture();
+    const selected = path.join(f.home, ".claude");
+    const user = path.join(selected, "settings.json");
+    writeFileSync(user, JSON.stringify({ apiKeyHelper: "/synthetic/key-helper" }));
+    expect(isolatedClaudeAccountProblem(selected, f.cwd, false)).toBeNull();
+    for (const name of ["ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID"]) {
+      for (const file of [user, path.join(f.cwd, ".claude", "settings.json")]) {
+        writeFileSync(file, JSON.stringify({ env: { [name]: "synthetic-selector" } }));
+        expect(isolatedClaudeAccountProblem(selected, f.cwd, false)).not.toBeNull();
+        writeFileSync(file, "{}");
+      }
+    }
+    const legacy = fixture({ daemonEnv: { ANTHROPIC_PROFILE: "synthetic-profile" }, memberEnv: { ANTHROPIC_ORGANIZATION_ID: "synthetic-org" } });
+    expect((await legacy.managed.credentialPrecedence("node")).conflicts).toEqual([]);
   });
 });

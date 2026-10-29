@@ -8,7 +8,7 @@ import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 import { planPermissionAccount, type PermissionAccount } from "./permission-account.js";
-import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
+import { seatAccountHome, RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "./seat-runtime-home.js";
 import { claudeSeatTokenFallbackNotice, claudeSeatTokenFileProblem, readClaudeSeatTokenRef } from "./claude-seat-token.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
@@ -39,8 +39,8 @@ export interface SeatStatus {
   runtime_home?: {
     variable: "CLAUDE_CONFIG_DIR" | "CODEX_HOME";
     home: string | null;
-    source: "member" | "rig" | "daemon" | "native_default";
-    ignored?: { source: "member" | "rig"; value: string };
+    source: "member" | "rig" | "account-switch" | "daemon" | "native_default";
+    ignored?: { source: "member" | "rig" | "account-switch"; value: string };
   };
   /** A Claude seat's own subscription token: its reference (never the value), and whether the file would give Claude the
    *  token at the next launch. When it wouldn't, Claude starts on the config dir's stored login, and `notice` says so. */
@@ -190,13 +190,15 @@ export class SeatStatusService {
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }
 
+  /** Report a Claude token's stored reference and file availability without reading its value or verifying the login. */
   private claudeTokenStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "claude_token"> {
     if (runtime !== "claude-code") return {};
     const ref = readClaudeSeatTokenRef(this.rigRepo.db, nodeId);
     if (!ref) return {};
     const problem = claudeSeatTokenFileProblem(ref);
     return { claude_token: { label: ref.label, token_file: ref.tokenFile, file: problem ? "unusable" : "readable",
-      ...(problem ? { problem, notice: claudeSeatTokenFallbackNotice(ref, problem) } : {}) } };
+      ...(problem ? { problem, notice: seatAccountHome(this.rigRepo.db, nodeId, "claude-code")
+        ? "The selected account token is unusable; no agent will start." : claudeSeatTokenFallbackNotice(ref, problem) } : {}) } };
   }
 
   private terminalPolicyStatus(nodeId: string, runtime: string | null): SeatStatus["terminalPolicy"] {

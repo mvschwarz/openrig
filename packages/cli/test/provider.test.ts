@@ -82,6 +82,93 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
     asOf: "2026-08-03T12:00:00.000Z",
   };
 
+  it("switches to a selected account home without sending credential values", async () => {
+    const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "api-account", "--account-home", "/accounts/api",
+      "--reason", "Plan limit", "--model", "gpt-5.5", "--json"], runningDeps(port));
+    expect(result.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ seat: "dev-a@rig", toAccount: "api-account", accountHome: "/accounts/api",
+      reason: "Plan limit", model: "gpt-5.5", dryRun: false });
+    expect(JSON.parse(result.logs.at(-1)!)).toMatchObject({ ok: true });
+  });
+
+  it("returns to configured defaults through an acknowledged read-only clear plan", async () => {
+    const before = seen.length;
+    const args = ["switch", "--seat", "dev-a@rig", "--clear-account-home", "--reason", "Plan reset"];
+    const dry = await run([...args, "--dry-run", "--json"], runningDeps(port));
+    expect(dry.exitCode).toBeFalsy();
+    expect(JSON.parse(dry.logs[0]!)).toMatchObject({ accountHome: null, dryRun: true });
+    expect(seen.slice(before).some(r => r.url === "/api/provider/switch")).toBe(false);
+    const result = await run(args, runningDeps(port));
+    expect(result.exitCode).toBeFalsy();
+    expect(JSON.parse(seen.at(-1)!.body)).toEqual({ seat: "dev-a@rig", clearAccountHome: true, reason: "Plan reset", dryRun: false });
+  });
+
+  it("refuses a clear that an older daemon does not explicitly acknowledge", async () => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "old-daemon@rig", "--clear-account-home", "--reason", "Plan reset", "--json"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.logs[0]!)).toMatchObject({ code: "account_home_switch_unavailable" });
+    expect(seen.slice(before).some(r => r.url === "/api/provider/switch")).toBe(false);
+  });
+
+  it.each([{ selectors: ["--stored-login"] }, { selectors: ["--to-account", "other"] }, { selectors: ["--token-file", "/tokens/new"] }, { selectors: ["--account-home", "/accounts/new"] }])("refuses conflicting clear selectors $selectors before requesting a switch", async ({ selectors }) => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "dev-a@rig", "--clear-account-home", "--reason", "Plan reset", ...selectors], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(seen.length).toBe(before);
+  });
+
+  it("a clear without its reason names the required flag without asking for a conflicting account selector", async () => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "dev-a@rig", "--clear-account-home"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs).toContain("Pass --reason with --clear-account-home.");
+    expect(seen.length).toBe(before);
+  });
+
+  it("requires a reason before starting an account-home switch", async () => {
+    const before = seen.length;
+    const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "api-account", "--account-home", "/accounts/api"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(seen.length).toBe(before);
+  });
+
+  it("reports pending account-home recovery with its instruction instead of success", async () => {
+    const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "recovery-pending", "--account-home", "/accounts/api",
+      "--reason", "Plan limit"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs.join("\n")).toContain("Recovery is still pending");
+    expect(result.logs.join("\n")).toContain("rig seat set-runtime dev-a@rig --recover");
+    expect(result.logs.join("\n")).not.toContain("A fresh conversation carries the handover");
+  });
+
+  it("prints refusal recovery instructions even without warnings", async () => {
+    const result = await run(["switch", "--seat", "dev-a@rig", "--to-account", "recovery-refused", "--account-home", "/accounts/api",
+      "--reason", "Plan limit"], runningDeps(port));
+    expect(result.exitCode).toBe(1);
+    expect(result.logs).toContain("The staged successor could not be retired.");
+    expect(result.logs).toContain("Run rig seat set-runtime dev-a@rig --recover.");
+    expect(result.logs.join("\n")).not.toContain("A fresh conversation carries the handover");
+  });
+
+  it("shows account-home dry-run settings, cleared choices and costs without requesting a switch", async () => {
+    const before = seen.length;
+    const args = ["switch", "--seat", "dev-a@rig", "--to-account", "api-account", "--account-home", "/accounts/api",
+      "--reason", "Plan limit", "--dry-run"];
+    const result = await run(args, runningDeps(port));
+    const output = result.logs.join("\n");
+    expect(output).toContain("Nothing changed.");
+    expect(output).toContain("model: gpt-5.5 (explicit)");
+    expect(output).toContain("effort: none (native_default)");
+    expect(output).toContain("Cleared from codex: Codex profile old-profile.");
+    expect(output).toContain("A fresh conversation carries only the handover.");
+    expect(result.exitCode).toBeFalsy();
+    expect(seen.slice(before).some(request => request.url === "/api/provider/switch")).toBe(false);
+    const json = JSON.parse((await run([...args, "--json"], runningDeps(port))).logs[0]!);
+    expect(json).toMatchObject({ dryRun: true, settings: { model: { value: "gpt-5.5", source: "explicit" } },
+      dropped: [{ setting: "Codex profile", value: "old-profile" }], costs: ["A fresh conversation carries only the handover."] });
+  });
+
   beforeAll(async () => {
     server = http.createServer(async (req, res) => {
       let body = "";
@@ -89,6 +176,15 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       seen.push({ url: req.url ?? "", method: req.method ?? "", body });
       const send = (code: number, obj: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(obj)); };
       const path = (req.url ?? "").split("?")[0];
+      if (path?.startsWith("/api/seat/status/")) return send(200, { runtime: "codex" });
+      if (path?.startsWith("/api/seat/set-runtime/")) {
+        const request = JSON.parse(body);
+        if (path.includes("old-daemon")) return send(200, { ok: true, dryRun: true });
+        return send(200, { ok: true, dryRun: true, accountHome: request.clearAccountHome ? null : request.accountHome, from: "codex", to: "codex",
+          settings: { model: { value: "gpt-5.5", source: "explicit" }, effort: { value: null, source: "native_default" } },
+          dropped: [{ setting: "Codex profile", value: "old-profile" }], costs: ["A fresh conversation carries only the handover."],
+          ...(request.tokenFile ? { accountToken: { label: request.accountLabel, tokenFile: request.tokenFile } } : {}) });
+      }
       if (path === "/api/provider/status") return send(200, FOUR_BLOCK);
       if (path === "/api/provider/accounts") {
         if ((req.url ?? "").includes("provider=bad")) return send(404, { error: "unknown provider: bad" });
@@ -99,6 +195,11 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       if (path === "/api/provider/precheck") return send(200, { safe: false, reasons: ["target_needs_reauth"] });
       if (path === "/api/provider/switch") {
         if (body.includes("bad")) return send(400, { error: "invalid target account" });
+        if (JSON.parse(body).toAccount === "recovery-refused") return send(409, { ok: false, recoveryPending: true,
+          message: "The staged successor could not be retired.", guidance: "Run rig seat set-runtime dev-a@rig --recover." });
+        if (JSON.parse(body).toAccount === "recovery-pending") return send(200, { ok: true, changed: true,
+          recoveryPending: true, warnings: ["Run rig seat set-runtime dev-a@rig --recover before retrying."] });
+        if (JSON.parse(body).accountHome || JSON.parse(body).clearAccountHome) return send(200, { ok: true, changed: true, recoveryPending: false });
         return send(200, { outcome: "succeeded" });
       }
       return send(500, { error: "not found" });

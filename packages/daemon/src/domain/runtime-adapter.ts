@@ -16,6 +16,9 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** A staged account-home selection; null explicitly returns to configured defaults before commit. */
+  accountHome?: string | null;
+  accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;

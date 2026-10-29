@@ -74,6 +74,9 @@ export interface SubsystemSlackDeliveryOpts {
    *  reaction on that message can reach them. A throw retains the
    *  delivery like any receipt failure; the replay reconciles the message by marker and records it again. */
   onPostedPart?: (payload: OutboundPostPayload, messageTs: string, threadTs: string, channel: string) => void;
+  /** #2234: Slack posted a reply to `threadTs` as a new top-level message, so that thread's root is gone. The message is
+   *  then recorded as a root through `onPostedRoot`. */
+  onThreadMissing?: (payload: OutboundPostPayload, threadTs: string, channel: string) => void;
   /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
    *  the row's transport-failed ledger transition (class + API error), so a
    *  delivery failure is as legible on the row as a success. `partlyPosted` marks an ask whose
@@ -469,10 +472,14 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // write that throws after a successful post is a clean retained outcome
     // (never an escaped throw); the replay reconciles by marker — the message
     // IS in the channel — and retries the idempotent receipt without reposting.
+    // #2234: record where Slack actually put the message, not where it was asked to. Without the posted message in its
+    // answer, the requested placement stands.
+    const placedThreadTs = res.threadTs === undefined ? threadTs : res.threadTs ?? undefined;
     try {
-      if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts, channel);
-      else opts.onPostedPart?.(q, res.ts, threadTs, channel);
-      opts.onPosted?.(q, res.ts, threadTs);
+      if (threadTs !== undefined && placedThreadTs === undefined) opts.onThreadMissing?.(q, threadTs, channel);
+      if (placedThreadTs === undefined) opts.onPostedRoot?.(q, res.ts, channel);
+      else opts.onPostedPart?.(q, res.ts, placedThreadTs, channel);
+      opts.onPosted?.(q, res.ts, placedThreadTs);
     } catch (e) {
       log(`receipt write FAILED after successful post for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained; replay reconciles by marker and retries the idempotent receipt`);
       return { ok: false, class: "receipt-failed", detail: (e as Error).message };
@@ -498,7 +505,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     if (local && "skipped" in local) {
       log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);
     } else if (local) {
-      const intoThread = threadTs ?? res.ts;
+      const intoThread = placedThreadTs ?? res.ts;
       const up = await getUploadURLExternal(opts.botToken, local.filename, local.bytes.length, opts.fetchImpl);
       if (up.ok && up.uploadUrl && up.fileId) {
         const put = await uploadBytesExternal(up.uploadUrl, local.bytes, opts.fetchImpl);
@@ -772,7 +779,9 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         resolveChannel: index === 0
           ? opts.resolveChannel
           : (part) => firstAttemptChannel(opts, opts.attempted.load(), partId(0)) ?? opts.resolveChannel?.(part) ?? opts.channel,
-        onPostedRoot: index === 0 ? opts.onPostedRoot : undefined,
+        // #2234: a later part has the primary's thread, so this fires only when Slack posted it top-level because that root was
+        // deleted between parts. It then opens a root of its own for the same conversation, as a single part does.
+        onPostedRoot: opts.onPostedRoot,
         onPosted: (_part, messageTs, threadTs) => {
           if (index !== 0) return;
           if (messageTs === "reconciled") throw new Error("Primary reconciliation has no Slack timestamp; multipart delivery remains incomplete.");
