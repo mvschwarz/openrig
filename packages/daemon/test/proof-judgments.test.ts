@@ -39,6 +39,19 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("reads CRLF judgment receipts without changing identity or accepting changed payloads", () => {
+    const f = fixture(), input = f.input(), first = f.judge(input);
+    const file = join(f.alpha, "proof", "judgments", "00000001.md");
+    const crlf = fs.readFileSync(file, "utf8").replace(/\r?\n/g, "\r\n");
+    fs.writeFileSync(file, crlf);
+    expect(readSliceReadiness(f.alpha).items[0]).toMatchObject({ state: "accepted", judgment: { id: first.judgment.id } });
+    expect(f.judge(input)).toMatchObject({ replayed: true, judgment: { id: first.judgment.id } });
+    expect(fs.readFileSync(file, "utf8")).toBe(crlf);
+    fs.writeFileSync(file, crlf.replace("Independent accept judgment", "Changed payload"));
+    const changed = readSliceReadiness(f.alpha);
+    expect(changed.state).toBe("unknown");
+    expect(changed.issues.join()).toContain("changed judgment");
+  });
   it("keeps published receipts private through replay and correction", () => {
     const f = fixture(), input = f.input();
     const first = f.judge(input);

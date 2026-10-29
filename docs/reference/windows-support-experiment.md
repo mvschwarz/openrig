@@ -123,6 +123,17 @@ and unhealthy results. This consumer supplies boot gating and environment
 receipt capture; the fixtures do not start Docker or prove a complete service
 orchestrator lifecycle. Redirect non-following and bounded hangs remain checked.
 
+## CRLF proof judgment receipts (2026-10-30)
+
+An owned receipt produced by recordJudgment, converted only from LF to CRLF,
+was rejected as incomplete by the ledger reader. Its frontmatter fences now
+accept either line ending. The actual read/replay check retains the judgment
+identity and receipt bytes, and a subsequent payload edit still produces an
+unknown result with the changed-judgment error. Existing payload hashes,
+sequence, correction lineage and policy checks remain in place. The adjacent
+judgment/policy suites and daemon typecheck pass. Only synthetic project
+receipts were used; no workspace judgment or evidence was changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

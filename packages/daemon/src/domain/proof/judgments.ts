@@ -129,7 +129,7 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
     const expected = `${String(receipts.length + 1).padStart(8, "0")}.md`;
     if (name !== expected) throw new JudgmentError("journal_conflict", `${home}: expected ${expected}, found ${name}; inspect retained receipts`);
     const raw = io.readFile(path.join(home, name));
-    const fm = raw && /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(raw);
+    const fm = raw && /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
     if (!fm) throw new JudgmentError("journal_invalid", `${home}/${name}: incomplete judgment`);
     const obj = mapping(YAML.parse(fm[1]!), name), { id, ...payload } = obj;
     if (id !== hash(payload) || obj.version !== 1 || obj.sequence !== receipts.length + 1 || typeof obj.itemId !== "string" || typeof obj.itemRevision !== "string" || typeof obj.policyRevision !== "string" || typeof obj.actor !== "string" || typeof obj.operationId !== "string" || typeof obj.intent !== "string" || !["accept", "reject", "withdraw"].includes(String(obj.verdict)) || !Array.isArray(obj.evidence)) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed or changed judgment; inspect history`);
