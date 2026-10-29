@@ -2311,3 +2311,25 @@ pass with them: 9/9, plus daemon TypeScript checking. These fixtures contain no
 actual provider code, credentials or sessions and establish command selection
 and argv delivery only; existing native identity and provider acceptance limits
 remain. No running team or installed runtime was changed.
+
+## Relative Pi PATH and child working directory (2026-10-30)
+
+Windows Pi lookup skipped relative PATH entries entirely. It now resolves them
+against an explicit working directory, retaining the runner process cwd only
+as the compatibility default. The actual runner supplies its Pi child's
+configured cwd, which can differ from the runner's own cwd. Package/shim and
+regular-file checks remain in place; there is no batch-shell fallback.
+
+The relative local-npm Pi regression failed before the resolver correction.
+A real runner plus owned offline RPC child separately reproduced the caller
+cwd mismatch (exit 127 before the child could start). With the child cwd
+passed through, it reaches the real READY marker after get_state, records the
+correct child cwd/argv and exits normally. The fixture explicitly selects
+--no-approve and uses no installed provider code, credentials or network calls.
+Absolute/relative local npm cases also retain wrong-package, escaping-entry
+and unrelated-shim refusal checks for Codex, Claude and Pi.
+
+The final selected combination passes 13 with 6 existing POSIX-only skips;
+daemon TypeScript checking passes. This is native process/RPC fixture evidence,
+not actual-provider, stock-psmux or running-fleet acceptance. The full Windows
+parity objective remains active.
