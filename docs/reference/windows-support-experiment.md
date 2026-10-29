@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Empty HOME account projection matches its resolvers (2026-10-30)
+
+ProviderServiceImpl independently calculated its displayed Codex home using a
+nullish HOME fallback. With HOME empty, metadata reads used the existing OS
+account-home resolver while the configured-account display named relative
+`.codex`. The service now reuses resolveCodexHome for that display. Claude's
+default display also treats empty HOME as absent and uses the existing OS-home
+fallback. Explicit CODEX_HOME and CLAUDE_CONFIG_DIR semantics remain unchanged.
+
+An owned migrated SQLite service fixture reproduces the Codex mismatch before
+the repair. Distinct controlled account-home and OS-home roots then verify both
+runtime projections and explicit Codex selection through getReadModel. Neither
+root is written, and the provider reader is not called. Four account/home files
+pass 38/38 without skips; daemon type checking passes. This verifies read-model
+directory selection, not the account loaded by a running provider or native
+provider lifecycle acceptance.
+
 ## Provider account fixture follow-up (2026-10-30)
 
 The six adjacent failures below are now reconciled. Four fixtures assumed POSIX

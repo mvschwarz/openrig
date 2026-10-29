@@ -163,9 +163,9 @@ export class ProviderServiceImpl implements ProviderService {
       auth: readAuth(),
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
-      codexHome: readPlatformEnv(env, "CODEX_HOME") || nodePath.join(readPlatformEnv(env, "HOME") ?? os.homedir(), ".codex"),
+      codexHome: resolveCodexHome(env).codexHome,
       claudeConfigDir: readPlatformEnv(env, "CLAUDE_CONFIG_DIR"),
-      home: readPlatformEnv(env, "HOME") ?? os.homedir(),
+      home: readPlatformEnv(env, "HOME") || os.homedir(),
     });
     return { ...model, usage: allUsage, seatAccounts };
   }
