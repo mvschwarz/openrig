@@ -320,7 +320,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           actions: [{ type: "button", block_id: `or-q:${questionId}`, action_id: `or-opt:${optionId}`, value: optionId, action_ts: actionTs }],
         },
       }) });
-      const answerRowId = (qitemId: string) => `qitem-slack-answers-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`;
+      const answerRowId = (qitemId: string) => `qitem-human-answer-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`;
       const resolvedCount = (qitemId: string) => repo.transitionLog.listForQitem(qitemId)
         .filter((t) => t.ownerNotificationKind === "human-decision-resolved").length;
       // The ask posts as root 1.1; its agent then parks it on the person it asked, and that question posts too.
