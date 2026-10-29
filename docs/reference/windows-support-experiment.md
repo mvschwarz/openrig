@@ -2229,3 +2229,21 @@ failures were two host-denied file-symlink creations and one POSIX mode-bit
 assertion. The corrected casing case passes independently. Daemon TypeScript
 checking passes. These are source fixtures, not live workspace registration or
 runtime deployment; the full Windows parity goal remains incomplete.
+
+## Seat skill storage native containment (2026-10-30)
+
+Seat skill file/folder admission used a case-sensitive string prefix before
+its anchored filesystem walk. This rejected a different Windows casing of
+the same seat root, including actual writes through writeInsideSeatStorage.
+Native path-relative strict containment now supplies that first check. The
+existing anchored walk still refuses links from the seats anchor downward.
+The root entry itself, sibling seats, traversal and absolute relative results
+remain outside admission; POSIX comparison retains its native case semantics.
+
+The owned Windows fixture failed before repair and now verifies actual skill
+write/readback with alternate root casing, root/sibling rejection and directory
+junction refusal. The junction check tests directory-link semantics and does
+not replace unavailable file-symlink coverage. The adjacent plugin-list fixture
+now uses the native path-list delimiter rather than hard-coded colons, matching
+the existing implementation. Combined seat-storage checks pass 22/22; daemon
+TypeScript checking passes. No live seat material or deployment was changed.

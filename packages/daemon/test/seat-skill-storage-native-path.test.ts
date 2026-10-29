@@ -1,0 +1,30 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { insideSeatStorage, insideSeatStorageFolder, seatSkillPaths, writeInsideSeatStorage } from "../src/domain/seat-skill-storage.js";
+
+let home: string | undefined;
+afterEach(() => { if (home) rmSync(home, { recursive: true, force: true }); });
+it.runIf(process.platform === "win32")("accepts native casing for the same seat while refusing siblings and directory links", () => {
+  home = mkdtempSync(join(tmpdir(), "seat-skill-native-"));
+  const paths = seatSkillPaths({ rigId: "rig", logicalId: "worker", runtime: "claude-code" }, home);
+  const folder = join(paths.skillsRoot, "fixture");
+  mkdirSync(folder, { recursive: true });
+  const file = join(folder, "SKILL.md");
+  expect(insideSeatStorageFolder(paths.root, paths.root)).toBe(false);
+  expect(insideSeatStorage(paths.root, paths.root)).toBe(false);
+  expect(insideSeatStorage(paths.root.toUpperCase(), file)).toBe(true);
+  expect(insideSeatStorageFolder(paths.root.toUpperCase(), folder)).toBe(true);
+  writeInsideSeatStorage(paths.root.toUpperCase(), file, "synthetic skill\n");
+  expect(readFileSync(file, "utf8")).toBe("synthetic skill\n");
+  const sibling = `${paths.root}-other`;
+  expect(insideSeatStorage(paths.root, join(sibling, "file.md"))).toBe(false);
+  expect(insideSeatStorageFolder(paths.root, sibling)).toBe(false);
+  expect(() => writeInsideSeatStorage(paths.root, join(sibling, "file.md"), "not written")).toThrow(/not inside/);
+  const outside = join(home, "outside"); mkdirSync(outside);
+  const linked = join(paths.skillsRoot, "linked"); symlinkSync(outside, linked, "junction");
+  expect(insideSeatStorageFolder(paths.root.toUpperCase(), linked)).toBe(false);
+  expect(insideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"))).toBe(false);
+  expect(() => writeInsideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"), "not written")).toThrow(/not inside/);
+});

@@ -133,17 +133,23 @@ function anchored(anchor: string, target: string, kind: "file" | "folder"): bool
   return true;
 }
 
-/** Whether folder `dir` is inside the seat storage at `root`, with no link on the way, itself included. */
+/** Native strict containment; the root itself is not a seat-owned child entry. */
+function seatDescendant(root: string, target: string): boolean {
+  const relative = nodePath.relative(nodePath.resolve(root), nodePath.resolve(target));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative);
+}
+
+/** Whether folder `dir` is inside seat storage, with no link on the way, the folder included. */
 export function insideSeatStorageFolder(root: string, dir: string): boolean {
   const seatRoot = nodePath.resolve(root);
-  if (!nodePath.resolve(dir).startsWith(seatRoot + nodePath.sep)) return false;
+  if (!seatDescendant(seatRoot, dir)) return false;
   return anchored(seatsAnchor(seatRoot), dir, "folder");
 }
 
 /** Whether `file` is inside the seat storage at `root`, with no link on the way from the anchor all seats share. */
 export function insideSeatStorage(root: string, file: string): boolean {
   const seatRoot = nodePath.resolve(root);
-  if (!nodePath.resolve(file).startsWith(seatRoot + nodePath.sep)) return false;
+  if (!seatDescendant(seatRoot, file)) return false;
   return anchored(seatsAnchor(seatRoot), file, "file");
 }
 
