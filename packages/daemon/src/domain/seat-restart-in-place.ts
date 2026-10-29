@@ -286,7 +286,7 @@ export class CodexInPlaceRestart {
 
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
-      const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt);
+      const stopped = await this.stopUnderShell(pane, panePid, codexPid, codexStartedAt, report.oldProcess);
       if (stopped === "running") {
         return { ...report, outcome: "not_started", recoveryCommand, message: "Codex did not exit after TERM and KILL; nothing was restarted and the original process is still running." };
       }
@@ -589,12 +589,14 @@ export class CodexInPlaceRestart {
   }
 
   /** Shell-backed: TERM the Codex chain's top process (not the pane's shell), KILL after the timeout, then
-   *  require the original process gone AND the shell back in the foreground. */
-  private async stopUnderShell(pane: string, panePid: number, pid: number, startedAt: string | null): Promise<"stopped" | "running" | "unknown"> {
+   *  require both launcher and native process gone AND the shell back in the foreground. */
+  private async stopUnderShell(pane: string, panePid: number, pid: number, startedAt: string | null,
+    native: InPlaceRestartReport["oldProcess"]): Promise<"stopped" | "running" | "unknown"> {
     const gone = async (): Promise<boolean | null> => {
       const rows = await this.listProcesses();
       if (rows.length === 0) return null;
-      if (rows.some((row) => row.pid === pid && (row.startedAt ?? null) === startedAt)) return false;
+      if (rows.some((row) => (row.pid === pid && (row.startedAt ?? null) === startedAt)
+        || (row.pid === native.pid && (row.startedAt ?? null) === native.startedAt))) return false;
       const command = await this.deps.tmux.getPaneCommand(pane);
       const root = rows.find((row) => row.pid === panePid);
       return command !== null && isShellForeground(command) && !!root;
