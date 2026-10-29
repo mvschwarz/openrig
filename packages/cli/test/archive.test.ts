@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.3.3.19 - rig archive / unarchive CLI surface.
 //
 // Covers AC-6 (running-rig --force guard surfaces a 3-part honest error),
@@ -29,27 +30,27 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    const origWrite = process.stderr.write.bind(process.stderr);
-    // archive.ts writes the 3-part error via process.stderr.write
-    (process.stderr as { write: unknown }).write = (chunk: string) => { logs.push(String(chunk)); return true; };
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-      (process.stderr as { write: unknown }).write = origWrite;
-    }
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  const origWrite = process.stderr.write.bind(process.stderr);
+  // archive.ts writes the 3-part error via process.stderr.write
+  (process.stderr as { write: unknown }).write = (chunk: string) => { logs.push(String(chunk)); return true; };
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    (process.stderr as { write: unknown }).write = origWrite;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+  }
 }
 
 function runningDeps(port: number): StatusDeps {
@@ -92,6 +93,7 @@ describe("Archive / Unarchive CLI (OPR.0.3.3.19)", () => {
       }
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

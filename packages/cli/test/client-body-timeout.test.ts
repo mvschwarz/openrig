@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, describe, expect, it } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -33,6 +34,7 @@ async function slowBodyServer(delayMs: number) {
     });
   });
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+  allowOwnedHttpFixture(server);
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     requests: () => requests, closedBeforeEnd: () => closedBeforeEnd,
     headersWritten, dropBody: () => response!.destroy() };

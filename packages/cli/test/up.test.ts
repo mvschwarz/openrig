@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import fs from "node:fs";
@@ -27,20 +28,23 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+  }
 }
 
 function runningDeps(port: number): StatusDeps {
@@ -93,6 +97,7 @@ describe("Up CLI", () => {
       }
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 
@@ -230,6 +235,7 @@ describe("Up CLI", () => {
       res.end(JSON.stringify({ status: "failed", error: "boom", stages: [], errors: ["boom"] }));
     });
     await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    allowOwnedHttpFixture(failServer);
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -255,6 +261,7 @@ describe("Up CLI", () => {
       }));
     });
     await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    allowOwnedHttpFixture(failServer);
     const failPort = (failServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -310,8 +317,7 @@ describe("Up CLI", () => {
     });
 
     // sourceRef must be an absolute path, not the raw relative input
-    expect(lastBody.sourceRef).toMatch(/^\//);
-    expect((lastBody.sourceRef as string).endsWith("relative/spec.yaml")).toBe(true);
+    expect(lastBody.sourceRef).toBe(nodePath.resolve("relative/spec.yaml"));
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -335,7 +341,7 @@ describe("Up CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle"]);
     });
 
-    expect(lastBody.sourceRef).toBe("/tmp/demo.rigbundle");
+    expect(lastBody.sourceRef).toBe(nodePath.resolve("/tmp/demo.rigbundle"));
     expect(lastBody.targetRoot).toBe(process.cwd());
 
     server.removeAllListeners("request");
@@ -360,7 +366,7 @@ describe("Up CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle", "--target", "/tmp/custom-root"]);
     });
 
-    expect(lastBody.targetRoot).toBe("/tmp/custom-root");
+    expect(lastBody.targetRoot).toBe(nodePath.resolve("/tmp/custom-root"));
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -384,7 +390,7 @@ describe("Up CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle", "--target", "rel/target-root"]);
     });
 
-    expect(lastBody.targetRoot).toBe(`${process.cwd()}/rel/target-root`);
+    expect(lastBody.targetRoot).toBe(nodePath.resolve("rel/target-root"));
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -409,7 +415,7 @@ describe("Up CLI", () => {
     });
 
     expect(lastBody.targetRoot).toBe(process.cwd());
-    expect(lastBody.cwdOverride).toBe(`${process.cwd()}/rel/launch-dir`);
+    expect(lastBody.cwdOverride).toBe(nodePath.resolve("rel/launch-dir"));
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -491,12 +497,13 @@ describe("Up CLI", () => {
       if (req.url === "/api/up") { lastBody = JSON.parse(body); return reply(201, { status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }); }
       reply(404, { error: "not found" });
     });
-    const cwd = vi.spyOn(process, "cwd").mockReturnValue("/");
+    const root = nodePath.parse(process.cwd()).root;
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
     try {
       const { logs, exitCode } = await captureLogs(async () => {
         await makeCmd().parseAsync(["node", "rig", "up", ...args]);
       });
-      expect(lastBody.cwdOverride).toBe("/");
+      expect(lastBody.cwdOverride).toBe(root);
       expect(exitCode).toBeUndefined();
       expect(logs.some((l) => l.includes("warning:") && l.includes("--cwd <project dir>"))).toBe(warns);
     } finally {
@@ -524,8 +531,7 @@ describe("Up CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "up", "/tmp/rig.yaml", "--cwd", "relative/project"]);
     });
 
-    expect(lastBody.cwdOverride).toMatch(/^\//);
-    expect((lastBody.cwdOverride as string).endsWith("relative/project")).toBe(true);
+    expect(lastBody.cwdOverride).toBe(nodePath.resolve("relative/project"));
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
@@ -1010,6 +1016,7 @@ describe("Up CLI", () => {
     const net = await import("node:net");
     const blockingServer = net.createServer();
     await new Promise<void>((resolve) => blockingServer.listen(0, resolve));
+    allowOwnedHttpFixture(blockingServer);
     const blockedPort = (blockingServer.address() as { port: number }).port;
 
     // Create deps where daemon is NOT running (triggers auto-start → preflight)

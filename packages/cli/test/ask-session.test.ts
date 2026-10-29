@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -33,15 +34,18 @@ function runningDeps(port: number): StatusDeps {
     clientFactory: (u) => new DaemonClient(u),
   };
 }
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[] }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const ol = console.log, oe = console.error;
-    console.log = (...a: unknown[]) => logs.push(a.join(" "));
-    console.error = (...a: unknown[]) => logs.push(a.join(" "));
-    try { await fn(); } finally { console.log = ol; console.error = oe; }
-    resolve({ logs });
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[] }> {
+  const logs: string[] = [];
+  const ol = console.log, oe = console.error;
+  console.log = (...a: unknown[]) => logs.push(a.join(" "));
+  console.error = (...a: unknown[]) => logs.push(a.join(" "));
+  try {
+    await fn();
+    return { logs };
+  } finally {
+    console.log = ol;
+    console.error = oe;
+  }
 }
 
 const FOUND = {
@@ -76,6 +80,7 @@ describe("rig ask --session (L2 CLI)", () => {
       });
     });
     await new Promise<void>((r) => server.listen(0, r));
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());
