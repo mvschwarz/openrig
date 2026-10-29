@@ -10,6 +10,7 @@ import {SessionTransport, CAPTURE_READABLE_BUDGET_MS} from '../src/domain/sessio
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
+import {denyDirectoryChildren} from './helpers/directory-permissions.js';
 import Database from 'better-sqlite3';
 import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
 import {migrate} from '../src/db/migrate.js';
@@ -485,11 +486,28 @@ it('registered cwd: automatic monitor forwards the launch workspace and isolates
  expect(b.mapPath).not.toBe(a.mapPath);expect(compacts(f)).toHaveLength(0);
 });
 it('registered cwd: absent, relative or unwritable cwd preserves the legacy map location',async()=>{
- for(const cwd of [undefined,'relative',join('/dev/null','unwritable')]){
-  const f=fixture();await f.e.maybeAutoCompact({...input,cwd} as any);
+ for(const kind of ['absent','relative','unwritable']){
+  const f=fixture(),blocker=join(f.home,'not-a-directory');writeFileSync(blocker,'keep fixture');
+  const cwd=kind==='absent'?undefined:kind==='relative'?'relative':join(blocker,'unwritable');
+  await f.e.maybeAutoCompact({...input,cwd} as any);
   expect(f.e.getPreparationState(seat)!.mapPath).toBe(join(f.home,'compaction','preparation',seat,f.e.getPreparationState(seat)!.attemptId,'RESTORE-MAP.md'));
   expect(f.writes).toHaveLength(1);
+  expect(readFileSync(blocker,'utf8')).toBe('keep fixture');
  }
+});
+
+for(const configured of [false,true])it(`directory-linked ignore remains untouched (configured=${configured})`,async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=configured?join(f.home,'maps'):join(cwd,'.openrig','compaction');
+ mkdirSync(root,{recursive:true});const outside=join(f.home,'outside-directory');mkdirSync(outside);
+ const marker=join(outside,'keep.txt');writeFileSync(marker,'preserve');
+ const ignore=join(root,'.gitignore');symlinkSync(outside,ignore,process.platform==='win32'?'junction':'dir');
+ if(configured)f.policy.preparationRoot=root;
+ await f.e.maybeAutoCompact({...input,cwd});
+ const state=f.e.getPreparationState(seat)!;
+ if(configured){expect(state.status).toBe('stopped');expect(f.writes).toHaveLength(0);}
+ else expect(state.mapPath).toBe(join(f.home,'compaction','preparation',seat,state.attemptId,'RESTORE-MAP.md'));
+ expect(lstatSync(ignore).isSymbolicLink()).toBe(true);expect(readFileSync(marker,'utf8')).toBe('preserve');
+ expect(compacts(f)).toHaveLength(0);
 });
 
 it('preparation contract: prompt qualifies later refusal and the shipped skill follows its named map',async()=>{
@@ -550,11 +568,11 @@ it('workspace setup: publishes only after creating the actual attempt parent',as
  stageMap(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
 });
 it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant selects the home fallback',async()=>{
- const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});const restore=denyDirectoryChildren(parent);
  try{
   await f.e.maybeAutoCompact({...input,cwd});const a=f.e.getPreparationState(seat)!;
   expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
- }finally{chmodSync(parent,0o700);}
+ }finally{restore();}
 });
 
 for(const mode of ['automatic','manual'])it(`${mode}: daemon publishes the complete temp bytes before compact input`,async()=>{
@@ -776,12 +794,12 @@ for(const mode of ['manual','automatic'] as const)for(const end of ['expiry','ca
 });
 
 it.skipIf(process.getuid?.()===0)('configured preparation root: an unwritable descendant stops without fallback',async()=>{
- const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});const restore=denyDirectoryChildren(parent);
  f.policy.preparationRoot=root;
  try{
   expect(await f.e.maybeAutoCompact(input)).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
   expect(f.writes).toHaveLength(0);expect(existsSync(join(f.home,'compaction'))).toBe(false);
- }finally{chmodSync(parent,0o700);}
+ }finally{restore();}
 });
 
 // Manual preparation owns this bounded attention wait; generic sends still refuse attention.

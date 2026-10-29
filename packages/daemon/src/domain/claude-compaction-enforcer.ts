@@ -5,6 +5,7 @@ import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } fr
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
+import { readWindowsOwnedText } from "./windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1247,13 +1248,19 @@ export class ClaudeCompactionEnforcer {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           // Reuse only our equivalent, owned regular file; never rewrite it.
           // NONBLOCK also prevents an unexpected FIFO from stalling preparation.
-          const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-          try {
-            const stat = fs.fstatSync(fd);
-            if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+          if (process.platform === "win32") {
+            if (readWindowsOwnedText(ignorePath, 2) !== "*\n") {
               throw new Error("Existing compaction ignore file is not owned and equivalent");
             }
-          } finally { fs.closeSync(fd); }
+          } else {
+            const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+            try {
+              const stat = fs.fstatSync(fd);
+              if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+                throw new Error("Existing compaction ignore file is not owned and equivalent");
+              }
+            } finally { fs.closeSync(fd); }
+          }
         }
         const parent = path.join(preparationRoot ?? path.join(root, "preparation"), sanitizeSessionKey(input.sessionName), attemptId);
         fs.mkdirSync(parent, { recursive: true });

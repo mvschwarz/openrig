@@ -1,5 +1,47 @@
 # Native Windows support experiment
 
+## Shared native file boundaries, compaction and shadow (2026-10-29)
+
+The daemon UID baseline selected `compaction-preparation` and
+`occupant-shadow-integration` explicitly: 100 tests, 93 passed and seven failed.
+It confirmed that an existing owned, equivalent `.gitignore` fell back because
+Windows has no POSIX UID, and a private shadow sink could not create its file.
+These were not all the same defect: the baseline also contained file-symlink
+EPERM and POSIX-only fixture assumptions.
+
+The existing native file bridge now lives in daemon domain modules with a
+declared `windows-owned-files` export; CLI modules use thin re-exports. The
+compaction ignore reuse path checks the current user's owner SID, final reparse
+status and exact bounded bytes on the same reading handle. It does not rewrite
+an existing ignore file or loosen the fallback/explicit-root rules.
+
+Shadow remains source-only and disabled by default. Its Windows sink requires
+a canonical, current-user-owned parent whose allow rules grant access only to
+that user. It asynchronously prepares a private output handle with exclusive
+publication, retaining the existing finite budgets, stop/drain behavior and
+non-overwrite rule. Preparing the sink does not synchronously run PowerShell on
+the send path. POSIX keeps its existing UID/mode parent check.
+
+The revised two-file daemon run reports 102 tests: 100 passed and two failed.
+Both remaining failures occur while creating file symlinks (EPERM), before
+product code, and remain unwaived. Added directory-junction cases prove refusal
+and target preservation for that native reparse shape only. Real DACL-denied
+child creation replaces ineffective Windows chmod fixtures; the test restores
+only the DACL, not an audit policy requiring SeSecurityPrivilege. A former
+`/dev/null` fixture now uses an owned file-as-parent blocker on both platforms.
+The CLI seven-file regression still exits successfully with 78 passed and one
+POSIX FIFO skip. Full typecheck passed.
+
+An isolated staging probe used the actual compiled CLI/daemon modules and the
+official import rewriter, then verified the five required JS paths in the CLI
+npm dry-run and performed native file readback through rewritten imports.
+The daemon workspace is private and is not its own published npm package; its
+standalone dry-run omitting dist is not a CLI packaging failure. The probe is
+not a full installed-package or live Claude compaction/terminal capture proof.
+These OS-file boundary cases use synthetic observations and mocked transport;
+a stub-agent scenario cannot establish native ACL or reparse semantics. No
+running daemon was restarted and no live capture was enabled.
+
 ## Owned experimental configuration and incremental output (2026-10-29)
 
 The `b6c2c7570` full CLI failures identified a real Windows configuration
