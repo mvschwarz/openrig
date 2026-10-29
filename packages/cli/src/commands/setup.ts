@@ -12,6 +12,7 @@ import { ConfigStore } from "../config-store.js";
 import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
+import { readPlatformEnv } from "../lib/codex-auth.js";
 
 export interface SetupStep {
   id: string;
@@ -613,7 +614,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
 
   // 6. tmux config
   const setupEnv = deps.env ?? process.env;
-  const setupHome = setupEnv["HOME"] || (platform === "win32" ? setupEnv["USERPROFILE"] : undefined) || homedir();
+  const setupHome = readPlatformEnv(setupEnv, "HOME", platform)
+    || (platform === "win32" ? readPlatformEnv(setupEnv, "USERPROFILE", platform) : undefined) || homedir();
   const TMUX_CONF = `${setupHome}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
 
@@ -646,7 +648,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // Informational only: never enable inheritance automatically or add a setup prompt.
-  const tmuxConfigs = [TMUX_CONF, `${setupEnv["XDG_CONFIG_HOME"] || `${setupHome}/.config`}/tmux/tmux.conf`, ...(platform === "win32" ? [] : ["/etc/tmux.conf"])];
+  const tmuxConfigs = [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, ...(platform === "win32" ? [] : ["/etc/tmux.conf"])];
   const customTmux = tmuxConfigs.some(file => {
     try {
       const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
