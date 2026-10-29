@@ -18,6 +18,7 @@ import { QueueRepository, hasLiveHumanGate } from "../src/domain/queue-repositor
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
+import { CLICK_REPLIES } from "../src/domain/gateway/slack/inbound.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { ThreadSeatMap, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
@@ -305,6 +306,73 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(posts.at(-1)?.thread_ts).toBe("1.1");
       expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
       expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
+    });
+
+    describe("an ask parked on the person it asked (P4)", () => {
+      const questions = [
+        { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+        { id: "q2", question: "Tell the users?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      ];
+      const click = (questionId: string, optionId: string, actionTs: string) => inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: `interaction-${questionId}-${actionTs}`, type: "interactive", payload: {
+          type: "block_actions", user: { id: registry.entities[0]!.connectorBindings[0]!.handle }, channel: { id: "C-TEST" },
+          container: { type: "message", message_ts: "1.1", channel_id: "C-TEST" }, message: { ts: "1.1" },
+          actions: [{ type: "button", block_id: `or-q:${questionId}`, action_id: `or-opt:${optionId}`, value: optionId, action_ts: actionTs }],
+        },
+      }) });
+      const answerRowId = (qitemId: string) => `qitem-slack-answers-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`;
+      const resolvedCount = (qitemId: string) => repo.transitionLog.listForQitem(qitemId)
+        .filter((t) => t.ownerNotificationKind === "human-decision-resolved").length;
+      // The ask posts as root 1.1; its agent then parks it on the person it asked, and that question posts too.
+      async function parkedAsk(blockedOn: string = human) {
+        await connectInbound();
+        const ask = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: questions });
+        await deliver(ask.qitemId);
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn, summary: "Still need your call",
+          evidenceRef: "/private/proof.md", transitionNote: "parked on its person" });
+        await postPendingNotice(ask.qitemId);
+        return ask;
+      }
+
+      it("records each click, then resumes the ask once and hands the answers back once, even when Slack redelivers", async () => {
+        const ask = await parkedAsk();
+        click("q1", "yes", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes" }));
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        click("q2", "no", "991.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes", q2: "no" });
+        expect(repo.getById(answerRowId(ask.qitemId))).toMatchObject({ destinationSession: "author@rig" });
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        click("q2", "no", "991.1");
+        await new Promise((r) => setTimeout(r, 50));
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        expect(repo.getById(ask.qitemId)?.state).toBe("in-progress");
+      });
+
+      it("refuses a click from before its current question posted, and says the decision is parked", async () => {
+        const ask = await parkedAsk();
+        const before = posts.length;
+        click("q1", "yes", "1.5");
+        await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+        expect(posts.at(-1)?.text).toBe(CLICK_REPLIES.parked);
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+      });
+
+      it("still refuses a click on an ask parked on something other than its person", async () => {
+        const other = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig", body: "Ship the fix.", nudge: false });
+        await connectInbound();
+        const ask = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: questions });
+        await deliver(ask.qitemId);
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: other.qitemId, transitionNote: "waits on the work" });
+        const before = posts.length;
+        click("q1", "yes", "990.1");
+        await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+        expect(posts.at(-1)?.text).toBe(CLICK_REPLIES.parked);
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+      });
     });
 
     async function reactToAsk(decisionId: string, eventTs: string): Promise<string> {
