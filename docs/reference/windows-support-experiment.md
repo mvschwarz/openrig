@@ -7,6 +7,34 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native npm subprocesses and package-root checks, 2026-10-29
+
+Repository release/package scripts now share a native npm command builder:
+Windows runs the current npm CLI with Node, without passing operands through
+cmd.exe. POSIX invocation remains npm. It is used by artifact enumeration,
+package content/license tests, testbed/TUI package paths and inherited-instance
+isolation. Native receiver tests preserve quotes, shell metacharacters, empty
+strings, Unicode, stderr and a nonzero child status. Artifact-enumeration errors
+now expose an actual spawn error instead of only `exit null`.
+
+The substance gate uses native relative-path containment for package roots.
+Fifteen gate cases passed, including a real nested npm package and rejection of
+a sibling root without replacing the existing receipt. With npm argument,
+license/archive and actual inherited-instance cases, the related selection
+passed 19 tests. The separate npm dry-run content check passed too. The license
+fixture now supplies a native compiler stub on Windows; it still runs the actual
+build staging, npm file selection and tarball byte checks for LICENSE/README.
+
+Testbed package assembly now uses the existing explicit Git for Windows shell
+selector instead of the ambient WSL bash. The native assembly and npm pack ran
+at source `265d12380` plus these edits, stamped dirty=true; the tarball test
+**failed** because its release-note content was a Git symlink placeholder
+(`../../../../docs/reference/whats-new.md`) rather than the document. Six tracked
+symlinks under context-packs-src need Windows-aware projection. This remains a
+demonstrated packaging gap; compilation/assembly is not package acceptance.
+The install and packed-TUI gates are not claimed passed. No publication,
+installation into an operator prefix or runtime activation occurred.
+
 ## Guard execution and mirrored bytes correction, 2026-10-29
 
 Earlier Windows docs/mirror “passed” reports relied on exit status from entry

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cli = path.join(root, "packages", "cli");
@@ -46,8 +47,8 @@ async function assertDelayedSplits(entry, pkgDir) {
 }
 
 try {
-  execFileSync("npm", ["run", "build:package"], { cwd: root, stdio: "inherit" });
-  const packed = JSON.parse(execFileSync("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp], { cwd: cli, encoding: "utf8" }));
+  execFileSync(...npmCommand(["run", "build:package"]), { cwd: root, stdio: "inherit" });
+  const packed = JSON.parse(execFileSync(...npmCommand(["pack", "--ignore-scripts", "--json", "--pack-destination", temp]), { cwd: cli, encoding: "utf8" }));
   const tarball = path.join(temp, packed[0].filename);
   execFileSync("tar", ["-xzf", tarball, "-C", temp]);
 

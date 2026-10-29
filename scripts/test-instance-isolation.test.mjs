@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { npmCommand } from "./npm-command.mjs";
 
 const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -40,13 +41,9 @@ for (const prefix of ["OPENRIG", "RIGGED"]) {
     });
     let output = "";
     try {
-      // Node's native Windows spawn does not resolve/execute npm.cmd. Reuse
-      // the running npm CLI (or Node's colocated installation) without a shell.
-      const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
-      const command = process.platform === "win32" ? process.execPath : "npm";
-      const child = spawn(command, [...(process.platform === "win32" ? [npmCli] : []), "test", "-w", "packages/daemon", "--",
+      const child = spawn(...npmCommand(["test", "-w", "packages/daemon", "--",
         "test/bundle-routes.test.ts", "test/instance-environment.test.ts", "--maxWorkers=1",
-        "-t", "v2 bundle enters pod-aware path|test instance environment"],
+        "-t", "v2 bundle enters pod-aware path|test instance environment"]),
       { cwd: repo, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", chunk => { output += chunk; });
       child.stderr.on("data", chunk => { output += chunk; });
