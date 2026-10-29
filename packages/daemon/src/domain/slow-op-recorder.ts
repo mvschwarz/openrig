@@ -106,7 +106,7 @@ const WORKER_SOURCE = String.raw`
   const { execFileSync } = require("node:child_process");
   function privateOperation(operation, file, input) {
     if (!workerData.privateAppendHelper) throw new Error("native private log helper unavailable");
-    execFileSync(workerData.privateAppendHelper, [operation, file], {
+    execFileSync(workerData.privateAppendHelper, [operation, path.toNamespacedPath(file)], {
       input, windowsHide: true, timeout: 10000, stdio: ["pipe", "pipe", "pipe"]
     });
   }

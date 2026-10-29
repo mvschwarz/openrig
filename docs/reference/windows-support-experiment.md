@@ -1803,3 +1803,17 @@ file at a deep configured root instead of stopping. These cases plus the native
 directory and private channel-ledger checks passed five tests; daemon TypeScript
 checking passed. This does not establish long-path coverage for every native
 helper operation or runtime/provider acceptance.
+
+## Slow-operation worker long paths (2026-10-30)
+
+The recorder worker invokes the native assembly directly, bypassing the outer
+owned-text wrapper. A real worker reproduced failed appends at a deep Unicode
+path. Its private append/seal calls now convert that path to Windows namespace
+form before invoking the same native operations, covering rotation as well.
+
+The reproducer passes after the fix: current and rotated logs preserve their
+respective records. After the worker closes, short hardlink aliases inspect the
+same files' private DACLs; these aliases are only test inspection paths and are
+not used during writes. Recorder, private-log and shutdown suites passed 24
+tests with one existing Windows signal skip; daemon TypeScript checking passed.
+Sustained-load throughput and live deployment remain unestablished.
