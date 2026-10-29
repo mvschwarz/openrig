@@ -49,6 +49,13 @@ function fake(script: string) {
 }
 
 describe("selected Claude credential usage", () => {
+  it.runIf(process.platform === "win32")("retains daemon PATHEXT for isolated synthetic token probes", async () => {
+    vi.stubEnv("PATHEXT", ".CMD;.EXE;.COM");
+    const f = fake(`if(process.env.PATHEXT!=='.CMD;.EXE;.COM')process.exit(7);console.log(JSON.stringify({type:'system',claude_code_version:'2.1.310'}));console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    fs.writeFileSync(path.join(f.root, "claude.com"), "selection decoy; never executed");
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "synthetic", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true, probe: { exitCode: 0 } });
+  });
   it.runIf(process.platform === "win32")("assesses the opened token handle across pathname replacement without consuming bytes", async () => {
     const f = fake("");
     fs.unlinkSync(f.tokenFile); createPrivateTextFile(f.tokenFile, "SYNTHETIC-PRIVATE");

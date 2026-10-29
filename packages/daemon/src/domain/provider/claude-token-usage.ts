@@ -5,6 +5,7 @@ import path from "node:path";
 import { createWindowsPrivateDirectoryAsync } from "../private-text-file.js";
 import { assessWindowsFilePermissions } from "../windows-owned-text.js";
 import { resolveClaudeExecutable, runClaudeCommand } from "./claude-auth-status-reader.js";
+import { readPlatformEnv } from "../platform-env.js";
 import { UsageWindows, type UsageReadOutcome, type UsageReadingStore } from "./usage-windows.js";
 import type { ClaudeTokenIdentity, ClaudeTokenProbe, ProviderUsageAllowance } from "./provider-types.js";
 
@@ -56,7 +57,9 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
     const now = options.now ?? (() => new Date().toISOString());
     const warnings: string[] = [];
     const fail = (reason: string, detail: string) => ({ ok: false as const, at: now(), reason, detail: [detail, ...warnings].join("; ") });
-    const executable = resolveClaudeExecutable({ PATH: options.launchPath ?? process.env.PATH });
+    const launchEnv: NodeJS.ProcessEnv = { PATH: options.launchPath ?? readPlatformEnv(process.env, "PATH"),
+      ...(process.platform === "win32" ? { PATHEXT: readPlatformEnv(process.env, "PATHEXT") } : {}) };
+    const executable = resolveClaudeExecutable(launchEnv);
     if (!executable) return fail("binary_not_found", "no claude executable on the daemon's PATH");
     let scratch: string | undefined;
     try {
@@ -81,7 +84,7 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
       if (!token || /\s/.test(token)) return fail("credential_file_unavailable", "token file must hold one nonempty token");
       scratch = process.platform === "win32" ? await createWindowsPrivateDirectoryAsync(os.tmpdir())
         : fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
-      const env: NodeJS.ProcessEnv = { PATH: options.launchPath ?? process.env.PATH, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
+      const env: NodeJS.ProcessEnv = { ...launchEnv, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
         CLAUDE_CODE_OAUTH_TOKEN: token, DISABLE_AUTOUPDATER: "1" };
       if (process.platform === "win32") {
         env.USERPROFILE = scratch;

@@ -43,6 +43,14 @@ checks pass, including an actual offline npm auth command selected ahead of a
 COM decoy, native home/environment readback and owned process-tree timeout.
 The daemon typecheck passes. No real authentication or credential file is used.
 
+The token-usage reader separately dropped PATHEXT while constructing its
+credential-isolated environment. An owned synthetic-token/offline-program probe
+failed before the correction. Selection and execution now share the daemon's
+native-cased PATH/PATHEXT without copying unrelated environment variables.
+The complete token-usage file reports 23 tests: 21 passed, one pending, and one
+file-symlink creation denied by this host (EPERM). The new actual consumer check
+passes and daemon typecheck passes. No real token or provider turn was used.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen CLI run exposed three failing HOME-fallback assertions: its OS mock
