@@ -45,5 +45,9 @@ a manifest path containing spaces, user-config precedence, routing-variable
 separation, later panes after manifest disposal, a verified warm-server claim,
 invalid-file rejection before mutation, direct respawn and argv inspection.
 They also exercise OpenRig's capability selection and successful file disposal.
-They do not prove general Windows acceptance. Interactive PowerShell's first
-command after respawn remains a separate unresolved readiness issue.
+They do not prove general Windows acceptance. An earlier apparent interactive
+respawn-readiness failure was traced to the first-target routing defect in the
+OpenRig adapter: session-only routing lost the inactive pane target for Enter.
+The adapter now includes the immutable pane ID in its initial psmux target;
+isolated stock 3.4.0 and candidate probes deliver to the inactive pane without
+selecting it or submitting input to its active-window decoy.

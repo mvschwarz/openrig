@@ -7,6 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Inactive-pane input routing, 2026-10-29
+
+The psmux adapter now carries the immutable pane/window ID in its first target,
+alongside the server's session name. Stock 3.4.0's send-keys client consumes a
+later `-t` without forwarding it, so the old session-only first target sent Enter
+to the active pane even though paste-buffer reached the intended inactive pane.
+This also explains the apparent first-command failure after respawn. Waiting
+for the prompt or command echo did not fix the old route. The correction does
+not select a window, repeat Enter or relax occupant/input guards.
+
+The relevant adapter/target selection passed 200 tests with two POSIX skips;
+workspace build/typecheck passed. Native isolated stock 3.4.0 and candidate
+probes delivered before and after respawn while the target window was inactive.
+The stock probe verifies the active selection and decoy pane screen remain
+unchanged. Namespace/pane processes and fixture files were removed, and the
+default session list was unchanged. No operator runtime was replaced.
+
 ## Optional private environment protocol, 2026-10-29
 
 OpenRig can select a versioned file protocol when a psmux backend advertises the
@@ -24,8 +41,8 @@ actual adapter with a manifest path containing spaces and verified exact values,
 user config precedence, later panes, warm-server isolation, rejected malformed
 input, direct respawn and file disposal. Its namespace and pane processes were
 stopped, temporary files removed and default session list unchanged. This is
-synthetic local evidence; interactive PowerShell readiness after respawn and
-stock-backend privacy remain open.
+synthetic local evidence; stock-backend privacy remains open. The earlier
+interactive respawn failure is addressed by the target-routing correction above.
 
 ## Current-occupant parsing after rebase, 2026-10-29
 

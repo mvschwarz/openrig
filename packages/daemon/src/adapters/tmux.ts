@@ -613,11 +613,19 @@ export class TmuxAdapter {
    */
   private async run(argv: string[], legacy?: string, bufferScope?: string): Promise<string> {
     if (this.terminalKind === "psmux") {
-      const scoped = argv.find(a => /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(a)) ?? bufferScope;
+      const scopedArg = argv.find(a => /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(a));
+      const scoped = scopedArg ?? bufferScope;
       if (scoped) {
         const [, encoded, pane] = scoped.split(":");
         const session = scoped.startsWith("psmux:") ? Buffer.from(encoded!, "base64url").toString("utf8") : scoped;
-        argv = [argv[0]!, "-t", `=${session}`, ...argv.slice(1).map(a => a === scoped ? pane! : a)];
+        // psmux selects the server AND the initial target from the first -t.
+        // Some client commands (notably send-keys) consume the later -t and
+        // omit it from their control request. Carry the immutable pane/window
+        // in the first target too; session-only routing would hit its active pane.
+        const target = scopedArg && pane!.startsWith("%") ? `=${session}:.${pane}`
+          : scopedArg && pane!.startsWith("@") ? `=${session}:${pane}` : `=${session}`;
+        argv = [argv[0]!, "-t", target, ...argv.slice(1).map(a => a === scoped ? pane! : a)];
+        legacy = undefined;
       }
     }
     const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
