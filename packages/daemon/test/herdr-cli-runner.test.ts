@@ -71,7 +71,7 @@ describe.skipIf(process.platform === "win32")("selected Herdr CLI endpoint", () 
       expect(result).toMatchObject({ ok: false, error: "Only verified local tmux bindings support ensure-viewer." });
     }
     const result = await selected.followView("qitem:example", { id: "example", opened: [], absent: [], degraded: [], pages: [],
-      task: { qitemId: "example", name: "Example", complete: true, issues: [], members: [] } }, { enabled: true }, async () => false);
+      task: { kind: "qitem", id: "example", qitemId: "example", name: "Example", complete: true, issues: [], members: [] } }, { enabled: true }, async () => false);
     expect(result).toMatchObject({ ok: false, error: "Task membership changed before reconciliation; keeping the previous view." });
     expect(f.calls()).toEqual(Array.from({ length: 3 }, () => ({ args: ["status", "server", "--json"], home, configHome, socket: socketPath, session: null })));
   });

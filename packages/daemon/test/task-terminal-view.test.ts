@@ -281,3 +281,9 @@ describe("task terminal membership", () => {
     expect(links.read()!.task.issues.join(" ")).toContain("link work limit");
   });
 });
+
+
+it("identifies genuine qitem tasks without changing their legacy qitemId", () => {
+  const { add, read } = fixture(); add("qitem-root");
+  expect(read()?.task).toMatchObject({ kind: "qitem", id: "qitem-root", qitemId: "qitem-root" });
+});

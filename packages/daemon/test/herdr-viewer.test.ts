@@ -191,7 +191,7 @@ describe("owned Herdr viewer", () => {
       } };
     const svc = new TerminalService({ viewsStore: { get: () => null, list: () => [] }, listRigSeats: () => null, listPodSeats: () => null,
       listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
-      resolveTaskView: () => ({ task: { qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
+      resolveTaskView: () => ({ task: { kind: "qitem", id: "qitem-root", qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
         members: joined ? [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }] : [] }) });
     const preview = await svc.previewView({ view: "qitem:qitem-root", provider: "herdr" });
     expect("planId" in preview).toBe(true); if (!("planId" in preview)) throw new Error("missing preview");

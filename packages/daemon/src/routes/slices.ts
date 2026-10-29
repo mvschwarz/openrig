@@ -1,3 +1,4 @@
+import type { EventBus } from "../domain/event-bus.js";
 import { selectedProject, projectMission, workSource, projectReadResponse } from "../domain/workspace/project-read.js";
 // Slice Story View v0 — HTTP routes.
 //
@@ -120,6 +121,7 @@ export function slicesRoutes(): Hono {
     const deps = getDeps(c);
     if (!deps) return c.json({ error: "slices_indexer_unavailable" }, 503);
     deps.indexer.invalidate();
+    (c.get("eventBus" as never) as EventBus | undefined)?.emit({ type: "scope.sources_changed", scope: deps.indexer.slicesRoot });
     return c.json({ ok: true });
   });
 

@@ -76,7 +76,7 @@ function shallowWatches(missionsRoot: string, realRoot: string, top: string, pro
  * including absent nearer ones, and accepted evidence elsewhere in the project) is watched at its parent directory,
  * not recursively, so sibling checkouts and build trees are never subscribed to.
  */
-export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus): ProofSourceWatch {
+export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus, scopeChanged?: () => void): ProofSourceWatch {
   missionsRoot = path.resolve(missionsRoot);
   let projectRoot = path.dirname(missionsRoot);
   try { projectRoot = resolveProjectRoot(missionsRoot) ?? projectRoot; } catch { /* Legacy roots keep the missions root's parent. */ }
@@ -106,6 +106,8 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   // failed latches for this instance: a watcher that errored is not trusted to be replaced by a later read.
   let closed = false, failed = false, covered = false, readable = false;
   let revision = "unavailable", timer: NodeJS.Timeout | undefined;
+  let scopeDirty = false;
+  const notifyScope = () => { try { scopeChanged?.(); } catch { /* A later event or explicit refresh retries the view read. */ } };
   let wanted: Shallow = new Map();
   const shallow = new Map<string, fs.FSWatcher>();
   let recursive: fs.FSWatcher | undefined;
@@ -127,12 +129,13 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       else if (!wanted.get(dir)?.has(filename.toString())) return;
       else stale(path.join(dir, filename.toString()));
     }
+    if (filename == null || _event === "rename" || /(?:^|[\\/])(?:SPEC\.md|README\.md|mission\.yaml)$/.test(filename.toString())) scopeDirty = true;
     schedule();
   };
   const onError = () => {
     if (closed) return;
     failed = true; covered = false; revision = "unavailable";
-    invalidate(); notify("unavailable");
+    invalidate(); notify("unavailable"); notifyScope();
   };
   const watchDir = (dir: string, recursiveWatch: boolean) => {
     try {
@@ -176,6 +179,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       timer = undefined;
       if (closed) return;
       try {
+        if (scopeDirty) { scopeDirty = false; notifyScope(); }
         const before = observed();
         const next = evaluate();
         readable = true;
@@ -208,7 +212,7 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
     closed = true;
     recursive?.close();
     for (const watcher of shallow.values()) watcher.close();
-    invalidate(); notify("unavailable");
+    invalidate(); notify("unavailable"); notifyScope();
     return { close() {}, observation: () => ({ state: "unavailable", revision }) };
   }
   return {

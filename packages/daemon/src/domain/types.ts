@@ -120,6 +120,7 @@ export interface Session {
 // -- Event types --
 
 export type RigEvent =
+  | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }

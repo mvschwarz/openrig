@@ -25,14 +25,14 @@ export class TerminalFollowing {
       const saved = JSON.parse(readFileSync(file, "utf8")) as { version: number; selections: Selection[] };
       if (saved.version !== 1 || !Array.isArray(saved.selections) || saved.selections.length > 64
         || saved.selections.some(s => typeof s.enabled !== "boolean" || s.selector?.provider !== "herdr"
-          || typeof s.selector.view !== "string" || !s.selector.view.startsWith("qitem:")
+          || typeof s.selector.view !== "string" || !/^(qitem|slice):.+/.test(s.selector.view)
           || (s.selector.session !== undefined && typeof s.selector.session !== "string"))) throw new Error("Invalid following selectors.");
       for (const selected of saved.selections) this.selections.set(this.key(selected.selector), selected);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.loadError = "Saved following selectors are unreadable; their file was preserved.";
     }
     this.unsubscribe = bus.subscribe(event => {
-      if (/^(queue|session|node)\./.test(event.type)) this.changed();
+      if (/^(queue|session|node)\./.test(event.type) || event.type === "scope.sources_changed") this.changed();
     });
     if (this.selections.size) this.changed();
   }
@@ -63,7 +63,7 @@ export class TerminalFollowing {
     // A complete empty task has finished. Keep its provider workspace, but
     // retire automatic work and release the active-selector slot. Explicit
     // --follow can resume the same journaled workspace if work returns.
-    if (result.ok && result.following?.state === "empty") {
+    if (selected.selector.view.startsWith("qitem:") && result.ok && result.following?.state === "empty") {
       this.selections.delete(key); selected.enabled = false;
       result.following.enabled = false;
       this.save();

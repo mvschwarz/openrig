@@ -14,7 +14,10 @@ export interface TaskTerminalMember {
   viewer?: import("./herdr-viewer.js").ViewerMapping;
 }
 export interface TaskMembership {
-  qitemId: string;
+  kind: "qitem" | "slice" | "mission";
+  id: string;
+  /** Present only for a genuine queue episode. */
+  qitemId?: string;
   name: string;
   complete: boolean;
   issues: string[];
@@ -160,6 +163,16 @@ function readTaskTerminalSnapshot(
   };
   for (const row of selected) visit(row.qitem_id);
 
+  return projectTaskOwners({ kind: "qitem", id: qitemId, qitemId, name: selected[0]!.summary?.trim() || qitemId,
+    complete: issues.length === 0, issues: [...new Set(issues)] }, selected, resolveSeat);
+}
+
+/** Shared owner/availability fold; the caller owns authoritative work enumeration. */
+export function projectTaskOwners(
+  task: Omit<TaskMembership, "members">,
+  selected: readonly { qitem_id: string; destination_session: string; state: string }[],
+  resolveSeat: (address: string) => TaskSeat | null,
+): TaskTerminalView {
   const owners = new Map<string, TaskTerminalMember>();
   const inputs = new Map<string, ViewMemberInput>();
   const resolved = new Map<string, TaskSeat | null>();
@@ -189,7 +202,7 @@ function readTaskTerminalSnapshot(
     });
   }
   const members = [...owners.values()].sort((a, b) => JSON.stringify(a.key).localeCompare(JSON.stringify(b.key)) || a.seat.localeCompare(b.seat));
-  return { task: { qitemId, name: selected[0]!.summary?.trim() || qitemId, complete: issues.length === 0, issues: [...new Set(issues)], members }, members: [...inputs.values()] };
+  return { task: { ...task, members }, members: [...inputs.values()] };
 }
 
 /** Preserve local stopped/unlaunched owners as well as current registry aliases.

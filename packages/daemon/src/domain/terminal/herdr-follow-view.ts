@@ -84,7 +84,7 @@ export class HerdrFollowView {
       }
       if (!await stillCurrent()) throw new Error("Task membership changed before reconciliation; keeping the previous view.");
       if (!state) {
-        state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, pins: [], suppressed: {} },
+        state = { version: 1, cwd: path.join(root, "strip"), phase: "creating", policy: { ...DEFAULT_FOLLOW_POLICY, ...(view.task.kind === "slice" || view.task.kind === "mission" ? { maxTiles: 4 } : {}), pins: [], suppressed: {} },
           tiles: [], events: [`Following ${view.task.name}. Opening a tile can change an agent's terminal size.`] };
         mkdirSync(state.cwd, { recursive: true, mode: 0o700 }); save();
         // Persist first. An uncertain response is enumerated on the next call,

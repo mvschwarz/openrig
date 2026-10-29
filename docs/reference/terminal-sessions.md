@@ -184,7 +184,7 @@ GET /api/terminal/preview?view=qitem:<id>&provider=herdr
 POST /api/terminal/open {"view":"qitem:<id>","provider":"herdr","expectedPlan":"<preview planId>"}
 ```
 
-Preview and open include `task: {qitemId, name, complete, issues, members}`. Each member
+Preview and open include `task: {kind:"qitem", id, qitemId, name, complete, issues, members}`. Each member
 names its structured `{hostId, nodeId}` key (null when unresolved), seat,
 contributing `obligations`, `availability` and `viewerStatus`. Stopped, missing,
 external and unresolved remote owners remain visible. Remote queues are not
@@ -306,3 +306,57 @@ when other clients establish the agent window's dimensions. It is **not resize
 isolation**: opening a tile can change the agent's terminal size when it is the
 only sizing client. Observers of a Herdr terminal do not themselves resize it;
 a controlling browser can. No cross-version resize guarantee is implied.
+
+
+## Following a slice's current work
+
+Use `rig terminal open slice:<name-or-id> --follow --provider herdr` to keep
+one workspace following the current destination owners of that slice's active
+queue rows. `pending`, `in-progress` and `blocked` rows count. A member can own
+several rows; `task.members[].obligations` preserves every row and state.
+
+A slice resolves within the daemon's configured slice index, by exact directory
+name or unique frontmatter `id`. Tags must name it exactly: `rig queue create
+--slice <name-or-id> ...` associates a row. Handoff inherits those tags unless
+replaced; merely linking an untagged child does not associate it. A mission-only
+tag does not put a row in every slice. No project is inferred from a tag or the
+caller's working directory. Duplicate names or aliases require disambiguation
+in the configured index; no first-match scope is selected.
+
+Slice keys are case-sensitive and can include Unicode, plus signs and internal
+spaces. They cannot be empty or contain slash, backslash, control characters,
+or leading/trailing whitespace. Pass the literal selector in JSON or a quoted
+CLI argument; encode it once as a GET query value. Do not double-decode it.
+
+Slice previews and open results use `task: {kind:"slice", id, name, complete,
+issues, members}`. `id` is the unique frontmatter id, or the directory name when
+no id is present. There is no synthetic `qitemId`. Preserve the preview's `view`
+for the ensure request. All successful previews, including qitem previews,
+include `capabilities: {ensureViewer:boolean}`. True means that the resolved
+view/provider implements ensure; the existing member, completeness, owner and
+`expectedPlan` checks still apply. A missing capability/task on an older daemon
+is unsupported scoped membership, not an empty team.
+
+New slice workspaces default to four automatic tiles; `--max-tiles` overrides
+that. Qitem views retain their eight-tile default. The full membership and
+obligation list remains available when tiles exceed capacity. Pins, drafts,
+unknown input and focus retention still protect departed viewers. Closing a
+viewer never stops its agent. Opening a tile can change the agent's dimensions.
+
+A known empty slice remains enabled in the same workspace; later associated
+work can join it. An incomplete queue read (`task.complete:false` plus `issues`)
+retains previous viewers. A missing scope is `scope_not_found`, duplicate scope
+identity is `scope_ambiguous`, unreadable/capped index data is `scope_unavailable`,
+and an unavailable resolver is `scope_unsupported`. None is authoritative empty.
+Ensure of an incomplete snapshot returns `viewer_unconfirmed`; changed plans
+return `preview_changed` before provisioning. Mission following is a separate
+increment; the existing mission display projection is not authoritative follow
+or ensure capability.
+
+Ordinary ownership changes follow queue/session/node events. Node and directory
+changes under the primary configured index use the existing filesystem watcher,
+with a coalesced scope invalidation event. There is no repeating membership
+poll. Structural edits under additional legacy roots, or a filesystem where
+watching is unavailable, require `rig`'s existing slice refresh endpoint
+`POST /api/slices/refresh` or reopening the view. Missing or unreadable sources
+keep prior viewers; they never certify that the work disappeared.

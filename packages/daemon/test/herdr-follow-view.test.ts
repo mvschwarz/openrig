@@ -16,7 +16,7 @@ const socket = "/tmp/follow-provider.sock";
 export function task(seats: string[], complete = true): ComposedView {
   const composed = composeView("qitem:task", seats.map(seat => ({ seat, label: seat, host: null, alive: true,
     tmuxSession: seat, readOnly: false })), { resolveHost: () => null, localTmux: "/usr/bin/tmux", localTmuxServer: ["-S", "/tmp/follow-seats.sock"] });
-  return { ...composed, task: { qitemId: "task", name: "Example task", complete, issues: complete ? [] : ["read failed"],
+  return { ...composed, task: { kind: "qitem", id: "task", qitemId: "task", name: "Example task", complete, issues: complete ? [] : ["read failed"],
     members: seats.map(seat => ({ key: { hostId: "self", nodeId: seat }, seat, obligations: [{ qitemId: seat, state: "in-progress" }],
       availability: "available", viewerStatus: "not-provisioned" })) } };
 }
@@ -232,5 +232,21 @@ describe("stable task-following workspace", () => {
     const count = f.calls.length;
     expect(await next.follow("qitem:task", null, { enabled: false }, async () => false)).toMatchObject({ ok: true, following: { state: "disabled" } });
     expect(f.calls.length).toBe(count);
+  });
+});
+
+
+describe("slice follower policy", () => {
+  it("defaults a new scoped workspace to four tiles, allows an override, and keeps qitem eight", async () => {
+    const f = fixture();
+    const scope = task(["a", "b", "c"]); scope.task = { ...scope.task!, kind: "slice", id: "example" }; delete scope.task.qitemId;
+    const provider = f.create();
+    const first = await provider.follow("slice:example", scope, { enabled: true }, async () => true);
+    expect(first.following?.maxTiles).toBe(4);
+    const ids = [...f.panes.values()].map(pane => [pane.pane_id, pane.terminal_id]);
+    const next = await provider.follow("slice:example", scope, { enabled: true, maxTiles: 6 }, async () => true);
+    expect(next.following?.maxTiles).toBe(6);
+    expect([...f.panes.values()].map(pane => [pane.pane_id, pane.terminal_id])).toEqual(ids);
+    const qitem = await f.follow(); expect(qitem.following?.maxTiles).toBe(8);
   });
 });
