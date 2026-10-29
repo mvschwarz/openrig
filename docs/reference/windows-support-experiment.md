@@ -1753,3 +1753,21 @@ stub HTTP activity checks passed all 15 tests. Daemon build passed, including
 the compiled standalone resolver dependency. The adjacent Pi path suite skipped
 all six cases under its existing Windows guard; this is not Pi/provider runtime
 acceptance. No active runner or daemon was restarted.
+
+## Native permission-drift command observations (2026-10-30)
+
+The permission observer previously looked for extensionless commands only and
+started `claude --help` directly. Windows now discovers `.com`, `.exe`, `.bat`
+and `.cmd` files on the native PATH, including quoted entries, and excludes
+directories. This remains file availability, not successful launch or native
+permission enforcement. Claude mode loading uses the existing bounded native
+command runner and recognized npm entry resolver. Unrecognized shims, failed
+commands and timeouts remain unknown; no shell fallback was added. POSIX help
+execution retains its existing behavior and bound.
+
+Owned fixtures cover all four runtime command names and a real synthetic npm
+Claude entry in a Unicode/spaced path, verify exact `--help` argv and refuse an
+unrecognized shim. Adjacent settings fixtures now use native path construction
+without weakening configuration/enforcement distinctions. All 29 permission
+drift tests passed on Windows and daemon TypeScript checking passed. No real
+provider command, model call or installed provider configuration was used.
