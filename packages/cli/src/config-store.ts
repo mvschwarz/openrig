@@ -1,6 +1,6 @@
 import { readFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
 import { writeTextAtomically } from "./atomic-text-write.js";
-import { join, dirname, resolve, isAbsolute } from "node:path";
+import { join, dirname, resolve, isAbsolute, normalize } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -1497,7 +1497,8 @@ export class ConfigStore {
     const fileVal = getNestedValue(fileConfig, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
       const legacyDefault = deriveLegacyWorkspaceDefault(key, workspaceRoot);
-      if (legacyDefault !== null && fileVal === legacyDefault) {
+      if (legacyDefault !== null && (fileVal === legacyDefault
+        || (process.platform === "win32" && typeof fileVal === "string" && normalize(fileVal) === normalize(legacyDefault)))) {
         return { value: defaultValue, source: "default", defaultValue };
       }
       // Validate the file-source value too. Hand-edited config.json with
