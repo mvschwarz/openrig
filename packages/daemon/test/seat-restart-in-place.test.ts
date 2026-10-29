@@ -452,23 +452,28 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
-  it.each(["survives", "exits after KILL", "PID reused"])("checks the native child after its MainThread launcher exits: %s", async nativeState => {
+  it.each(["survives", "launcher PID reused", "exits after KILL", "PID reused"])("checks launcher and native identities before KILL and resume: %s", async nativeState => {
     const w = world({ between: "node /usr/local/bin/codex", betweenName: "MainThread",
       facts: { 150: facts({ exe: "/usr/bin/node", argv: ["node", "/usr/local/bin/codex"] }) } });
     const signalPid = w.tmux.signalPid;
     w.tmux.signalPid = async (pid, signal) => {
       const result = await signalPid(pid, signal);
       if (nativeState !== "exits after KILL" || signal !== "KILL") {
-        w.setRows([shellRow(100, 100), codexRow(200, 1, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`,
+        const launcherRows: NativeProcessRow[] = nativeState === "exits after KILL" || nativeState === "launcher PID reused"
+          ? [{ pid: 150, ppid: 100, pgid: 150, tpgid: 150, executableName: "MainThread", command: "node /usr/local/bin/codex",
+            startedAt: nativeState === "launcher PID reused" ? LATER : LSTART }] : [];
+        w.setRows([shellRow(100, 100), ...launcherRows, codexRow(200, launcherRows.length ? 150 : 1, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`,
           nativeState === "PID reused" ? LATER : LSTART)]);
       }
       return result;
     };
     const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" });
-    expect(result).toMatchObject({ ok: true, outcome: nativeState === "survives" ? "not_started" : "restarted_account_unverified" });
-    if (nativeState === "survives") expect(w.launches).toEqual([]);
+    const survives = nativeState === "survives" || nativeState === "launcher PID reused";
+    expect(result).toMatchObject({ ok: true, outcome: survives ? "not_started" : "restarted_account_unverified" });
+    if (survives) expect(w.launches).toEqual([]);
     else expect(w.launches).toHaveLength(1);
-    if (nativeState !== "PID reused") expect(w.calls).toContain("signalPid 150 KILL");
+    if (nativeState === "exits after KILL") expect(w.calls).toContain("signalPid 150 KILL");
+    else expect(w.calls).not.toContain("signalPid 150 KILL");
   });
 
   it("recognizes a MainThread-named npm launcher only when its OS executable is Node", async () => {

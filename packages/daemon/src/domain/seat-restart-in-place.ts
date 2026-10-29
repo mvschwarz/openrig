@@ -613,7 +613,8 @@ export class CodexInPlaceRestart {
     };
     await this.deps.tmux.signalPid(pid, "TERM");
     if (await wait()) return "stopped";
-    await this.deps.tmux.signalPid(pid, "KILL");
+    const launcherLive = (await this.listProcesses()).some((row) => row.pid === pid && (row.startedAt ?? null) === startedAt);
+    if (launcherLive) await this.deps.tmux.signalPid(pid, "KILL");
     const last = await wait();
     return last ? "stopped" : last === null ? "unknown" : "running";
   }
