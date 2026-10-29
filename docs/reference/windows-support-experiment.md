@@ -1,5 +1,40 @@
 # Native Windows support experiment
 
+## Runner readiness from native identity (2026-10-29)
+
+An owned PowerShell/offline-Node reproduction failed for both Pi and stub:
+after the runner exited, the PowerShell parent stayed alive and its untouched
+sidecar still said ready. The adapters' POSIX shell-word guard returned ready.
+Adding PowerShell to that word set would also reject a healthy hosted runner.
+
+Windows readiness now requires exactly one observed managed direct Node child
+of the bound PowerShell/pwsh pane. The OS executable path and command-line
+executable, selected runner entry, session, state root where applicable, cwd,
+launch id, creation-time ordering and runtime selector must match. Duplicate
+identity flags, competing/nested runners, changed panes or missing observations
+stay unready/unknown. Runner-authored exit records still refuse readiness.
+POSIX retains its existing shell/sidecar behavior; hermetic POSIX fixtures now
+name their observation platform explicitly rather than impersonating Windows.
+
+Pi, OMP and stub share the existing production process census with model
+readers. The strict census now retains Windows platform/executable-path metadata
+instead of dropping it while mapping generic fields. Eight concurrent witness
+reads are tested to coalesce into one enumeration. Its existing successful
+snapshot reuse window is two seconds: readiness is an observation, not an
+instantaneous exit guarantee. The native fixture uses that actual census and
+verifies that stale readiness does not survive its window.
+
+Final focused verification passed 86/86, including real owned PowerShell/Node
+processes for Pi, OMP and stub, healthy-positive and stale-sidecar-negative
+controls, wrong identity/ambiguity negatives and census metadata/coalescing.
+Expanded verification reports 187 tests: 184 passed, one failed and two pending.
+The failure is a Linux `/proc` FIFO fixture invoking unavailable `mkfifo` on this
+Windows host; it remains recorded, not waived. Full typecheck passed. The stub
+sidecar fixture also uses the host's public protocol path helper instead of a
+hardcoded POSIX separator. These are offline process/adapter and observation
+tests, not a real provider conversation, installed psmux startup/restore or
+fleet activation proof. No existing seat, console or daemon was changed.
+
 ## Shared native file boundaries, compaction and shadow (2026-10-29)
 
 The daemon UID baseline selected `compaction-preparation` and

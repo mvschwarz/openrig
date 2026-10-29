@@ -79,6 +79,7 @@ function readyState(sessionFile: string = SESSION_FILE, launchId?: string): stri
 
 function adapterWith(fs: PiAdapterFsOps, tmux: TmuxAdapter, trust?: "approve" | "no-approve") {
   return new PiRuntimeAdapter({
+    platform: "linux", // This factory models POSIX pane commands and paths.
     tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER,
     trustPosture: trust, sleep: async () => {},
   });

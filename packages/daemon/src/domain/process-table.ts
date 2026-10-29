@@ -14,6 +14,7 @@ export interface ProcessTableRow {
   pgid?: number;
   tpgid?: number;
   platform?: "win32";
+  executablePath?: string;
   executableName: string;
   /** lstart, in local time: the identity half of pid + start time. */
   startedAt: string;

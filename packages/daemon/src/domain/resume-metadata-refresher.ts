@@ -1,4 +1,5 @@
 import os from "node:os";
+import type { ProcessRow } from "./model-divergence/current-generation-record.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -486,12 +487,13 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
  *  empty SUCCESS for the whole freshness window (r2's discriminator: 0 rows
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
-export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
+export async function defaultListProcessesStrict(): Promise<Array<ProcessRow & { startedAt: string }>> {
   // startedAt = the process START TIME — the identity half of pid+start-time
   // (r1's pid-reuse remedy): a reused pid changes it, so a consumer
   // holding last cycle's identity can invalidate without any extra spawn.
   const rows = await runAsyncSite("resume_metadata.list_processes", readProcessTable);
-  return rows.map(({ pid, ppid, startedAt, command }) => ({ pid, ppid, startedAt: startedAt!, command }));
+  return rows.map(({ pid, ppid, startedAt, command, platform, executablePath }) => ({ pid, ppid, startedAt: startedAt!, command,
+    ...(platform === "win32" ? { platform, executablePath } : {}) }));
 }
 
 function findCodexDescendantPids(
