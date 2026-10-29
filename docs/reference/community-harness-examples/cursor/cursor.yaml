@@ -11,3 +11,4 @@ launch_result: true
 resume: true
 startup_assisted: false
 first_input: true
+passes_model: false              # the launcher maps OPENRIG_MODEL for a new session; set true once checked with the real harness

@@ -552,9 +552,12 @@ export class StartupOrchestrator {
 
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
-    // later reads (identity, activity, labels, restore), not launch success or identity proof.
+    // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
+    // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
+    // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
     if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime); }
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
+        input.skipHarnessLaunch ? undefined : input.adapter.runner()); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
@@ -594,6 +597,13 @@ export class StartupOrchestrator {
             this.eventBus.emit({ type: "node.startup_first_input_passed", rigId: input.rigId, nodeId: input.nodeId,
               sessionId: input.sessionId, ...launchResult.firstInput });
             warnings.push("First startup input passed at launch; submission is not confirmed.");
+          }
+          if (launchResult.modelInput?.dispatch === "confirmed") {
+            this.eventBus.emit({ type: "node.startup_model_passed", rigId: input.rigId, nodeId: input.nodeId,
+              sessionId: input.sessionId, model: launchResult.modelInput.model, resume: !!launchResumeToken });
+            warnings.push(`Model "${launchResult.modelInput.model}" passed to the launcher at launch; which model runs is not confirmed.`);
+          } else if (launchResult.modelInput) {
+            warnings.push(`Model "${launchResult.modelInput.model}": the launch command's send is uncertain, so it isn't recorded as passed.`);
           }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;

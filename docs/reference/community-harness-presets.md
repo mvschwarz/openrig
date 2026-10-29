@@ -15,14 +15,14 @@ it never reads an unsupported capability as idle, working, ready or verified.
 | Delivery | yes | `rig send` and queue wakes paste the text into the pane and press Enter, as for any seat. A pane that's back at a shell is refused (`target_runtime_unverified`) and nothing is typed. OpenRig doesn't confirm the harness took the message; `rig send --verify` checks the pane afterwards. |
 | Identity | when declared | With `launch_result`, the conversation is shown as reported by its launcher; with `names_conversation`, as named by OpenRig. Neither is observed by OpenRig. Without either, the identity is unavailable. |
 | Resume | when declared | `resume: true` with one of the two above (see [Reopening a conversation](#reopening-a-conversation-resume-true)). Without it, a resume says `Resume is unsupported: community harness "<name>" is launch-only`, and a restore stops and asks. |
-| Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. |
+| Activity | partly | Read from the screen only; there are no activity hooks. Work and attention the screen shows are kept, but a screen that looks idle reads `unknown`, never idle, because a quiet prompt can be an approval or a pause. A [runner preset](#runner-presets-runner-true)'s own reports decide it instead. |
 | Attention | partly | Read from the screen: a permission question or numbered choice that OpenRig recognizes reads as needing attention, and `rig send` won't type into it. A prompt it doesn't recognize reads `unknown`. |
 | Approval | no | Approvals stay in the harness's own pane. OpenRig relays none, so a person answers them there. |
 | Cancel | no | OpenRig has no verb that cancels a running turn. `rig seat stop` and `rig down` end the seat's tmux session; anything the harness runs outside its pane, such as a gateway, is its own, and the preset's `limits` should say what keeps running. Restarting in place and switching harness are refused. |
 | Transport | yes | The seat is a tmux pane like any other, so `rig capture`, `rig send` and `--host` work as they do for any seat. |
 
 **Not placed:** guidance, skills and startup files (a launch warns that they weren't delivered), and the model: set it in the harness's own
-configuration.
+configuration, or let a launcher that opts in take the seat's declared model (`passes_model`, below).
 
 **Check that the harness answers on its own first.** Before writing a preset, start the harness in a terminal outside OpenRig, with the
 same configuration and credentials your launcher will give it, and send it one prompt. Use the folder your launcher gives the seat, not
@@ -48,6 +48,8 @@ launch_result: true             # optional: the launcher reports the conversatio
 resume: true                    # optional, needs one of those two; declare it only once your harness's resume is checked
 startup_assisted: true           # optional: startup submission needs a person's check (below)
 first_input: true                # optional: launcher takes the first turn from OPENRIG_FIRST_INPUT (below)
+# runner: true                  # optional, needs launch_result: the launcher reports the seat's activity (below)
+# passes_model: true            # optional: the launcher takes the seat's declared model from OPENRIG_MODEL (below)
 ```
 
 - **`command`** is a single program and its arguments. Shell syntax such as `|`, `&&`, `;`, redirections or `$(…)`
@@ -143,6 +145,43 @@ For a reported conversation, OpenRig also says so plainly when:
   OpenRig doesn't switch it to the reported one;
 - **the saved conversation isn't this harness's own** (a former runtime's id, say): it isn't passed to the launcher. A restore stops and asks, and elsewhere the resume says it isn't possible;
 - **the record's folder can't be made:** the launcher couldn't be told what to reopen, so nothing starts.
+
+## Runner presets (`runner: true`)
+
+A plain preset's seat reads its activity from the screen. A **runner** preset is for a launcher that hosts the agent itself
+and reports what it's doing, as OpenRig's own Pi runner does. The seat's activity then follows those reports.
+
+- **It needs `launch_result: true`.** A runner reports the conversation it opened in its launch record, so `runner: true`
+  without `launch_result` is refused.
+- **The declaration is fixed at launch.** Each launch, a restore's included, records on the session what the preset
+  declares at that moment. Editing the preset changes the next launch, not a running seat. A session recorded before this
+  field existed reads as plain.
+- **No record means attention.** When a runner's launch record doesn't arrive within the wait, or its folder can't be
+  made, the seat needs attention instead of reading ready. A plain `launch_result` preset still starts, with its identity
+  unavailable.
+- **Input is as for any seat.** A send pastes the text and presses Enter, so a runner should submit everything up to that
+  Enter as one prompt.
+
+**What the runner posts.** The runner posts each event to `POST /api/activity/hooks` with the local activity hook token,
+one at a time and in order, without making the agent wait. It finds the address and token in `OPENRIG_URL` (or
+`OPENRIG_PORT`) and `OPENRIG_ACTIVITY_HOOK_TOKEN`, or else in `$OPENRIG_HOME/activity-endpoint.json`. Every post names:
+- the seat, as `sessionName` and `nodeId`;
+- `runtime`, the preset's name;
+- `generation`, from `OPENRIG_OCCUPANT_GENERATION`;
+- an increasing `sequence`, and `occurredAt`;
+- `hookEvent` and `subtype`, as in the table.
+
+| The runner posts | When | The seat reads |
+|---|---|---|
+| `UserPromptSubmit` | it gave the agent a prompt | working |
+| `active` or `PreToolUse` | the agent is working | working |
+| `Notification` / `permission_prompt` | the agent asked for a permission | needs input |
+| `Stop` / the turn's stop reason | the turn ended | idle |
+| `Stop` / `<preset name>_exited` | the agent's process ended | unknown, never idle |
+
+- **The screen still counts,** but only as evidence of work: on its own it never reads the seat idle.
+- **The generation attributes a post; it isn't authentication.** A post with an earlier occupant's generation doesn't
+  count for the live seat. The hook token is one local token, so any process that holds it can post for any seat.
 
 ## An example: Hermes
 
@@ -242,7 +281,7 @@ on it, not Pi choosing by itself to park or hand work on.
 Copy both and maintain them as your own.
 
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
-module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted` or `first_input` is refused by an older
+module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner` or `passes_model` is refused by an older
 OpenRig that doesn't know the field.
 
 ## Pass the first startup input at launch
@@ -254,6 +293,37 @@ The contributor-owned launcher reads the file and uses its harness’s supported
 OpenRig records `node.startup_first_input_passed` with the path and `submission: unconfirmed`. This says the input was passed at launch, not that the native harness submitted or read it. An uncertain launch is not permission to replay it. Readiness remains process-only. `startup_assisted` is independent: when declared, startup still requires a person’s acknowledgement, including when the first input was passed at launch.
 
 Presets without `first_input` and built-in runtimes keep their existing behavior. Older OpenRig versions reject this new field as unknown. The private input file remains for diagnostics; it can contain private startup context. A launcher that turns its contents into one argument is subject to the platform’s argument-size limit; the launcher must report a launch error rather than silently truncate the turn. The examples’ argument transport is covered with stand-ins; native unattended startup still requires qualification with the installed harness.
+
+## Pass the seat's declared model at launch
+
+A format-1 preset may set `passes_model: true` (a boolean, default false). Then a model declared for the seat (in the rig
+spec, or set later with `rig seat set-model`) reaches its launcher as `OPENRIG_MODEL`, on new and resumed launches alike. A seat that declares no model gets none,
+and an inherited `OPENRIG_MODEL` is cleared. The launcher maps it into its harness's own setting; Core knows no harness's
+model flag or config key.
+
+OpenRig keeps three things apart:
+- **requested:** the declared model, as `rig ps --nodes` shows it ("configured", or "not-declared");
+- **passed:** the launcher was handed the model. OpenRig records `node.startup_model_passed` with the model and whether the
+  launch was a resume only when the launch command's send succeeded, and a later failure of the launch doesn't undo that.
+  It never says passed from the declaration alone or for a launch that failed before anything was typed. When typing
+  began and the send then failed, the model's dispatch is uncertain: it isn't recorded as passed, and it isn't retyped;
+- **effective:** the model that actually runs. OpenRig doesn't observe it for a community harness, so it reads UNKNOWN.
+
+Passing a model never makes OpenRig pick a default, substitute another model, or retry with one. A model the harness
+refuses is the harness's own error.
+
+The examples apply the request for a new session only; on a resume, the example launcher doesn't apply it, and which
+model a resumed session runs stays unknown unless the harness's own evidence says otherwise:
+- **Cursor:** `--model "$OPENRIG_MODEL"` for a new chat. What a resumed chat runs hasn't been checked: the launcher leaving
+  out `--model` doesn't show that it keeps its earlier model.
+- **Hermes:** Hermes takes its model only from the seat's `config.yaml`, so for a new session the launcher writes
+  `model: "<id>"` there only when that file is absent or empty. A seat that has its own `config.yaml` keeps it
+  byte-for-byte, and the launcher says the model wasn't applied: set it in that file. A seat set up from
+  `config.yaml.example` already has a config, so set its model there. Hermes v0.22.4 fixes a session's
+  launch settings when it creates it (its own source), so a resumed Hermes session runs with what it was created with.
+
+Both example presets ship with `passes_model: false` until that mapping has been checked with the real harness. Presets
+without the field and built-in runtimes are unchanged, and older OpenRig versions reject it as unknown.
 
 ## Interactive Pi in a terminal seat: the coordination skills
 

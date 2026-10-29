@@ -457,7 +457,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     // Claude replaces its mode hint after our paste; that noninteractive hint is not a new composer.
     const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
     const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
-    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
+    const nativeCodex = prompt.glyph !== "❯" && codexFooterSeparator(lines) === end;
+    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
     // previously empty composer. A newly observed menu gains no such authority.
@@ -466,6 +467,13 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       && hasExpectedStagedText(`${prompt.glyph} ${visible.join("\n")}`, owned.text, runtime)) {
       input.collapsedPaste = visible.join("\n");
       input.pasteMatchesExpected = true;
+    }
+    if (nativeCodex) {
+      // Codex 0.164 fullscreen: composer <= 2/3 of the pane (at least eight
+      // rows, capped by the pane), less padding/status/hint rows. Leave the
+      // one-column right inset out of the native printable width.
+      input.pasteViewport = { columns: input.columns,
+        rows: Math.min(height, Math.max(8, Math.floor(height * 2 / 3))) - 4 };
     }
     candidates.push(input);
   }

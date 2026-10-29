@@ -13,7 +13,7 @@ const open: Database.Database[] = [];
 afterEach(() => { for (const db of open.splice(0)) db.close(); });
 
 // `file` is the exact bytes of `claude` on the daemon's PATH; it must be a script, which runs on every platform.
-async function prepared(file: string, link?: boolean, recordedExecutable?: boolean) {
+async function prepared(file: string, link?: boolean, recordedExecutable?: boolean, isolatedHome?: boolean) {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "claude-script-launch-")));
   const cwd = path.join(root, "seat"); const bin = path.join(root, "bin");
   mkdirSync(cwd); mkdirSync(bin); mkdirSync(path.join(root, "home"));
@@ -27,7 +27,10 @@ async function prepared(file: string, link?: boolean, recordedExecutable?: boole
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation-1',1)");
   const managed = new ClaudeManagedLaunch(db, { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home") }, {});
-  return { managed: await managed.prepare({ nodeId: "node", ...(recordedExecutable ? { executable: target } : {}) }, "auto"), target, resolver: managed };
+  const selectedHome = path.join(root, "selected-account");
+  if (isolatedHome) mkdirSync(selectedHome);
+  return { managed: await managed.prepare({ nodeId: "node", ...(recordedExecutable ? { executable: target } : {}),
+    ...(isolatedHome ? { accountHome: selectedHome } : {}) }, "auto"), target, resolver: managed, selectedHome };
 }
 const printsHelp = `printf '%s\\n' '${HELP}'\n`;
 
@@ -43,8 +46,9 @@ it("reports it through a symlink, whose realpath is the frozen executable", asyn
   expect(managed.executableIsScript).toBe(true);
 });
 
-it("continues with the recorded executable outside the daemon PATH, freezing the same file", async () => {
-  const { managed, target, resolver } = await prepared(`#!/bin/sh\n${printsHelp}`, false, true);
+it.each([false, true])("continues with the recorded executable outside daemon PATH and isolated home=%s", async isolated => {
+  const { managed, target, resolver, selectedHome } = await prepared(`#!/bin/sh\n${printsHelp}`, false, true, isolated);
+  if (isolated) expect(managed.configDir).toBe(selectedHome);
   expect(managed.executable).toBe(target);
   expect(managed.command(["--resume", "same-conversation"])).toContain(target);
   await expect(resolver.prepare({ nodeId: "node" }, "auto")).rejects.toThrow("unavailable on the intended PATH");

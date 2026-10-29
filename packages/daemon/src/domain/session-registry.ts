@@ -513,8 +513,14 @@ export class SessionRegistry {
   // empty-token skip or a lower-rank no-op. Callers that only set-and-forget can
   // ignore it; the adoption-capture path uses it so its audit event never
   // falsely claims a captured write when the provenance guard refused it.
-  /** Record that this session was launched for a community harness, selected through its preset. */
-  recordCommunityHarnessSelection(sessionId: string, app: string): void {
+  /** Record that this session was launched for a community harness, selected through its preset. With `runner`, also
+   *  record what that launch's preset declared (`runner: true` or not), so activity reads the launched occupant's
+   *  declaration, never a later preset edit. Without it (a restore carrying only the selection) the field is left as is. */
+  recordCommunityHarnessSelection(sessionId: string, app: string, runner?: boolean): void {
+    if (runner !== undefined && sessionCommunityRunnerSelect(this.db, "sessions") !== "NULL") {
+      this.db.prepare("UPDATE sessions SET agent_app = ?, agent_runner = ? WHERE id = ?").run(app, runner ? 1 : 0, sessionId);
+      return;
+    }
     this.db.prepare("UPDATE sessions SET agent_app = ? WHERE id = ?").run(app, sessionId);
   }
 
@@ -941,4 +947,17 @@ export function sessionCommunityHarnessSelect(db: Database.Database, alias = "s"
     sessionsHaveCommunityHarness.set(db, has);
   }
   return has ? `${alias}.agent_app` : "NULL";
+}
+
+const sessionsHaveCommunityRunner = new WeakMap<Database.Database, boolean>();
+
+/** The SQL that reads whether a session's community app was launched as a runner: 1, 0, or NULL. NULL also on a schema
+ *  without the column, so a legacy database reads every seat as before (never a runner opt-in). */
+export function sessionCommunityRunnerSelect(db: Database.Database, alias = "s"): string {
+  let has = sessionsHaveCommunityRunner.get(db);
+  if (has === undefined) {
+    has = (db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name?: string }>).some(row => row.name === "agent_runner");
+    sessionsHaveCommunityRunner.set(db, has);
+  }
+  return has ? `${alias}.agent_runner` : "NULL";
 }

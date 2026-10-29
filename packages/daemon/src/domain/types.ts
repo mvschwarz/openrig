@@ -38,6 +38,8 @@ export interface Node {
   advisor?: string | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
+  /** Explicit native account-home selection; a path only, not credential data. */
+  accountHome?: string | null;
   codexConfigProfile?: string | null;
   /** A Claude seat's own subscription credential, as a reference (operator label and token-file path); null = none. */
   claudeTokenRef?: { label: string; tokenFile: string } | null;
@@ -250,6 +252,7 @@ export type RigEvent =
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
+  | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
@@ -576,6 +579,8 @@ export interface AgentActivity {
   turnId?: string | null;
   /** Native Claude hook actor: null is the main session; absent means an older or unrecognized relay. */
   hookAgentId?: string | null;
+  /** Recorded on a hook for a session launched for a community runner (its launch fact, not the hook's claim). */
+  communityRunner?: boolean;
 
   state: AgentActivityState;
   reason: string;

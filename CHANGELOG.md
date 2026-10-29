@@ -667,10 +667,11 @@ from the commit tagged `v0.7.3`. The changes since 0.7.2:
   current TUI sends it (a request without a seat identity); an older TUI's
   answer on someone else's ask is refused.
   ([#2006](https://github.com/mvschwarz/openrig/pull/2006))
-- **A Codex seat's permission settings are passed as launch flags; that Codex
-  enforces them was not proven natively.** Going back to an older OpenRig keeps
-  them unread (see Before you upgrade). The Codex trust fixes stop new duplicate
-  hook groups but don't remove existing ones.
+- **A Codex seat's permission settings were enforced natively in our test with
+  Codex 0.164.0,** including after a managed restore and a restart. Other Codex
+  versions weren't tested. Going back to an older OpenRig keeps them unread (see
+  Before you upgrade). The Codex trust fixes stop new duplicate hook groups but
+  don't remove existing ones.
   ([#2048](https://github.com/mvschwarz/openrig/pull/2048),
   [#2035](https://github.com/mvschwarz/openrig/pull/2035))
 - **The cmux path wasn't tried in a real cmux**, and a remote host's rigs are
@@ -735,8 +736,7 @@ reported [#1653](https://github.com/mvschwarz/openrig/issues/1653) (worked on in
 reported [#980](https://github.com/mvschwarz/openrig/issues/980) (addressed by
 [#2081](https://github.com/mvschwarz/openrig/pull/2081)); @rakoort, whose
 suggestion in [#1679](https://github.com/mvschwarz/openrig/issues/1679) became
-[#2086](https://github.com/mvschwarz/openrig/pull/2086) (the issue's main
-report is still open); @george661, whose
+[#2086](https://github.com/mvschwarz/openrig/pull/2086); @george661, whose
 [#1710](https://github.com/mvschwarz/openrig/issues/1710) led to
 [#2093](https://github.com/mvschwarz/openrig/pull/2093).
 

@@ -24,6 +24,21 @@ if ! grep -qs OPENRIG_SESSION_NAME "$HERMES_HOME/config.yaml"; then
   echo "openrig-hermes-launch: $HERMES_HOME/config.yaml doesn't pass OPENRIG_SESSION_NAME to Hermes's tools, so rig run from Hermes won't act as this seat; see config.yaml.example" >&2
 fi
 
+# The seat's declared model (OPENRIG_MODEL, when the preset sets passes_model): Hermes takes it only from config.yaml, and
+# Hermes v0.22.4 fixes a session's launch settings when it creates it. So it's written for a new session only, and only
+# into a config.yaml that is absent or empty: a seat's own config is left byte-for-byte as it is, whatever it says. On a
+# resume this launcher applies no OpenRig model.
+if [ -n "${OPENRIG_MODEL:-}" ] && [ -z "${OPENRIG_RESUME_REF:-}" ]; then
+  case "$OPENRIG_MODEL" in
+    ''|*[!A-Za-z0-9._:/@+-]*) echo "openrig-hermes-launch: not writing unusual model id \"$OPENRIG_MODEL\" into $HERMES_HOME/config.yaml" >&2 ;;
+    *) if [ -s "$HERMES_HOME/config.yaml" ]; then
+         echo "openrig-hermes-launch: the seat has its own $HERMES_HOME/config.yaml; OPENRIG_MODEL was not applied; set the model there" >&2
+       else
+         printf 'model: "%s"\n' "$OPENRIG_MODEL" >> "$HERMES_HOME/config.yaml"
+       fi ;;
+  esac
+fi
+
 if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
   exec "$hermes" chat -c "$OPENRIG_RESUME_REF"
 fi

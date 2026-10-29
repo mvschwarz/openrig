@@ -6,6 +6,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import nativePaste from "./fixtures/claude-paste-footer.json";
+import { wrapPaneEnvelope } from "../src/lib/pane-envelope.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
@@ -101,6 +102,222 @@ function fixture(saved?: Buffer, opts: { runtime?: string; idleHook?: boolean } 
   };
 }
 
+
+// Retained D1 geometry: empty Codex 0.164 at 65x9; after paste the editor
+// shows only the envelope's reply footer and an upward scroll indicator.
+function codexViewport(body: string, width: number, height: number, renderedRows?: string[]): ComposerSnapshot {
+  // rust-v0.164.0 uses this character-count label, not Claude's line-count label.
+  if ([...body].length > 1000) return codexViewport(`[Pasted Content ${[...body].length} chars]`, width, height);
+  if (!body) return { screen: ["• DONE", "", "  Worked for 4s • 20:24", "", "",
+    "› \x1b[2mAsk Codex to do anything\x1b[0m", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", "  ? for shortcuts", ""].join("\n"),
+    cursor: { x: 2, y: 5, width, height }, inMode: false };
+  if (height === 9 && body.includes("From:")) return {
+    screen: ["", "", "› ---                                                           ↑",
+      "  ↩ Reply if needed: rig queue create --destination host-",
+      '  fixture-driver@external --summary "<one line>" --body "..."',
+      "  --verify", "", "  GPT-6.1-Sol low · ~/project · Recover OpenRig identity context", ""].join("\n"),
+    cursor: { x: 10, y: 5, width, height }, inMode: false };
+  // The fullscreen composer scrolls input once padding/status/hint consume its cap.
+  const capacity = Math.min(height, Math.max(8, Math.floor(height * 2 / 3))) - 4;
+  const rows = (renderedRows ?? body.split("\n")).slice(-capacity);
+  return { screen: ["Ready", "", `› ${rows[0]}`, ...rows.slice(1).map(row => `  ${row}`), "",
+    "  GPT-6.1-Sol low · ~/project", "  ? for shortcuts", ""].join("\n"),
+    cursor: { x: 2 + stringWidth(rows.at(-1)!), y: 1 + rows.length, width, height }, inMode: false };
+}
+
+const d1Envelope = wrapPaneEnvelope("host-fixture-driver@external", "worker@test",
+  "Write exactly draft-aware to /home/t1s075/project/delivery-draft-aware.txt with one shell tool; reply DONE briefly and wait.");
+
+async function codexDelivery(mode = "draft-aware", size = { width: 65, height: 9 }) {
+  const f = fixture(undefined, { runtime: "codex" });
+  await f.guard.set("a", { mode }, "human@test", "D1 protected delivery");
+  vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () => codexViewport(f.bodies.a ?? "", size.width, size.height));
+  return { ...f, size, options: { verify: false, ...(mode === "openrig-urgent" ? { urgent: { by: "human@test" } } : {}) } };
+}
+
+describe("Codex pre-paste observability through the real delivery path", () => {
+  it.each(["draft-aware", "openrig-urgent"])("retains the full envelope before writing into the native 65x9 frame (%s)", async mode => {
+    const f = await codexDelivery(mode);
+    expect(await f.send("D1", d1Envelope, f.options)).toMatchObject({ ok: true, outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_unknown" });
+    expect(f.writes).toEqual([]);
+    expect(f.submissions).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["draft-aware", "openrig-urgent"])("submits a fitting full envelope once (%s)", async mode => {
+    const f = await codexDelivery(mode, { width: 160, height: 45 });
+    expect(await f.send("fits", d1Envelope, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([mode === "openrig-urgent" ? `Urgent (marked by human@test):\n${d1Envelope}` : d1Envelope]);
+    expect(f.writes).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("delivers nine native-fitting 61-column lines plus their envelope at 65x45", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const text = wrapPaneEnvelope("sender@test", "worker@test", Array(9).fill("x".repeat(61)).join("\n"));
+    expect(await f.send("native-fit", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("owns the complete envelope after a native 62-column hard wrap at 65x45", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const body = "x".repeat(64);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body);
+    expect(text.split("\n").filter(row => row.length > 62)).toEqual([body]);
+    // Codex's two-column prompt and one-column right inset leave 62 cells.
+    // This ASCII word wraps without dropping or replacing any authored byte.
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport((f.bodies.a ?? "").replace(body, `${body.slice(0, 62)}\n${body.slice(62)}`), 65, 45));
+    expect(await f.send("native-wrap", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("retains fourteen exact-width body lines before their insertion rows scroll the full envelope", async () => {
+    const f = await codexDelivery("draft-aware", { width: 65, height: 45 });
+    const body = "x".repeat(62);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", Array(14).fill(body).join("\n"));
+    expect([...text].length).toBeLessThan(1000);
+    const rows = text.split("\n").flatMap(row => row === body ? [row, ""] : [row]);
+    expect(rows).toHaveLength(33); // Native fullscreen cap is 30 rows, including chrome.
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 65, 45, f.bodies.a ? rows : undefined));
+    expect(await f.send("full-width", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it("counts the insertion row of an exact-width line at the input viewport limit", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    const full = "x".repeat(157);
+    const text = [full, ...Array(25).fill("x")].join("\n"); // 26 logical rows, 27 visual rows.
+    const rows = [full, "", ...Array(25).fill("x")];
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 160, 45, f.bodies.a ? rows : undefined));
+    expect(await f.send("insertion-row", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("delivers a full envelope whose logical lines fit one native row at 80x22", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "Please review this task.", { stampISO: "2026-10-28T22:06:00Z" });
+    expect(text.split("\n").every(row => stringWidth(row) < 77)).toBe(true);
+    expect(await f.send("one-row-fit", text, f.options)).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it("conservatively retains a natively fitting wrapped wake when its full-line bound exceeds 80x22", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const line = "Please review the current task and reply with the smallest useful change.";
+    expect(stringWidth(line)).toBe(73);
+    const body = Array(3).fill(line).join(" ");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body, { stampISO: "2026-10-28T21:49:00Z" });
+    // Native FirstFit keeps each phrase together; the next word cannot fit on the previous row.
+    const rows = text.replace(body, Array(3).fill(line).join("\n")).split("\n");
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(rows).toHaveLength(9); // Fits natively, but the conservative bound is larger.
+    expect(await f.send("ordinary-wake", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+    expect(f.submissions).toEqual([]);
+  });
+
+  it("retains a hyphen-separated envelope before native semantic breaks scroll it at 80x24", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 24 });
+    const body = Array(9).fill("x".repeat(40)).join("-");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body, { stampISO: "2026-10-28T22:03:00Z" });
+    expect(body).toHaveLength(368);
+    // Native HyphenSplitter moves each 41-cell piece whole; two cannot fit in 77.
+    const rows = text.replace(body, body.match(/x{40}-?/g)!.join("\n")).split("\n");
+    expect(rows).toHaveLength(15);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 24, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-hyphens", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains a three-segment path envelope at the native viewport limit", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const segment = "x".repeat(38) + "/";
+    const path = segment.repeat(3);
+    const text = wrapPaneEnvelope("sender@test", "worker@test", path + "\n\n", { stampISO: "2026-10-28T22:03:00Z" });
+    expect(path).toHaveLength(117);
+    // Native UAX#14 path pieces are 39 cells; two need 78, exceeding 77.
+    const rows = text.replace(path, Array(3).fill(segment).join("\n")).split("\n");
+    expect(rows).toHaveLength(11);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-path", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains an envelope whose space before /path cannot be a native break", async () => {
+    const f = await codexDelivery("draft-aware", { width: 80, height: 22 });
+    const first = "a".repeat(30), glued = "b".repeat(46) + " /cc", last = "d".repeat(30);
+    const body = `${first} ${glued} ${last}`;
+    const text = wrapPaneEnvelope("sender@test", "worker@test", body + "\n\n", { stampISO: "2026-10-28T22:03:00Z" });
+    // UAX#14 LB13 glues the slash to the preceding word across the space.
+    const rows = text.replace(body, [first, glued, last].join("\n")).split("\n");
+    expect(rows).toHaveLength(11);
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async () =>
+      codexViewport(f.bodies.a ?? "", 80, 22, f.bodies.a ? rows : undefined));
+    expect(await f.send("semantic-glue", text, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains a raw-fitting 1200-code-point envelope before Codex collapses it into an unowned label", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    const empty = wrapPaneEnvelope("sender@test", "worker@test", "");
+    const text = wrapPaneEnvelope("sender@test", "worker@test", "x".repeat(1200 - [...empty].length));
+    expect([...text]).toHaveLength(1200);
+    const result = await f.send("native-long", text, f.options);
+    expect(result).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(result.error).toContain("Send a shorter message; nothing was pasted.");
+    expect(result.error).toContain("Turning this seat's typing guard off explicitly disables draft protection.");
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["\t", "\x1b"])("gives control-specific recovery at every size (%j)", async control => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    for (const text of [`a${control}b`, `${"x".repeat(1200)}${control}`]) {
+      const result = await f.send("control", text, f.options);
+      expect(result).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+      expect(result.error).toMatch(/without them/);
+      expect(result.error).not.toMatch(/larger terminal/);
+    }
+    expect(f.writes).toEqual([]);
+  });
+
+  it("leaves default-off delivery unchanged in the small viewport", async () => {
+    const f = await codexDelivery("off");
+    expect(await f.send("off", d1Envelope, f.options)).toMatchObject({ ok: true });
+    expect(f.submissions).toEqual([d1Envelope]);
+  });
+
+  it("rechecks the actual viewport after buffer preparation, before any paste", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    f.hooks.load = () => { f.size.width = 65; f.size.height = 9; };
+    expect(await f.send("resized", d1Envelope, f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("retains a wrapped line which cannot stay visible without writing it", async () => {
+    const f = await codexDelivery();
+    expect(await f.send("wraps", "one-long-word-".repeat(40), f.options)).toMatchObject({ outcome: "retained", sent: false, inputPhase: "not_reached" });
+    expect(f.writes).toEqual([]);
+  });
+
+  it("keeps a concurrent real draft and the human-input epoch check", async () => {
+    const f = await codexDelivery("draft-aware", { width: 160, height: 45 });
+    f.hooks.load = () => f.guard.humanInput("a", async () => { f.bodies.a = "my real draft"; });
+    expect(await f.send("human", d1Envelope, f.options)).toMatchObject({ outcome: "retained", sent: false,
+      inputPhase: "not_reached", reason: "draft_input_changed" });
+    expect(f.writes).toEqual([]);
+    expect(f.bodies.a).toBe("my real draft");
+  });
+});
 
 describe("current draft-aware delivery through the real transport", () => {
   it.each(["ordinary request ", "1. Review the change"])("attempts each ordinary authored request, even with a reused caller ID: %j", async text => {

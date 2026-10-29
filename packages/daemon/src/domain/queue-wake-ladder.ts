@@ -847,7 +847,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
         // Keep this recovery visible without sharing the ordinary destination aggregate or forwarding another hop.
-        await ensureEscalationRow(deps, row.destinationSession, resolveOperatorSeat() ?? row.sourceSession,
+        await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
           [{ row, reason: consumedReason }], consumedReason, `consumed-hop:${row.qitemId}`, [ESCALATION_HOP_TAG]);
         if (!view.orchRung) appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${consumedReason}`);
         if (await operatorRung(deps, row, consumedReason, actions, view)) {
@@ -883,10 +883,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           // F4: rung 1 self-skips when it resolves to the destination itself (or nowhere)
           // — never escalate INTO the dead seat; fall through to the operator rung now.
           // The operator floor must be a VISIBLE OBJECT, not markers alone: ensure the
-          // per-destination escalation row exists (addressed to the operator seat, else
-          // the obligation's own creator) so the escalations view and the health count
+          // per-destination escalation row has an admissible carrier so the
+          // escalations view and the health count
           // expose it — it stays open past the batons' exhaustion.
-          const floorDest = resolveOperatorSeat() ?? needsOrchRung[0]!.row.sourceSession;
+          const floorDest = humanAlertCarrier(deps, dest, needsOrchRung[0]!.row.sourceSession);
           await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
           for (const m of needsOrchRung) {
             appendMarker(
@@ -1076,6 +1076,13 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
     appendMarker(deps.queueRepo, row, `${waiting} reason=one person alert at a time for seats blocked at a prompt`);
   }
   return true;
+}
+
+// The operator engine owns actual human delivery. Its non-nudged queue carrier
+// must still be locally admissible; cross-host source provenance is not a local destination.
+function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
+  const candidates = [resolveOperatorSeat(), source];
+  return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
 }
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
@@ -1287,7 +1294,7 @@ async function advancePromptRefusals(
         const choiceOnly = Boolean(group.choice && !group.other);
         const promptTags = choiceOnly ? [PROMPT_ALERT_TAG, PROMPT_CHOICE_TAG, `consumed-prompt-destination:${dest}`,
           ...(group.rowKeys.get(member.row.qitemId) ?? [])] : [];
-        const continuation = await ensureEscalationRow(deps, dest, resolveOperatorSeat() ?? member.row.sourceSession,
+        const continuation = await ensureEscalationRow(deps, dest, humanAlertCarrier(deps, dest, member.row.sourceSession),
           [{ row: member.row, reason }], reason, `consumed-hop:${member.row.qitemId}`, [ESCALATION_HOP_TAG, ...promptTags]);
         if (!view.orchRung) appendMarker(deps.queueRepo, member.row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
         // A choice alert's tags and dispatch marker must live on the same durable row the shared gate reads.
@@ -1327,7 +1334,7 @@ async function advancePromptRefusals(
     const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
     const keys = group.keys.filter(key => group.jobKeys.has(key) || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
+      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;

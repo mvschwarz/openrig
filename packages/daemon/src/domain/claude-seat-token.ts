@@ -63,11 +63,13 @@ export function claudeSeatTokenFallbackNotice(ref: ClaudeSeatTokenRef, problem: 
  *  token Claude uses. When the file can't be read or is empty, Claude still starts, on the config dir's stored login, and
  *  the pane says so; any token the launch already carried is kept unless `removeOnFailure`, and an empty one is never
  *  exported. */
-export function claudeSeatTokenStep(ref: ClaudeSeatTokenRef, quote: (value: string) => string, opts: { removeOnFailure?: boolean } = {}): string {
-  const notice = claudeSeatTokenFallbackNotice(ref, `${ref.tokenFile} couldn't be read when Claude started`);
+export function claudeSeatTokenStep(ref: ClaudeSeatTokenRef, quote: (value: string) => string, opts: { removeOnFailure?: boolean; required?: boolean } = {}): string {
+  const notice = opts.required ? "OpenRig: the selected account's token could not be read; no agent started."
+    : `OpenRig: ${claudeSeatTokenFallbackNotice(ref, `${ref.tokenFile} couldn't be read when Claude started`)}`;
   return `{ __openrig_token=$(/bin/cat -- ${quote(ref.tokenFile)} 2>/dev/null); if [ -n "$__openrig_token" ]; `
-    + `then unset ${OUTRANKING_TOKEN_ENV.join(" ")}; CLAUDE_CODE_OAUTH_TOKEN=$__openrig_token; export CLAUDE_CODE_OAUTH_TOKEN; `
-    + `else ${opts.removeOnFailure ? "unset CLAUDE_CODE_OAUTH_TOKEN; " : ""}printf '%s\\n' ${quote(`OpenRig: ${notice}`)} >&2; fi; unset __openrig_token; }`;
+    + `then unset ${OUTRANKING_TOKEN_ENV.join(" ")}; CLAUDE_CODE_OAUTH_TOKEN=$__openrig_token; export CLAUDE_CODE_OAUTH_TOKEN; unset __openrig_token; `
+    + `else ${opts.removeOnFailure || opts.required ? "unset CLAUDE_CODE_OAUTH_TOKEN; " : ""}printf '%s\\n' ${quote(notice)} >&2; unset __openrig_token; ${opts.required ? "false;" : ""} fi; }`;
+
 }
 
 /** Whether a launch warning is the one a launch that couldn't apply the seat's token gives. */
