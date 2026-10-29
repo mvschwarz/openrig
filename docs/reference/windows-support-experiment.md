@@ -53,6 +53,11 @@ passes and daemon typecheck passes. No real token or provider turn was used.
 
 ## Auth home test module boundary (2026-10-30)
 
+The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:
+its temporary HOME did not set Windows USERPROFILE, used by os.homedir().
+Setting both to the owned temporary home makes the actual CLI header lookup
+pass (one check). Product token lookup is unchanged; no real token was read.
+
 The frozen CLI run exposed three failing HOME-fallback assertions: its OS mock
 did not reach the shared implementation through the CLI's compiled daemon
 re-export. The five mocked account-home cases now live beside the daemon source.
