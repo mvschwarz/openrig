@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
@@ -11,7 +13,8 @@ import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
 import { RigSpecCodec, LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
 import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
-import { isClaudeSeatTokenFallback, readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
+import { claudeSeatTokenStep, isClaudeSeatTokenFallback, readClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { LegacyRigSpec, RigSpec } from "../src/domain/types.js";
 import { createTestApp } from "./helpers/test-app.js";
 
@@ -19,7 +22,10 @@ import { createTestApp } from "./helpers/test-app.js";
 // that account. The spec and the seat's record hold the label and the path only; the file is read as Claude starts.
 
 const opened: Database.Database[] = [];
-afterEach(() => { for (const db of opened.splice(0)) db.close(); });
+const dirs: string[] = [];
+afterEach(() => { for (const db of opened.splice(0)) db.close(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const tempDir = () => { const dir = mkdtempSync(path.join(tmpdir(), "claude-member-token-")); dirs.push(dir); return dir; };
+const SYNTHETIC = "synthetic-fixture-value-not-a-credential";
 // There is no such file: storing the reference never reads it, and a launch starts with the existing fallback notice.
 const tokenFile = path.join(tmpdir(), "no-such-dir-claude-member-token", "dev.token");
 const ref = { label: "dev-sub", tokenFile };
@@ -34,11 +40,11 @@ function database() {
   return db;
 }
 
-async function materialize(db: Database.Database) {
+async function materialize(db: Database.Database, extra: Record<string, unknown> = {}) {
   const setup = createTestApp(db, { podInstantiatorFsOps: {
     readFile: () => 'name: dev\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []', exists: () => true,
   } });
-  const raw = spec(member());
+  const raw = spec(member(extra));
   expect(RigSpecSchema.validate(raw).errors).toEqual([]);
   const result = await setup.podInstantiator.materializeStructured(raw, "/project");
   expect(result.ok, JSON.stringify(result)).toBe(true);
@@ -82,6 +88,47 @@ describe("a Claude member's own subscription token (claude_token)", () => {
     const flatParsed = LegacyRigSpecCodec.parse(LegacyRigSpecCodec.serialize(flatSpec as LegacyRigSpec));
     expect(LegacyRigSpecSchema.normalize(flatParsed).nodes[0]!.claudeTokenRef).toEqual(ref);
     expect(() => repo.addNode(rig.id, "other", { runtime: "codex", claudeTokenRef: ref })).toThrow(/claude_token/);
+    // An account-home selection isn't exported, so neither is the token that goes with it.
+    flatDb.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(tempDir(), node.id);
+    const homed = new RigSpecExporter({ rigRepo: repo, sessionRegistry: new SessionRegistry(flatDb) }).exportRig(rig.id);
+    expect(LegacyRigSpecCodec.serialize(homed as LegacyRigSpec)).not.toContain("claude_token");
+  });
+
+  // r1: a spec-declared token gets the switch's credential-precedence check, said as a launch warning, never a refusal.
+  it("warns, in the switch's terms, when the seat's settings would outrank its token", async () => {
+    const db = database(), cwd = tempDir(), home = tempDir();
+    // A readable token file: the warning is about what outranks it, not about the file.
+    const readable = path.join(home, "dev.token");
+    writeFileSync(readable, `${SYNTHETIC}\n`, { mode: 0o600 });
+    const own = { label: "dev-sub", tokenFile: readable };
+    mkdirSync(path.join(cwd, ".claude"));
+    const project = path.join(cwd, ".claude", "settings.json");
+    writeFileSync(project, JSON.stringify({ apiKeyHelper: "/bin/echo not-a-key", env: { ANTHROPIC_API_KEY: "placeholder" } }));
+    const { node } = await materialize(db, { cwd, claude_token: { label: "dev-sub", file: readable } });
+    const managed = new ClaudeManagedLaunch(db, { PATH: "/usr/bin:/bin", HOME: home }, {}, async () => undefined);
+    const [warning, ...rest] = await managed.tokenPrecedenceWarnings(node.id, own);
+    expect(rest).toEqual([]);
+    expect(warning).toContain("Claude Code would use these instead");
+    expect(warning).toContain(`apiKeyHelper (project settings ${project}`);
+    expect(warning).toContain(`ANTHROPIC_API_KEY (the env block of project settings ${project}`);
+    writeFileSync(project, "{}");
+    expect(await managed.tokenPrecedenceWarnings(node.id, own)).toEqual([]);
+  });
+
+  // r1: a pane shell with tracing on must not print the token as the step reads and assigns it.
+  it("keeps the token out of a traced shell, restores its tracing, and keeps a required step's failure", () => {
+    const dir = tempDir(), tokenFile = path.join(dir, "dev.token");
+    writeFileSync(tokenFile, `${SYNTHETIC}\n`, { mode: 0o600 });
+    const step = claudeSeatTokenStep({ label: "dev-sub", tokenFile }, shellQuote);
+    const traced = spawnSync("/bin/sh", ["-xc", `${step} && /bin/sh -c 'printf %s "$CLAUDE_CODE_OAUTH_TOKEN"'; echo traced-after`],
+      { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+    expect(traced.status, traced.stderr).toBe(0);
+    expect(traced.stdout).toBe(`${SYNTHETIC}traced-after\n`);
+    expect(traced.stderr).not.toContain(SYNTHETIC);
+    expect(traced.stderr).toContain("echo traced-after");
+    const missing = claudeSeatTokenStep({ label: "dev-sub", tokenFile: path.join(dir, "missing.token") }, shellQuote, { required: true });
+    const failed = spawnSync("/bin/sh", ["-xc", `${missing}; echo "rc=$?"`], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+    expect(failed.stdout).toBe("rc=1\n");
   });
 
   it.each([
