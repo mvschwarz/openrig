@@ -336,7 +336,10 @@ IDs or colliding child slice names/IDs are ambiguous, never first-match.
 
 Slice and mission keys are case-sensitive and can include Unicode, plus signs and internal
 spaces. They cannot be empty or contain slash, backslash, control characters,
-or leading/trailing whitespace. Pass the literal selector in JSON or a quoted
+or leading/trailing whitespace in the scope reader. The service trims the whole
+selector before composition, so a trailing selector space is accepted by
+preview/ensure with the same plan; ensure rejects a leading selector space.
+Prefer the exact canonical selector in every call. Pass it in JSON or a quoted
 CLI argument; encode it once as a GET query value. Do not double-decode it.
 
 Slice previews and open results use `task: {kind:"slice", id, name, complete,
