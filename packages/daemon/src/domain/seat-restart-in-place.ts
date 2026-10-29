@@ -411,7 +411,7 @@ export class CodexInPlaceRestart {
     const startedAt = process.startedAt ?? null;
     const facts = await this.io.readProcess(process.pid);
     if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (this observer reads /proc on Linux). Nothing was stopped." };
-    const codexHome = facts.env.CODEX_HOME ?? (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
+    const codexHome = facts.env.CODEX_HOME || (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
     if (!codexHome) return { ok: false, code: "settings_unverified", message: "The running Codex's home could not be determined (no CODEX_HOME or HOME). Nothing was stopped." };
 
     // The conversation the PROCESS is on: argv for a resumed Codex, its own native logs for a fresh one.
@@ -498,7 +498,7 @@ export class CodexInPlaceRestart {
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
       ?? (paneShape === "shell_backed"
-        ? shellFacts!.env.CODEX_HOME ?? (shellFacts!.env.HOME ? nodePath.join(shellFacts!.env.HOME, ".codex") : null)
+        ? shellFacts!.env.CODEX_HOME || (shellFacts!.env.HOME ? nodePath.join(shellFacts!.env.HOME, ".codex") : null)
         : (await this.deps.tmux.getSessionEnv(sessionName, "CODEX_HOME")) ?? null);
 
     const effective = parseEffectiveSettings(runningArgv);
@@ -781,7 +781,7 @@ export class CodexInPlaceRestart {
       if (row.tmux_pane && row.tmux_session) {
         const observed = await this.observeCodex(row.tmux_pane, null).catch(() => null);
         const facts = observed ? await this.io.readProcess(observed.process.pid) : null;
-        const peerHome = facts?.env.CODEX_HOME ?? (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
+        const peerHome = facts?.env.CODEX_HOME || (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
         if (peerHome) home = peerHome === codexHome ? "same" : "different";
       }
       reports.push({ logicalId: row.logical_id, sessionName: row.tmux_session, home,
@@ -1183,7 +1183,7 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
           const facts = await readWindowsProcessFacts(pid);
           if (!facts) return null;
           const { HOME, USERPROFILE, CODEX_HOME } = facts.env;
-          const home = HOME ?? USERPROFILE;
+          const home = HOME || USERPROFILE || undefined;
           return { cwd: facts.cwd, exe: facts.exe, argv: facts.argv,
             env: { ...(home !== undefined ? { HOME: home } : {}), ...(CODEX_HOME !== undefined ? { CODEX_HOME } : {}) } };
         }

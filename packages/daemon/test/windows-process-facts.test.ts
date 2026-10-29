@@ -21,6 +21,7 @@ describe.skipIf(process.platform !== "win32")("native Windows restart process fa
     try {
       await once(child.stdout!, "data");
       expect(await defaultResolveHomeDirByPid(child.pid!)).toBe(profile);
+      expect((await defaultInPlaceRestartIo().readProcess(child.pid!))?.env.HOME).toBe(profile);
     } finally {
       if (child.exitCode === null && child.signalCode === null) { const closed = once(child, "close"); child.kill(); await closed; }
     }

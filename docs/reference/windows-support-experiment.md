@@ -234,6 +234,19 @@ process-fact and Codex thread-id checks pass, with daemon typecheck passing.
 Only the owned child was observed/stopped; no authentication file, existing
 provider process, thread database or fleet session was read or changed.
 
+## Restart and native-turn empty-home consumers (2026-10-30)
+
+The default Windows restart IO still projected empty HOME over USERPROFILE;
+the owned process fixture reproduced that independently of the thread-id
+resolver. It now uses the nonempty observed profile. Restart preflight,
+shell-backed relaunch, peer-home reporting and native-turn lookup also let
+empty CODEX_HOME fall through to the observed HOME's default .codex directory.
+No nonempty selection is replaced. Adjacent process/restart checks report
+148 passed and one pending; a separate added public-service plan fixture
+passes with empty CODEX_HOME and records no stop/relaunch effects. Daemon
+typecheck passes. Native logs, credentials and signals in that plan are mocked;
+only the separate owned native child is actually observed and stopped.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

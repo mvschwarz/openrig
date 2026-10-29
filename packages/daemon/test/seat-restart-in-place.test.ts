@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -40,6 +41,7 @@ const HOME = "/home/u/.codex";
 type Shape = "shell_backed" | "direct_native";
 
 interface WorldOptions {
+  relaunchHome?: string;
   shape?: Shape;
   runningArgs?: string;
   runningArgv?: string[];
@@ -198,7 +200,7 @@ function world(options: WorldOptions = {}) {
         + `${binding.effort ? ` -c 'model_reasoning_effort="${binding.effort}"'` : ""} -s workspace-write`
         + `${running?.networkOverride ? " -c 'sandbox_workspace_write.network_access=true'" : ""} resume`
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
-      return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
+      return { ok: true as const, core, command: `env CODEX_HOME='${options.relaunchHome ?? HOME}' ${core}` };
     },
     async sendResumeCommand(_session: string, command: string, resumeToken: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       launches.push({ command, resumeToken });
@@ -273,6 +275,14 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it("plans from the default process home when CODEX_HOME is explicitly empty without stopping the seat", async () => {
+    const root = path.join(path.parse(process.cwd()).root, "synthetic-restart-home"), home = path.join(root, ".codex");
+    const w = world({ relaunchHome: home, facts: { 200: facts({ env: { HOME: root, CODEX_HOME: "" } }), 100: facts({ env: { HOME: root, CODEX_HOME: "" } }) } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, codexHome: home });
+    expect(w.relaunched).toBe(false);
+    expect(w.launches).toEqual([]);
+    expect(w.calls).toEqual([]);
+  });
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
