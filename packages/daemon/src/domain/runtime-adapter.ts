@@ -97,6 +97,8 @@ export interface ReadinessResult {
   code?: string;
   /** Ready because the pane's process proved the seat with no launch record (#1477): the screen alone would not have. */
   provedWithoutLaunch?: boolean;
+  /** Not ready, and no wait can change that (#2277: the launched runtime wasn't found): startup ends at once with `reason`. */
+  failed?: true;
 }
 
 export const ATTENTION_REQUIRED_READINESS_CODES = new Set([

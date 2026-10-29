@@ -744,7 +744,10 @@ export class StartupOrchestrator {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
           return this.fail(input, "attention_required", errors, undefined, isFreshLaunch || (forkContext ?? false), undefined, false, "readiness_check", hasPendingReadinessWork);
         }
-        errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
+        // #2277: a failure no wait can change ends startup now, with its own reason rather than a timeout.
+        errors.push(readiness.failed
+          ? `Startup failed: ${readiness.reason ?? "unknown"}`
+          : `Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
         return this.fail(input, forkContext ? "attention_required" : "failed", errors, undefined, forkContext ?? false, undefined, false, "readiness_check", hasPendingReadinessWork);
       }
     } catch (err) {
@@ -1001,7 +1004,7 @@ export class StartupOrchestrator {
     while (true) {
       const result = await adapter.checkReady(binding);
       if (result.ready) return result;
-      if (isAttentionRequiredReadinessCode(result.code)) {
+      if (isAttentionRequiredReadinessCode(result.code) || result.failed) {
         return result;
       }
 

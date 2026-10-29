@@ -50,6 +50,21 @@ export interface ClaudeAdapterFsOps {
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
+/** #2277: the shell's own not-found line for the launched Claude, from the last lines of a pane back at its shell: bash's
+ *  `claude: command not found`, sh's `claude: not found`, zsh's `command not found: claude`, or `No such file or directory`
+ *  naming the launch's executable (a managed launch runs its resolved path, which can be a versioned file). */
+function claudeNotFoundLine(paneContent: string, executable: string | undefined): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse().find((line) =>
+    /(?:^|[\s:])claude: (?:command )?not found$/.test(line) || /command not found: claude$/.test(line)
+    || (line.endsWith("No such file or directory") && (executable ? line.includes(executable) : /\/claude['’]?: No such file or directory$/.test(line))),
+  ) ?? null;
+}
+
+function claudeNotFoundReason(line: string): string {
+  return `claude wasn't found when the launch ran (the pane shows: ${line}). Claude Code may have been updating or being reinstalled `
+    + "at that moment; relaunch this seat once claude is back.";
+}
+
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
  * and delivers startup files via guidance merge, skill install, or tmux send-text.
@@ -459,6 +474,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         code: "awaiting_runtime",
       };
     }
+    // A proven idle shell that printed not-found for the launched Claude can't recover, so readiness says why and ends.
+    const notFound = probe.code === "returned_to_shell"
+      ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
+    if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell", failed: true };
 
     if (probe.status === "resumed") return "provedWithoutLaunch" in probe ? { ready: true, provedWithoutLaunch: true } : { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -772,10 +791,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     if (await this.paneReturnedToShell(binding, finalCommand)) {
+      const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
       return {
         ok: false,
         probe: probeEvidence,
-        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
     }
