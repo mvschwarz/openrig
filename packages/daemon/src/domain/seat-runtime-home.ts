@@ -1,6 +1,7 @@
 import { ANTHROPIC_PROFILE_ENV, OUTRANKING_TOKEN_ENV } from "./claude-credential-precedence.js";
 import os from "node:os";
 import path from "node:path";
+import { readPlatformEnv } from "./platform-env.js";
 import type Database from "better-sqlite3";
 import { parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 
@@ -119,5 +120,5 @@ export function withoutRuntimeHomes(env: SeatEnv): SeatEnv {
  *  `~/.claude`. */
 export function claudeConfigRootFor(db: Database.Database, nodeId: string | null | undefined,
   env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir()): string {
-  return seatRuntimeHome(db, nodeId, "claude-code").home ?? env.CLAUDE_CONFIG_DIR ?? path.join(homeDir, ".claude");
+  return seatRuntimeHome(db, nodeId, "claude-code").home ?? readPlatformEnv(env, "CLAUDE_CONFIG_DIR") ?? path.join(homeDir, ".claude");
 }

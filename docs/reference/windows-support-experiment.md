@@ -1560,3 +1560,9 @@ The complete OMP-runner file passes 53/53. The added synthetic pipeline case che
 The daemon's metadata-only Codex reader retained a separate exact-key HOME/CODEX_HOME lookup after the CLI resolver had gained native Windows lookup. It now uses the same environment-key semantics while retaining account-home fallback, profile-name-only directory listing and the six-column seat registry contract. It still never opens saved profile contents.
 
 Both complete metadata-reader files pass 8/8 on Windows. Owned temporary directories cover lowercase home keys and a blank canonical CODEX_HOME winning over its nonempty lowercase duplicate, alongside the existing explicit-home, absent-home, empty-home and registry behavior. No personal credential directory is read.
+
+### Native provider account projection and Claude reader roots (2026-10-30)
+
+Provider status still selected its displayed default account homes with exact environment properties, and the shared Claude config-root reader did the same. Both now use native environment lookup for their existing HOME/CODEX_HOME/CLAUDE_CONFIG_DIR selections. Stored per-seat account selections keep precedence; the declarative seat-env naming contract is unchanged.
+
+A real migrated SQLite integration case seeds live Codex and Claude seats and supplies an owned synthetic copied environment with lowercase home keys. Status selects the expected account roots, the Claude config reader selects that same root, and no provider is started or file written beneath the fixture home. The complete new file and seat-runtime-home file pass 11/11. Four failures in the latter initially exposed hardcoded POSIX expected paths; the expectations now use host-native separators while retaining member/rig precedence, normalization and distinct-home assertions. Comprehensive provider/runtime acceptance remains open.
