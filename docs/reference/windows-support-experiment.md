@@ -2247,3 +2247,21 @@ not replace unavailable file-symlink coverage. The adjacent plugin-list fixture
 now uses the native path-list delimiter rather than hard-coded colons, matching
 the existing implementation. Combined seat-storage checks pass 22/22; daemon
 TypeScript checking passes. No live seat material or deployment was changed.
+
+## Native-cased seat skill records (2026-10-30)
+
+The record reader still used case-sensitive prefixes independently of seat
+write admission. An owned projection record with a different Windows casing
+was ignored, so a missing skill was not restored despite unchanged recorded
+source bytes. Record-root admission now uses native strict containment too.
+Replay's missing/refused-path comparison, kept/refused report deduplication and
+empty-owned-folder traversal use the same native path semantics where needed.
+Hash matching, source-change refusal and anchored no-link checks are unchanged.
+
+The restoration regression failed before repair. The fixture now verifies
+restore/readback, preservation and single reporting of an edited file, removal
+of unchanged recorded bytes and their emptied folder, retained recovery record,
+and suppression of replay after the recorded source changes. All operations
+use this test's synthetic files only. Combined storage checks pass 23/23 and
+daemon TypeScript checking passes. This covers the exercised record/replay
+paths, not a claim that all skill or Windows parity work is complete.

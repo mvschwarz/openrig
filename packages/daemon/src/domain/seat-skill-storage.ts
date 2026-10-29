@@ -418,7 +418,7 @@ export function seatSkillReplay(input: {
 }): { skipEntryIds: Set<string>; skipFiles: Set<string>; warnings: string[] } {
   const { paths } = input;
   const notPutBack = [...input.rehydration.missing, ...input.rehydration.refused].map((f) => nodePath.resolve(f));
-  const blocked = (target: string) => notPutBack.some((f) => f === target || f.startsWith(target + nodePath.sep));
+  const blocked = (target: string) => notPutBack.some((f) => nodePath.relative(target, f) === "" || seatDescendant(target, f));
   const kept = seatSkillsToKeep(input.entries, paths);
   const skipEntryIds = new Set(kept.keep);
   const warnings = [...kept.warnings];
@@ -488,8 +488,8 @@ export function seatAdditionLocations(paths: SeatSkillPaths): string[] {
 /** Every file OpenRig recorded writing into this seat's skills or launch additions: its recorded hash and source. */
 function recordedSeatSkillFiles(paths: SeatSkillPaths): Map<string, { sha256: string; source: string }> {
   const out = new Map<string, { sha256: string; source: string }>();
-  const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)].map((dir) => nodePath.resolve(dir) + nodePath.sep);
-  const inside = (file: string) => roots.some((root) => file.startsWith(root));
+  const roots = [paths.skillsRoot, ...seatAdditionLocations(paths)];
+  const inside = (file: string) => roots.some((root) => seatDescendant(root, file));
   try {
     const manifest = JSON.parse(fs.readFileSync(paths.manifestPath, "utf8")) as { skills?: unknown };
     for (const skill of Array.isArray(manifest.skills) ? manifest.skills as Array<Record<string, unknown>> : []) {
@@ -567,7 +567,9 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   for (const dir of [paths.skillsRoot, ...seatAdditionLocations(paths)]) {
     // A linked location is refused above, file by file; nothing is walked through it.
     if (dir !== paths.skillsRoot && lexists(dir) && !anchored(seatsAnchor(paths.root), dir, "folder")) continue;
-    for (const file of leftovers(dir)) if (!out.kept.includes(file) && !out.refused.includes(file)) out.kept.push(file);
+    for (const file of leftovers(dir)) {
+      if (!out.kept.some(kept => nodePath.relative(kept, file) === "") && !out.refused.some(refused => nodePath.relative(refused, file) === "")) out.kept.push(file);
+    }
   }
   // Nothing points at the storage any more: no Claude plugin, no Codex catalog (both are rebuilt on a restore). Each is
   // removed only while it is exactly what OpenRig wrote: the plugin manifest is a constant, and the catalog's digest
@@ -593,7 +595,7 @@ export function cleanSeatSkills(paths: SeatSkillPaths, opts: { dropRecords?: boo
   const anchor = seatsAnchor(paths.root);
   const emptied = new Set<string>();
   for (const file of removedFiles) {
-    for (let dir = nodePath.dirname(nodePath.resolve(file)); dir.startsWith(anchor + nodePath.sep); dir = nodePath.dirname(dir)) emptied.add(dir);
+    for (let dir = nodePath.dirname(nodePath.resolve(file)); seatDescendant(anchor, dir); dir = nodePath.dirname(dir)) emptied.add(dir);
   }
   for (const dir of [...emptied].sort((a, b) => b.split(nodePath.sep).length - a.split(nodePath.sep).length)) {
     try { if (anchored(anchor, dir, "folder") && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}

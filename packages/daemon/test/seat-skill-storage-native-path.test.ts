@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { insideSeatStorage, insideSeatStorageFolder, seatSkillPaths, writeInsideSeatStorage } from "../src/domain/seat-skill-storage.js";
+import { cleanSeatSkills, insideSeatStorage, insideSeatStorageFolder, recordSeatSkillWrite, rehydrateSeatSkills, seatSkillPaths, seatSkillReplay, writeInsideSeatStorage } from "../src/domain/seat-skill-storage.js";
 
 let home: string | undefined;
 afterEach(() => { if (home) rmSync(home, { recursive: true, force: true }); });
@@ -27,4 +27,27 @@ it.runIf(process.platform === "win32")("accepts native casing for the same seat 
   expect(insideSeatStorageFolder(paths.root.toUpperCase(), linked)).toBe(false);
   expect(insideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"))).toBe(false);
   expect(() => writeInsideSeatStorage(paths.root.toUpperCase(), join(linked, "SKILL.md"), "not written")).toThrow(/not inside/);
+});
+it.runIf(process.platform === "win32")("restores and cleans native-cased projection records while preserving edits", () => {
+  home = mkdtempSync(join(tmpdir(), "seat-record-native-"));
+  const paths = seatSkillPaths({ rigId: "rig", logicalId: "worker", runtime: "claude-code" }, home);
+  const source = join(home, "source.md"), file = join(paths.skillsRoot, "fixture", "SKILL.md");
+  const original = "synthetic recorded skill\n";
+  writeFileSync(source, original);
+  writeInsideSeatStorage(paths.root, file, original);
+  recordSeatSkillWrite(paths.skillsRoot, file.toUpperCase(), source, original);
+  unlinkSync(file);
+  expect(rehydrateSeatSkills(paths).restored.map(value => value.toLowerCase())).toEqual([file.toLowerCase()]);
+  expect(readFileSync(file, "utf8")).toBe(original);
+  writeFileSync(file, "person's edit\n");
+  expect(cleanSeatSkills(paths).kept.map(value => value.toLowerCase())).toEqual([file.toLowerCase()]);
+  expect(readFileSync(file, "utf8")).toBe("person's edit\n");
+  writeFileSync(file, original);
+  expect(cleanSeatSkills(paths).removed.map(value => value.toLowerCase())).toEqual([file.toLowerCase()]);
+  expect(existsSync(join(paths.skillsRoot, "fixture"))).toBe(false);
+  expect(existsSync(paths.projectionsPath)).toBe(true);
+  writeFileSync(source, "changed source\n");
+  const rehydration = rehydrateSeatSkills(paths);
+  expect(rehydration.missing.map(value => value.toLowerCase())).toEqual([file.toLowerCase()]);
+  expect(seatSkillReplay({ paths, rehydration, entries: [{ category: "skill", effectiveId: "fixture", absolutePath: source }], files: [] }).skipEntryIds.has("fixture")).toBe(true);
 });
