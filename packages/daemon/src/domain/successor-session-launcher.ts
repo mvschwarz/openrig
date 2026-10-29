@@ -369,7 +369,7 @@ export class SuccessorSessionLauncher {
       if (panes.length !== 1) return { ok: false, code: "pane_unresolved", message: "The staging session should have exactly one new pane." };
       const pane = panes[0]!.id;
       input.onPaneCreated(pane);
-      await this.tmuxOptionDefaults?.applyToFreshSession(input.stagingSession);
+      const optionWarnings = await this.tmuxOptionDefaults?.applyToFreshSession(input.stagingSession) ?? [];
       shell ??= (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
       const blank = await this.verifyPaneIsBlankShell(pane, shell);
       if (!blank.ok) {
@@ -377,7 +377,8 @@ export class SuccessorSessionLauncher {
       }
       const started = await this.startAgent(input.node, input.stagingSession, pane, input.node.cwd ?? undefined,
         undefined, input.occupantGeneration, { ...input.staged, canonicalSession: input.canonicalSession });
-      return started.ok ? { ...started, tmuxPane: pane } : started;
+      return started.ok ? { ...started, tmuxPane: pane,
+        ...(optionWarnings.length ? { notes: [...optionWarnings, ...(started.notes ?? [])] } : {}) } : started;
     } catch (err) {
       return { ok: false, code: "successor_launch_failed", message: (err as Error).message };
     }

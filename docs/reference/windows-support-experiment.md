@@ -189,6 +189,17 @@ actual adapter argv and failure reporting; daemon typecheck passes. No running
 session or system clipboard was changed. Real native copy/paste acceptance
 remains unverified; source support and mocked transport are separate evidence.
 
+## Staged successor option warnings (2026-10-30)
+
+The staging successor consumer discarded fresh-session option warnings.
+It now returns them through the existing notes channel alongside prepared
+materials/runtime notes; an unsupported native clipboard option remains
+nonfatal. A complete staged-success fixture reproduces the missing warning
+before the fix, then verifies both notes survive. The initial incomplete
+fixture lacked staged.prepare and is not the causal baseline. Successor,
+ordinary launcher and defaults checks pass 84/84; daemon typecheck passes.
+No live handover, running session or clipboard was changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

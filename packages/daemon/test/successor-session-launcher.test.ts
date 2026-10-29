@@ -90,6 +90,17 @@ describe("SuccessorSessionLauncher", () => {
     expect(createSession).not.toHaveBeenCalled(); expect(onPaneCreated).not.toHaveBeenCalled(); expect(launchHarness).not.toHaveBeenCalled();
   });
 
+  it("retains native fresh-server option warnings in staged successor notes", async () => {
+    getDefaultShell.mockResolvedValue("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+    getPaneCommand.mockResolvedValue("powershell.exe");
+    const applyToFreshSession = vi.fn(async () => ["psmux clipboard option unavailable for owned-stage"]);
+    const defaults = { applyToFreshSession } as unknown as TmuxOptionDefaultsApplier;
+    const staged = { prepare: async () => ["materials note"] } as Parameters<SuccessorSessionLauncher["stageSuccessor"]>[0]["staged"];
+    const result = await launcher(defaults, true).stageSuccessor({ node: { id: "node-1", runtime: "codex" }, stagingSession: "owned-stage", canonicalSession: "dev-impl@rig", occupantGeneration: "gen", onPaneCreated: vi.fn(), staged });
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: true, notes: ["psmux clipboard option unavailable for owned-stage", "materials note"] });
+    expect(applyToFreshSession).toHaveBeenCalledExactlyOnceWith("owned-stage");
+  });
+
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({
       node: { id: "node-1", runtime: "codex", cwd: "/w", seatEnv: { MODE: "fast", REGION: "eu" } },
