@@ -144,6 +144,16 @@ describe("HistoryQuery", () => {
       expect(exec).not.toHaveBeenCalled();
     });
 
+    it("reports a listing error rather than no history when the directory became a file", async () => {
+      writeFileSync(join(tmpDir, "replaced-rig"), "not a transcript directory");
+      const exec: ExecDep = vi.fn(async () => ({ stdout: "", exitCode: 2 }));
+      const hq = new HistoryQuery({ transcriptsRoot: tmpDir, exec });
+      expect(await hq.search("replaced-rig", "deployment strategy")).toMatchObject({
+        backend: "none", insufficient: true, excerpts: [], error: expect.stringContaining("could not be listed"),
+      });
+      expect(exec).toHaveBeenCalledTimes(1);
+    });
+
     it("uses native reading on Windows, otherwise reports both failed tools", async () => {
       const rigDir = join(tmpDir, "my-rig");
       mkdirSync(rigDir, { recursive: true });

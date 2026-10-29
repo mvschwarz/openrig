@@ -269,7 +269,11 @@ export class HistoryQuery {
     }
 
     // rg failed (exit code >= 2), fall back to grep
-    const logFiles = this.getLogFiles(rigDir);
+    let logFiles: string[];
+    try { logFiles = this.getLogFiles(rigDir); }
+    catch {
+      return { backend: "none", excerpts: [], insufficient: true, error: "Transcript directory could not be listed. Check that it is a readable directory." };
+    }
     if (logFiles.length === 0) {
       return { backend: "grep", excerpts: [], insufficient: true };
     }
@@ -431,12 +435,8 @@ export class HistoryQuery {
   }
 
   private getLogFiles(dir: string): string[] {
-    try {
-      return readdirSync(dir)
-        .filter((f) => f.endsWith(".log"))
-        .map((f) => join(dir, f));
-    } catch {
-      return [];
-    }
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".log"))
+      .map((f) => join(dir, f));
   }
 }
