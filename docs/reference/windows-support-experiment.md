@@ -205,8 +205,21 @@ is queried once per scan, with fresh queries on subsequent scan refresh; this
 does not produce a positive cmux identity. Six process/discovery suites passed
 68 tests with three existing platform skips, and workspace lint/typecheck passed.
 These checks do not prove complete Windows restore or every native process
-architecture. Initial private-config startup experiments still failed to start
-their owned receiver; no initial-launch replacement is claimed or deployed.
+architecture. Two initial private-config startup experiments with a custom
+default-command failed to start their owned receiver. A subsequent bare-session
+fixture, launching its receiver through the existing native launch adapter,
+verified exact metadata and inheritance into the first shell's child. This case
+is now a repository test: the three focused native environment suites pass six
+tests. All owned namespaces and receiver processes were stopped and temporary
+files removed. This proves a startup primitive, not a production initial-launch
+replacement: TmuxAdapter still passes new-session/respawn assignments in argv.
+
+A separate native comparison established that existing `new-session -e` values
+are overwritten by a user-config assignment. A private wrapper must therefore
+apply its assignments before sourcing the selected user config to match that
+baseline, rather than silently changing precedence. Warm-server adoption,
+reserved routing variables, config metadata and private-file lifetimes still
+need verification before integrating the initial path.
 
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
