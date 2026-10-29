@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { shellQuote } from "../cross-host-executor.js";
@@ -751,7 +751,6 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
     configStore: new ConfigStore(),
     platform: platform as NodeJS.Platform,
     mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
-    checkWritable: (p: string) => accessSync(p, constants.W_OK),
     fetch: globalThis.fetch,
   };
 }

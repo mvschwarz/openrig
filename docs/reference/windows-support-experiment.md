@@ -1689,3 +1689,17 @@ passed on Windows. This does not establish desktop or provider acceptance.
 The separate frozen e36cef0 CLI run completed with stable source: 5,983 tests,
 5,830 passed, 97 failed and 56 pending. It predates subsequent source fixes;
 these counts are retained as that exact snapshot rather than current-head acceptance.
+
+## Doctor/setup writable-directory parity follow-up (2026-10-30)
+
+The production doctor and setup verification dependencies still replaced the
+shared writable-directory check with `access(W_OK)`, bypassing the native DACL
+probe used by daemon preflight. Both now inherit the shared check. Explicit
+injected test checks remain supported. An owned temporary directory with an
+actual deny-create DACL is reported unwritable; restoring its DACL makes the
+same doctor check pass, and neither result leaves a probe file.
+
+The new native doctor case passed. Existing preflight and setup suites passed;
+the combined preflight/setup/doctor run had 130 passed and two existing daemon
+distribution fixture path failures in doctor. Those failures are also present
+in the earlier frozen CLI report and are not reported as resolved here.

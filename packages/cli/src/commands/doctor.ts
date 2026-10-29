@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
@@ -519,7 +519,6 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
-        checkWritable: (dirPath: string) => accessSync(dirPath, constants.W_OK),
         specPath: opts.spec ? path.resolve(opts.spec) : undefined,
         // Returns null when the live side is unavailable; a known foreign owner is reported. The conformance check treats null as
         // "unknown" and skips — an unreachable daemon must never read as a matching topology.
