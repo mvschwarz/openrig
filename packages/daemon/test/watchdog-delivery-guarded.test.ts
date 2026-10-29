@@ -12,7 +12,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
 import type { ComposerSnapshot } from "../src/domain/composer-prompts.js";
-import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { OutboxHandler, OutboxHandlerError } from "../src/domain/outbox-handler.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -366,5 +366,38 @@ describe("current parked-owner reminders", () => {
     expect(await f.transport.send(seat, "Peer context")).toMatchObject({ ok: true });
     expect(await f.deliver({ targetSession: seat, message: "Unrelated reminder" }, lone("other", "occ"))).toMatchObject({ status: "ok" });
     expect(f.submissions).toHaveLength(2);
+  });
+});
+
+
+describe("watchdog positive no-input outcomes", () => {
+  it("preserves the typed quota rejection through the real engine history", async () => {
+    const f = fixture();
+    const jobs = new WatchdogJobsRepository(f.db);
+    const history = new WatchdogHistoryLog(f.db);
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: async () => { throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full; no input was written."); } } });
+    const engine = new WatchdogPolicyEngine({ jobsRepo: jobs, historyLog: history, eventBus: new EventBus(f.db), deliver });
+    const job = jobs.register({ policy: "periodic-reminder", targetSession: seat, intervalSeconds: 60, registeredBySession: seat, specYaml: "message: Still owed\n" });
+    await engine.evaluate(job);
+    expect(history.listForJob(job.jobId, 1)[0]).toMatchObject({ deliveryStatus: "failed", evaluationNotes: { deliveryCode: "retained_quota_full", deliveryInputPhase: "not_reached" } });
+    expect(f.pastes).toHaveLength(0);
+  });
+
+  it("does not infer no input from an untyped error with the same text", async () => {
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: async () => { throw new Error("Held-message quota is full; no input was written."); } } });
+    const result = await deliver({ targetSession: seat, message: "Still owed" }, { jobId: "quota-control", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "one" });
+    expect(result).not.toHaveProperty("code");
+    expect(result).not.toHaveProperty("inputPhase");
+  });
+
+  it("excludes bound terminal-only parked reminders while preserving other deliberate deliveries", async () => {
+    const sends = vi.fn().mockResolvedValue({ ok: true });
+    const deliver = makeWatchdogDeliver({ sessionTransport: { send: sends }, isTerminalSeat: () => true } as Parameters<typeof makeWatchdogDeliver>[0]);
+    const refused = await deliver({ targetSession: seat, message: "Parked wake" }, { jobId: "terminal-policy", policy: PARKED_OWNER_POLICY_NAME, occurrenceId: "one" });
+    expect(refused).toMatchObject({ status: "failed", code: "terminal_seat", inputPhase: "not_reached" });
+    expect(sends).not.toHaveBeenCalled();
+    const deliberate = await deliver({ targetSession: seat, message: "Explicitly requested terminal text" }, { jobId: "terminal-explicit", policy: "periodic-reminder", occurrenceId: "two" });
+    expect(deliberate.status).toBe("ok");
+    expect(sends).toHaveBeenCalledTimes(1);
   });
 });
