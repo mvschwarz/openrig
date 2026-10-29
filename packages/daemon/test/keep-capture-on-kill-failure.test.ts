@@ -73,7 +73,10 @@ describe.skipIf(process.platform === "win32")("native failed-kill transcript con
     } finally {
       stopTranscriptRotation(sessionName);
       await runFile("tmux", ["-S", socket, "kill-server"], { env }).catch(() => {});
-      db.close(); fs.rmSync(temp, { recursive: true, force: true }); fs.rmSync(socketDir, { recursive: true, force: true });
+      db.close();
+      // tmux's children can still finish writing as its server exits.
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+      fs.rmSync(socketDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
     }
   });
 });
