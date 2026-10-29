@@ -130,6 +130,25 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  it("finds a configured instance spec without HOME or a literal tilde directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-native-home-"));
+    const previousHome = process.env.HOME, previousInstance = process.env.OPENRIG_HOME;
+    try {
+      delete process.env.HOME;
+      process.env.OPENRIG_HOME = root;
+      const rigDir = path.join(root, "shared-docs", "rigs", "test-rig");
+      fs.mkdirSync(rigDir, { recursive: true });
+      fs.writeFileSync(path.join(rigDir, "rig.yaml"), "name: test-rig\n");
+      const result = new RestoreCheckService(mockDeps({ exists: file => fs.existsSync(file) })).check({ noQueue: true, noHooks: true }) as any;
+      expect(result.checks.find((entry: { check: string }) => entry.check === "rig.test-rig.spec-present"))
+        .toMatchObject({ status: "green", evidence: `Spec present at ${path.join(rigDir, "rig.yaml")}` });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+      if (previousInstance === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = previousInstance;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["ready", "failed", "attention_required"])("identity projection advice preserves the stored %s outcome", stored => {
     const db = createFullTestDb();
     try {

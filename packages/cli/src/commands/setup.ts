@@ -612,7 +612,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 6. tmux config
-  const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
+  const setupEnv = deps.env ?? process.env;
+  const setupHome = setupEnv["HOME"] || (platform === "win32" ? setupEnv["USERPROFILE"] : undefined) || homedir();
+  const TMUX_CONF = `${setupHome}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
 
   try {
@@ -644,7 +646,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // Informational only: never enable inheritance automatically or add a setup prompt.
-  const tmuxConfigs = [TMUX_CONF, `${process.env["XDG_CONFIG_HOME"] ?? `${process.env["HOME"] ?? "~"}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const tmuxConfigs = [TMUX_CONF, `${setupEnv["XDG_CONFIG_HOME"] || `${setupHome}/.config`}/tmux/tmux.conf`, ...(platform === "win32" ? [] : ["/etc/tmux.conf"])];
   const customTmux = tmuxConfigs.some(file => {
     try {
       const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";

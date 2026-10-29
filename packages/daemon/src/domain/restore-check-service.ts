@@ -1228,7 +1228,7 @@ export class RestoreCheckService {
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
     // OPR.0.3.2.14 — subpath scrubbed (internal-team layout → generic placeholder).
-    const substrateRoot = this.deps.substrateRoot ?? join(process.env["HOME"] ?? "~", ".openrig", "shared-docs");
+    const substrateRoot = this.deps.substrateRoot ?? getCompatibleOpenRigPath("shared-docs");
     const rigRoot = join(substrateRoot, "rigs", rig.name);
     const rigYaml = join(rigRoot, "rig.yaml");
 

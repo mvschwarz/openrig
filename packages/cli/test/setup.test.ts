@@ -37,6 +37,20 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   };
 }
 
+it.each([undefined, ""])("native setup resolves USERPROFILE when HOME is %s without a literal tilde path", async homeValue => {
+  const writes = vi.fn(), reads: string[] = [];
+  const profile = "C:/synthetic 用户/profile";
+  const result = await runSetup(makeDeps({
+    platform: "win32", env: { HOME: homeValue, USERPROFILE: profile, XDG_CONFIG_HOME: "C:/synthetic-config" },
+    writeFile: writes, readFile: file => { reads.push(file); return null; },
+  }), { herdr: false, ghostty: false });
+  expect(result.steps.find(step => step.id === "tmux_config")?.status).toBe("applied");
+  expect(writes.mock.calls.some(([file]) => file === `${profile}/.tmux.conf`)).toBe(true);
+  expect(writes.mock.calls.some(([file]) => String(file).startsWith("~"))).toBe(false);
+  expect(reads).toContain("C:/synthetic-config/tmux/tmux.conf");
+  expect(reads).not.toContain("/etc/tmux.conf");
+});
+
 function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
   const orig = console.log;
