@@ -325,7 +325,8 @@ export function resolveNotesFile(absPath: string): NotesFileResolution | null {
     const candidate = path.join(absPath, name);
     try {
       if (!fs.statSync(candidate).isFile()) continue;
-      fs.accessSync(candidate, fs.constants.R_OK);
+      const fd = fs.openSync(candidate, "r");
+      fs.closeSync(fd);
       return { path: candidate, name };
     } catch {
       // Missing, unreadable, and non-file candidates all fall through to the next name.
