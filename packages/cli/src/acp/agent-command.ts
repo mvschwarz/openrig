@@ -12,7 +12,8 @@ export function resolveAcpAgentCommand(command: string, cwd: string, env: NodeJS
   const directories = searchPath.split(path.delimiter).map(value => path.resolve(cwd, value.replace(/^"(.*)"$/, "$1")));
   const explicit = /[\\/]/.test(command);
   const bases = explicit ? [path.resolve(cwd, command)] : directories.map(directory => path.join(directory, command));
-  const extensions = path.extname(command) ? [""] : [".com", ".exe", ".bat", ".cmd"];
+  const extensions = path.extname(command) ? [""]
+    : (readPlatformEnv(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
   for (const base of bases) for (const extension of extensions) {
     const candidate = base + extension;
     if (!existsSync(candidate) || !statSync(candidate).isFile()) continue;

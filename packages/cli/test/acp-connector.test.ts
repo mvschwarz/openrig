@@ -88,6 +88,8 @@ describe("rig acp run", () => {
     const shim = join(bin, "fixture-acp.cmd");
     writeFileSync(shim, `@ECHO off\r\nSET dp0=%~dp0\r\nSET "_prog=node"\r\n"%_prog%" "%dp0%\\${local ? ".." : "node_modules"}\\@fixture\\acp-agent\\agent.mjs" %*\r\n`);
     vi.stubEnv("PATH", `${bin};${dirname(process.execPath)}`);
+    vi.stubEnv("PATHEXT", ".CMD;.EXE");
+    writeFileSync(join(bin, "fixture-acp.exe"), "synthetic decoy: must not execute when CMD precedes EXE");
     const args = ["中文 space", "apostrophe'", 'quote"', "", "trailing\\", "%OPENRIG_NODE_ID%", "amp&word"];
     const outcome = await runAcpAssignment(q.queue, { ...run, agent: [explicit ? shim : "fixture-acp", ...args] });
     expect(outcome).toMatchObject({ kind: "completed", text: "working… NATIVE-PONG" });

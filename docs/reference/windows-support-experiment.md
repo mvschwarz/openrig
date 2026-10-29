@@ -2118,3 +2118,22 @@ delete-sharing lock refuses publication. The ACL/readonly fixture file passes
 replacement now passes; the remaining three are file-symlink creation EPERM and
 two POSIX mode-bit assertions. CLI TypeScript checking and daemon build pass.
 These are source-level owned fixtures, not fleet activation or full acceptance.
+
+## ACP selected PATHEXT (2026-10-30)
+
+Windows ACP command selection previously hard-coded COM/EXE/BAT/CMD order,
+ignoring the selected launch environment's PATHEXT. A synthetic command-selection
+regression reproduced selection of an EXE despite a CMD-first environment.
+The resolver now reads PATHEXT with native environment-key casing and retains
+the configured order. Undefined PATHEXT uses the previous default; an explicitly
+empty list does not introduce default extension candidates. Explicit extensions
+retain their direct lookup. Unresolved commands still reach ordinary spawn
+semantics; this does not claim PATHEXT controls CreateProcess itself.
+
+Five focused checks pass: resolver selection/empty/casing and four actual
+synthetic npm ACP runs (global/local install, explicit/bare command) with exact
+argument readback. Their CMD-first environment contains a competing synthetic
+EXE that must not be selected. No shell fallback or unrecognized batch execution
+was added. CLI TypeScript checking passes. An earlier broader connector run
+also encountered an EPERM during cleanup of its detached-process fixture; that
+run is not recorded as green acceptance, and this change does not resolve it.
