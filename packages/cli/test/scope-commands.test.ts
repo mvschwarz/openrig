@@ -1412,7 +1412,7 @@ describe("rig scope audit ordinal naming", () => {
     expect(payload.slice.name).toBe(`${String(previous + 1).padStart(2, "0")}-next`);
     expect(payload.slice.id).toBe(`OPR.99.0.1.${previous + 1}`);
     const audited = await publicScope(["audit", "--mission", "backlog"]);
-    expect(audited.exitCode).toBe(0);
+    expect(audited.exitCode, audited.stdout + audited.stderr).toBe(0);
     const audit = JSON.parse(audited.stdout);
     expect(audit.ok).toBe(true);
     expect(audit.slices).toHaveLength(1);

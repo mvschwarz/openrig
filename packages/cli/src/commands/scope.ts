@@ -1315,7 +1315,7 @@ function buildAuditCommand(): Command {
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
+  const match = /^---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n---/.exec(content);
   return match ? match[1]! : null;
 }
 
