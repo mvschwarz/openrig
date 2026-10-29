@@ -28,6 +28,10 @@ describe("Windows process ancestry without fabricated foreground groups", () => 
     for (const change of [
       { command: '"C:\\pwsh.exe" -NoProfile -EncodedCommand YQ==' },
       { command: '"C:\\pwsh.exe" -File launch.ps1' },
+      // -NoExit leaves the startup command in argv forever. A sole console
+      // member cannot prove a profile/builtin command has finished executing.
+      { command: '"C:\\pwsh.exe" -NoLogo -NoExit -Command "Start-Sleep -Seconds 60"' },
+      { command: '"C:\\pwsh.exe" -NoLogo -NoExit -Command "try { . $PROFILE } catch {}; Set-PSReadLineOption -PredictionSource None"' },
       { executablePath: "C:\\different.exe" },
     ]) {
       const shell = [{ ...rows()[0]!, ...change }];

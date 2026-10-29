@@ -409,10 +409,12 @@ and how you discover which seats cannot yet describe their own job.
   subtly; keep the trace path-only.
 - Summarizing this model for another agent instead of pointing them here —
   a summary becomes another copy that can drift from its source.
-- The historical `trunk-diff.sh` entry still requires Bash, Python 3 and diff;
-  the Node scaffold and trace entries do not require those Unix tools.
+- Native `node scripts/trunk-diff.mjs ROOT STATE` uses Node and Git, without
+  Bash, Python or Unix diff. `compose-down.mjs` renders the subtree directly;
+  both preserve scaffold/stale-marker audits and skip linked trees. The `.sh`
+  entry delegates to Node. Historical `compose.py up/progress` still need Python.
 
 ## Files in this skill
 
 `templates/{SPEC,LEARNED,SOP}.md` ·
-`scripts/{compose.py, trace-due.mjs, trace-stamp.mjs, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.mjs, scaffold.sh}`
+`scripts/{compose.py, compose-down.mjs, trace-due.mjs, trace-stamp.mjs, trace-due.sh, trace-stamp.sh, trunk-diff.mjs, trunk-diff.sh, scaffold.mjs, scaffold.sh}`

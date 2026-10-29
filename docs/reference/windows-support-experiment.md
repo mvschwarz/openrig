@@ -7,6 +7,34 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Native subtree render and trunk diff, 2026-10-29
+
+`compose-down.mjs` and `trunk-diff.mjs` provide native Node entries for subtree
+rendering and baseline comparison. The historical shell entry delegates to Node.
+Diffing uses native Git with external diff/text conversion disabled, rather than
+Bash/Python/Unix diff. Baseline replacement happens only after a successful
+render/diff; a per-state exclusive lock prevents concurrent writers, and linked
+state files are refused. The renderer preserves template-only collapse, stale
+UNSEEDED warnings, names/exclusions and generated-header removal, without
+following file links or directory junctions. Failed diff or locked-state tests
+verify that existing state survives and another writer's lock is retained.
+
+Six scaffold/trace/trunk tests passed on Windows. A separate fixture matched the
+old Python subtree renderer after stdout EOL normalization, including authored,
+template-only, conflicted and excluded content. Python 3.13 was available through
+the Windows launcher, while `python3` was absent from PATH. This is a fixture
+comparison, not general Python/Node equivalence or Linux/macOS acceptance.
+Historical `compose.py up/progress` and the public refocusing trace remain Python
+entry points. A local trace ran via the existing launcher and reported unresolved
+topology/work roots; it did not change operator configuration.
+
+Default psmux bootstrap idle proof remains open. Its `-NoExit -Command` body
+sources user profile code, which can still be executing builtins with only the
+shell in the console. Command-line recognition plus a sole-member console census
+does not prove that execution ended. Eighteen native lineage/console tests passed,
+including explicit retained-command/profile refusal cases. The idle predicate
+was not broadened to treat this bootstrap as a bare shell.
+
 ## Inactive-pane input routing, 2026-10-29
 
 The psmux adapter now carries the immutable pane/window ID in its first target,
