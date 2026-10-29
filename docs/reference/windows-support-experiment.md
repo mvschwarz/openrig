@@ -273,6 +273,20 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Codex and Claude cmd ancestry consumer evidence (2026-10-30)
+
+An owned native console executable, compiled locally without provider credentials,
+now exercises both Codex and Claude process-identity consumers through the actual
+cmd-to-PowerShell staging chain. Each consumer accepts its exact executable and
+conversation argument and rejects a different conversation, a different selected
+executable, and a competing matching process. The staged file is consumed. Only
+the temporary fixture process tree and files are removed afterward.
+
+The provider-lineage and existing process-lineage selection passes 17/17; daemon
+type checking passes. The tmux foreground-command field is supplied by the test
+seam: this establishes native ancestry and argument matching, not installed
+provider lifecycle, stock psmux foreground detection, or full native acceptance.
+
 ## Native cmd pane gap identified (2026-10-30)
 
 The earlier checkpoint confirmed a coordinated implementation gap, rather
