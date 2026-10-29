@@ -139,42 +139,21 @@ export class RigExpansionService {
           id: pod.id,
           label: pod.label,
           ...(pod.summary ? { summary: pod.summary } : {}),
-          members: pod.members.map((member) => ({
-            id: member.id,
-            runtime: member.runtime,
-            ...(member.agentRef ? { agent_ref: member.agentRef } : {}),
-            ...(member.profile ? { profile: member.profile } : {}),
-            ...(member.codexConfigProfile ? { codex_config_profile: member.codexConfigProfile } : {}),
-            ...(member.claudePermissions === undefined ? {} : { claude_permissions: member.claudePermissions }),
-            ...(member.codexPermissions === undefined ? {} : { codex_permissions: member.codexPermissions }),
-            // OPR.0.4.8.3 Seam B: permission_policy rides the fragment→spec map like role.
-            // R2 (4ac243c3): PRESENCE-preserving — present-invalid values (null, …) flow
-            // to the canonical validator; only a truly absent key is omitted.
-            ...("permissionPolicy" in member && member.permissionPolicy !== undefined
-              ? { permission_policy: member.permissionPolicy }
-              : {}),
-            ...(member.cwd ? { cwd: member.cwd } : {}),
-            ...(member.model ? { model: member.model } : {}),
-            ...(member.effort === undefined ? {} : { effort: member.effort }),
-            // OPR.0.4.6.FAC1: role rides the fragment→spec map (a
-            // provided role must never be silently dropped here).
-            ...(member.role ? { role: member.role } : {}),
-            ...(member.restorePolicy ? { restore_policy: member.restorePolicy } : {}),
-            ...(member.label ? { label: member.label } : {}),
-            // OPR.0.5.6.3 repair amendment: session_source is carried FAITHFULLY —
-            // the route already normalizes valid shapes to the typed spec (whose
-            // field names are identical in snake_case form), and a present-INVALID
-            // value rides through RAW so the ONE canonical RigSpec validator
-            // rejects it structurally. A field-by-field re-map here was the
-            // original drop site (ref.version, wave-1 R2) and would crash on
-            // preserved-raw input; a faithful carry has no field list to forget.
-            // KEY PRESENCE, never truthiness, governs emission: null/false/
-            // primitive raw values must not vanish before canonical validation.
-            ...("sessionSource" in member ? { session_source: member.sessionSource } : {}),
-            ...(member.starterRef ? {
-              starter_ref: { name: member.starterRef.name },
-            } : {}),
-          })),
+          members: pod.members.map((member) => {
+            // Carry every canonical field, including invalid values, to the one
+            // RigSpec validator. Only the existing API aliases need translation;
+            // this is not a list of accepted member fields.
+            if (!member || typeof member !== "object" || Array.isArray(member)) return member;
+            const raw: Record<string, unknown> = { ...member };
+            for (const alias of ["agentRef", "codexConfigProfile", "claudePermissions", "claudeToken", "codexPermissions",
+              "permissionPolicy", "restorePolicy", "sessionSource", "starterRef"]) {
+              if (Object.prototype.hasOwnProperty.call(member, alias)) {
+                raw[alias.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)] = member[alias];
+              }
+              delete raw[alias];
+            }
+            return raw;
+          }),
           edges: pod.edges.map((edge) => ({
             kind: edge.kind,
             from: edge.from,
