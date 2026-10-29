@@ -134,8 +134,6 @@ export interface TerminalServiceDeps {
   listRigSeatsBatch?(rigNames: string[]): Promise<Map<string, LiveSeatRow[]>> | Map<string, LiveSeatRow[]>;
   /** Live seats of a pod within a rig (by rig name-or-id + pod namespace); null when the rig/pod is unknown. */
   listPodSeats(rigArg: string, podNamespace: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
-  /** Legacy display callback; authoritative scope composition uses resolveScopeView. */
-  listScopeSeats(scope: string): Promise<LiveSeatRow[] | null> | LiveSeatRow[] | null;
   /** Exact local queue episode; unavailable owners must remain in task.members. */
   resolveTaskView?(qitemId: string): Promise<TaskTerminalView | null> | TaskTerminalView | null;
   /** Authoritative scoped work in this daemon's configured index context. */

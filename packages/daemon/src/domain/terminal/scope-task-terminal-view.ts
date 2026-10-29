@@ -120,13 +120,13 @@ function selectSlice(scopes: Scope[], key: string): Scope | ScopeViewError {
   return selected;
 }
 
-function selectMission(index: ScopeIndex, key: string): { mission: Mission; sliceKeys: Set<string> } | ScopeViewError {
+function selectMission(index: ScopeIndex, key: string): { mission: Mission; sliceKeys: Set<string>; collidingKeys: Map<string, Set<string>> } | ScopeViewError {
   if (!key || key.trim() !== key || /[\\/\x00-\x1f\x7f]/.test(key)) return { code: "scope_not_found", error: "Invalid mission directory id." };
   if (index.missionIssues.length) return unavailable(index.missionIssues.join(" "));
   const matches = index.missions.filter(mission => mission.name === key);
   if (!matches.length) return { code: "scope_not_found", error: `No indexed mission exactly matches '${key}'.` };
   if (matches.length !== 1) return { code: "scope_ambiguous", error: `Multiple indexed missions match '${key}'.` };
-  const mission = matches[0]!, sliceKeys = new Set<string>();
+  const mission = matches[0]!, sliceKeys = new Set<string>(), collidingKeys = new Map<string, Set<string>>();
   if (mission.manifest) {
     try { fs.accessSync(mission.manifest, fs.constants.R_OK); }
     catch { return unavailable("The selected mission declaration is unavailable; refresh after inspecting its configured source."); }
@@ -135,11 +135,15 @@ function selectMission(index: ScopeIndex, key: string): { mission: Mission; slic
     if (slice.missionSource !== mission.source) continue;
     for (const tag of [slice.name, slice.id]) {
       if (!tag) continue;
-      if ((index.claims.get(tag)?.size ?? 0) > 1) return { code: "scope_ambiguous", error: `Indexed slice '${slice.name}' has a colliding name or id association.` };
+      if ((index.claims.get(tag)?.size ?? 0) > 1) { collidingKeys.set(tag, new Set()); continue; }
       sliceKeys.add(tag);
     }
   }
-  return { mission, sliceKeys };
+  // One bounded index pass establishes which missions can place shared keys.
+  for (const slice of index.slices) for (const tag of new Set([slice.name, slice.id])) {
+    if (tag && slice.mission) collidingKeys.get(tag)?.add(slice.mission);
+  }
+  return { mission, sliceKeys, collidingKeys };
 }
 
 /** Active typed-tag owners only, with one bounded local queue projection.
@@ -151,6 +155,7 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
   if ("code" in identities) return identities;
   const kind = view.startsWith("mission:") ? "mission" : "slice";
   let id: string, name: string, sliceKeys: Set<string>, missionKey: string | undefined, scope: Scope | undefined;
+  let collidingKeys = new Map<string, Set<string>>();
   if (kind === "slice") {
     const selected = selectSlice(identities.slices, view.slice(6));
     if ("code" in selected) return selected;
@@ -159,7 +164,7 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
   } else {
     const selected = selectMission(identities, view.slice(8));
     if ("code" in selected) return selected;
-    id = name = missionKey = selected.mission.name; sliceKeys = selected.sliceKeys;
+    id = name = missionKey = selected.mission.name; sliceKeys = selected.sliceKeys; collidingKeys = selected.collidingKeys;
   }
   // At most two linear index passes per resolve, never a scan per queue row.
   const claims = new Map(scope ? [...new Set([scope.name, scope.id].filter((key): key is string => !!key))].map(key => {
@@ -194,6 +199,13 @@ export function readScopedTaskTerminalView(db: Database.Database, view: string, 
       if (index.projectId && !belongsToProject(row.tags, index.projectId)) continue;
       const parsed = parseScopeTags(row.tags);
       if (kind === "mission") {
+        const mission = parsed.missions.size === 1 ? parsed.missions.values().next().value : undefined;
+        const unplaced = [...parsed.slices].some(key => collidingKeys.has(key)
+          && (mission === undefined || !collidingKeys.get(key)!.has(mission)));
+        if (unplaced) {
+          issues.add(`Queue row '${row.qitem_id}' has unplaceable or contradictory colliding slice tags; membership is incomplete.`);
+          continue;
+        }
         if ((missionKey && parsed.missions.has(missionKey)) || [...parsed.slices].some(tag => sliceKeys.has(tag))) selected.push(row);
         continue;
       }

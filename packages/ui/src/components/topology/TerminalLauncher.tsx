@@ -12,13 +12,13 @@
 // This is the real-data build of `fr5-launcher-mockup/` (twin-locked): the
 // structure, copy, testids, and 4 regions match the twin; the DEMO roster is
 // replaced by live seams — rig seats + pods from `useNodeInventory`, derived
-// mission/slice targets from `useSlices` (roster previewed via the review
-// agents band), saved views from `GET /api/terminal/views`, and the launch via
+// mission/slice targets from `useSlices` (roster previewed by the terminal
+// composer), saved views from `GET /api/terminal/views`, and the launch via
 // `POST /api/terminal/open { provider, view }` (the C3 canonical composer).
 // Any copy change routes back through spec-mockup, never driver improvisation.
 
 import { useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Terminal, ChevronDown, Bookmark, Layers, GitBranch, Server, Eye, Plus } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "../ui/dialog.js";
 import { StatusPip } from "../ui/status-pip.js";
@@ -28,7 +28,6 @@ import { useSelectedHostId } from "../../hooks/useHosts.js";
 import { useNodeInventory, type NodeInventoryEntry } from "../../hooks/useNodeInventory.js";
 import { useSlices } from "../../hooks/useSlices.js";
 import { useTerminalViews } from "../../hooks/useTerminalViews.js";
-import { useReviewAgents } from "../../hooks/useReviewAgents.js";
 import { terminalAuthHeaders } from "../mission-control/missionControlAuth.js";
 
 type ProviderId = "herdr" | "cmux";
@@ -47,7 +46,7 @@ export interface LauncherView {
   kind: ViewKind;
   label: string;
   sub: string;
-  /** null = a derived roster resolved lazily (mission/slice) via the review band. */
+  /** null = a derived roster resolved lazily (mission/slice) via the terminal composer. */
   seats: Seat[] | null;
   /** spans another rig / all-read-only ⇒ read-only by construction (tmux attach -r). */
   crossRig?: boolean;
@@ -63,6 +62,18 @@ export interface OpenViewResult {
   pages: number;
   error?: string;
   code?: string;
+}
+
+interface LauncherPreview {
+  planId: string;
+  composed: {
+    opened: { seat: string; readOnly: boolean }[];
+    absent: OpenViewResult["absent"];
+    degraded: OpenViewResult["degraded"];
+    pages: { seat: string; readOnly: boolean }[][];
+    columns?: number;
+  };
+  task?: { complete: boolean; issues: string[] };
 }
 
 /**
@@ -154,7 +165,7 @@ export function nodeToSeat(n: NodeInventoryEntry): Seat {
  * is unit-testable without rendering the (Radix) dialog. Order = the founder's
  * "choose what to open": this rig → a pod → a mission/slice → a saved view.
  * Derived mission/slice views carry `seats: null` (their roster resolves live at
- * open, previewed via the review agents band); rig/pod/saved carry their roster.
+ * open, previewed via the terminal composer); rig/pod/saved carry their roster.
  */
 export function buildLauncherViews(input: {
   nodes: NodeInventoryEntry[] | undefined;
@@ -254,31 +265,46 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
   const selected = views.find((v) => v.id === selectedId) ?? views[0];
   const resolvedRigName = views.find((view) => view.kind === "rig")?.label ?? RIG_NAME_UNAVAILABLE;
 
-  // A derived view (mission/slice) previews its roster via the review band.
+  // Use the same scoped composition for the displayed roster and the open plan.
   const derivedScope = selected && (selected.kind === "mission" || selected.kind === "slice") ? selected.id : null;
-  const { data: reviewBand } = useReviewAgents(derivedScope);
-
-  const selectedSeats: Seat[] =
-    selected?.seats ??
-    (reviewBand?.rows.map((r) => ({
-      session: r.sessionName,
-      live: true,
-      activity: r.stateGlyph === "active" ? ("active" as const) : ("idle" as const),
-    })) ??
-      []);
+  const previewQuery = useQuery({
+    queryKey: ["terminal", "preview", hostId, provider, derivedScope],
+    enabled: open && derivedScope !== null,
+    retry: false,
+    queryFn: async (): Promise<LauncherPreview> => {
+      const query = new URLSearchParams({ provider, view: derivedScope! });
+      const res = await fetch(withHostParam(`/api/terminal/preview?${query}`, hostId), { headers: terminalAuthHeaders() });
+      const body = await res.json() as LauncherPreview & { error?: string; code?: string };
+      if (!res.ok || !body.planId || !body.composed) throw new Error(body.error ?? body.code ?? `HTTP ${res.status}`);
+      return body;
+    },
+  });
+  const preview = derivedScope ? previewQuery.data : undefined;
+  const previewUnavailable = Boolean(derivedScope && (!preview || previewQuery.isFetching || previewQuery.isError));
+  const previewNotice = derivedScope && (previewQuery.isError ? (previewQuery.error as Error).message
+    : previewUnavailable ? "Loading terminal preview…"
+    : preview?.task?.complete === false ? `Membership is incomplete: ${preview.task.issues.join(" ")}` : null);
+  const selectedSeats: Seat[] = derivedScope ? [
+    ...(preview?.composed.opened.map(pane => ({ session: pane.seat, live: true, activity: "idle" as const })) ?? []),
+    ...([...(preview?.composed.absent ?? []), ...(preview?.composed.degraded ?? [])]
+      .map(seat => ({ session: seat.seat, live: false, reason: seat.reason, activity: "idle" as const }))),
+  ] : selected?.seats ?? [];
 
   const live = selectedSeats.filter((s) => s.live);
   const absent = selectedSeats.filter((s) => !s.live);
-  const layout = suggestLayout(live.length);
+  const shown = preview?.composed.pages[0]?.length ?? 0;
+  const cols = preview?.composed.columns ?? Math.max(1, Math.ceil(Math.sqrt(shown)));
+  const layout = preview ? { shown, cols, rows: Math.ceil(shown / cols), paged: preview.composed.opened.length - shown } : suggestLayout(live.length);
   const readOnly = Boolean(selected?.crossRig);
   const providerLabel = PROVIDERS.find((p) => p.id === provider)!.label;
 
   const openMut = useMutation({
     mutationFn: async (): Promise<OpenViewResult> => {
+      if (previewUnavailable) throw new Error("Refresh the terminal preview before opening.");
       const res = await fetch(withHostParam("/api/terminal/open", hostId), {
         method: "POST",
         headers: { "Content-Type": "application/json", ...terminalAuthHeaders() },
-        body: JSON.stringify({ provider, view: selected?.id ?? `rig:${rigId}` }),
+        body: JSON.stringify({ provider, view: selected?.id ?? `rig:${rigId}`, ...(derivedScope ? { expectedPlan: preview!.planId } : {}) }),
       });
       const body = (await res.json().catch(() => null)) as OpenViewResult | null;
       if (!res.ok || !body) throw new Error(body?.error ?? `HTTP ${res.status}`);
@@ -456,9 +482,9 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                   Auto grid · {layout.cols}×{layout.rows} · {layout.shown} pane{layout.shown === 1 ? "" : "s"}
                 </div>
                 {layout.paged > 0 ? (
-                  <div className="font-mono text-[9px] text-warning mt-0.5">{layout.paged} more paged · raise the show-limit in settings</div>
+                  <div className="font-mono text-[9px] text-warning mt-0.5">{layout.paged} more paged{preview ? " · from terminal preview" : " · raise the show-limit in settings"}</div>
                 ) : (
-                  <div className="font-mono text-[9px] text-on-surface-variant mt-0.5">Fits the show-limit ({PANE_CAP}) · no paging</div>
+                  <div className="font-mono text-[9px] text-on-surface-variant mt-0.5">{preview ? "Layout from terminal preview · no paging" : `Fits the show-limit (${PANE_CAP}) · no paging`}</div>
                 )}
               </div>
             </section>
@@ -473,7 +499,7 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                   testId="launcher-mode-pip"
                 />
                 <div className="mt-1.5 font-mono text-[9px] text-on-surface-variant leading-relaxed">
-                  Opens <span className="text-on-surface">{layout.shown}</span> pane{layout.shown === 1 ? "" : "s"}
+                  {previewUnavailable ? "Terminal membership is not confirmed" : <>Opens <span className="text-on-surface">{layout.shown}</span> pane{layout.shown === 1 ? "" : "s"}</>}
                   {absent.length > 0 ? (
                     <>
                       {" · "}
@@ -482,9 +508,10 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
                       </span>
                     </>
                   ) : (
-                    <> · every seat live</>
+                    <>{previewUnavailable ? "" : " · every seat live"}</>
                   )}
                 </div>
+                {previewNotice ? <div data-testid="launcher-preview-notice" className="mt-1 font-mono text-[9px] text-warning">{previewNotice}</div> : null}
                 {openMut.data
                   ? (() => {
                       // Guard G2: a 200 body is authoritative, not automatically green —
@@ -509,12 +536,12 @@ export function TerminalLauncher({ rigId, rigName }: TerminalLauncherProps) {
               <button
                 type="button"
                 data-testid="launcher-open"
-                disabled={openMut.isPending || !selected}
+                disabled={openMut.isPending || !selected || previewUnavailable}
                 onClick={() => openMut.mutate()}
                 className="shrink-0 inline-flex items-center gap-2 bg-inverse-surface text-background px-4 py-2.5 font-headline font-bold uppercase tracking-widest text-[11px] hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 disabled:opacity-60"
               >
                 <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-                {openMut.isPending ? "Opening…" : `Open ${layout.shown} in ${providerLabel}`}
+                {openMut.isPending ? "Opening…" : previewUnavailable ? "Preview unavailable" : `Open ${layout.shown} in ${providerLabel}`}
               </button>
             </div>
           </div>

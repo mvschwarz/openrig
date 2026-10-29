@@ -167,7 +167,7 @@ describe("task terminal membership", () => {
     const { add, read } = fixture(); add("qitem-root"); add("qitem-unresolved", "b@remote", "blocked", "qitem-root");
     const opened: string[][] = [];
     const svc = new TerminalService({ resolveTaskView: () => read(), viewsStore: { list: () => [], get: () => null },
-      listRigSeats: () => null, listPodSeats: () => null, listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null,
+      listRigSeats: () => null, listPodSeats: () => null, listRigNames: () => [], resolveHost: () => null,
       hasSession: () => true, resolveProvider: () => ({ name: "herdr", status: async () => ({ provider: "herdr", available: true, capabilities: {} }),
         liveness: async () => ({ alive: true }), openView: async view => {
           expect(view.opened.every(member => member.readOnly)).toBe(true); opened.push(view.opened.map(m => m.seat));

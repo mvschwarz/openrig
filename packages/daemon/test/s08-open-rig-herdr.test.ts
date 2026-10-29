@@ -76,7 +76,7 @@ function service(herdr: TerminalProvider, cmux = new RecordingCmux()): { svc: Te
     viewsStore: { get: () => null, list: () => [] },
     listRigSeats: (r) => (r === RIG ? rows : null),
     listPodSeats: () => null,
-    listScopeSeats: () => null,
+    
     listRigNames: () => [RIG],
     resolveHost: () => null,
     hasSession: () => true,
@@ -322,7 +322,7 @@ describe("S08 correction — catalog pages match the Herdr open", () => {
       viewsStore: { get: (id) => (id === "ten" ? saved : null), list: () => [saved] },
       listRigSeats: (r) => (r === RIG ? ten : null),
       ...(batch ? { listRigSeatsBatch: (names: string[]) => new Map(names.map((n) => [n, n === RIG ? ten : []])) } : {}),
-      listPodSeats: () => null, listScopeSeats: () => null, listRigNames: () => [RIG],
+      listPodSeats: () => null, listRigNames: () => [RIG],
       resolveHost: () => null, hasSession: () => true,
     } as TerminalServiceDeps);
   }

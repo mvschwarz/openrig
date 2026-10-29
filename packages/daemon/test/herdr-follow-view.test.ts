@@ -266,7 +266,7 @@ function scopeCoreFixture(kind: "qitem" | "slice" | "mission") {
       liveness: async () => ({ alive: true }), openView: async () => { throw new Error("No whole-view relayout"); },
       followView: component.follow.bind(component) }),
     viewsStore: { list: () => [], get: () => null }, listRigSeats: () => null, listPodSeats: () => null,
-    listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
+    listRigNames: () => [], resolveHost: () => null, hasSession: () => true,
     resolveTaskView: snapshot, resolveScopeView: () => failed ? { code: "scope_not_found", error: "Slice was renamed; reopen the view under its current key." } : snapshot() });
   return { ...f, service, selector: `${kind}:empty`, fail: () => {
     failed = true; for (const callback of callbacks) callback({ type: "queue.updated" } as Parameters<typeof callback>[0]);

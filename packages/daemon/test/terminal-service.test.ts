@@ -80,10 +80,6 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
     },
     listRigSeats: (rigArg) => (rigArg === "acme-build" || rigArg === "rig-id-1" ? rigRows : null),
     listPodSeats: (rigArg, pod) => (rigArg === "acme-build" && pod === "dev" ? [rigRows[0]!] : null),
-    listScopeSeats: (scope) =>
-      scope === "mission:4.6" || scope === "slice:02"
-        ? [{ canonicalSessionName: "dev-driver@acme-build", attachmentType: "tmux", tmuxSession: "dev-driver@acme-build", rigName: "acme-build", logicalId: "dev.driver" }]
-        : null,
     resolveScopeView: view => view === "slice:02" || view === "mission:4.6" ? { task: { kind: view.startsWith("slice:") ? "slice" : "mission", id: view.split(":")[1]!, name: view, complete: true, issues: [], members: [] },
       members: [{ seat: "dev-driver@acme-build", tmuxSession: "dev-driver@acme-build", host: null, readOnly: true, alive: true }] }
       : { code: "scope_not_found", error: "Unknown fixture slice" },

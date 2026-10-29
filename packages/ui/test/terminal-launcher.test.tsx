@@ -5,7 +5,7 @@
 // in jsdom.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { NodeInventoryEntry } from "../src/hooks/useNodeInventory.js";
 
@@ -28,7 +28,7 @@ vi.mock("../src/hooks/useSlices.js", () => ({
 vi.mock("../src/hooks/useTerminalViews.js", () => ({
   useTerminalViews: () => ({ data: { saved: [{ id: "watchtower", name: "Watchtower", members: [{ seat: "lead@acme-ops", readOnly: true }] }], rigs: ["acme-build"] } }),
 }));
-vi.mock("../src/hooks/useReviewAgents.js", () => ({ useReviewAgents: () => ({ data: undefined }) }));
+vi.mock("../src/hooks/useReviewAgents.js", () => ({ useReviewAgents: () => ({ data: { rows: [{ sessionName: "a@acme", stateGlyph: "active" }, { sessionName: "wrong-project@acme", stateGlyph: "active" }] } }) }));
 vi.mock("../src/components/mission-control/missionControlAuth.js", () => ({ terminalAuthHeaders: () => ({}) }));
 
 import {
@@ -52,6 +52,7 @@ const node = (partial: Partial<NodeInventoryEntry>): NodeInventoryEntry =>
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   window.history.replaceState({}, "", "/");
 });
 
@@ -255,5 +256,47 @@ describe("TerminalLauncher — mounts with its live hooks (collapsed)", () => {
     expect(classes).toContain("max-h-[calc(100vh-2rem)]");
     expect(classes).toContain("overflow-y-auto");
     expect(classes).not.toContain("overflow-hidden");
+  });
+});
+
+
+describe("derived terminal launcher uses the Core preview", () => {
+  const preview = () => ({ planId: "plan-chosen-project", provider: "herdr", view: "mission:release-0.4.6",
+    composed: { opened: [{ seat: "a@acme", readOnly: true }], pages: [[{ seat: "a@acme", readOnly: true }]],
+      absent: [{ seat: "stopped@acme", host: null, reason: "stopped" }],
+      degraded: [{ seat: "remote@acme", host: "remote", reason: "transport unavailable" }] },
+    task: { complete: true, issues: [] } });
+  function mount() {
+    window.history.replaceState({}, "", "/topology/rig/rig-1?launcher=open&view=mission:release-0.4.6");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(<QueryClientProvider client={qc}><TerminalLauncher rigId="rig-1" /></QueryClientProvider>);
+  }
+  it("shows only composed terminals and sends the displayed preview plan on open", async () => {
+    const fetcher = vi.fn(async (_url: string, init?: RequestInit) => ({ ok: true, status: 200,
+      json: async () => init?.method === "POST" ? { provider: "herdr", ok: true, opened: ["a@acme"], absent: [], degraded: [], pages: 1 } : preview() }));
+    vi.stubGlobal("fetch", fetcher); mount();
+    const button = await screen.findByRole("button", { name: "Open 1 in herdr" });
+    expect(screen.getByTestId("launcher-honest-partial").textContent).toContain("stopped");
+    expect(screen.getByTestId("launcher-honest-partial").textContent).toContain("transport unavailable");
+    fireEvent.click(button);
+    await waitFor(() => expect(fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const sent = fetcher.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(sent[1]!.body as string)).toMatchObject({ provider: "herdr", view: "mission:release-0.4.6", expectedPlan: "plan-chosen-project" });
+    expect(String(fetcher.mock.calls[0]![0])).toContain("/api/terminal/preview?");
+  });
+  it("reports preview failure and does not offer an unpreviewed open", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ error: "scope collision", code: "scope_ambiguous" }) })));
+    mount();
+    await screen.findByText(/scope collision/);
+    expect((screen.getByTestId("launcher-open") as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("uses Core page sizing and labels incomplete membership", async () => {
+    const p = preview(), panes = Array.from({ length: 16 }, (_, i) => ({ seat: `seat${i}@acme`, readOnly: true }));
+    p.composed.opened = panes; p.composed.pages = [panes]; p.task = { complete: false, issues: ["queue read incomplete"] };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => p })));
+    mount();
+    await screen.findByRole("button", { name: "Open 16 in herdr" });
+    expect(screen.getByTestId("launcher-preview-notice").textContent).toContain("queue read incomplete");
+    expect(screen.getByTestId("launcher-layout").textContent).toContain("16 panes");
   });
 });

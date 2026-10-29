@@ -190,7 +190,7 @@ describe("owned Herdr viewer", () => {
         expect(await stillCurrent!()).toBe(true); return { ok: true as const, viewer: { workspaceId: "w", paneId: "p", terminalId: "t", readOnly: false }, created: true };
       } };
     const svc = new TerminalService({ viewsStore: { get: () => null, list: () => [] }, listRigSeats: () => null, listPodSeats: () => null,
-      listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
+      listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
       resolveTaskView: () => ({ task: { kind: "qitem", id: "qitem-root", qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
         members: joined ? [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }] : [] }) });
     const preview = await svc.previewView({ view: "qitem:qitem-root", provider: "herdr" });

@@ -2119,22 +2119,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         // No node carries that pod namespace → an unknown pod (not an empty view).
         return rows.length > 0 ? rows : null;
       },
-      listScopeSeats: (scope) => {
-        const gatherer = deps.reviewGatherer;
-        if (!gatherer) return null;
-        // N1 (dev44-driver2 pre-guard): cast to the real AgentsScope union (not
-        // `never`) so the compile guard on the scope grammar is restored.
-        const band = gatherer.composeAgents(scope as import("./domain/review/types.js").AgentsScope);
-        if (!band) return null;
-        const wanted = new Set(band.rows.map((r) => r.sessionName));
-        const rows: ReturnType<typeof toLiveSeatRow>[] = [];
-        for (const rig of rigRepo.listRigs()) {
-          for (const e of getNodeInventory(db, rig.id)) {
-            if (e.canonicalSessionName && wanted.has(e.canonicalSessionName)) rows.push(toLiveSeatRow(e));
-          }
-        }
-        return rows;
-      },
       resolveTaskView: (qitemId) => readTaskTerminalView(db, qitemId, (address) =>
         resolveLocalTaskSeat(db, address, getSelfHostId(), sessionRegistry.resolveAddress(address)?.nodeId)),
       resolveScopeView: view => scopeTasks?.resolve(view)

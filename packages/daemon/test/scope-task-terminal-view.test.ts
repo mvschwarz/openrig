@@ -245,11 +245,13 @@ describe("mission union over the same authoritative scope snapshot", () => {
     f.add("ghost", "a", "pending", ["mission:unknown"]);
     expect(f.read("mission:unknown")).toMatchObject({ code: "scope_not_found" });
   });
-  it.each(["name-name", "id-id", "id-name", "name-id"])("rejects a child %s collision instead of importing another mission's work", mode => {
+  it.each(["name-name", "id-id", "id-name", "name-id"])("places a colliding child %s key through direct mission tags", mode => {
     const f = fixture();
     f.addSlice("other", mode === "name-name" ? "03-build" : mode === "id-name" ? "OPR.3" : "other",
       mode === "id-id" ? "OPR.3" : mode === "name-id" ? "03-build" : "OTHER");
-    expect(f.read("mission:release")).toMatchObject({ code: "scope_ambiguous" });
+    f.add("ours", "a", "pending", ["mission:release", "slice:OPR.3"]);
+    f.add("theirs", "b", "pending", ["mission:other", "slice:OTHER"]);
+    expect(f.read("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
   });
   it("refuses duplicate mission directory IDs across distinct physical index roots", () => {
     const f = fixture(), extra = mkdtempSync(path.join(tmpdir(), "mission-index-")); cleanup.push(() => rmSync(extra, { recursive: true, force: true }));
@@ -274,5 +276,33 @@ describe("mission union over the same authoritative scope snapshot", () => {
     expect(f.resolver.resolve("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
     f.resolver.invalidate();
     expect(f.resolver.resolve("mission:release")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }, { seat: "b" }] } });
+  });
+});
+
+
+describe("mission views with repeated slice templates", () => {
+  it("keeps each release's direct owners and uniquely identified child work", () => {
+    const f = fixture();
+    f.addSlice("new-release", "01-regression-checks", "NEW");
+    f.addSlice("old-release", "01-regression-checks", "OLD");
+    f.add("new", "a", "pending", ["mission:new-release", "slice:01-regression-checks"]);
+    f.add("old", "b", "blocked", ["mission:old-release", "slice:01-regression-checks"]);
+    f.add("unique", "a", "pending", ["slice:NEW"]);
+    expect(f.read("mission:new-release")).toMatchObject({ task: { complete: true, members: [{ seat: "a", obligations: [{ qitemId: "new" }, { qitemId: "unique" }] }] } });
+    expect(f.read("mission:old-release")).toMatchObject({ task: { complete: true, members: [{ seat: "b" }] } });
+    expect(f.read("slice:NEW")).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+    expect(f.read("slice:01-regression-checks")).toMatchObject({ code: "scope_ambiguous" });
+  });
+  it.each([
+    { label: "no mission", tags: [] },
+    { label: "both missions", tags: ["mission:release", "mission:other"] },
+    { label: "non-claimant mission", tags: ["mission:unknown"] },
+  ])("names an unplaceable shared-key row with $label without losing known owners", ({ tags }) => {
+    const f = fixture(); f.addSlice("other", "03-build", "OTHER");
+    f.add("known", "a", "pending", ["mission:release"]);
+    f.add("unplaced", "b", "blocked", ["slice:03-build", ...tags]);
+    const result = f.read("mission:release"); if ("code" in result) throw new Error(result.error);
+    expect(result.task).toMatchObject({ complete: false, members: [{ seat: "a" }] });
+    expect(result.task.issues.join(" ")).toContain("unplaced");
   });
 });
