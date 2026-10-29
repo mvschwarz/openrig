@@ -2351,3 +2351,21 @@ OMP or provider code. The combined resolver/OMP lifecycle/Windows env checks
 pass 57/57; daemon TypeScript checking passes. These checks preserve the
 distinction between executable selection, fixture lifecycle and real OMP
 provider acceptance; no live seat or deployment was changed.
+
+## Native MCP lifecycle evidence correction (2026-10-30)
+
+The frozen CLI failures for native stdio SIGTERM and IPv6 endpoint shutdown
+mixed POSIX graceful-signal expectations with Windows forceful termination.
+[Node's signal contract](https://nodejs.org/api/process.html#signal-events)
+states the Windows termination behavior. The stdio test now separately checks
+normal EOF closure and actual Windows SIGTERM termination, including the
+reported signal and absence of the graceful-close marker. No Windows signal
+case was skipped or relabeled as graceful success; POSIX expectations remain.
+
+The IPv6 fixture now performs initialize and an actual tools/call rig_status
+over MCP, receives its owned IPv6 daemon identity in the tool response, and
+closes by EOF. Its previous direct factory-client probe alone was weaker than
+the tool-request claim in the test name. The selected lifecycle combination
+passes 5/5 using real local stdio processes and an owned IPv6 loopback server.
+No production change was needed for these two failures. This is bounded IPC
+and endpoint evidence, not real-provider or full Windows runtime acceptance.
