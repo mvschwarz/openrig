@@ -1,6 +1,7 @@
 // P37 — request-layer hermeticity guard at globalThis.fetch. The permit rule is a
 // SHAPE, not a registry: loopback (127.0.0.1 / ::1 / localhost) on an EPHEMERAL high
-// port — exactly what server.listen(0) produces — is PERMITTED with zero registration;
+// port is PERMITTED with zero registration. An OS-configured low ephemeral range
+// requires registering the actual owned fixture origin;
 // everything else is REFUSED (fail-closed default). allowFetchTarget stays as the
 // escape hatch for a fixture that needs a fixed low port.
 //
@@ -21,12 +22,19 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
     await expect(fetch("http://127.0.0.1:7433/healthz")).rejects.toThrow(/FETCH GUARD|daemon/i);
   });
 
-  it("PERMITS a loopback-ephemeral fixture BY SHAPE (server.listen(0), no registration)", async () => {
+  it("permits an owned listen(0) fixture, requiring registration when the OS chooses a low port", async () => {
     const server = http.createServer((_req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end('{"ok":true}'); });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     const port = (server.address() as { port: number }).port;
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/ping`); // NOT registered — permitted by shape
+      const origin = `http://127.0.0.1:${port}`;
+      // Windows can have a configured ephemeral range below the guard's
+      // high-port shape. That does not authorize widening the guard.
+      if (port < 32768) {
+        await expect(fetch(`${origin}/ping`)).rejects.toThrow(/FETCH GUARD/);
+        allowFetchTarget(origin);
+      }
+      const res = await fetch(`${origin}/ping`);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
     } finally {

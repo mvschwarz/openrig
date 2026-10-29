@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createViewState } from "../src/state.js";
-import { createControlSocket, defaultSocketPath, MAX_SOCKET_PATH_BYTES } from "../src/socket-server.js";
+import { controlEndpoint, createControlSocket, defaultSocketPath, MAX_SOCKET_PATH_BYTES } from "../src/socket-server.js";
 import { demoSnapshot } from "../src/demo-data.js";
 import type { ControlSocket } from "../src/socket-server.js";
 
@@ -100,7 +100,8 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
       process.env["HOME"] = os.userInfo().homedir;
       const p = defaultSocketPath("tui-1");
       expect(p).toMatch(/[/\\]run[/\\]tui-tui-1\.sock$/);
-      expect(Buffer.byteLength(p)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+      if (process.platform === "win32") expect(controlEndpoint(p)).toMatch(/^\\\\\.\\pipe\\openrig-tui-[a-f0-9]{64}$/);
+      else expect(Buffer.byteLength(p)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
     } finally {
       if (prevOpenRigHome !== undefined) process.env["OPENRIG_HOME"] = prevOpenRigHome;
       if (prevUserHome !== undefined) process.env["HOME"] = prevUserHome;
