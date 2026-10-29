@@ -41,7 +41,7 @@ export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000,
   return (cwd, seatHome) => probeCodexDaemonSupport(async () => {
     const { execFile } = await import("node:child_process");
     const home = seatHome ?? codexHome;
-    const env = { ...process.env, ...(launchPath ? { PATH: launchPath } : {}), ...(home ? { CODEX_HOME: home } : {}) };
+    const env = { ...process.env, ...(launchPath !== undefined ? { PATH: launchPath } : {}), ...(home ? { CODEX_HOME: home } : {}) };
     const executable = resolveCodexCommand(env, cwd);
     const launch = process.platform === "win32"
       ? prepareWindowsJobProcess(executable.command, [...executable.prefix, "--help"], { cwd, env })

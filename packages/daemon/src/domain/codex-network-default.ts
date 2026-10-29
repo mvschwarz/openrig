@@ -133,7 +133,7 @@ export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {
     const started = performance.now();
     const env = {
       ...process.env,
-      ...(options.launchPath ? { PATH: options.launchPath } : {}),
+      ...(options.launchPath !== undefined ? { PATH: options.launchPath } : {}),
       ...(options.home ? { HOME: options.home } : {}),
       ...(codexHome ? { CODEX_HOME: codexHome } : {}),
     };

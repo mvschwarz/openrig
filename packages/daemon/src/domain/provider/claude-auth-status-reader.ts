@@ -85,7 +85,7 @@ export function claudeAuthReaderEnv(options: ClaudeAuthReaderOptions, base: Node
     if (process.platform === "win32") for (const key of Object.keys(env)) if (key.toUpperCase() === name) delete env[key];
     env[name] = value;
   };
-  if (options.launchPath) set("PATH", options.launchPath);
+  if (options.launchPath !== undefined) set("PATH", options.launchPath);
   if (options.home) {
     set("HOME", options.home);
     if (process.platform === "win32") set("USERPROFILE", options.home);

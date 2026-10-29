@@ -1989,3 +1989,19 @@ standalone relay parsers in parity. The three-suite batch now has 28 tests:
 failures. This resolves the three refresh failures reported above. Daemon
 TypeScript and mirror checks passed; plugin manifests are 0.1.29. No live
 settings or hook registrations were rewritten.
+
+## Explicit empty provider probe PATH (2026-10-30)
+
+Codex daemon-support, usage and network-default probes and the Claude auth
+reader environment previously treated an empty launchPath as an omitted option.
+They now retain an explicitly empty PATH instead of inheriting the daemon's
+command search path. Undefined still means inherit. Normal Windows current-dir
+lookup is not redefined by this change.
+
+An owned native fixture puts a recognized synthetic npm provider on the daemon
+PATH outside the seat cwd. Before the fix the support probe ran it and reported
+support; after the fix the probes report unavailable/unknown without starting
+it, and the Claude environment retains the empty value. No real provider or
+credential was used. Native empty-PATH and adjacent network checks passed all
+49 cases; daemon TypeScript checking passed. Launch/resume command construction
+is a separate remaining audit scope.

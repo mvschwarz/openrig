@@ -65,7 +65,7 @@ export function codexUsageReader(options: CodexUsageReaderOptions = {}): CodexUs
   return async () => {
     const env = {
       ...process.env,
-      ...(options.launchPath ? { PATH: options.launchPath } : {}),
+      ...(options.launchPath !== undefined ? { PATH: options.launchPath } : {}),
       ...(options.home ? { HOME: options.home } : {}),
       ...(options.codexHome ? { CODEX_HOME: options.codexHome } : {}),
     };
