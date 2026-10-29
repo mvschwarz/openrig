@@ -739,3 +739,40 @@ describe("TerminalService — an omitted provider falls back from herdr to cmux 
     expect(cmux.lastView).toBeNull();
   });
 });
+
+
+describe("slice task preview and explicit viewer capability", () => {
+  function sliceService(complete = true) {
+    const { deps, herdr } = makeDeps();
+    const snapshot = () => ({ task: { kind: "slice", id: "build", name: "Build it", complete,
+      issues: complete ? [] : ["Scope read unavailable"], members: [{ key: { hostId: "local", nodeId: "a" }, seat: "a@team",
+        obligations: [{ qitemId: "work", state: "pending" }], availability: "available", viewerStatus: "not-provisioned" }] },
+      members: [{ seat: "a@team", tmuxSession: "a", alive: true, readOnly: true }] });
+    Object.assign(deps, { resolveScopeView: () => snapshot() });
+    let effects = 0;
+    Object.assign(herdr, { ensureViewer: async () => { effects++; return { ok: false, code: "viewer_unconfirmed", error: "Fixture viewer not started" }; } });
+    return { service: new TerminalService(deps), effects: () => effects };
+  }
+  it("uses authoritative scoped membership instead of the live review band", async () => {
+    const { service } = sliceService();
+    const preview = await service.previewView({ view: "slice:build" });
+    expect(preview).toMatchObject({ task: { kind: "slice", id: "build", name: "Build it", complete: true,
+      members: [{ seat: "a@team", obligations: [{ qitemId: "work", state: "pending" }] }] }, capabilities: { ensureViewer: true } });
+    expect("task" in preview && preview.task).not.toHaveProperty("qitemId");
+  });
+  it("rejects changed scope plans before any owner ensure effect", async () => {
+    const { service, effects } = sliceService();
+    expect(await service.ensureViewer({ view: "slice:build", expectedPlan: "stale", member: { hostId: "local", nodeId: "a" } }))
+      .toMatchObject({ ok: false, code: "preview_changed" });
+    expect(effects()).toBe(0);
+  });
+  it("distinguishes an incomplete scope from an empty scope and never ensures it", async () => {
+    const { service, effects } = sliceService(false);
+    const preview = await service.previewView({ view: "slice:build" });
+    if (!("planId" in preview)) throw new Error("Expected scoped preview");
+    expect(preview.task?.complete).toBe(false);
+    expect(await service.ensureViewer({ view: "slice:build", expectedPlan: preview.planId, member: { hostId: "local", nodeId: "a" } }))
+      .toMatchObject({ ok: false, code: "viewer_unconfirmed" });
+    expect(effects()).toBe(0);
+  });
+});
