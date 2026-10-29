@@ -7,7 +7,30 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Native Claude token follow-up, 2026-10-29
+## Native process-facts follow-up, 2026-10-29
+
+Codex in-place restart no longer relies on `/proc` on Windows. A shared read-only
+query observes a target's cwd, exact command-line words, kernel executable path
+and only HOME/USERPROFILE/CODEX_HOME. It is restricted to the current Windows SID,
+uses the existing bounded NT/PEB environment approach and returns unavailable
+for exited/inaccessible/unsupported targets. Restart maps a missing HOME to the
+target's USERPROFILE, never the daemon's. The thread resolver uses the same home
+observation. ACP marker lookup consumes the shared module through a packaged
+daemon surface rather than retaining a separate query implementation.
+
+Windows ISO creation timestamps now enter the existing whole-second PID reuse
+gate; they previously failed the POSIX `lstart` parser. A retired-PID log fixture
+confirms old conversations are excluded. Staged launch-script recognition also
+accepts native absolute paths using the same generated filename contract.
+
+The latest five-suite process-facts/thread/restart selection passed 137 tests
+with one existing skip. Workspace lint/typecheck passed. Native package assembly passed using
+Git for Windows, including the new daemon-import rewrite; the candidate build
+was stamped dirty because these source edits were not committed at build time.
+The assembled CLI's ACP help and shared native marker-query module both ran.
+This is not installed-package, live Codex restart or reboot acceptance.
+
+## Earlier native Claude token follow-up, 2026-10-29
 
 Windows classic and managed Claude launches now read a seat token file inside
 the staged PowerShell command, directly into the child ProcessStartInfo

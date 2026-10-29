@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { findWindowsRunProcesses } from "./windows-run-processes.js";
+import { findWindowsRunProcesses } from "@openrig/daemon/windows-process-facts";
 
 /** Set in the agent's environment by `rig acp run`; every process it launches inherits it, even one that detaches
  *  (PPID 1), which is how a run finds what it started without touching anything it didn't. */

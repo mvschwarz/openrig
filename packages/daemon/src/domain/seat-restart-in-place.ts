@@ -20,6 +20,7 @@ import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
+import { readWindowsProcessFacts } from "./windows-process-facts.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -1169,6 +1170,14 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
   return {
     async readProcess(pid) {
       try {
+        if (process.platform === "win32") {
+          const facts = await readWindowsProcessFacts(pid);
+          if (!facts) return null;
+          const { HOME, USERPROFILE, CODEX_HOME } = facts.env;
+          const home = HOME ?? USERPROFILE;
+          return { cwd: facts.cwd, exe: facts.exe, argv: facts.argv,
+            env: { ...(home !== undefined ? { HOME: home } : {}), ...(CODEX_HOME !== undefined ? { CODEX_HOME } : {}) } };
+        }
         const environ = fs.readFileSync(`/proc/${pid}/environ`);
         const env: ProcessFacts["env"] = {};
         for (const entry of environ.toString("utf8").split("\0")) {

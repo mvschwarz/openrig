@@ -1,7 +1,7 @@
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as pathJoin } from "node:path";
+import { basename as pathBaseName, isAbsolute as pathIsAbsolute, join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
@@ -66,7 +66,7 @@ const SEND_SCRIPT_NAME = new RegExp(
 /** Whether `path` names a launch script sendShellCommand staged (an absolute path with the name
  *  defaultTmuxFileOps gives it). The script removes itself first, so this is a name check only. */
 export function isStagedSendScriptPath(path: string): boolean {
-  return path.startsWith("/") && SEND_SCRIPT_NAME.test(path.split("/").pop() ?? "");
+  return pathIsAbsolute(path) && SEND_SCRIPT_NAME.test(pathBaseName(path));
 }
 
 export function defaultTmuxFileOps(): TmuxFileOps {
