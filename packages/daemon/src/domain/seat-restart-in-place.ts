@@ -14,7 +14,7 @@ import {
   type NativeProcessLister, type NativeProcessRow,
 } from "./native-process-lineage.js";
 import { CodexThreadIdResolver, resolveCodexDbPaths, type CodexThreadEvidence } from "./codex-thread-id.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
@@ -455,7 +455,8 @@ export class CodexInPlaceRestart {
       if (!parent || visited.has(parent.pid)) break;
       visited.add(parent.pid);
       processChain.push(parent);
-      if (executableBase(parent) === "MainThread") {
+      if (executableBase(parent) === "MainThread"
+        || (parent.platform === "win32" && executableBase(parent) === "node")) {
         launcherFacts.set(parent.pid, await this.io.readProcess(parent.pid));
       }
       ancestor = parent;
@@ -471,7 +472,7 @@ export class CodexInPlaceRestart {
     const between = rows.find((row) => row.pid === top.ppid);
     const viaLaunchScript = !!between && between.ppid === panePid && isStagedLaunchScript(between);
     if (top.pid === panePid) paneShape = "direct_native";
-    else if (root && (top.ppid === panePid || viaLaunchScript) && isShellForeground(executableBase(root))) paneShape = "shell_backed";
+    else if (root && (top.ppid === panePid || viaLaunchScript) && (isShellForeground(executableBase(root)) || (root.platform === "win32" && isWindowsShellHost(executableBase(root))))) paneShape = "shell_backed";
     else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped.",
       // Report the observed chain from Codex toward the pane, never argv, paths or environment values.
       detail: { panePid, processChain: processChain.map(row => ({ pid: row.pid, ppid: row.ppid, name: row.executableName ?? null })) },
@@ -589,7 +590,7 @@ export class CodexInPlaceRestart {
     const rows = await this.listProcesses();
     const panePid = await this.deps.tmux.getPanePid(pane);
     if (!panePid) return null;
-    const observation = await verifyCodexPaneProcess({ target: pane, tmux: { getPanePid: async () => panePid },
+    const observation = await verifyCodexPaneProcess({ target: pane, tmux: { getPanePid: async () => panePid, getPaneCommand: target => this.deps.tmux.getPaneCommand(target) },
       listProcesses: () => rows, requireArgv: true, ...(token ? { expectedToken: token } : {}) });
     return observation && observation.panePid === panePid ? { process: observation.process, panePid, rows } : null;
   }
@@ -605,7 +606,8 @@ export class CodexInPlaceRestart {
         || (row.pid === native.pid && (row.startedAt ?? null) === native.startedAt))) return false;
       const command = await this.deps.tmux.getPaneCommand(pane);
       const root = rows.find((row) => row.pid === panePid);
-      return command !== null && isShellForeground(command) && !!root;
+      return command !== null && !!root && (isShellForeground(command)
+        || (root.platform === "win32" && isWindowsShellHost(command) && isWindowsShellHost(executableBase(root))));
     };
     const wait = async (): Promise<boolean | null> => {
       const polls = Math.max(1, Math.ceil(this.timing.timeoutMs / this.timing.pollMs));
@@ -861,6 +863,7 @@ function readResumeToken(db: BetterSqlite3.Database, sessionId: string): string 
 
 function executableBase(row: NativeProcessRow): string {
   const name = row.executableName ?? processArgv(row.command)[0] ?? "";
+  if (row.platform === "win32") return nodePath.win32.basename(name).replace(/\.exe$/i, "").toLowerCase();
   return (name.split("/").pop() ?? name).replace(/^-/, "");
 }
 
@@ -910,12 +913,18 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
     const facts = launcherFacts.get(parent.pid);
     const mainThreadNode = name === "MainThread" && nodePath.basename(facts?.exe ?? "") === "node";
+    const windowsNode = parent.platform === "win32" && name === "node"
+      && nodePath.win32.basename(facts?.exe ?? "").toLowerCase() === "node.exe";
     // ps flattens argument boundaries; only exact argv can distinguish an option value from the entry script.
-    const script = mainThreadNode ? nodeLaunchScript(facts?.argv ?? []) : undefined;
-    const codexScript = !!script && nodePath.isAbsolute(script)
-      && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
+    const script = mainThreadNode || windowsNode ? nodeLaunchScript(facts?.argv ?? []) : undefined;
+    const codexScript = !!script && (windowsNode ? nodePath.win32.isAbsolute(script) : nodePath.isAbsolute(script))
+      && ((windowsNode ? nodePath.win32.basename(script).toLowerCase() : nodePath.basename(script)) === "codex" || (windowsNode
+        ? script.replace(/\\/g, "/").toLowerCase().endsWith("/bin/codex.js")
+        : script.endsWith("/bin/codex.js")));
     const launcher = /^codex/i.test(name)
-      || (name === "node" && processArgv(parent.command).some((arg) => /codex/i.test(arg)))
+      || (name === "node" && (parent.platform === "win32"
+        ? windowsNode && codexScript
+        : processArgv(parent.command).some((arg) => /codex/i.test(arg))))
       || (mainThreadNode && codexScript);
     if (!launcher) break;
     chain.push(parent);
