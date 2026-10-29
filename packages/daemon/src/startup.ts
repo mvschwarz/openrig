@@ -794,7 +794,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
   const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
   const { ServiceOrchestrator } = await import("./domain/service-orchestrator.js");
-  const composeAdapter = new ComposeServicesAdapter(opts?.tmuxExec ?? execCommand);
+  const composeAdapter = new ComposeServicesAdapter(opts?.tmuxExec ?? execCommand,
+    process.platform === "win32" && !opts?.tmuxExec ? execArgvCommand : undefined);
   const serviceOrchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter });
 
   // Filled after the pod-aware instantiator is constructed below. Keeping this

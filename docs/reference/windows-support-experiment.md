@@ -7,7 +7,26 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Native console-membership follow-up, 2026-10-29
+## Native service-adapter follow-up, 2026-10-29
+
+Windows production service operations now invoke Docker with argv arrays,
+including compose file/project/profile names, log tail zero and volume policy.
+POSIX command strings are retained for the existing transport and injected test
+executors; authored checkpoint commands keep their own platform syntax.
+Windows HTTP readiness uses Node fetch with manual redirects and an abort
+deadline rather than curl shell quoting. Numeric TCP probes use Node sockets;
+named TCP ports use the Windows services database (TCP names and aliases only),
+with an explicit unknown-name diagnostic rather than an nc installation request.
+This uses Node's HTTP/TLS behavior; proxy/custom-CA parity needs acceptance.
+
+The native service and related replica/project suites passed 19 tests with four
+existing platform skips. A real Node receiver proves the Windows argv boundary
+with spaces, quotes and shell metacharacters, but is not a real Docker daemon.
+An owned HTTP server proves status, no redirect follow, abort and TCP behavior.
+No system services file was edited and no container was started for these tests.
+Actual Docker Compose integration remains unverified.
+
+## Earlier native console-membership follow-up, 2026-10-29
 
 Windows idle-shell proof can query actual console members with AttachConsole /
 GetConsoleProcessList from a separate current-user helper. The helper sends no
