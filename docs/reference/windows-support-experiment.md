@@ -2287,3 +2287,27 @@ in an actual Node child's environment and explicit-empty-key precedence. The
 focused file passes 2/2; the adjacent storage combination passes 23/23. Daemon
 TypeScript checking passes. This verifies selection/env delivery boundaries,
 not actual Claude/Codex hook activation or live fleet deployment.
+
+## Project-local npm runtime layout (2026-10-30)
+
+The Windows Codex/Claude provider resolver and Pi runner resolver recognized
+global npm launchers only. Standard project-local node_modules/.bin launchers
+point through `..` to their package, rather than through a nested node_modules;
+all three owned local-layout regressions failed before repair.
+
+The resolvers now recognize that local layout as well as their existing global
+layout. They still verify the exact expected package name, declared bin staying
+inside the package and matching shim target. Execution goes directly through
+Node and the selected entry, with no batch-shell fallback. Pi lookup also skips
+directories named pi.exe or pi.cmd, matching regular-file command lookup; an
+actual synthetic launch reproduced the pi.exe-directory selection failure
+before that correction.
+
+Synthetic Codex/Claude/Pi package entries now run from local .bin with exact
+Unicode, space, quote, empty, trailing-backslash and shell-metacharacter argv
+readback. Wrong package names, escaping entries and unrelated shims remain
+refused. Adjacent global Pi, native provider env selection and empty-PATH checks
+pass with them: 9/9, plus daemon TypeScript checking. These fixtures contain no
+actual provider code, credentials or sessions and establish command selection
+and argv delivery only; existing native identity and provider acceptance limits
+remain. No running team or installed runtime was changed.

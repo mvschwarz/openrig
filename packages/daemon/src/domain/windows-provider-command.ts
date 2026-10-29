@@ -18,7 +18,9 @@ export function resolveWindowsProviderCommand(name: "codex" | "claude", env: Nod
       const candidate = path.join(directory, `${name}${extension}`);
       if (!existsSync(candidate) || !statSync(candidate).isFile()) continue;
       if (extension === ".exe" || extension === ".com") return { command: realpathSync(candidate), prefix: [] };
-      const root = path.join(directory, "node_modules", ...packageName.split("/"));
+      const local = path.basename(directory).toLowerCase() === ".bin";
+      const modules = local ? path.dirname(directory) : path.join(directory, "node_modules");
+      const root = path.join(modules, ...packageName.split("/"));
       const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
       const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[name];
       if (extension !== ".cmd" || manifest.name !== packageName || typeof entry !== "string" || path.isAbsolute(entry)) {
@@ -26,7 +28,7 @@ export function resolveWindowsProviderCommand(name: "codex" | "claude", env: Nod
       }
       const file = path.resolve(root, entry), relative = path.relative(root, file);
       if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error(`${name} npm entry escapes its package`);
-      const needle = `%dp0%\\node_modules\\${packageName.replaceAll("/", "\\")}\\${entry.replaceAll("/", "\\")}`;
+      const needle = `%dp0%\\${local ? ".." : "node_modules"}\\${packageName.replaceAll("/", "\\")}\\${entry.replaceAll("/", "\\")}`;
       if (!readFileSync(candidate, "utf8").includes(needle)) throw new Error(`Unrecognized Windows ${name} shim`);
       const node = [path.join(directory, "node.exe"), ...searchPath.split(path.delimiter).map(dir => path.resolve(cwd, dir.replace(/^"(.*)"$/, "$1"), "node.exe"))].find(file => existsSync(file) && statSync(file).isFile());
       if (!node) throw new Error(`${name} npm installation requires Node on its launch PATH`);
