@@ -103,7 +103,11 @@ export class ClaudeResumeAdapter {
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
     // A seat's own subscription token, as on a fresh launch (claude-code-adapter.ts).
-    const seatToken = managed || !nodeId ? null : this.options.claudeManagedLaunch?.seatTokenLaunch?.(nodeId) ?? null;
+    let seatToken: ReturnType<ClaudeManagedLaunch["seatTokenLaunch"]> = null;
+    if (!managed && nodeId) {
+      try { seatToken = this.options.claudeManagedLaunch?.seatTokenLaunch?.(nodeId) ?? null; }
+      catch (error) { return { ok: false, code: "api_key_unavailable", message: (error as Error).message }; }
+    }
     const requiresApiKey = seatToken?.ref.kind === "api-key";
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };

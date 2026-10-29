@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -52,6 +54,29 @@ if [ -n "\${ANTHROPIC_API_KEY-}" ]; then printf '{"API":"%s","TOKEN":"%s"}' "$AN
 }
 
 describe.skipIf(process.platform === "win32")("a Claude seat's own subscription token file", () => {
+  it.each(["missing-key", "relative-cwd", "conflicting-settings"])("classic launch and resume return structured credential failure: %s", async problem => {
+    const f = fixture();
+    const tokenFile = path.join(f.root, "key");
+    if (problem !== "missing-key") writeFileSync(tokenFile, SYNTHETIC, { mode: 0o600 });
+    f.db.prepare("UPDATE nodes SET claude_token_ref = ?").run(JSON.stringify({ label: "api", tokenFile, kind: "api-key" }));
+    if (problem === "relative-cwd") f.db.exec("UPDATE nodes SET cwd = 'relative'");
+    if (problem === "conflicting-settings") {
+      mkdirSync(path.join(f.root, "work", ".claude"));
+      writeFileSync(path.join(f.root, "work", ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "synthetic-conflict" } }));
+    }
+    const sendText = vi.fn(), sendKeys = vi.fn(), sendShellCommand = vi.fn();
+    const tmux = { sendText, sendKeys, sendShellCommand } as unknown as TmuxAdapter;
+    const adapter = new ClaudeCodeAdapter({ tmux, claudeManagedLaunch: f.managed });
+    await expect(adapter.launchHarness({ nodeId: "node", tmuxSession: "seat@rig", cwd: path.join(f.root, "work") } as never,
+      { name: "seat" })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Selected API-key|Claude credential settings/) });
+    const resume = new ClaudeResumeAdapter(tmux, { claudeManagedLaunch: f.managed });
+    await expect(resume.resume("seat@rig", "claude_id", "original", path.join(f.root, "work"), undefined, undefined, undefined, "node"))
+      .resolves.toMatchObject({ ok: false, code: "api_key_unavailable" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect(sendShellCommand).not.toHaveBeenCalled();
+  });
+
   it("a staged API successor rechecks its own reference and home rather than the predecessor's missing key", async () => {
     const f = fixture({ label: "old-api", tokenFile: "/synthetic/missing-old-api", kind: "api-key" });
     const selected = path.join(f.root, "next-account"); mkdirSync(selected);
