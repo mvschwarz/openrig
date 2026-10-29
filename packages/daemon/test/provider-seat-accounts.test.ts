@@ -1,7 +1,7 @@
 // Slice 01 (OPR.0.7.0.1) — each seat's CONFIGURED account in the provider read model, kept apart from observed
 // allowances: registry, default login and unknown; a stale registry; a configuration-vs-observed difference; an
 // unresolved allowance row kept and never linked; and, with provider.usage_windows off, today's model unchanged.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -81,7 +81,7 @@ describe("configuredSeatAccounts — each state", () => {
   it("default login: a Codex seat with no row, and every Claude seat, name the daemon's home", () => {
     const rows = configuredSeatAccounts(input({ seats: [seat("dev-qa@r", "codex"), seat("dev-build@r", "claude-code")] }));
     expect(rows[0]!.configured).toEqual({ source: "default_login", home: "/h/.codex", homeNote: "the login active in the daemon's CODEX_HOME when this seat launched" });
-    expect(rows[1]!.configured).toEqual({ source: "default_login", home: "/h/.claude", homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon" });
+    expect(rows[1]!.configured).toEqual({ source: "default_login", home: path.join("/h", ".claude"), homeNote: "the login in the daemon's Claude config dir, shared by every Claude seat on this daemon" });
     for (const row of rows) expect(row.allowance).toEqual({ linked: false, reason: expect.stringContaining("active when it launched") });
   });
 
@@ -242,7 +242,7 @@ describe("configuredSeatAccounts — a seat's own home", () => {
     expect(rows[0]!.configured).toMatchObject({ source: "default_login", home: "/h/.codex" });
     expect(rows[0]!.configured).not.toHaveProperty("homeFrom");
     expect(rows[0]!.ignoredHome).toEqual({ from: "member", variable: "CODEX_HOME", value: "codex-home" });
-    expect(rows[1]!.configured).toMatchObject({ source: "default_login", home: "/h/.claude" });
+    expect(rows[1]!.configured).toMatchObject({ source: "default_login", home: path.join("/h", ".claude") });
     expect(rows[1]!.ignoredHome).toEqual({ from: "rig", variable: "CLAUDE_CONFIG_DIR", value: "claude-home" });
   });
 
@@ -285,13 +285,14 @@ describe("seatAccounts through the provider service", () => {
 
   it("switch on: a Codex seat with its own CODEX_HOME reads as that home, and the daemon home's registry binds it to nothing", async () => {
     const { svc, db } = setup(true);
-    db.prepare("UPDATE nodes SET env_json = ? WHERE id = 'qa'").run(JSON.stringify({ CODEX_HOME: "/homes/qa" }));
-    db.prepare("UPDATE rigs SET env_json = ? WHERE id = 'rig-1'").run(JSON.stringify({ CLAUDE_CONFIG_DIR: "/homes/claude-team" }));
+    const qaHome = path.resolve("/homes/qa"), teamHome = path.resolve("/homes/claude-team");
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = 'qa'").run(JSON.stringify({ CODEX_HOME: qaHome }));
+    db.prepare("UPDATE rigs SET env_json = ? WHERE id = 'rig-1'").run(JSON.stringify({ CLAUDE_CONFIG_DIR: teamHome }));
     const model = await svc.getReadModel();
     const bySeat = new Map(model.seatAccounts!.map((row) => [row.seatSession, row]));
-    expect(bySeat.get("dev-qa@r")!.configured).toMatchObject({ source: "default_login", home: "/homes/qa", homeFrom: "member" });
+    expect(bySeat.get("dev-qa@r")!.configured).toMatchObject({ source: "default_login", home: qaHome, homeFrom: "member" });
     expect(bySeat.get("dev-qa@r")!.registryNotes).toEqual([expect.stringMatching(/names profile work-a .*not applied: this seat launches with its own CODEX_HOME$/)]);
-    expect(bySeat.get("dev-build@r")!.configured).toMatchObject({ source: "default_login", home: "/homes/claude-team", homeFrom: "rig" });
+    expect(bySeat.get("dev-build@r")!.configured).toMatchObject({ source: "default_login", home: teamHome, homeFrom: "rig" });
     expect(model.bindings.find((b) => b.seatSession === "dev-qa@r")).toMatchObject({ accountId: null });
   });
 
@@ -303,13 +304,13 @@ describe("seatAccounts through the provider service", () => {
   });
 
   it("switch on: every live seat with its configured account and source; bindings and usage rows unchanged", async () => {
-    const { svc, mainSvc, fake } = setup(true);
+    const { svc, mainSvc, fake, home } = setup(true);
     const model = await svc.getReadModel();
     const bySeat = new Map(model.seatAccounts!.map((row) => [row.seatSession, row]));
     expect([...bySeat.keys()].sort()).toEqual(["dev-build@r", "dev-cx@r", "dev-old@r", "dev-qa@r"]);
     expect(bySeat.get("dev-qa@r")!.configured).toEqual({ source: "registry", profileRef: "work-a", recordedAt: "2026-10-12T10:00:00Z", profileSaved: true });
     expect(bySeat.get("dev-cx@r")!.configured).toMatchObject({ source: "default_login", home: fake.codexHome });
-    expect(bySeat.get("dev-build@r")!.configured).toMatchObject({ source: "default_login", home: expect.stringMatching(/seat-accounts-home-.*\/\.claude$/) });
+    expect(bySeat.get("dev-build@r")!.configured).toMatchObject({ source: "default_login", home: path.join(home, ".claude") });
     expect(bySeat.get("dev-old@r")!.registryNotes![0]).toMatch(/^stale registry row: names profile work-a .* this seat now runs claude-code$/);
     // The existing blocks are as before: bindings[] as main, usage rows still seats: "unknown".
     expect(model.bindings).toEqual((await mainSvc.getReadModel()).bindings);
@@ -362,7 +363,7 @@ describe("seatAccounts on the production path (samples, registry reads, config d
       env: { CODEX_HOME: codexHome, HOME: home, ...opts.env } as NodeJS.ProcessEnv,
       usageWindows: { enabled: () => true, windows, claude } });
     const bySeat = async () => new Map((await svc.getReadModel()).seatAccounts!.map((row) => [row.seatSession, row]));
-    return { svc, claude, sample, bySeat, home, profileDir, setClock: (t: string) => { clock = t; }, setOrg: (o: string) => { org = o; } };
+    return { svc, claude, sample, bySeat, home, codexHome, profileDir, setClock: (t: string) => { clock = t; }, setOrg: (o: string) => { org = o; } };
   }
   const claudeSeats = [
     { id: "a", session: "a@r", runtime: "claude-code" },
@@ -417,10 +418,19 @@ describe("seatAccounts on the production path (samples, registry reads, config d
 
   it.skipIf(process.getuid?.() === 0)("F3: an unreadable registry: each Codex seat without a parsed row is unknown, with the error code", async () => {
     const p = prod({ seats: codexSeats, registry: { body: HEADER + ROW, mode: 0o000 } });
-    const rows = await p.bySeat();
-    for (const seat of ["dev-qa@r", "dev-cx@r"]) {
-      expect(rows.get(seat)!.configured).toEqual({ source: "unknown", reason: "the seat registry exists but couldn't be read (EACCES)" });
-    }
+    // Windows chmod does not deny reads. Inject only the exact fixture's I/O
+    // failure; POSIX keeps the real mode-based refusal check.
+    const read = fs.readFileSync.bind(fs);
+    const denied = process.platform === "win32" ? vi.spyOn(fs, "readFileSync").mockImplementation(((file, ...args) => {
+      if (file === path.join(p.codexHome, "auth-seat-registry.tsv")) throw Object.assign(new Error("owned fixture denied"), { code: "EACCES" });
+      return read(file, ...args);
+    }) as typeof fs.readFileSync) : undefined;
+    try {
+      const rows = await p.bySeat();
+      for (const seat of ["dev-qa@r", "dev-cx@r"]) {
+        expect(rows.get(seat)!.configured).toEqual({ source: "unknown", reason: "the seat registry exists but couldn't be read (EACCES)" });
+      }
+    } finally { denied?.mockRestore(); }
   });
 
   it("F3: malformed rows: a Codex seat without a parsed row is unknown, with the count; a parsed row still applies", async () => {
@@ -432,6 +442,11 @@ describe("seatAccounts on the production path (samples, registry reads, config d
 
   it.skipIf(process.getuid?.() === 0)("an unreadable profile folder: whether the profile is saved can't be told (null), never 'not saved'", async () => {
     const p = prod({ seats: codexSeats, registry: { body: HEADER + ROW, mode: 0o600 }, profiles: { names: ["saved-work"], folderMode: 0o000 } });
+    const read = fs.readdirSync.bind(fs);
+    const denied = process.platform === "win32" ? vi.spyOn(fs, "readdirSync").mockImplementation(((file, ...args) => {
+      if (file === p.profileDir) throw Object.assign(new Error("owned fixture denied"), { code: "EACCES" });
+      return read(file, ...args);
+    }) as typeof fs.readdirSync) : undefined;
     try {
       const model = await p.svc.getReadModel();
       const row = model.seatAccounts!.find((r) => r.seatSession === "dev-cx@r")!;
@@ -442,6 +457,7 @@ describe("seatAccounts on the production path (samples, registry reads, config d
       expect(model.accounts).toEqual([]);
       for (const usage of model.usage!) expect(usage).not.toHaveProperty("savedProfiles");
     } finally {
+      denied?.mockRestore();
       fs.chmodSync(p.profileDir, 0o700);
     }
   });

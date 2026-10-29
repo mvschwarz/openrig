@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Provider account fixture follow-up (2026-10-30)
+
+The six adjacent failures below are now reconciled. Four fixtures assumed POSIX
+path spelling or used drive-unqualified rooted values for seat-home declarations;
+they now use native path joins/resolution and exact expected fixture homes. Two
+fixtures assumed chmod 000 denies reads on Windows. Windows now injects EACCES
+only for the exact owned registry/profile-directory reads, preserving the full
+service composition and unknown-account assertions; POSIX retains real mode-based
+checks. This does not prove native DACL access denial. No production account
+policy was weakened or changed to satisfy these fixtures.
+
+The same three-file selection now passes 37/37 without skips, including registry
+CRLF and account projection. The earlier six failures remain a historical
+observation, superseded for this fixture selection only. Full native acceptance
+and the broader parity audit remain incomplete.
+
 ## Native CRLF account registries preserve row facts (2026-10-30)
 
 Both the shared CLI auth-seat reader and the provider metadata reader split
