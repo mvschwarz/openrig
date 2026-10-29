@@ -5,6 +5,7 @@ import { expect, it, vi } from "vitest";
 import { daemonCommand } from "../src/commands/daemon.js";
 import { doctorLegs, type DoctorDeps } from "../src/commands/host.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 it.each(["healthy", "unhealthy", "unverified", "stopped"] as const)(
   "preserves the actual daemon status command's %s verdict in SSH doctor",
@@ -16,6 +17,7 @@ it.each(["healthy", "unhealthy", "unverified", "stopped"] as const)(
       res.end("{}");
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(server);
     const address = server.address() as AddressInfo;
     vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${address.port}`);
     if (mode === "stopped") await new Promise<void>((resolve) => server.close(() => resolve()));

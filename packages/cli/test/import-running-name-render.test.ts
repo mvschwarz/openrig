@@ -12,6 +12,7 @@ import { adoptCommand } from "../src/commands/adopt.js";
 import { importCommand } from "../src/commands/import.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 const TEACHING =
   'A rig named "dupe-cli" is already RUNNING: 01RIGID with 1 running session(s) ' +
@@ -76,6 +77,7 @@ describe("rig import rendering — rig_name_running teaching refusal (S5b r2)", 
   });
 
   async function run(mode: "--instantiate" | "--materialize-only" | "adopt"): Promise<{ out: string; exitCode: number | undefined }> {
+    allowOwnedHttpFixture(server);
     const captured: string[] = [];
     const originalExit = process.exitCode;
     process.exitCode = undefined;
