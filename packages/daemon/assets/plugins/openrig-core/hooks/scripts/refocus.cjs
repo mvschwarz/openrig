@@ -12,6 +12,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnRig } = require("./rig-command.cjs");
 const { spawnPython } = require("./python-command.cjs");
+const { acquireNativeStateLock } = require("./refocus-state-lock.cjs");
 const { recordRefocusResult } = require("./refocus-health.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
@@ -421,6 +422,7 @@ function runsForThisSeatsProject(env = process.env) {
   } catch {}
 
   const stateFile = path.join(stateDir, `${seatKey}__${keyFor(identity)}.json`);
+  await acquireNativeStateLock(stateFile);
   let state = null;
   try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")) || null; } catch {}
   const persist = () => {
