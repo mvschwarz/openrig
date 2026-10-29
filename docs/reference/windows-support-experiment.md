@@ -260,6 +260,18 @@ directory before any stop/relaunch effect. The full restart file reports
 146 passed and one pending; daemon typecheck passes. Only temporary directory
 metadata was used; credential and conversation reads in the plan remain mocked.
 
+## Native heartbeat proof-path recognition (2026-10-30)
+
+The read-only heartbeat analyzer ignored timestamped proof notes containing
+Windows backslash paths. Owned queue fixtures reproduced this for drive paths,
+UNC paths and relative backslash paths. The Windows recognizer now accepts
+native absolute paths and separator-normalizes only its path-shape check;
+the reported reference retains its original spelling. Complete heartbeat
+checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
+This remains declared proof-note classification, not artifact verification,
+completion or delivery evidence. No heartbeat, message, timer or real queue
+was started or changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

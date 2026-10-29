@@ -373,6 +373,10 @@ function extractEvidencePath(line: string): string | null {
 }
 
 function looksLikePath(value: string): boolean {
+  if (process.platform === "win32") {
+    if (nodePath.win32.isAbsolute(value)) return true;
+    value = value.replaceAll("\\", "/");
+  }
   if (value.startsWith("/")) return value.length > 1;
   if (value.startsWith("./") || value.startsWith("../")) return true;
   if (/^[A-Za-z0-9_.-]+\.(md|txt|ts|tsx|js|jsx|json|jsonl|yaml|yml|toml|sqlite|db)$/i.test(value)) return true;
