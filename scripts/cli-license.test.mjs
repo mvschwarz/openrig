@@ -19,6 +19,8 @@ test("the CLI build carries the unchanged repository LICENSE and README into npm
     copyFileSync("scripts/prepare-workspace-build.mjs", join(root, "scripts/prepare-workspace-build.mjs"));
     writeFileSync(join(cli, "src/schemas/fixture.json"), "{}\n");
     writeFileSync(join(cli, "src/lib/scope-templates/fixture.md"), "fixture\n");
+    mkdirSync(join(cli, "dist"), { recursive: true });
+    writeFileSync(join(cli, "dist/index.js"), 'export function createProgram(){let write;return {configureHelp(){return this},configureOutput(io){write=io.writeOut;return this},outputHelp(){write("Usage: rig\\n")}}}\n');
     // Compilation is outside this packaging regression. Run the actual build
     // script with its expected compiler output, then npm's real file selection.
     if (process.platform === "win32") {
@@ -34,6 +36,8 @@ test("the CLI build carries the unchanged repository LICENSE and README into npm
     assert.deepEqual(readFileSync(join(cli, "LICENSE")), source, "build must stage the repository license verbatim");
     const packed = JSON.parse(execFileSync(...npmCommand(["pack", "--ignore-scripts", "--json"]), { cwd: cli, env, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }));
     assert.ok(packed[0].files.some((file) => file.path === "LICENSE"), "npm archive must include LICENSE");
+    assert.ok(packed[0].files.some((file) => file.path === "dist/root-help.txt"), "npm archive must include the generated complete root help");
+    assert.equal(readFileSync(join(cli, "dist/root-help.txt"), "utf8"), "Usage: rig\n");
     const bytes = execFileSync("tar", ["-xOf", join(cli, packed[0].filename), "package/LICENSE"]);
     assert.deepEqual(bytes, source, "packed license must equal the existing root bytes");
     // npm shows the package-root README on the registry page; without it the page reads "No README data found".

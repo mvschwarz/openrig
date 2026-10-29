@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { runFrontDoor, resolveTuiPath, probeFrontDoor, type FrontDoorIo } from "../src/front-door.js";
 import { diagnoseRuntimePosture, observeClaudePermission } from "../../daemon/src/domain/permission-drift.js";
@@ -425,9 +425,9 @@ describe("front-door probe routing", () => {
 
 describe("resolveTuiPath — monorepo-first, bundled fallback (the daemon resolver pattern)", () => {
   it("prefers the monorepo sibling dist, falls back to the bundled copy, null when neither", () => {
-    const base = "/repo/packages/cli/dist";
-    const mono = join("/repo/packages/cli/dist", "../../tui/dist/main.js");
-    const bundled = join("/repo/packages/cli/dist", "../tui/dist/main.js");
+    const base = resolve("/repo/packages/cli/dist");
+    const mono = resolve(base, "../../tui/dist/main.js");
+    const bundled = resolve(base, "../tui/dist/main.js");
     expect(resolveTuiPath(base, (p) => p === mono)).toBe(mono);
     expect(resolveTuiPath(base, (p) => p === bundled)).toBe(bundled);
     expect(resolveTuiPath(base, () => false)).toBeNull();
