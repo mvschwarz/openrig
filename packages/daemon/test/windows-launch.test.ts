@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch, hasOnlyWindowsTerminalResponseDraft } from "../src/adapters/windows-launch.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { windowsCmdBridgeInvocation } from "../src/domain/windows-cmd-bridge.js";
 
 describe("literal Windows launch rendering", () => {
   it("recognises only an entirely terminal-response current draft", () => {
@@ -29,6 +30,17 @@ describe("literal Windows launch rendering", () => {
 });
 
 describe("psmux PowerShell launch staging", () => {
+  it("stages cmd payload privately and pastes only the bounded encoded bridge", async () => {
+    const script = "C:\\temp\\openrig-tmux-send-1-12345678-1234-4123-8123-123456789abc.txt";
+    const writes: Array<[string, string]> = [], calls: string[][] = [];
+    const fileOps = { writeFile: async (file: string, content: string) => { writes.push([file, content]); }, unlink: async () => {}, tmpName: () => script, bufferName: () => "owned" };
+    const adapter = new TmuxAdapter(async () => { throw new Error("No shell execution"); }, fileOps, async args => { calls.push(args); return "cmd.exe"; }, "psmux");
+    const result = await adapter.sendShellCommand("owned", "'synthetic payload & 中文'");
+    expect(result, JSON.stringify(result)).toEqual({ ok: true });
+    expect(writes[0]![1]).toContain("synthetic payload & 中文");
+    expect(writes[1]![1]).toBe(windowsCmdBridgeInvocation(script));
+    expect(calls.some(args => args.includes("send-keys") && args.at(-1) === "Enter")).toBe(true);
+  });
   it("scopes duplicate psmux pane IDs to the session's server", async () => {
     const calls: string[][] = [];
     const adapter = new TmuxAdapter(async () => "", undefined, async argv => {
@@ -37,7 +49,7 @@ describe("psmux PowerShell launch staging", () => {
     }, "psmux");
     const pane = (await adapter.listPanes("seat-a"))[0]!;
     await adapter.getPaneCommand(pane.id);
-    expect(calls.at(-1)?.slice(0, 3)).toEqual(["tmux", "-t", "=seat-a"]);
+    expect(calls.at(-1)?.slice(0, 3)).toEqual(["tmux", "-t", "=seat-a:.%1"]);
     expect(calls.at(-1)).toContain("%1");
     expect(await adapter.readAllPaneProcesses()).toBeNull();
   });
@@ -60,8 +72,14 @@ describe("psmux PowerShell launch staging", () => {
   });
   it("rejects an unsupported pane before typing a native command", async () => {
     const fileOps = { writeFile: vi.fn(async () => {}), unlink: vi.fn(async () => {}), tmpName: () => "C:\\temp\\launch.txt", bufferName: () => "buf" };
-    const adapter = new TmuxAdapter(async () => "", fileOps, async () => "cmd", "psmux");
+    const adapter = new TmuxAdapter(async () => "", fileOps, async () => "nu", "psmux");
     expect(await adapter.sendShellCommand("seat", "node -v")).toMatchObject({ ok: false, code: "unsupported_windows_pane" });
+    expect(fileOps.writeFile).not.toHaveBeenCalled();
+  });
+  it("refuses an unrecognized cmd bridge script without staging or typing", async () => {
+    const fileOps = { writeFile: vi.fn(async () => {}), unlink: vi.fn(async () => {}), tmpName: () => "C:\\temp\\unmanaged.txt", bufferName: () => "owned" };
+    const adapter = new TmuxAdapter(async () => "", fileOps, async () => "cmd", "psmux");
+    expect(await adapter.sendShellCommand("owned", "node -v")).toMatchObject({ ok: false, code: "unsupported_windows_launch" });
     expect(fileOps.writeFile).not.toHaveBeenCalled();
   });
 });

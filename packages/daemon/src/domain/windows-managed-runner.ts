@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readProcessTable } from "./process-table.js";
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
+import { windowsManagedRunnerParent } from "./windows-cmd-bridge.js";
 
 export interface WindowsRunnerEvidence {
   runtime: "pi" | "omp" | "stub";
@@ -25,8 +26,8 @@ function flag(words: string[], name: string): string | undefined {
   return at < 0 ? undefined : words[at + 1];
 }
 
-/** A PowerShell pane can hold a live runner or remain after its death. Only
- * the exact managed direct child and matching sidecar launch prove readiness.
+/** A pane can hold a live runner or remain after its death. Only the exact
+ * managed child of PowerShell (directly, or the admitted cmd bridge) and matching sidecar launch prove readiness.
  * Unavailable/ambiguous observations stay unknown; a shell name is not proof. */
 export async function verifyWindowsManagedRunner(input: WindowsRunnerEvidence): Promise<boolean> {
   if (!input.launchId || !input.entryPath) return false;
@@ -37,7 +38,8 @@ export async function verifyWindowsManagedRunner(input: WindowsRunnerEvidence): 
     const byPid = new Map(rows.map(row => [row.pid, row]));
     if (byPid.size !== rows.length) return false;
     const parent = byPid.get(panePid), parentStart = Date.parse(parent?.startedAt ?? "");
-    if (!parent || !Number.isFinite(parentStart) || !(executable(parent, "powershell") || executable(parent, "pwsh"))) return false;
+    const runnerParent = windowsManagedRunnerParent(rows, panePid);
+    if (!parent || !Number.isFinite(parentStart) || runnerParent === null) return false;
     const descendants: ProcessRow[] = [], pending = [parent], visited = new Set<number>([panePid]);
     while (pending.length) {
       const current = pending.pop()!;
@@ -50,7 +52,7 @@ export async function verifyWindowsManagedRunner(input: WindowsRunnerEvidence): 
     const candidates = descendants.filter(row => flag(parseWindowsCommandLine(row.command), "--session-name") === input.sessionName);
     if (candidates.length !== 1) return false;
     const runner = candidates[0]!;
-    if (runner.ppid !== panePid || !executable(runner, "node")) return false;
+    if (runner.ppid !== runnerParent || !executable(runner, "node")) return false;
     const words = parseWindowsCommandLine(runner.command);
     const head = ["--session-name", input.sessionName, ...(input.runtime === "stub" ? [] : ["--state-root", input.stateRoot ?? ""]), "--cwd", input.cwd, "--launch-id", input.launchId];
     if (!samePath(words[1] ?? "", input.entryPath)) return false;

@@ -10,7 +10,7 @@ not activate the running daemon or seats.
 | Area | Current implementation/evidence | Remaining work or evidence limit |
 | --- | --- | --- |
 | Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
-| Native pane shells | PowerShell/pwsh startup transport and managed-runner identity checks; cmd idle-shell census exists | cmd startup transport, wrapper lineage and runner/model readiness are not implemented as a coherent supported path |
+| Native pane shells | PowerShell/pwsh plus bounded cmd-to-PowerShell staging; owned cmd/runner lineage and Pi record-selection checks | All-provider cmd lifecycle and stock psmux visible-terminal acceptance remain incomplete |
 | Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; npm Claude native identity limitations remain |
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
@@ -273,9 +273,9 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
-## Remaining native cmd pane path (2026-10-30)
+## Native cmd pane gap identified (2026-10-30)
 
-Current source inspection confirms a coordinated implementation gap, rather
+The earlier checkpoint confirmed a coordinated implementation gap, rather
 than an external-runtime limitation: sendWindowsShellCommand in tmux.ts refuses
 cmd panes and emits a PowerShell-only staged-script invocation. The idle-shell
 census in native-process-lineage.ts already recognizes bare cmd, but
@@ -284,10 +284,39 @@ runner as its direct child, and model-divergence/current-generation-record.ts
 uses the same direct-parent boundary for Pi. The Windows launch renderers also
 produce PowerShell scripts. Removing only the transport refusal would leave
 readiness and model attribution inconsistent. Complete cmd support therefore
-still requires a coherent invocation, owned wrapper lineage, readiness/model
-identity and actual owned-process checks. This remains open implementation
-work; no cmd support, acceptance, source-wide parity or completion is claimed.
+requires a coherent invocation, owned wrapper lineage, readiness/model
+identity and actual owned-process checks. The implementation follow-up below
+fills the staging and managed-runner portion; whole-lifecycle acceptance and
+source-wide parity remain open.
 No live pane was entered, started, stopped or reconfigured during this audit.
+
+## Cmd bridge implementation and actual process evidence (2026-10-30)
+
+Native shell staging now admits cmd and pastes a bounded, non-bracketed ASCII
+invocation of the pinned Windows PowerShell executable. Only a fixed encoded
+loader and a recognized private staged-script path cross cmd parsing; runtime
+payload/environment stay in the existing private file. The existing 512-byte
+input limit and paste/Enter delivery guard remain. Unsupported bridge paths
+return a refusal before staging or typing. The old transport refusal is a
+reproduced failing baseline.
+
+Runner readiness and Pi current-generation selection share the native parent
+rule: a direct PowerShell runner, or exactly one admitted loader bridge under
+cmd. Its argv, staged name, native executable evidence and creation order are
+checked. The actual cmd fixture exposed an additional system conhost child;
+only the OS-observed system conhost path is exempted from the single-bridge
+check. Extra children, competing runners, wrong launch IDs and arbitrary
+PowerShell commands remain refused. File naming is shared with the generator.
+
+Owned cmd/PowerShell/offline-Node processes prove Pi/OMP/stub readiness branches,
+Pi current-generation file selection and consumed-script removal against the
+actual native census. They use isolated homes and cleanup only their own trees.
+The related group passes 75/75; final transport/refusal checks pass 9/9 and
+daemon typecheck passes. A stale pane-routing assertion and the former cmd
+unsupported-shell fixture were corrected separately. No real provider,
+installed psmux session, fleet seat or console window was started or changed.
+Codex/Claude cmd lifecycle, interactive focus and installed-stock-psmux behavior
+remain separate unfinished checks; this is not whole-Windows acceptance.
 
 ## Auth home test module boundary (2026-10-30)
 

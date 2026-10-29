@@ -11,6 +11,7 @@ import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 import { commandNamesClaude } from "../native-process-lineage.js";
 import { parseWindowsCommandLine } from "../../adapters/windows-argv.js";
+import { windowsManagedRunnerParent } from "../windows-cmd-bridge.js";
 
 export interface ProcessRow {
   platform?: "win32";
@@ -355,7 +356,8 @@ export async function resolveIdentityVerifiedPiRecord(
   const paneCommand = paneRow?.command.trim().split(/\s+/)[0] ?? "";
   // This identifies the runner's parent, not an idle/blank shell. The runner's
   // exact direct-parent, launch-id and sidecar checks below still apply.
-  if (native ? !["powershell", "pwsh"].some(name => nativeExecutableIs(paneRow!, name))
+  const nativeParent = native ? windowsManagedRunnerParent(processes, panePid) : null;
+  if (native ? nativeParent === null
     : !isShellForeground(basename(paneCommand.replace(/^-/, "")))) {
     return { ok: false, reason: `the process of registered pane ${binding.tmuxPane} is not a shell` };
   }
@@ -371,7 +373,7 @@ export async function resolveIdentityVerifiedPiRecord(
     return { ok: false, reason: `${candidates.length} processes under registered pane ${binding.tmuxPane} name ${input.sessionName} with a launch id` };
   }
   const runner = candidates[0]!;
-  if (runner.ppid !== panePid) {
+  if (runner.ppid !== (native ? nativeParent : panePid)) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} is not a direct child of the pane's shell` };
   }
   // ps joins argv with spaces, and the entry path and state root may contain spaces. Matching the
@@ -401,6 +403,9 @@ export async function resolveIdentityVerifiedPiRecord(
   const startedMs = Date.parse(runner.startedAt ?? "");
   if (!Number.isFinite(startedMs)) {
     return { ok: false, reason: `the live Pi runner under ${binding.tmuxPane} has no readable start time` };
+  }
+  if (native && nativeParent !== panePid && startedMs < Date.parse(processes.find(row => row.pid === nativeParent)!.startedAt!)) {
+    return { ok: false, reason: "the Pi runner predates its native launch bridge" };
   }
 
   const sessionFile = cleanString(state.sessionFile);

@@ -13,6 +13,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
 import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
+import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
+import { windowsCmdBridgeInvocation } from "../domain/windows-cmd-bridge.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -60,16 +62,11 @@ export interface TmuxFileOps {
 
 // One source for the staged script's name: the generator (defaultTmuxFileOps) and the matcher
 // (isStagedSendScriptPath) are both built from it.
-const SEND_SCRIPT_PREFIX = "openrig-tmux-send-";
-const SEND_SCRIPT_SUFFIX = ".txt";
-const SEND_SCRIPT_NAME = new RegExp(
-  `^${SEND_SCRIPT_PREFIX}\\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${SEND_SCRIPT_SUFFIX.replace(".", "\\.")}$`,
-);
 
 /** Whether `path` names a launch script sendShellCommand staged (an absolute path with the name
  *  defaultTmuxFileOps gives it). The script removes itself first, so this is a name check only. */
 export function isStagedSendScriptPath(path: string): boolean {
-  return pathIsAbsolute(path) && SEND_SCRIPT_NAME.test(pathBaseName(path));
+  return pathIsAbsolute(path) && isStagedSendName(pathBaseName(path));
 }
 
 export function defaultTmuxFileOps(): TmuxFileOps {
@@ -1208,11 +1205,15 @@ export class TmuxAdapter {
 
   private async sendWindowsShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
     const paneShell = (await this.getPaneCommand(target) ?? "").toLowerCase().replace(/\.exe$/, "");
-    if (!["pwsh", "powershell"].includes(paneShell)) {
-      return { ok: false, code: "unsupported_windows_pane", message: "Experimental Windows launch requires a PowerShell pane; no command was typed." };
+    if (!["pwsh", "powershell", "cmd"].includes(paneShell)) {
+      return { ok: false, code: "unsupported_windows_pane", message: "Experimental Windows launch requires a PowerShell or cmd pane; no command was typed." };
     }
     const script = this.fileOps.tmpName();
-    const invocation = `& ([scriptblock]::Create([IO.File]::ReadAllText(${powershellQuote(script)})))`;
+    let invocation: string;
+    try {
+      invocation = paneShell === "cmd" ? windowsCmdBridgeInvocation(script)
+        : `& ([scriptblock]::Create([IO.File]::ReadAllText(${powershellQuote(script)})))`;
+    } catch (error) { return { ok: false, code: "unsupported_windows_launch", message: (error as Error).message }; }
     if (Buffer.byteLength(invocation, "utf8") > 512) {
       return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
     }
@@ -1220,9 +1221,8 @@ export class TmuxAdapter {
     try {
       await this.fileOps.writeFile(script, `Remove-Item -LiteralPath ${powershellQuote(script)}\n${command}\n`, { mode: 0o600, flag: "wx" });
       created = true;
-      const text = beforeInput
-        ? await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation, () => { check(); beforeInput(); }))
-        : await this.sendText(target, invocation);
+      const text = await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation,
+        () => { check(); beforeInput?.(); }, paneShell !== "cmd"));
       if (!text.ok) return text;
       // The actual consumer deletes the script. Successful paste alone is not consumption.
       const enter = beforeInput
