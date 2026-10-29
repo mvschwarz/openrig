@@ -10,6 +10,7 @@ import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
 import { watchCancelRequest } from "../acp/cancel-request.js";
+import { resolveAcpAgentCommand } from "../acp/agent-command.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -175,8 +176,11 @@ shared one) is left alone; stop it with its own command, if it's yours to stop. 
       if (liveConnector(run)) { console.error(`${runId} is still running; cancel it or detach first`); process.exitCode = 1; return; }
       let ran = "no stop command was given";
       if (stopCommand.length > 0) {
-        const result = spawnSync(stopCommand[0]!, stopCommand.slice(1), { stdio: "inherit" });
-        ran = `${stopCommand.join(" ")} exited ${result.error ? `with ${result.error.message}` : result.status ?? result.signal}`;
+        try {
+          const executable = resolveAcpAgentCommand(stopCommand[0]!, process.cwd());
+          const result = spawnSync(executable.command, [...executable.prefix, ...stopCommand.slice(1)], { stdio: "inherit" });
+          ran = `${stopCommand.join(" ")} exited ${result.error ? `with ${result.error.message}` : result.status ?? result.signal}`;
+        } catch (error) { ran = `${stopCommand.join(" ")} could not run: ${(error as Error).message}`; }
       }
       const left = await findRunProcesses(runId).catch(() => undefined);
       const report = left === undefined ? "unknown: the process table couldn't be read"
