@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { projectCommand, type ProjectDeps } from "../src/commands/project.js";
 import { JevRun, JEV_MODEL, JEV_ENDPOINT, CAPTURE_QUESTIONS, classifyCapture, readExperiment, setExperiment, validateJev } from "../src/commands/project-jev.js";
 
@@ -75,7 +76,7 @@ describe("public finite Jev experiment", () => {
     const result=await command(["experimental","capture","--config",f.config,"--input",input,"--output",output],{experimentEnv:{OPENROUTER_API_KEY:"synthetic-test-value"},experimentFetch:send});
     expect(result).toMatchObject({calls:1,inspected:1,remaining:1,unavailable:0});
     const row=JSON.parse(fs.readFileSync(output,"utf8"));expect(row).toMatchObject({attemptId:"attempt-1",binding:observation().binding,delivery:"INDETERMINATE",advisoryOnly:true,result:{status:"answered"}});
-    expect(fs.statSync(output).mode & 0o777).toBe(0o600);expect(fs.readFileSync(input,"utf8")).toBe(bytes);
+    expectPrivateFile(output);expect(fs.readFileSync(input,"utf8")).toBe(bytes);
     const saved=fs.readFileSync(output,"utf8");
     expect((await command(["experimental","capture","--config",f.config,"--input",input,"--output",output],{experimentEnv:{OPENROUTER_API_KEY:"synthetic-test-value"},experimentFetch:send})).error).toBe("capture_experiment_unavailable");
     expect(send).toHaveBeenCalledTimes(1);expect(fs.readFileSync(output,"utf8")).toBe(saved);

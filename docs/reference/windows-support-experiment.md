@@ -1,5 +1,39 @@
 # Native Windows support experiment
 
+## Owned experimental configuration and incremental output (2026-10-29)
+
+The `b6c2c7570` full CLI failures identified a real Windows configuration
+blocker: `setExperiment` compared a synthetic file UID with unavailable
+`process.getuid()`. Simply dropping that check would lose the ownership
+boundary, and Node's unavailable `O_NOFOLLOW` would still follow final links.
+
+Windows now opens the selected file with `FILE_FLAG_OPEN_REPARSE_POINT` and
+checks ordinary-disk-file type, reparse attributes and (before configuration
+truncation) one link and the current user's owner SID on that same handle.
+New configurations get an owner-only DACL; existing files retain their ACL.
+Reads remain byte-bounded, and missing configuration retains the disabled
+default. Configuration/output content never travels in argv or environment.
+
+Incremental experimental output now obtains a private descriptor through a
+protected sibling staging directory, an explicitly private staging file and
+an exclusive hard-link publication. This keeps incremental completed records
+and refuses every existing destination; it does not buffer the whole run or
+replace earlier results. Owned staging names are removed before returning.
+
+The native bridge compiles once per CLI process into a current-SID-only
+temporary directory and releases its exact executable/directory on normal
+exit. The initial per-operation PowerShell compilation passed all assertions
+but caused an unhandled Vitest communication timeout, so that failing run is
+not a pass receipt. The revised seven-file batch exited successfully with
+79 tests: 78 passed and one POSIX FIFO test skipped. It includes a complementary
+owned Windows named-pipe rejection, bounded UTF-8 reads, hard-link/junction
+refusal, private incremental output, one-compilation/exit-cleanup proof, Jev
+disable/cancel/limits, worker entry and MCP regressions. CLI typecheck passed.
+These use synthetic input/credentials and owned OS objects, not a live provider
+or fleet. No foreign account's files were modified for this proof; other UID
+and private-file consumers remain separate review work. A stub-agent scenario
+cannot establish native handle ownership, DACL or reparse behavior.
+
 ## Native MCP file privacy (2026-10-29)
 
 The complete CLI run at unchanged `b6c2c7570b6a12abc79783c0213c550c04f0e07a`
