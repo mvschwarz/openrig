@@ -1380,3 +1380,11 @@ The existing content-ref precedence, exact configured-content bytes, missing-con
 The work-packet file now passes 36/36 tests without skips on Windows, including one added Unicode evidence/stdin case. Its previous 35-case observation had 14 passes and 21 failures. Windows uses an owned npm-shaped CLI, an installed Python interpreter and an inert compiled argv/stdin capture probe; POSIX retains shell fixtures. Semantic text checks normalize CRLF, native paths use canonical disk spellings, and the old-notes regex escapes its literal path. The capture probe reads and writes UTF-8 and is removed after the test file.
 
 Candidate ownership, ambiguity, ancestry labels, held/next separation, bounded output with pointers, note age/source/threshold, explicit-start precedence and older-CLI fallback assertions remain in place. Production behavior and packet defaults are unchanged by this fixture batch. Workspace type checking passes. This receipt covers the packet fixture file; budget/concurrency characterization and the wider failure inventory remain separate.
+
+### Native budget and overlap fixtures (2026-10-30)
+
+The budget/overlap fixtures now run owned npm-shaped CLI entries and an inert native delay probe on Windows; POSIX retains its shell fixtures. The hook itself starts through the test runner's Node. All original delay values, lookup caps, outer kill bounds and failure-episode reporting assertions remain unchanged. The probe has no child processes, so a timed-out observation terminates its owned delay rather than leaving a shell sleep behind.
+
+All 12 cases pass on Windows, including the 52-second budget clamp, the default two-second trace cap, successful slow lookups, failed-attempt issue reporting and separate-occupant delivery. Full workspace type checking passes.
+
+The overlap tests deliberately characterize unresolved behavior: a later PostCompact can be lost and overlapping prompts can deliver twice for one occupant. Passing those characterization cases is evidence of a remaining defect, not concurrency acceptance. Native harness overlap in actual use remains unestablished. No managed seat or daemon is exercised.

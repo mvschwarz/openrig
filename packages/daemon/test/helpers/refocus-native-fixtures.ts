@@ -25,7 +25,30 @@ export function writeRefocusNpmFixture(bin: string, body: string): void {
 }
 
 let probeRoot: string | undefined;
-afterAll(() => { if (probeRoot) fs.rmSync(probeRoot, { recursive: true, force: true }); });
+let budgetRoot: string | undefined;
+afterAll(() => { for (const root of [probeRoot, budgetRoot]) if (root) fs.rmSync(root, { recursive: true, force: true }); });
+
+export function writeRefocusBudgetProbe(destination: string): string {
+  if (!budgetRoot) {
+    budgetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "refocus-budget-probe-"));
+    const source = `using System; using System.Threading; using System.Text;
+public class RefocusBudget { public static int Main() {
+  Console.OutputEncoding = new UTF8Encoding(false);
+  var partial = Environment.GetEnvironmentVariable("STUB_TRACE_PARTIAL");
+  if (!String.IsNullOrEmpty(partial)) { Console.WriteLine(partial); Console.Out.Flush(); }
+  var delay = Environment.GetEnvironmentVariable("STUB_TRACE_MS");
+  if (!String.IsNullOrEmpty(delay)) Thread.Sleep(Int32.Parse(delay));
+  Console.WriteLine("TRACE OK: work and topology"); return 0;
+} }`;
+    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly $env:REFOCUS_PROBE_EXE -OutputType ConsoleApplication`;
+    execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { env: { ...process.env, REFOCUS_PROBE_EXE: path.join(budgetRoot, "probe.exe") }, windowsHide: true, timeout: 15000 });
+  }
+  const file = destination + ".exe";
+  fs.copyFileSync(path.join(budgetRoot, "probe.exe"), file);
+  return file;
+}
 export function writeRefocusCaptureProbe(destination: string): string {
   if (!probeRoot) {
     probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "refocus-packet-probe-"));
