@@ -13,6 +13,7 @@
 
 import { spawn } from "node:child_process";
 import { killWindowsChildTree } from "./windows-child-tree.js";
+import { resolveCodexCommand } from "./windows-codex-command.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
@@ -141,7 +142,8 @@ export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {
     let child: ReturnType<typeof spawn>;
     try {
       // Its own process group, so cleanup reaches the reader's descendants and nothing else.
-      child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
+      const executable = resolveCodexCommand(env, cwd);
+      child = spawn(executable.command, [...executable.prefix, ...args], { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
     } catch (error) {
       return { ...no(`codex app-server could not start: ${firstLine(error)}`), elapsedMs: Math.round(performance.now() - started) };
     }

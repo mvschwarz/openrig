@@ -9,6 +9,8 @@
 //   unknown   → failure, timeout or non-Codex output: refuse rather than start a possibly
 //               shared seat.
 
+import { resolveCodexCommand } from "./windows-codex-command.js";
+
 export type CodexDaemonSupport =
   | { kind: "supported" }
   | { kind: "legacy" }
@@ -39,13 +41,14 @@ export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000,
     const { execFile } = await import("node:child_process");
     const home = seatHome ?? codexHome;
     const env = { ...process.env, ...(launchPath ? { PATH: launchPath } : {}), ...(home ? { CODEX_HOME: home } : {}) };
+    const executable = resolveCodexCommand(env, cwd);
     let deadline: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
       // execFile closes its pipes on timeout, but can report success if a wrapper
       // already exited zero while a descendant kept them open. Bound the decision
       // separately; execFile still owns pipe/direct-child cleanup, not the whole tree.
       deadline = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
-      execFile("codex", ["--help"], { cwd, env, timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf-8" }, (error, stdout) => {
+      execFile(executable.command, [...executable.prefix, "--help"], { cwd, env, timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf-8" }, (error, stdout) => {
         if (error) reject(error.killed ? new Error(`timed out after ${timeoutMs} ms`) : error);
         else resolve(stdout);
       });

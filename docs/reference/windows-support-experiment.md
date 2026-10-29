@@ -111,6 +111,19 @@ old target. Remote names that cannot be represented on Windows are refused.
 Owner/group/ACL mapping is not claimed. Link creation still requires native OS
 permissions; the OpenSSH-compatible symlink wire order is used.
 
+Windows Codex help, network-default and usage readers also resolve native
+executables or the recognized `@openai/codex` npm entry instead of trying to
+execute a `.cmd` file through native spawn. The selected Node executable receives
+literal argument arrays; arbitrary batch wrappers are not interpreted. Relative
+PATH entries resolve against the seat cwd. The native fixture exercises literal
+arguments, help and usage RPC without a real provider. Together with existing
+opt-out/auth tests, 38 tests passed; seven network-reader tests passed separately.
+The existing parent-exited process-group cleanup case was excluded from that
+selection because native orphan cleanup remains unresolved. Initial regression
+attempts exposed a POSIX-only fake PATH and unintentionally reached the installed
+Codex in temporary homes; those results are not acceptance evidence. The fixture
+now uses the native PATH delimiter and an isolated recognized npm layout.
+
 The SFTP follow-up selection passed 64 tests with three existing rsync skips.
 Actual Windows `sftp-server.exe` subprocesses exercised upload/download, Unicode
 names, directories, overwrite, extra-file retention, skip and dry-run behavior.

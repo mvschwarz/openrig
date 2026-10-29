@@ -9,6 +9,10 @@ import { codexDaemonSupportProbe, probeCodexDaemonSupport, type CodexDaemonSuppo
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+// These tests replace the executor; native executable discovery is covered by
+// windows-codex-command.test.ts rather than the host's real installations.
+vi.mock("../src/domain/windows-codex-command.js", () => ({ resolveCodexCommand: () => ({ command: "codex", prefix: [] }) }));
+
 // #69 — Codex versions using a shared app-server daemon can run tool shells there, so a seat's tools
 // can inherit another seat's OpenRig identity. Supported binaries must launch with
 // --no-daemon on every path; a positively legacy binary keeps its current invocation;
@@ -226,7 +230,7 @@ describe("#69 production detector with a fake executor", () => {
           expect(args).toEqual(["--help"]);
           expect(options.cwd).toBe(cwd);
           expect(options.env.PATH).toBe(launchPath);
-          expect(nodePath.resolve(options.cwd, options.env.PATH.split(":")[0], file)).toBe("/seat space's/bin/codex");
+          expect(nodePath.resolve(options.cwd, options.env.PATH.split(":")[0], file)).toBe(nodePath.resolve(cwd, "bin", "codex"));
           expect(options.timeout).toBe(10_000);
           expect(options.killSignal).toBe("SIGKILL");
           callback(null, help);
