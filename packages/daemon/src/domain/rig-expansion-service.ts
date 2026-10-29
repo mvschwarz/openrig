@@ -147,7 +147,11 @@ export class RigExpansionService {
             const raw: Record<string, unknown> = { ...member };
             for (const alias of ["agentRef", "codexConfigProfile", "claudePermissions", "claudeToken", "codexPermissions",
               "permissionPolicy", "restorePolicy", "sessionSource", "starterRef"]) {
-              if (Object.prototype.hasOwnProperty.call(member, alias)) {
+              // These aliases historically select a string, otherwise the raw
+              // canonical value wins. Permission/session-source aliases use presence.
+              const stringAlias = ["agentRef", "codexConfigProfile", "restorePolicy"].includes(alias);
+              if (Object.prototype.hasOwnProperty.call(member, alias)
+                && (!stringAlias || typeof member[alias] === "string")) {
                 raw[alias.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)] = member[alias];
               }
               delete raw[alias];
