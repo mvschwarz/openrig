@@ -37,6 +37,15 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   };
 }
 
+it("native setup refuses readiness when the required multiplexer is absent", async () => {
+  const base = makeDeps();
+  const exec = vi.fn((cmd: string) => { if (cmd === "tmux -V") throw new Error("not found"); return base.exec(cmd); });
+  const result = await runSetup(makeDeps({ platform: "win32", exec }), { herdr: false, ghostty: false });
+  expect(result.steps.find(step => step.id === "tmux_install")).toMatchObject({ status: "fail", fixHint: expect.stringContaining("psmux") });
+  expect(result.ready).toBe(false);
+  expect(exec.mock.calls.some(([cmd]) => cmd.startsWith("brew "))).toBe(false);
+});
+
 it.each([undefined, ""])("native setup resolves USERPROFILE when HOME is %s without a literal tilde path", async homeValue => {
   const writes = vi.fn(), reads: string[] = [];
   const profile = "C:/synthetic 用户/profile";

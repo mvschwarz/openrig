@@ -65,6 +65,13 @@ does not establish native psmux daemon startup behavior. Its private-socket
 isolation must not be bypassed to make it run against an operator server.
 Native scenario acceptance remains incomplete; no fleet process was changed.
 
+The setup consumer had a separate readiness defect: on Windows a missing tmux
+was marked skipped because Homebrew was unavailable, leaving no required
+multiplexer failure for the ready calculation. An injected native setup check
+failed before the correction. Setup now records a failed required dependency
+with the same psmux guidance; it does not run Homebrew or install software on
+the host. The complete setup test file passes after the correction.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

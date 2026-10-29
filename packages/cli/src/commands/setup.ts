@@ -9,7 +9,7 @@ import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl, tmuxInstallGuidance } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
 import { readPlatformEnv } from "../lib/codex-auth.js";
@@ -518,7 +518,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   // 2. tmux
   const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
   if (tmuxProbe.code === "not_installed") {
-    if (!brewOk) {
+    if (platform === "win32") {
+      steps.push({ id: "tmux_install", status: "fail", message: "Native multiplexer not found on PATH.", reason: "OpenRig requires psmux's tmux.exe alias to manage native Windows sessions.", fixHint: tmuxInstallGuidance(platform) });
+    } else if (!brewOk) {
       steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: Homebrew not available.", reason: "tmux install requires Homebrew." });
     } else {
       try {
