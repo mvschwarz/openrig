@@ -625,10 +625,13 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const wake = deps.queueRepo.getParkWakeStatus(qitem_id);
       if ((wake?.live === true && (!wake.unconsumed || wake.recoveryOwner === "queue-stuck-sweep"))
         || deps.queueRepo.parkWakeServedByOwnReminder(qitem_id)) continue;
-      const failure = currentParkedOwnerNoInputFailure(deps.queueRepo.listTransitions(qitem_id));
+      const transitions = deps.queueRepo.listTransitions(qitem_id);
+      const failure = currentParkedOwnerNoInputFailure(transitions);
       if (!failure) continue;
-      const response = lastMeaningfulTransition(deps.db, qitem_id);
-      if (response && (failure.transitionId === undefined ? Date.parse(response.at) > Date.parse(failure.ts) : response.id > failure.transitionId)) continue;
+      // Another seat's incidental note is not the owner's response. This kind follows
+      // the parked policy's owner-or-state-change rule, leaving other sweep kinds alone.
+      if (transitions.some((t, i) => t.transitionId > (failure.transitionId ?? Number.POSITIVE_INFINITY)
+        && (t.actorSession === row.destinationSession || t.state !== transitions[i - 1]?.state))) continue;
       candidates.push({ kind: "parked-owner-no-input", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
         ageMinutes: minutesSince(failure.ts, now), evidenceAt: failure.ts,
         why: `Automated parked-owner reminder refused before input (${failure.code}); repeated input stopped. Inspect the retained quota/guard or route terminal work to an agent. Original blocker remains ${row.blockedOn}` });

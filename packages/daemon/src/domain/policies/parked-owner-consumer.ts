@@ -229,7 +229,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           } else {
             const typedNoInput = n["deliveryInputPhase"] === "not_reached" && n["deliveryCode"] === "retained_quota_full";
             const terminal = n["deliveryInputPhase"] === "not_reached" && n["deliveryCode"] === "terminal_seat";
-            const admission = typedNoInput ? QUOTA_NO_INPUT : terminal ? TERMINAL_NO_INPUT : ";";
+            const admission = typedNoInput ? QUOTA_NO_INPUT : terminal ? TERMINAL_NO_INPUT : "; detail:";
             deps.rows.appendNote(primary, `${FAILED_PREFIX} ${key}${admission} ${reason}`);
             const uncertain = n["deliveryInputPhase"] === "attempted" || n["deliveryInputPhase"] === "written";
             deps.rows.recordNudgeResult(primary, `${uncertain ? "indeterminate: parked-owner wake delivery" : NUDGE_FAIL_PREFIX}${typedNoInput ? QUOTA_NO_INPUT : terminal ? TERMINAL_NO_INPUT : ""} — ${reason}`);
