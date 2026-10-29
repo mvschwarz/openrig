@@ -157,6 +157,16 @@ with the owned offline npm program; explicit-empty extension selection is also
 checked. Related checks report 10 passed and six POSIX skips, with daemon
 typecheck passing. No installed Pi, provider conversation or fleet seat changed.
 
+## OMP selected native extension order (2026-10-30)
+
+OMP's native resolver likewise fixed EXE before COM. Owned native witnesses
+reproduced both ignored order and ignored explicit-empty PATHEXT. The resolver
+now retains the selected native extension order with case-aware environment
+lookup, defaults only when absent, and still excludes batch/script shims under
+OMP's existing native-only contract. Actual copied Node witnesses execute from
+relative PATH as EXE and COM under isolated child homes; no OMP or provider is
+invoked. Adjacent OMP checks and daemon typecheck pass.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

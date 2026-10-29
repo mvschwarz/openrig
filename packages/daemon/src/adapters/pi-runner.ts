@@ -1158,7 +1158,10 @@ export function resolveRuntimeExecutable(
   const paths = platform === "win32" ? nodePath.win32 : nodePath.posix;
   // Native spawn does not execute npm .cmd/.ps1 shims. OMP ships an .exe;
   // resolve that file before the isolated seat HOME is applied.
-  const names = platform === "win32" && !paths.extname(name) ? [name + ".exe", name + ".com"] : [name];
+  const names = platform === "win32" && !paths.extname(name)
+    ? (readPlatformEnv(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD").split(";")
+      .map(ext => ext.toLowerCase()).filter(ext => ext === ".exe" || ext === ".com").map(ext => name + ext)
+    : [name];
   const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
   const onPath = searchPath.split(paths.delimiter)
     .map(dir => platform === "win32" ? paths.resolve(cwd, dir.replace(/^"(.*)"$/, "$1")) : dir)
