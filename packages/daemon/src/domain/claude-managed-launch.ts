@@ -288,6 +288,8 @@ export class ClaudeManagedLaunch {
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (this.platform === "win32") {
+      const pathExt = readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform);
+      if (pathExt !== undefined) env.PATHEXT = pathExt;
       for (const key of ["SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA"]) {
         const entry = Object.entries(process.env).find(([name]) => name.toUpperCase() === key);
         if (entry?.[1]) env[key] = entry[1];
@@ -349,7 +351,7 @@ export class ClaudeManagedLaunch {
     // Filter out the explicit capability environment and overwrite launch identity.
     const nativeName = (key: string) => this.platform === "win32" ? key.toUpperCase() : key;
     const inheritedKeys = () => Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-      && !MANAGED_LAUNCH_KEYS.includes(nativeName(key)) && !isCredentialKey(key));
+      && !MANAGED_LAUNCH_KEYS.includes(nativeName(key)) && !(this.platform === "win32" && nativeName(key) === "PATHEXT") && !isCredentialKey(key));
     const inherited = inheritedKeys();
     if (inherited.some(key => this.platform === "win32"
       ? !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && nativeName(key) !== "PROGRAMFILES(X86)"
@@ -418,7 +420,7 @@ export class ClaudeManagedLaunch {
       assertCurrent();
       if (token?.ref.kind === "api-key") this.seatTokenLaunch(target.nodeId, { ref: token.ref, accountHome: target.accountHome });
       if (this.platform === "win32") {
-        const boundNames = new Set([...Object.keys(identity), ...Object.keys(publicEnv)].map(nativeName));
+        const boundNames = new Set([...Object.keys(identity), ...Object.keys(publicEnv), "PATHEXT"].map(nativeName));
         const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
           .filter(key => !boundNames.has(nativeName(key)));
         const terminalNames = [...PANE_TERMINAL_KEYS, "EDITOR", "VISUAL"];

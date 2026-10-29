@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Managed native PATHEXT remains selected through launch (2026-10-30)
+
+The selected PATHEXT participated in native executable lookup but was absent
+from the capability environment and could later be forwarded from a different
+pane environment. Windows managed launches now include an explicitly selected
+PATHEXT (including an empty value) in the frozen context and capability query,
+and exclude pane/seat forwarding of that managed key. Other existing pane-owned
+environment channels retain their behavior. POSIX environment handling is unchanged.
+
+The new fixture fails before this repair at the capability environment assertion.
+Afterward it launches an owned copied Node executable through the generated
+PowerShell command with a conflicting pane PATHEXT and reads back the exact
+selected value. Both native managed/selection files pass 23/23 without skips;
+daemon type checking passes. The capability answer is an inert mock; the child
+is an offline witness, not an installed provider or live seat.
+
 ## Managed Claude native selection honors PATHEXT (2026-10-30)
 
 When no prior executable was frozen, ClaudeManagedLaunch searched only for

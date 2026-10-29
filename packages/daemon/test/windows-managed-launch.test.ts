@@ -42,6 +42,22 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("pins selected PATHEXT for capability discovery and the actual child despite pane drift", async () => {
+    const f = fixture(); fs.copyFileSync(process.execPath, f.executable);
+    f.env.Pathext = ".EXE";
+    vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], opts: { env: Record<string, string> }, done: (error: null, help: string) => void) => {
+      expect(opts.env.PATHEXT).toBe(".EXE");
+      done(null, '--permission-mode <mode> (choices: "auto", "default")');
+    }) as never);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const command = prepared.command(["-e", "console.log(JSON.stringify({extensions:process.env.PATHEXT}))"]);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => native.execFile(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      { env: { SystemRoot: process.env.SystemRoot, HOME: f.home, USERPROFILE: f.home, TEMP: f.home, TMP: f.home, PATHEXT: ".WRONG" }, encoding: "utf8", windowsHide: true, timeout: 10000 },
+      (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim())).toEqual({ extensions: ".EXE" });
+  });
   it.runIf(process.platform === "win32")("selects native COM by copied PATHEXT order and refuses empty or batch-first selection", async () => {
     const f = fixture();
     const native = path.join(f.home, "claude.com");
