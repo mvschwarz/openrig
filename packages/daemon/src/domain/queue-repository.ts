@@ -39,6 +39,7 @@ import {
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
+import { slackMicros } from "./gateway/slack/state-store.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -3776,12 +3777,14 @@ export class QueueRepository {
    * resolve) with exactly what the seat will read. Anything else is not-applicable (a forged
    * id, a stranger, a decision already resolved), never an error the socket must retry.
    */
-  recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; primaryUser?: boolean }): RecordHumanAnswerResult {
+  recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string; primaryUser?: boolean;
+    /** The click's Slack action_ts: a decision parked on the person it asked takes the click only from after its current question posted. */
+    clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
-      if (item.state !== "pending") {
+      if (item.state !== "pending" && !this.clickAnswersPark(item, input.actorSession, input.clickedTs)) {
         // Slack can redeliver the click that closed it. Only to the asked human, say whether this answer is on record.
         const onRecord = item.destinationSession === input.actorSession && item.humanAnswers?.[input.questionId] === input.optionId;
         const delegated = item.destinationSession === input.actorSession ? item.delegatedDecision : null;
@@ -3802,6 +3805,24 @@ export class QueueRepository {
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
+  }
+
+  /** A decision parked on the person it asked takes that person's click, as their typed reply does (makeHumanReplyResolver):
+   *  the park is on them by any of their addresses, and the click came after its current question posted. */
+  private clickAnswersPark(item: QueueItem, actorSession: string, clickedTs: string | undefined): boolean {
+    if (item.state !== "blocked" || !item.blockedOn || !this.isPersonAddress(item.blockedOn)) return false;
+    if (item.destinationSession !== actorSession || this.askedSomeoneElse(actorSession, item.blockedOn)) return false;
+    const posted = slackMicros(this.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs);
+    const clicked = slackMicros(clickedTs);
+    return posted !== null && clicked !== null && clicked > posted;
+  }
+
+  /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
+  currentHumanRequiredEpisode(qitemId: string): { key: string; receipt: ReturnType<QueueTransitionLog["getOwnerNotificationReceipt"]> } | null {
+    const episode = this.transitionLog.listForQitem(qitemId).filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
+    if (!episode) return null;
+    const key = `${qitemId}:${episode.transitionId}`;
+    return { key, receipt: this.transitionLog.getOwnerNotificationReceipt(qitemId, key) };
   }
 
   /**

@@ -112,11 +112,9 @@ export function makeHumanReplyResolver(
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
-      const episode = queueRepo.transitionLog.listForQitem(input.qitemId)
-        .filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
+      const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
-      const key = `${input.qitemId}:${episode.transitionId}`;
-      const receipt = queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, key);
+      const { key, receipt } = episode;
       // A final receipt attests delivery even when reconciliation lost its timestamp.
       // Without one, ONLY a unique exact current-episode primary proves anything.
       const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;

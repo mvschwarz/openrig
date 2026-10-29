@@ -70,7 +70,7 @@ export interface SlackBlockActions {
   actions?: Array<{ block_id?: string; action_id?: string; value?: string; action_ts?: string }>;
 }
 
-export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string }) => RecordHumanAnswerResult;
+export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string }) => RecordHumanAnswerResult;
 
 /** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
  *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
@@ -78,6 +78,7 @@ export const CLICK_REPLIES = {
   unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
   unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
   closed: "This decision is no longer waiting for answers, so this click wasn't recorded.",
+  parked: "This click wasn't recorded: this decision is parked right now, so it isn't taking this answer.",
   onRecord: "Your answer is recorded, and this decision is no longer waiting for answers.",
   someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
   stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
@@ -93,6 +94,7 @@ export function decidedForThemReply(d: { decidedBy: string; modeName: string; ch
 
 /** The reply for a click recordHumanAnswer didn't record, by its reason. */
 export function clickNotRecordedReply(reason: string): string {
+  if (reason === "state-blocked") return CLICK_REPLIES.parked;
   if (reason.startsWith("state-")) return CLICK_REPLIES.closed;
   if (reason === "not-the-asked-human") return CLICK_REPLIES.someoneElse;
   if (reason === "unknown-option" || reason === "no-questions") return CLICK_REPLIES.stale;
@@ -527,7 +529,7 @@ export class InboundRouter {
     const existing = this.deps.queue.getHumanAnswer?.(qitemId, who.source);
     if (existing) {
       try {
-        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body) });
+        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts });
         if (resolution === "not-applicable") {
           if (live) await acknowledge(CLICK_REPLIES.notClosed);
           return { status: "refused", reason: "resolve-not-applicable" };
@@ -540,7 +542,7 @@ export class InboundRouter {
         return { status: "handler-failed", reason: "answer-continuation-failed" };
       }
     }
-    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
+    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
@@ -572,7 +574,8 @@ export class InboundRouter {
         summary: `${who.source} via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
         body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
       });
-      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; ") });
+      // The click's own time, so a decision parked on this person resumes as a typed reply after its question would.
+      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; "), messageTs: action?.action_ts });
     } catch (e) {
       this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`);
       if (live) await acknowledge("Your answers are recorded, but handing them back failed. OpenRig will retry.");
