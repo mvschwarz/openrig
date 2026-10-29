@@ -67,6 +67,10 @@ const SANCTIONED: Record<string, { sites: number; why: string }> = {
     sites: 1,
     why: "quiet-hours hold: writes only a transition NOTE (the quiet-hold note, or the post-time 'release returned' note), never a state, in the same transaction as arming the window's quiet-release watchdog job (noteWithReleaseJob)",
   },
+  "domain/queue-wake-ladder.ts": {
+    sites: 1,
+    why: "hook-review guidance on an existing prompt alert: summary + transition only, no state supplied, in the same transaction as its hook episode tag; delivery receipt and custody stay unchanged",
+  },
   "domain/workflow-runtime.ts": {
     sites: 6,
     why: "entry-gate park; explicit abort closes every live packet; no-successor exception close; packet-addressed route close; route re-park; reconcileStuckExceptions closes only recovered overdue occurrences with no-follow-on (59d252f6; workflow-exception-stuck.test.ts)",
@@ -206,9 +210,9 @@ describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", (
   it("the LIVE corpus matches the sanctioned set exactly, by CALL SITE", () => {
     const result = checkCallSites(realCorpus(), SANCTIONED);
     expect(result.violations).toEqual([]);
-    // Counts SITES, not files. 13 sites across 4 files.
+    // Counts SITES, not files. 14 sites across 5 files.
     expect(result.examined).toBe(TOTAL_SITES);
-    expect(result.examined).toBe(13);
+    expect(result.examined).toBe(14);
     expect(result.vacuous).toBe(false);
   });
 
@@ -312,6 +316,6 @@ describe("P34 RED 5 — KNOWN-NEGATIVE: a guard that examines nothing must FAIL"
   it("the LIVE run is NOT vacuous and examined the expected number of SITES", () => {
     const live = checkCallSites(realCorpus(), SANCTIONED);
     expect(live.vacuous).toBe(false);
-    expect(live.examined).toBe(13);
+    expect(live.examined).toBe(14);
   });
 });
