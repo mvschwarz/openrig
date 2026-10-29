@@ -200,6 +200,19 @@ fixture lacked staged.prepare and is not the causal baseline. Successor,
 ordinary launcher and defaults checks pass 84/84; daemon typecheck passes.
 No live handover, running session or clipboard was changed.
 
+## Native-cased seat status home projection (2026-10-30)
+
+SeatStatusService read copied HOME and runtime-home variables by exact key,
+misreporting the configured home for Windows case variants. Its actual status
+projection fixture failed before using the shared native environment reader.
+It now reports Codex/Claude daemon selections with native key casing and keeps
+canonical empty selections authoritative over duplicate variants. The older
+home-source fixture now constructs platform-native paths instead of comparing
+Windows-resolved paths to POSIX literals; member/daemon/default precedence and
+relative-home refusal checks remain. The complete file passes 12/12 and daemon
+typecheck passes. Status remains configured next-launch context, not login or
+running-process proof; no seat or authentication file changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

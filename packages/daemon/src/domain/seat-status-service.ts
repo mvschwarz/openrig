@@ -1,5 +1,6 @@
 import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
+import { readPlatformEnv } from "./platform-env.js";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
@@ -197,9 +198,9 @@ export class SeatStatusService {
     const ignored = own.ignored ? { ignored: own.ignored } : {};
     if (own.home && own.source) return { runtime_home: { variable, home: own.home, source: own.source } };
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
-    const daemon = this.env[variable];
+    const daemon = readPlatformEnv(this.env, variable);
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
-    const home = this.env.HOME;
+    const home = readPlatformEnv(this.env, "HOME");
     const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }
