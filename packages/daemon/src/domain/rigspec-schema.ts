@@ -484,6 +484,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   const prefix = `${podPrefix}.members[${index}]`;
   if (!isMapping(member)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
+  for (const field of ["model", "label"]) {
+    if (member[field] !== undefined && typeof member[field] !== "string") {
+      errors.push(`${prefix}.${field}: must be a string`);
+    }
+  }
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
   // through the manifest's one canonical site; this leg only classifies the answer.
