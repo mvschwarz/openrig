@@ -7,6 +7,7 @@
 // is the guard rail. The security wall lives in lib/file-transfer.ts.
 
 import { Command } from "commander";
+import { buildSftpArgv } from "../lib/native-sftp-copy.js";
 import {
   planFileCopy,
   buildRsyncArgv,
@@ -66,7 +67,8 @@ export function fileCommand(deps: FileCommandDeps = {}): Command {
             error: result.ok ? null : result.stderr.trim() || `rsync failed (${result.failedStep})`,
             hint: result.hint ?? null,
             transport: result.transport ?? "rsync",
-            rsyncArgv: result.transport === "native-local" ? null : buildRsyncArgv(plan),
+            rsyncArgv: result.transport && result.transport !== "rsync" ? null : buildRsyncArgv(plan),
+            ...(result.transport === "sftp" ? { sshArgv: buildSftpArgv(plan) } : {}),
           }),
         );
         if (!result.ok) process.exitCode = 1;

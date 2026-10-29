@@ -45,6 +45,7 @@ import { loadHostRegistry, resolveHost, type SshHostEntry } from "./../host-regi
 import { looksLikePermissionGate } from "./../cross-host-executor.js";
 import { getDefaultOpenRigPath, getOpenRigHome } from "./../openrig-compat.js";
 import { runNativeLocalCopy } from "./native-local-copy.js";
+import { runNativeSftpCopy } from "./native-sftp-copy.js";
 
 // ── grammar ────────────────────────────────────────────────────────────────
 
@@ -293,10 +294,10 @@ export function buildRsyncArgv(plan: CopyPlan): string[] {
 
 // ── execution + classification ──────────────────────────────────────────────
 
-export type FileCopyFailedStep = "none" | "rsync-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed" | "local-copy-failed";
+export type FileCopyFailedStep = "none" | "rsync-missing" | "ssh-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed" | "local-copy-failed";
 
 export interface FileCopyResult {
-  transport?: "rsync" | "native-local";
+  transport?: "rsync" | "native-local" | "sftp";
   ok: boolean;
   failedStep: FileCopyFailedStep;
   exitCode: number | null;
@@ -349,6 +350,9 @@ export function classifyRsyncResult(exitCode: number | null, stdout: string, std
 }
 
 export async function runFileCopy(plan: CopyPlan, deps: { spawn?: SpawnFn } = {}): Promise<FileCopyResult> {
+  if (process.platform === "win32" && !deps.spawn && (plan.src.kind === "remote" || plan.dst.kind === "remote")) {
+    return runNativeSftpCopy(plan);
+  }
   if (process.platform === "win32" && !deps.spawn && plan.src.kind === "local" && plan.dst.kind === "local") {
     return runNativeLocalCopy(plan);
   }

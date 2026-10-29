@@ -98,7 +98,26 @@ Restart Manager database-file holder observations, shared CIM process identity,
 ACP creation times and detached-run marker discovery, local file copying, and
 live probe/scenario-client process-tree termination. Windows file operands retain
 drive, UNC, casing-deny and trailing-separator semantics. Extra destination files
-are retained; local dry-run moves nothing. Remote transfers still require rsync.
+are retained; local dry-run moves nothing. Windows remote transfers now use the
+native OpenSSH SFTP subsystem rather than requiring rsync on either endpoint.
+The registered SSH target/user and existing path policy are retained. The client
+uses binary SFTP v3 with request deadlines, bounded packet framing and literal
+SSH argv. Recursive copies retain extra destination entries, preserve timestamps
+and remote permission bits, support trailing-directory-separator semantics and
+preview without writes. Changed files are written to exclusive sibling staging
+files, then renamed; an existing remote target requires the OpenSSH atomic-rename
+extension. Failed staging may remain and is reported rather than deleting the
+old target. Remote names that cannot be represented on Windows are refused.
+Owner/group/ACL mapping is not claimed. Link creation still requires native OS
+permissions; the OpenSSH-compatible symlink wire order is used.
+
+The SFTP follow-up selection passed 64 tests with three existing rsync skips.
+Actual Windows `sftp-server.exe` subprocesses exercised upload/download, Unicode
+names, directories, overwrite, extra-file retention, skip and dry-run behavior.
+Malformed framing and a silent subsystem are rejected with owned-child cleanup.
+This does not validate a real SSH host, authentication, interactive prompts,
+non-OpenSSH SFTP servers or privileged Windows symlink creation. Workspace
+lint/typecheck passed; these changes have not been deployed.
 
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
@@ -117,7 +136,7 @@ that owned fixture was manually ended, and the deadline path was then fixed and
 retested. The failed run also includes Bash/npm-shim fixtures, symlink permission
 assumptions, Windows-invalid filenames and generated-lineage drift. It is not
 reported green. General orphan cleanup after a probe root has already exited,
-remote file transfer without rsync, live provider token acceptance, every-provider hooks,
+real remote SSH authentication acceptance, live provider token acceptance, every-provider hooks,
 desktop/reboot and Linux/macOS acceptance remain incomplete. The database holder
 test uses mocked HTTP confirmation, not a real competing-daemon acceptance test.
 Known-home holder records are checked; an unknown holder home stays unknown.
