@@ -92,7 +92,8 @@ export function workflowDetail(execution: ExecutionViewSnap, key: string, width:
     lines.push(sectionRule("Bound graph and sources", width), field("workflow", instance.workflow_name), field("version", instance.workflow_version), field("graph", instance.graph_source), { text: instance.reconciliation ? "  Bound source receipts are retained; the authored/running comparison below explains current changes." : "  Sources are bound at compilation. Current source bytes have not been compared." });
     for (const source of rows(instance.sources)) {
       if (source.kind === "slice" && typeof source.path === "string") {
-        const parts = source.path.split("/");
+        // Sources are daemon filesystem paths; the TUI may run on another OS.
+        const parts = source.path.replaceAll("\\", "/").split("/");
         const slice = parts.at(-2);
         if (slice) lines.push(listItem(`Slice ${slice}`, { type: "scopes-open", mission: execution.mission, slice }));
       }

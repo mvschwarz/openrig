@@ -1676,3 +1676,17 @@ A bounded lexical scan of production sources surfaced two filesystem paths still
 Health diagnosis split native path.relative results only on '/', so the three-part slices/folder/file test never admitted matching slice authority on Windows. It now splits those filesystem-relative paths with the native separator. Canonical-file checks, scope categories, declared slice identity and unrelated-authority refusal remain unchanged. The existing complete positive/negative scope-binding case fails before correction and passes after it, including sibling/malformed/changed-ID refusal.
 
 Draft generation, health diagnosis and ceremony files total 43 tests: 41 pass and two file-symlink fixtures fail during creation with EPERM. Correction, passive-ceremony and operating-posture consumers total 58 tests: 57 pass and one file-symlink fixture fails during creation. The directory-link posture fixture uses a Windows junction without changing its real-workspace/catalog assertions; its complete 21-test file passes. File-link cases remain unwaived. Type checking and diff whitespace checks pass. No live discovered session is adopted and no health notification is sent.
+# Windows bound-source navigation follow-up (2026-10-30)
+
+The lifecycle compiler records native filesystem paths for slice sources. The
+TUI previously split those paths only on `/`, so a Windows daemon's backslash
+source lost its Slice navigation action. The detail renderer now accepts both
+separator forms, including UNC paths, without changing the displayed source or
+the mission/slice action identity. This also supports a TUI on another OS.
+
+Focused native-source, wake-marker and connected workflow-journey checks: 7/7
+passed on Windows. This does not establish desktop or provider acceptance.
+The separate frozen e36cef0 CLI run completed with stable source: 5,983 tests,
+5,830 passed, 97 failed and 56 pending. It predates subsequent source fixes;
+these counts are retained as that exact snapshot rather than current-head acceptance.
+
