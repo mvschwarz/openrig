@@ -144,7 +144,8 @@ function normalizeFile(candidate, cwd) {
   if (/\.(?:md|mdx|txt|json|jsonl|yaml|yml|toml|ts|tsx|js|jsx|mjs|cjs|py|sh|rs|go|sql|css|scss|html|xml|svg|csv|log|lock)\//i.test(file)) return null;
   if (file.startsWith("~")) file = path.join(os.homedir(), file.slice(1));
   let normalized = null;
-  if (file.startsWith("/")) normalized = path.normalize(file);
+  if (process.platform === "win32" && (path.isAbsolute(file) || (file.includes("\\") && path.extname(file)))) normalized = path.normalize(path.resolve(cwd, file));
+  else if (file.startsWith("/")) normalized = path.normalize(file);
   else if (file.startsWith("./") || file.startsWith("../")) normalized = path.normalize(path.resolve(cwd, file));
   else if (/^[A-Za-z0-9_@.+-][A-Za-z0-9_@.+/\-:]*\.[A-Za-z0-9]+$/.test(file)) {
     normalized = path.normalize(path.resolve(cwd, file));
@@ -163,7 +164,21 @@ function normalizeFile(candidate, cwd) {
 
 function extractPaths(text, cwd) {
   const paths = new Set();
-  const s = String(text ?? "");
+  let s = String(text ?? "");
+  if (process.platform === "win32") {
+    if (path.isAbsolute(s.trim())) {
+      const whole = normalizeFile(s, cwd);
+      if (whole) return [whole];
+    }
+    const quoted = /["'`]((?:[A-Za-z]:[\\/]|\\\\)[^"'`\r\n]+)["'`]/g;
+    const native = /(?:^|[\s"'(<\[])([A-Za-z]:[\\/][^\s"'()\]<>]+\.[A-Za-z0-9]+)(?=$|[\s"')>\],.;:])/g;
+    for (const regex of [quoted, native]) s = s.replace(regex, (match, candidate) => {
+      const normalized = normalizeFile(candidate, cwd);
+      if (normalized) paths.add(normalized);
+      // Do not reinterpret a spaced native path's tail as a cwd-relative file.
+      return " ".repeat(match.length);
+    });
+  }
   const absolute = /(?:^|[\s"'(<\[])(\/(?:Users|private|tmp|var|opt|Volumes)\/[^\s"'()\]<>]+)/g;
   const relative = /(?:^|[\s"'(<\[])((?:\.{1,2}\/)?[A-Za-z0-9_@.+-][A-Za-z0-9_@.+/\-:]*\.(?:md|mdx|txt|json|jsonl|yaml|yml|toml|ts|tsx|js|jsx|mjs|cjs|py|sh|rs|go|sql|css|scss|html|xml|svg|csv|log|lock))(?:$|[\s"')>\],.;:])/g;
   const namedMarkdown = /(?:^|[\s"'(<\[])((?:CLAUDE|AGENTS|README|DESIGN|CULTURE|MEMORY)\.md)(?:$|[\s"')>\],.;:])/g;

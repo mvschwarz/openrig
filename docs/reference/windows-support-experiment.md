@@ -1936,3 +1936,19 @@ running refocus budget/concurrency batch passed 13 cases. Helper edits continued
 during that batch, so it is not an exact-commit acceptance run. Daemon TypeScript
 and mirror checks passed. Both plugin manifests are 0.1.26; no live plugin was
 installed or refreshed.
+
+## Native touched-file paths in restore packets (2026-10-30)
+
+Restore analysis discarded backslash paths from native tool arguments and could
+reinterpret the tail of a spaced Unicode path as a different cwd-relative file.
+Windows normalization now accepts native absolute and backslash-relative file
+paths. Text extraction recognizes quoted native absolute paths and masks those
+spans before the portable relative-path matcher runs. A whole native path is
+kept intact rather than reparsed as fragments. POSIX matching is unchanged.
+
+The synthetic transcript reproducer previously lost the real tool paths and
+invented path-tail entries. It now records exactly its three expected files:
+Unicode/spaced absolute Write, backslash-relative Edit and a quoted absolute
+text mention. Native discovery plus hook/bridge checks passed 28 tests with two
+existing skips. Plugin manifests are 0.1.27; mirror checks and staged skill-byte
+digest verification passed. No live transcript was inspected or restored.
