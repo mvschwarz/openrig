@@ -360,9 +360,11 @@ export class InboundRouter {
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
-      const askPending = correlated?.state === "pending";
+      // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
+      const askOpen = correlated?.state === "pending" || (correlated?.state === "blocked" && route.correlationQitemId !== undefined
+        && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true);
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && !asChannel && route.correlationQitemId
+      const committedAnswer = (askOpen || closed) && !ev.recoveredThreadReply && !asChannel && route.correlationQitemId
         ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
       const absorbedEventKey = committedAnswer ? `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, committedAnswer.qitemId])}` : null;
@@ -372,7 +374,7 @@ export class InboundRouter {
         (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
       ) ? committedAnswer : null;
       // A different event after close remains conversation; only the pending ask coalesces other retries.
-      const earlierAnswer = askPending ? committedAnswer : replayedAnswer;
+      const earlierAnswer = askOpen ? committedAnswer : replayedAnswer;
       let qitemId: string;
       try {
         qitemId = replayedAnswer ? replayedAnswer.qitemId : await this.deps.queue.createQitem({
@@ -385,7 +387,7 @@ export class InboundRouter {
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askPending && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true } : {}),
+          ...(askOpen && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);

@@ -109,9 +109,11 @@ export function makeHumanReplyResolver(
       return "resolved-uncertain";
     }
     let uncertain = false;
+    let parkedOnAsked = false;
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
+      parkedOnAsked = source.destinationSession === input.actorSession;
       const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
       const { key, receipt } = episode;
@@ -127,6 +129,9 @@ export function makeHumanReplyResolver(
 
     try {
       await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision });
+      // A question parked on the person it asked takes their reply as its answer, once: a second resolve can't succeed.
+      // A reply whose order against the question is uncertain stays words in context, as the agent is told.
+      if (parkedOnAsked && !uncertain) queueRepo.recordParkedTypedReply(input.qitemId, input.decision);
       return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;

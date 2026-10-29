@@ -73,6 +73,8 @@ export interface InboundQueuePort {
   createQitem(input: CreateQitemInput): Promise<string>;
   getQitem?(qitemId: string): QueueItem | null;
   getHumanAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
+  /** Whether a decision parked on the person it asked takes this person's reply, sent at `ts`, as its answer. */
+  answersPark?(qitemId: string, actorSession: string, ts: string | undefined): boolean;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -227,6 +229,10 @@ export function makeQueuePorts(
   return {
     getQitem: (qitemId) => queueRepo.getById(qitemId),
     getHumanAnswer: (qitemId, actorSession) => queueRepo.getHumanAnswer(qitemId, actorSession),
+    answersPark: (qitemId, actorSession, ts) => {
+      const item = queueRepo.getById(qitemId);
+      return item !== null && queueRepo.answersPark(item, actorSession, ts);
+    },
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"

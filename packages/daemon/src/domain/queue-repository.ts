@@ -3739,22 +3739,10 @@ export class QueueRepository {
         || (item.destinationSession !== input.actorSession && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
 
-      const text = input.decision.trim();
-      const unanswered = this.hasHumanQuestionsColumn && text && text !== "[file reply]"
-        ? unansweredQuestions(item.humanQuestions ?? [], item.humanAnswers ?? {})
-        : [];
-      const question = unanswered[0];
       let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
         : `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`;
-      if (question) {
-        const typedReply: TypedHumanReply = {
-          kind: "typed-reply", text, placement: "first-unanswered", unansweredCount: unanswered.length - 1,
-        };
-        const answers: HumanAnswers = { ...item.humanAnswers, [question.id]: typedReply };
-        this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?")
-          .run(JSON.stringify(answers), input.qitemId);
-        transitionNote += `; ${describeTypedReplyPlacement(question, typedReply)}`;
-      }
+      const placed = this.placeTypedReply(item, input.decision);
+      if (placed) transitionNote += `; ${placed}`;
       return this.updateInTransactionalContext({
         qitemId: input.qitemId,
         actorSession: input.actorSession,
@@ -3767,6 +3755,28 @@ export class QueueRepository {
     if (!result) return false;
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
     return true;
+  }
+
+  /** Store a typed reply under the first unanswered question, keeping earlier clicks; the placement note, or null. */
+  private placeTypedReply(item: QueueItem, decision: string): string | null {
+    const text = decision.trim();
+    const unanswered = this.hasHumanQuestionsColumn && text && text !== "[file reply]"
+      ? unansweredQuestions(item.humanQuestions ?? [], item.humanAnswers ?? {})
+      : [];
+    const question = unanswered[0];
+    if (!question) return null;
+    const typedReply: TypedHumanReply = {
+      kind: "typed-reply", text, placement: "first-unanswered", unansweredCount: unanswered.length - 1,
+    };
+    const answers: HumanAnswers = { ...item.humanAnswers, [question.id]: typedReply };
+    this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), item.qitemId);
+    return describeTypedReplyPlacement(question, typedReply);
+  }
+
+  /** A typed reply that resumed a decision parked on the person it asked is that decision's answer, as their click is. */
+  recordParkedTypedReply(qitemId: string, decision: string): void {
+    const item = this.getById(qitemId);
+    if (item) this.placeTypedReply(item, decision);
   }
 
   /**
@@ -3784,7 +3794,7 @@ export class QueueRepository {
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
-      if (item.state !== "pending" && !this.clickAnswersPark(item, input.actorSession, input.clickedTs)) {
+      if (item.state !== "pending" && !this.answersPark(item, input.actorSession, input.clickedTs)) {
         // Slack can redeliver the click that closed it. Only to the asked human, say whether this answer is on record.
         const onRecord = item.destinationSession === input.actorSession && item.humanAnswers?.[input.questionId] === input.optionId;
         const delegated = item.destinationSession === input.actorSession ? item.delegatedDecision : null;
@@ -3807,14 +3817,14 @@ export class QueueRepository {
     })();
   }
 
-  /** A decision parked on the person it asked takes that person's click, as their typed reply does (makeHumanReplyResolver):
-   *  the park is on them by any of their addresses, and the click came after its current question posted. */
-  private clickAnswersPark(item: QueueItem, actorSession: string, clickedTs: string | undefined): boolean {
+  /** A decision parked on the person it asked takes that person's click or typed reply as its answer (makeHumanReplyResolver
+   *  resumes it): the park is on them by any of their addresses, and the answer came after its current question posted. */
+  answersPark(item: QueueItem, actorSession: string, answeredTs: string | undefined): boolean {
     if (item.state !== "blocked" || !item.blockedOn || !this.isPersonAddress(item.blockedOn)) return false;
     if (item.destinationSession !== actorSession || this.askedSomeoneElse(actorSession, item.blockedOn)) return false;
     const posted = slackMicros(this.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs);
-    const clicked = slackMicros(clickedTs);
-    return posted !== null && clicked !== null && clicked > posted;
+    const answered = slackMicros(answeredTs);
+    return posted !== null && answered !== null && answered > posted;
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
