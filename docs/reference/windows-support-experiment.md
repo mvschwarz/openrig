@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native CRLF account registries preserve row facts (2026-10-30)
+
+Both the shared CLI auth-seat reader and the provider metadata reader split
+registries on LF alone. An owned CRLF registry reproduces two phantom malformed
+rows from blank lines; row timestamps also retain a trailing carriage return.
+Both readers now recognize CRLF line separators without trimming field contents
+or changing column-count validation. A real temporary registry is read through
+authSeatsList, authSeatsReport, readCodexAuthMetadata and configuredSeatAccounts:
+the row timestamp stays exact and blank lines do not become malformed records.
+
+The focused registry/metadata selection passes 5/5; daemon type checking passes.
+An expanded three-file observation reports 37 cases: 31 passed and six failed
+in the adjacent provider-seat-accounts file. Those failures remain unresolved
+and are not waived by this receipt; the added owned native consumer passes.
+No profile contents, actual credentials, account switch or seat process is used.
+
 ## Starter registry falls back from an empty HOME (2026-10-30)
 
 The starter resolver treated an empty HOME as a selected directory, producing a

@@ -92,7 +92,7 @@ function readSeats(registryPath: string): { seats: CodexSeatRow[]; registry: Cod
   }
   const rows: CodexSeatRow[] = [];
   let malformedRows = 0;
-  for (const line of raw.split("\n")) {
+  for (const line of raw.split(/\r?\n/)) {
     if (line.length === 0) continue;
     const cols = line.split("\t");
     if (cols.length !== SEAT_COLUMN_COUNT) { // skip malformed rows — never fabricate fields

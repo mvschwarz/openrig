@@ -467,7 +467,7 @@ function rawRegistryLines(registryPath: string): string[] {
   }
   const out: string[] = [];
   let first = true;
-  for (const line of text.split("\n")) {
+  for (const line of text.split(/\r?\n/)) {
     if (line === "" || line.startsWith("#")) continue;
     if (first) {
       first = false; // skip header
