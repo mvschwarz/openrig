@@ -37,6 +37,27 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   };
 }
 
+it.each(["primary", "rc", "fallback", "explicit", "disabled"])("native setup targets the selected psmux configuration (%s)", async selection => {
+  const home = "C:/synthetic-psmux-home";
+  const files = new Map<string, string>([
+    [`${home}/.tmux.conf`, "# existing fallback\n"],
+    ...(selection === "primary" ? [[`${home}/.psmux.conf`, "# existing primary\n"] as [string, string]] : []),
+    ...(["primary", "rc"].includes(selection) ? [[`${home}/.psmuxrc`, "# existing rc\n"] as [string, string]] : []),
+  ]);
+  const before = new Map(files);
+  const expected = selection === "primary" ? `${home}/.psmux.conf` : selection === "rc" ? `${home}/.psmuxrc`
+    : selection === "explicit" ? `${home}/custom.conf` : `${home}/.tmux.conf`;
+  const result = await runSetup(makeDeps({ platform: "win32", env: { HOME: home, ...(selection === "explicit" ? { psmux_config_file: expected } : selection === "disabled" ? { PSMUX_CONFIG_FILE: "NUL" } : {}) },
+    exists: file => files.has(file), readFile: file => files.get(file) ?? null, writeFile: (file, content) => { files.set(file, content); } }), { herdr: false, ghostty: false });
+  if (selection === "disabled") {
+    expect(files).toEqual(before);
+    expect(result.steps.find(step => step.id === "tmux_config")?.status).toBe("skipped");
+  } else {
+    expect(files.get(expected)).toContain("# OpenRig managed block");
+    for (const [file, content] of before) if (file !== expected) expect(files.get(file)).toBe(content);
+  }
+});
+
 it("native setup refuses readiness when the required multiplexer is absent", async () => {
   const base = makeDeps();
   const exec = vi.fn((cmd: string) => { if (cmd === "tmux -V") throw new Error("not found"); return base.exec(cmd); });
@@ -56,7 +77,8 @@ it.each([undefined, ""])("native setup resolves USERPROFILE when HOME is %s with
   expect(result.steps.find(step => step.id === "tmux_config")?.status).toBe("applied");
   expect(writes.mock.calls.some(([file]) => file === `${profile}/.tmux.conf`)).toBe(true);
   expect(writes.mock.calls.some(([file]) => String(file).startsWith("~"))).toBe(false);
-  expect(reads).toContain("C:/synthetic-config/tmux/tmux.conf");
+  expect(reads).toContain(`${profile}/.tmux.conf`);
+  expect(reads).not.toContain("C:/synthetic-config/tmux/tmux.conf");
   expect(reads).not.toContain("/etc/tmux.conf");
 });
 
@@ -69,7 +91,8 @@ it.each([false, true])("native setup reads copied home/config key variants (blan
   await runSetup(makeDeps({ platform: "win32", env, writeFile: writes, readFile: file => { reads.push(file); return null; } }), { herdr: false, ghostty: false });
   expect(writes.mock.calls.some(([file]) => file === `${profile}/.tmux.conf`)).toBe(true);
   expect(writes.mock.calls.some(([file]) => String(file).includes("shadowed-home"))).toBe(false);
-  expect(reads).toContain(`${config}/tmux/tmux.conf`);
+  expect(reads).toContain(`${profile}/.tmux.conf`);
+  expect(reads).not.toContain(`${config}/tmux/tmux.conf`);
   expect(reads).not.toContain("/etc/tmux.conf");
 });
 

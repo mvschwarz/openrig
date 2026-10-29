@@ -72,6 +72,17 @@ failed before the correction. Setup now records a failed required dependency
 with the same psmux guidance; it does not run Homebrew or install software on
 the host. The complete setup test file passes after the correction.
 
+Windows setup also always wrote `.tmux.conf`, which psmux ignores when an earlier
+native config exists. It now selects the first existing `.psmux.conf`, `.psmuxrc`,
+`.tmux.conf`, or `.config/psmux/psmux.conf`, retaining `.tmux.conf` as the creation
+fallback. An explicit native-cased PSMUX_CONFIG_FILE wins; NUL disables this
+write. Only the selected config is inspected for the custom-config note.
+This follows the [psmux 3.4.0 configuration contract](https://raw.githubusercontent.com/psmux/psmux/v3.4.0/docs/configuration.md).
+Five injected setup cases cover precedence, fallback, explicit selection and
+disabled configuration, with unselected bytes retained. The complete setup
+file passes 73/73 and CLI typecheck passes. No user configuration was changed;
+these are setup-consumer fixtures, not real multiplexer startup acceptance.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

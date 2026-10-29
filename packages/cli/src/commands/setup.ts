@@ -618,10 +618,17 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   const setupEnv = deps.env ?? process.env;
   const setupHome = readPlatformEnv(setupEnv, "HOME", platform)
     || (platform === "win32" ? readPlatformEnv(setupEnv, "USERPROFILE", platform) : undefined) || homedir();
-  const TMUX_CONF = `${setupHome}/.tmux.conf`;
+  const nativeConfigs = [`${setupHome}/.psmux.conf`, `${setupHome}/.psmuxrc`, `${setupHome}/.tmux.conf`, `${setupHome}/.config/psmux/psmux.conf`];
+  const selectedConfig = platform === "win32" ? readPlatformEnv(setupEnv, "PSMUX_CONFIG_FILE", platform) : undefined;
+  const disabledConfig = platform === "win32" && selectedConfig?.toUpperCase() === "NUL";
+  const TMUX_CONF = platform === "win32"
+    ? selectedConfig || nativeConfigs.find(file => deps.exists(file)) || `${setupHome}/.tmux.conf`
+    : `${setupHome}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
 
-  try {
+  if (disabledConfig) {
+    steps.push({ id: "tmux_config", status: "skipped", message: "psmux configuration is disabled by PSMUX_CONFIG_FILE=NUL; no config file was written." });
+  } else try {
     const historyLimit = (deps.configStore ?? new ConfigStore()).resolve().terminal.historyLimit;
     const MANAGED_BLOCK = [
       MANAGED_MARKER,
@@ -643,14 +650,14 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       steps.push({ id: "tmux_config", status: "applied", message: `Appended OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else {
       deps.writeFile(TMUX_CONF, MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: `Created .tmux.conf with OpenRig managed block (history-limit ${historyLimit}).` });
+      steps.push({ id: "tmux_config", status: "applied", message: `Created ${platform === "win32" ? TMUX_CONF : ".tmux.conf"} with OpenRig managed block (history-limit ${historyLimit}).` });
     }
   } catch (err) {
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
 
   // Informational only: never enable inheritance automatically or add a setup prompt.
-  const tmuxConfigs = [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, ...(platform === "win32" ? [] : ["/etc/tmux.conf"])];
+  const tmuxConfigs = disabledConfig ? [] : platform === "win32" ? [TMUX_CONF] : [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
   const customTmux = tmuxConfigs.some(file => {
     try {
       const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
