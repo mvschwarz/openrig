@@ -20,6 +20,20 @@ export function claudeSeatTokenRefProblem(ref: ClaudeSeatTokenRef): string | nul
   return null;
 }
 
+/** A spec's `claude_token: { label, file }` as the seat's reference; it throws, naming `where`, when it can't be one. The
+ *  file isn't read: a missing or unreadable one starts the seat with the usual fallback notice. */
+export function specClaudeTokenRef(value: unknown, where: string): ClaudeSeatTokenRef {
+  const fields = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!fields || typeof fields["label"] !== "string" || typeof fields["file"] !== "string"
+    || Object.keys(fields).some((key) => key !== "label" && key !== "file")) {
+    throw new Error(`${where}: must be { label, file }, the token file's label and absolute path`);
+  }
+  const ref = { label: fields["label"] as string, tokenFile: fields["file"] as string };
+  const problem = claudeSeatTokenRefProblem(ref);
+  if (problem) throw new Error(`${where}: ${problem}`);
+  return ref;
+}
+
 /** The stored reference, or null when it's absent or unreadable. */
 export function parseClaudeSeatTokenRef(value: unknown): ClaudeSeatTokenRef | null {
   if (typeof value !== "string" || value === "") return null;

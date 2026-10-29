@@ -10,7 +10,7 @@ import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
 import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
-import { parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { claudeSeatTokenRefProblem, parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import type {
   Rig,
   Node,
@@ -312,6 +312,8 @@ interface NodeOptions {
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** A Claude seat's own subscription token file, by reference (spec `claude_token`). */
+  claudeTokenRef?: ClaudeSeatTokenRef;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** The member's declared launch environment (spec `env:`); not merged with the rig's. */
   env?: SeatEnv;
@@ -615,6 +617,13 @@ export class RigRepository {
       // The envelope is written atomically with creation, including direct repository callers.
       if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
     }
+    if (opts?.claudeTokenRef !== undefined) {
+      if (opts.runtime !== "claude-code") throw new Error("claude_token requires a claude-code seat");
+      const problem = claudeSeatTokenRefProblem(opts.claudeTokenRef);
+      if (problem) throw new Error(`claude_token: ${problem}`);
+      // The reference is written atomically with creation, including direct repository callers.
+      if (!this.db.inTransaction) return this.db.transaction(() => this.addNode(rigId, logicalId, opts))();
+    }
     // Same-rig guard for podId
     if (opts?.podId) {
       const pod = this.db.prepare("SELECT rig_id FROM pods WHERE id = ?").get(opts.podId) as { rig_id: string } | undefined;
@@ -709,6 +718,10 @@ export class RigRepository {
           opts?.resolvedSpecVersion ?? null,
           opts?.resolvedSpecHash ?? null,
         );
+    }
+
+    if (opts?.claudeTokenRef !== undefined && !this.setNodeClaudeTokenRef(id, opts.claudeTokenRef)) {
+      throw new Error("claude_token needs the current database schema; the seat wasn't created");
     }
 
     if (opts?.claudePermissions !== undefined) {
