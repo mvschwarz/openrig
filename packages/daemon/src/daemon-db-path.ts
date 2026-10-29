@@ -23,9 +23,16 @@ function resolveForContainment(path: string, seen = new Set<string>()): string {
         throw realpathError;
       }
       const parent = dirname(absolute);
-      return parent === absolute
-        ? absolute
-        : join(resolveForContainment(parent, seen), basename(absolute));
+      if (parent === absolute) return absolute;
+      const resolvedParent = resolveForContainment(parent, seen);
+      // Windows reports ENOENT, rather than ENOTDIR, for a child of a file.
+      // A missing tail is permitted only after a directory (or missing parent).
+      let parentStat: ReturnType<typeof statSync> | undefined;
+      try { parentStat = statSync(resolvedParent); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (parentStat && !parentStat.isDirectory()) throw new Error(`Database path parent is not a directory: ${resolvedParent}`);
+      return join(resolvedParent, basename(absolute));
     }
     if (stat.isSymbolicLink()) {
       const target = readlinkSync(absolute);
