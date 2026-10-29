@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { constants } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export function dockerPlatform(server) {
@@ -52,6 +52,15 @@ export async function runWithDeadline(argv, { timeoutMs, killAfterMs = 15000 }) 
     let forced, escalation, finished = false;
     const signalChild = signal => {
       if (!child.pid) return;
+      if (process.platform === 'win32') {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        // Windows has no POSIX process groups or catchable TERM for console children.
+        // End the live client's tree, not any engine-side Docker container.
+        spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        return;
+      }
       try { process.kill(-child.pid, signal); } catch (error) {
         if (error.code !== 'ESRCH') throw error;
       }

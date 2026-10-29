@@ -65,7 +65,8 @@ export function fileCommand(deps: FileCommandDeps = {}): Command {
             exitCode: result.exitCode,
             error: result.ok ? null : result.stderr.trim() || `rsync failed (${result.failedStep})`,
             hint: result.hint ?? null,
-            rsyncArgv: buildRsyncArgv(plan), // transparency for agents; the builder is closed
+            transport: result.transport ?? "rsync",
+            rsyncArgv: result.transport === "native-local" ? null : buildRsyncArgv(plan),
           }),
         );
         if (!result.ok) process.exitCode = 1;

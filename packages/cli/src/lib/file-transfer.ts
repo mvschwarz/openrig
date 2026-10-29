@@ -44,6 +44,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { loadHostRegistry, resolveHost, type SshHostEntry } from "./../host-registry.js";
 import { looksLikePermissionGate } from "./../cross-host-executor.js";
 import { getDefaultOpenRigPath, getOpenRigHome } from "./../openrig-compat.js";
+import { runNativeLocalCopy } from "./native-local-copy.js";
 
 // ── grammar ────────────────────────────────────────────────────────────────
 
@@ -292,9 +293,10 @@ export function buildRsyncArgv(plan: CopyPlan): string[] {
 
 // ── execution + classification ──────────────────────────────────────────────
 
-export type FileCopyFailedStep = "none" | "rsync-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed";
+export type FileCopyFailedStep = "none" | "rsync-missing" | "permission-gate" | "ssh-unreachable" | "remote-command-failed" | "local-copy-failed";
 
 export interface FileCopyResult {
+  transport?: "rsync" | "native-local";
   ok: boolean;
   failedStep: FileCopyFailedStep;
   exitCode: number | null;
@@ -347,6 +349,9 @@ export function classifyRsyncResult(exitCode: number | null, stdout: string, std
 }
 
 export async function runFileCopy(plan: CopyPlan, deps: { spawn?: SpawnFn } = {}): Promise<FileCopyResult> {
+  if (process.platform === "win32" && !deps.spawn && plan.src.kind === "local" && plan.dst.kind === "local") {
+    return runNativeLocalCopy(plan);
+  }
   const argv = buildRsyncArgv(plan);
   const spawn = deps.spawn ?? nodeSpawn;
   const child = spawn("rsync", argv, { stdio: ["ignore", "pipe", "pipe"] });

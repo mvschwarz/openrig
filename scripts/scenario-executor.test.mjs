@@ -16,7 +16,7 @@ test('deadline wrapper preserves actual successful and nonzero exits', async () 
   assert.equal(await runWithDeadline([process.execPath, '-e', 'process.exit(0)'], { timeoutMs: 3000 }), 0);
   assert.equal(await runWithDeadline([process.execPath, '-e', 'process.exit(7)'], { timeoutMs: 3000 }), 7);
 });
-test('deadline expires even when the child ignores TERM', async () => {
+test('deadline expires even when the child ignores TERM', { timeout: 10000 }, async () => {
   const start = Date.now();
   const status = await runWithDeadline([process.execPath, '-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { timeoutMs: 300, killAfterMs: 100 });
   assert.equal(status, 124);
