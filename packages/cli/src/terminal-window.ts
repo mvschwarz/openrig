@@ -10,7 +10,7 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
-import { renderWindowsLaunch } from "@openrig/daemon/windows-launch";
+import { readPlatformEnv, renderWindowsLaunch } from "@openrig/daemon/windows-launch";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
@@ -206,11 +206,15 @@ end run`;
 async function openWindowsTerminalView(client: DaemonClient, view: string, requestedProvider: string | undefined, deps: WindowDeps, expectedPlan?: string): Promise<OpenViewResult> {
   if (requestedProvider === "herdr") return failure("herdr", "Herdr is unavailable on Windows; use --provider tmux --window.");
   const refused = (reason: string) => ({ ...failure("tmux", `No terminal window was opened. ${reason}`), windowAttempted: false });
-  if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return refused("This is a CI run.");
-  if (deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]) return refused("This is an SSH session; run the window command on the daemon's desktop.");
-  const desktop = (await deps.exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "[System.Diagnostics.Process]::GetCurrentProcess().SessionId"], 1000).catch(() => "")).trim();
+  const nativeEnv = (name: string) => readPlatformEnv(deps.env, name, "win32");
+  const ci = nativeEnv("CI");
+  if (ci && !["0", "false"].includes(ci)) return refused("This is a CI run.");
+  if (nativeEnv("SSH_CONNECTION") || nativeEnv("SSH_CLIENT") || nativeEnv("SSH_TTY")) return refused("This is an SSH session; run the window command on the daemon's desktop.");
+  const systemDirectory = path.win32.join(nativeEnv("SystemRoot") || "C:\\Windows", "System32");
+  const powershell = path.win32.join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+  const desktop = (await deps.exec(powershell, ["-NoProfile", "-NonInteractive", "-Command", "[System.Diagnostics.Process]::GetCurrentProcess().SessionId"], 1000).catch(() => "")).trim();
   if (!/^\d+$/.test(desktop) || Number(desktop) === 0) return refused("No interactive Windows desktop session could be confirmed.");
-  const binary = (await deps.exec("where.exe", ["wt.exe"]).catch(() => "")).trim().split(/\r?\n/)[0];
+  const binary = (await deps.exec(path.win32.join(systemDirectory, "where.exe"), ["wt.exe"]).catch(() => "")).trim().split(/\r?\n/)[0];
   if (!binary) return refused("Windows Terminal is unavailable. Install Windows Terminal, then retry.");
   const width = await deps.columns?.().catch(() => undefined);
   const viewport = Number.isSafeInteger(width) && width! > 0 ? `&viewportColumns=${width}` : "";
@@ -231,7 +235,7 @@ async function openWindowsTerminalView(client: DaemonClient, view: string, reque
     }
     const command = renderWindowsLaunch(pane.paneCommand);
     const script = `Remove-Item Env:TMUX -ErrorAction SilentlyContinue; ${command}`;
-    return ["--title", title, "--suppressApplicationTitle", "powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+    return ["--title", title, "--suppressApplicationTitle", powershell, "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
   };
   type Tile = { pane: Pane } | { first: Tile; second: Tile; direction: string; fraction: number };
   const rowTile = (row: Pane[]): Tile => {

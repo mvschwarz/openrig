@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { DaemonClient } from "../src/client.js";
-import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
+import { defaultWindowDeps, openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 import { windowsArguments } from "../../daemon/src/adapters/windows-argv.js";
 // Exact literal quoting used by daemon domain/terminal/view-composer.ts.
@@ -15,13 +18,47 @@ function fixture() {
   const launch = vi.fn(async () => {});
   const deps: WindowDeps = {
     platform: "win32", env: {}, exists: () => true,
-    exec: vi.fn(async (file) => file === "where.exe" ? "C:\\Users\\user\\wt.exe\r\n" : "1\r\n"),
+    exec: vi.fn(async (file) => file.endsWith("\\where.exe") ? "C:\\Users\\user\\wt.exe\r\n" : "1\r\n"),
     launch, sleep: async () => {}, id: () => "owned", herdrConfig: () => { throw new Error("No Herdr config should be written"); },
   };
   const client = { baseUrl: "http://127.0.0.1:7433", get } as unknown as DaemonClient;
   return { panes, get, launch, deps, client };
 }
 describe("Windows desktop terminal view", () => {
+  it.skipIf(process.platform !== "win32")("runs system discovery with an owned PATH containing no system tools", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "openrig-window-tools-"));
+    try {
+      const witness = path.join(root, "wt.exe");
+      writeFileSync(witness, "Owned lookup witness; never executed.");
+      const real = defaultWindowDeps();
+      for (const key of Object.keys(real.env)) if (key.toUpperCase() === "PATH") delete real.env[key];
+      real.env.Path = root;
+      const systemRoot = process.env.SystemRoot!;
+      const f = fixture();
+      f.deps.env = { systemroot: systemRoot, Path: root };
+      f.deps.exec = vi.fn(async (file, args) => {
+        const output = await real.exec(file, args, 10_000);
+        if (file.endsWith("\\powershell.exe")) {
+          expect(output.trim()).toMatch(/^\d+$/);
+          return "1"; // Desktop eligibility is mocked; no window is opened.
+        }
+        return output;
+      });
+      expect(await openTerminalWindow(f.client, "saved", "tmux", f.deps)).toMatchObject({ ok: true });
+      expect(f.launch).toHaveBeenCalledOnce();
+      const [binary] = f.launch.mock.calls[0]! as unknown as [string, string[]];
+      expect(realpathSync.native(binary)).toBe(realpathSync.native(witness));
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+  it("locates native system tools independently of PATH and uses the selected system root", async () => {
+    const f = fixture();
+    f.deps.env = { systemroot: "D:\\Windows", Path: "C:\\owned-tools" };
+    expect(await openTerminalWindow(f.client, "saved", "tmux", f.deps)).toMatchObject({ ok: true });
+    expect(f.deps.exec).toHaveBeenCalledWith("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", expect.any(Array), 1000);
+    expect(f.deps.exec).toHaveBeenCalledWith("D:\\Windows\\System32\\where.exe", ["wt.exe"]);
+    const [, args] = f.launch.mock.calls[0]! as unknown as [string, string[]];
+    expect(args).toContain("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+  });
   it("keeps a sixteen-pane real composition within the native command-line limit", async () => {
     const f=fixture();
     const members=Array.from({length:16},(_,i)=>({seat:'seat'+i,label:'seat'+i,tmuxSession:'seat'+i+'@fixture',host:null,alive:true,readOnly:true}));
@@ -75,7 +112,7 @@ describe("Windows desktop terminal view", () => {
     expect(f.deps.exec).not.toHaveBeenCalledWith("/bin/sh", expect.anything());
     expect(result.notes?.join(" ")).toContain("not visual confirmation");
   });
-  it.each([{ CI: "true" }, { SSH_TTY: "remote" }])("opens nothing in a background/remote caller %j", async (env) => {
+  it.each([{ CI: "true" }, { SSH_TTY: "remote" }, { ci: "true" }, { ssh_tty: "remote" }])("opens nothing in a background/remote caller %j", async (env) => {
     const f = fixture(); f.deps.env = env;
     expect(await openTerminalWindow(f.client, "saved", undefined, f.deps)).toMatchObject({ ok: false, windowAttempted: false });
     expect(f.launch).not.toHaveBeenCalled();

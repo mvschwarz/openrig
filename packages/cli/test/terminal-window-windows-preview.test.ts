@@ -50,7 +50,7 @@ async function fixture(readOnly = false) {
   const launch = vi.fn(async (_file: string, _args: string[]) => {});
   const deps: WindowDeps = {
     platform: "win32", env: {}, exists: () => true,
-    exec: vi.fn(async file => file === "where.exe" ? "C:\\fixture\\wt.exe\r\n" : "1\r\n"),
+    exec: vi.fn(async file => file.endsWith("\\where.exe") ? "C:\\fixture\\wt.exe\r\n" : "1\r\n"),
     launch, sleep: async () => {}, id: () => "owned",
     herdrConfig: () => { throw new Error("Native view must not prepare Herdr config"); },
   };

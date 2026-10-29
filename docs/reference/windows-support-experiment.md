@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native desktop system-tool selection (2026-10-30)
+
+Windows Terminal opening no longer needs PowerShell's directory or System32 on
+the caller's PATH. Desktop-session discovery, `where.exe` terminal discovery and
+the fallback tile bootstrap use absolute system-tool paths under the selected
+SystemRoot. This entry also uses Windows environment-name lookup for SystemRoot,
+CI and SSH markers. An owned PATH containing only a non-executable `wt.exe`
+discovery witness exercises real PowerShell and where.exe. Window launch and
+desktop eligibility remain mocked; the witness is never executed.
+
+The three native/composition files pass 29/29, daemon build and CLI typecheck
+pass. A separate four-case POSIX TUI preview file still fails because it invokes
+an unavailable bare tmux executable on this host; it is not included in that
+passing count. No actual desktop window, real psmux session or conversation was
+opened. Full visible-terminal acceptance remains incomplete.
+
 ## Native authored cwd expansion (2026-10-30)
 
 The shared authored-cwd resolver now expands a leading `~\` on Windows and
