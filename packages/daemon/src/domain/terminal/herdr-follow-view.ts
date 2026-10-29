@@ -139,7 +139,7 @@ export class HerdrFollowView {
       }
       const members = view.task.members.map(m => ({ key: keyOf(m.key.hostId, m.key.nodeId), seat: m.seat }));
       for (const key of Object.keys(state.viewerFailures ?? {})) {
-        if (!members.some(member => member.key === key)) delete state.viewerFailures![key];
+        if (!members.some(member => member.key === key) && !state.tiles.some(tile => tile.key === key)) delete state.viewerFailures![key];
       }
       const controlsToKeys = (seats: string[] = []) => seats.map(seat => {
         const member = members.find(m => m.seat === seat) ?? state!.tiles.find(m => m.seat === seat);
@@ -252,7 +252,7 @@ export class HerdrFollowView {
         state.closing = tile.key; save();
         await this.deps.run(["pane", "close", tile.viewer.paneId]);
         if (!await viewers.forgetClosed(tile.member, tile.viewer)) throw new Error("Tile close remains unconfirmed; no second close was attempted.");
-        state.tiles = state.tiles.filter(t => t.key !== tile.key); delete state.closing; notice(`${tile.seat}: ${leaving.reason}`); save();
+        state.tiles = state.tiles.filter(t => t.key !== tile.key); delete state.viewerFailures?.[tile.key]; delete state.closing; notice(`${tile.seat}: ${leaving.reason}`); save();
       }
       for (const retained of plan.retained) {
         const tile = state.tiles.find(t => t.key === retained.key);
