@@ -1554,3 +1554,9 @@ The complete Windows-Pi-command and OMP-runner files pass 55/55 without skips; t
 The daemon's earlier provider-credential collection stage also used exact property lookup, so copied Windows environment keys could be discarded before the child builder saw them. Collection now uses the shared native lookup while retaining the existing explicit uppercase configuration whitelist, runtime restrictions and nonempty-value requirement. A blank winning case variant does not fall through to another value. POSIX lookup remains exact.
 
 The complete OMP-runner file passes 53/53. The added synthetic pipeline case checks collection followed by child provider filtering: the selected provider survives, another admitted provider is removed by the child filter, and an unknown credential is never admitted. It also checks POSIX behavior, blank duplicate precedence and rejection of lowercase configuration names. No real credentials or provider processes are used. This is a focused implementation receipt; comprehensive Windows acceptance remains open.
+
+### Native Codex metadata home selection (2026-10-30)
+
+The daemon's metadata-only Codex reader retained a separate exact-key HOME/CODEX_HOME lookup after the CLI resolver had gained native Windows lookup. It now uses the same environment-key semantics while retaining account-home fallback, profile-name-only directory listing and the six-column seat registry contract. It still never opens saved profile contents.
+
+Both complete metadata-reader files pass 8/8 on Windows. Owned temporary directories cover lowercase home keys and a blank canonical CODEX_HOME winning over its nonempty lowercase duplicate, alongside the existing explicit-home, absent-home, empty-home and registry behavior. No personal credential directory is read.
