@@ -6,6 +6,7 @@ import http from "node:http";
 import * as fs from "node:fs";
 import { browserBoundary } from "../src/middleware/browser-boundary.js";
 import { registerTerminalWs } from "../src/routes/terminal-ws.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 
 const TOKEN = "test-ws-route-token";
 const PORT = 19876;
@@ -606,6 +607,7 @@ describe("terminal WebSocket attach rejection", () => {
       else localServer.once("listening", resolve);
     });
     const port = (localServer.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     const url = `ws://127.0.0.1:${port}/api/terminal/retry@rig?token=${TOKEN}`;
     const viewers: WebSocket[] = [];
     try {
