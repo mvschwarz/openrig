@@ -1,3 +1,5 @@
+import { allowFetchTarget } from "./fetch-guard.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // MCP clients on protocol 2026-07-28 reach the same durable work loop as 2025 clients: discovery, then a task created by
 // one seat and claimed by another through the daemon's real queue routes, over Streamable HTTP and over stdio. A client
 // pinned to 2026-07-28 never falls back to the 2025 initialize handshake, so it fails against a server that speaks only
@@ -52,6 +54,7 @@ describe("MCP 2026-07-28 clients on the daemon's queue routes", () => {
       },
     });
     daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   });
 
@@ -89,6 +92,7 @@ describe("MCP 2026-07-28 clients on the daemon's queue routes", () => {
     const deskToken = await addGrant(tokenFile, { name: "desk", seat: DESK, rigs: ["team"], roots: [], workspace: false, owner: false });
     const implToken = await addGrant(tokenFile, { name: "impl", seat: IMPL, rigs: ["team"], roots: [], workspace: false, owner: false });
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+    allowFetchTarget(served.url);
     closers.push(() => served.close());
     const over = (token: string) => new StreamableHTTPClientTransport(new URL(served.url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } });
 
@@ -112,12 +116,14 @@ describe("MCP 2026-07-28 clients on the daemon's queue routes", () => {
     const tokenFile = path.join(home, "mcp-http-tokens.json");
     await addGrant(tokenFile, { name: "desk", seat: DESK, rigs: ["team"], roots: [], workspace: false, owner: false });
     const authed = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+    allowFetchTarget(authed.url);
     closers.push(() => authed.close());
     const stranger = new Client({ name: "stranger", version: "1.0.0" }, PINNED);
     await expect(stranger.connect(new StreamableHTTPClientTransport(new URL(authed.url), { requestInit: { headers: { Authorization: "Bearer not-a-grant" } } })))
       .rejects.toThrow(/401/);
 
     const open = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "none.json") });
+    allowFetchTarget(open.url);
     closers.push(() => open.close());
     const { port } = new URL(open.url);
     const answer = await new Promise<{ status: number; body: string }>((resolve, reject) => {

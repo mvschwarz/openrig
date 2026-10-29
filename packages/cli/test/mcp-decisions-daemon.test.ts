@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The MCP decision tools against the daemon's real gateway and queue routes, over HTTP: the seat that asked a person reads
 // the decision room of the mode they have on and records a decision beside their answers, never as one. A person's own
 // answer isn't written by any MCP tool.
@@ -48,6 +49,7 @@ describe("MCP decision tools on the daemon's gateway and queue routes", () => {
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
+    allowOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 

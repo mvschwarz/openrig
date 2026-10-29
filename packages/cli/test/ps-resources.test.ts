@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -25,6 +26,7 @@ async function fixture() {
   app.route("/api/ps", psRoutes);
   const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
   await new Promise<void>((resolve) => server.on("listening", resolve));
+  allowOwnedHttpFixture(server);
   const port = (server.address() as { port: number }).port;
   close = () => new Promise<void>((resolve, reject) => { server.close((err) => { db.close(); err ? reject(err) : resolve(); }); });
   const client = new DaemonClient(`http://127.0.0.1:${port}`);
@@ -77,6 +79,7 @@ async function remoteFixture(status: 200 | 401 | 403 | 404 | 429 | 500) {
   });
   const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
   await new Promise<void>((resolve) => server.on("listening", resolve));
+  allowOwnedHttpFixture(server);
   const port = (server.address() as { port: number }).port;
   close = () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   const command = new Command().addCommand(psCommand({

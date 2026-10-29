@@ -1,3 +1,5 @@
+import { allowFetchTarget } from "./fetch-guard.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http against the daemon's real routes: the real HTTP listener, the SDK's own HTTP client, and grants in
 // a real token file. With no grants it serves loopback as the env's seat, declared; with grants, every request needs a
 // credential (loopback included), each caller acts as its own seat, reaches only its scope, and a revoked grant stops at
@@ -75,6 +77,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     daemon = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
+    allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   });
 
@@ -90,6 +93,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
 
   async function listen() {
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile });
+    allowFetchTarget(served.url);
     closers.push(() => served.close());
     return served;
   }

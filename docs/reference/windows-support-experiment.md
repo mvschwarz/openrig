@@ -1,5 +1,22 @@
 # Native Windows support experiment
 
+## Additional owned CLI fixtures (2026-10-29)
+
+The remaining explicit fetch-guard failures in the full `8ad49dd2b` CLI receipt
+were traced to OS-assigned low ports. Twenty-seven affected test files now
+register their own already-bound HTTP servers or URLs returned by their owned
+UsageHost/MCP fixtures; the fetch guard and its canonical-daemon refusal remain
+unchanged. The multi-process host-binding fixture also converts its `file:` URL
+to a filesystem cwd, and the watch-document assertion normalizes CRLF.
+
+The 29-file verification batch (including host bindings and the fetch guard)
+ran with unchanged source: 391 total, 389 passed and 2 failed. The two remaining
+failures are MCP presence/token-file POSIX `0600` assertions on Windows, whose
+mode bits read `0666`; they are retained as a native permission gap, not skipped
+or treated as an ACL proof. The earlier run of this batch had 30 failures before
+registering the separate owned MCP listeners and normalizing the document text.
+This receipt is not a new complete CLI run or an installed MCP acceptance claim.
+
 ## Native listener lookup deadline (2026-10-29)
 
 The complete CLI run at `8ad49dd2bc5e2d1ea35a26a00713c0a9db96ac04`

@@ -1,3 +1,5 @@
+import { allowFetchTarget } from "./fetch-guard.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http --grant-service against the daemon's real routes and a fake grant service speaking
 // openrig.grant/v1: each request's key is checked with the grant service for this daemon's self id, every answer but
 // active is refused with no fallback, and an external caller reaches only its own items and the team's questions to it.
@@ -72,6 +74,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     broken = undefined;
     const fetchRoute = (...args: Parameters<typeof setup.app.fetch>) => broken?.(args[0]) ?? setup.app.fetch(...args);
     daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: fetchRoute, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
     setSelfHostId(INSTANCE);
     asked = [];
@@ -86,6 +89,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
       });
     });
     await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(service);
     serviceUrl = `http://127.0.0.1:${(service.address() as AddressInfo).port}/api/connector/v1/grant`;
     seat("team-a", "cus-vvmaexample01-caller");
   });
@@ -112,6 +116,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
   async function listen(header?: { name: string; value: string }) {
     const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
       grantService: { url: serviceUrl, ...(header ? { header } : {}), timeoutMs: 1_000 } });
+    allowFetchTarget(served.url);
     closers.push(() => served.close());
     return served;
   }
@@ -559,6 +564,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
 
       const served = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile: path.join(home, "mcp-http-tokens.json"),
         grantService: { url: serviceUrl, timeoutMs: 1_000 }, oauth: { resource, issuer } });
+      allowFetchTarget(served.url);
       closers.push(() => served.close());
       const root = served.url.replace(/\/mcp$/, "");
       const before = asked.length;

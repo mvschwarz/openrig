@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // 51-08 A4 — `rig usage` CLI (plan-lock rev-1, PM decision 4: the SAME projection
 // serves CLI + HTTP). Param-faithful daemon-backed grammar per the provider.ts
 // precedent: values must ARRIVE at the route (option-parity doctrine), --json is
@@ -92,6 +93,7 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
       else res.end(JSON.stringify(SERIES_PAYLOAD));
     });
     await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());
