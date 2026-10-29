@@ -1222,6 +1222,36 @@ describe("Codex runtime adapter", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
+  describe("hook review of OpenRig's own hooks that an older install left unapproved", () => {
+    const review = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
+    const enabled = '[plugins."openrig-core@openrig"]\nenabled = true\n';
+    const readiness = async (config: string) => {
+      const fsOps = mockFs({ "/codex-home/config.toml": config });
+      const tmux = mockTmux({ capturePaneScreen: vi.fn(async () => review) });
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps, codexHome: "/codex-home", codexSystemConfigDir: "/codex-system" });
+      return { result: await adapter.checkReady(makeBinding()), fsOps, tmux };
+    };
+
+    it("says these are OpenRig's own hooks, why they're unapproved and the one step, and grants nothing", async () => {
+      const { result, fsOps, tmux } = await readiness(enabled);
+      expect(result).toEqual({
+        ready: false, code: "hook_trust_gate",
+        reason: "Codex is waiting for hook review before the session can become interactive. The hooks include OpenRig's own "
+          + "(openrig-core@openrig), which an older install left unapproved: this seat's Codex config enables the plugin but "
+          + "records no approval for its hooks. Approve them once in the seat's pane, through Codex's hook review "
+          + "(tmux attach -t r01-qa); later launches then renew that approval on their own when the plugin updates.",
+      });
+      expect(fsOps.readFile("/codex-home/config.toml")).toBe(enabled);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+    });
+
+    it("keeps the plain reason once any of OpenRig's hooks has a recorded choice", async () => {
+      const { result } = await readiness(`${enabled}[hooks.state."openrig-core@openrig:hooks/codex.json:stop:0:0"]\nenabled = false\n`);
+      expect(result).toEqual({ ready: false, code: "hook_trust_gate",
+        reason: "Codex is waiting for hook trust approval before the session can become interactive." });
+    });
+  });
+
   // What a failed resume reports must match the newest screen observed and what was typed (reporting only).
   const UPDATING = ["✨ Update available! 0.120.0 -> 0.121.0", "Updating Codex..."].join("\n"); // no skip option
   const HOOK_REVIEW = "Hooks need review\n1. Review hooks\n2. Trust all and continue\n3. Continue without trusting";
