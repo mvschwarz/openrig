@@ -1249,9 +1249,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (probe.status === "resumed") return { ready: true };
     if (probe.code === "hook_trust_gate" && this.ownHooksNeverApproved(this.homeFor(binding))) {
       return { ready: false, code: probe.code, reason: "Codex is waiting for hook review before the session can become interactive. "
-        + `The hooks include OpenRig's own (${CODEX_CORE_PLUGIN_KEY}), which an older install left unapproved: this seat's Codex `
-        + "config enables the plugin but records no approval for its hooks. Approve them once in the seat's pane, through Codex's "
-        + `hook review (${tmuxAttachCommand(binding.tmuxSession)}); later launches then renew that approval on their own when the plugin updates.` };
+        + `The hooks include OpenRig's own (${CODEX_CORE_PLUGIN_KEY}): this seat's Codex config enables the plugin but records no `
+        + "approval for its hooks, as after an older install or after continuing without trusting. To approve them, do it once in "
+        + `the seat's pane, through Codex's hook review (${tmuxAttachCommand(binding.tmuxSession)}); a later launch on the same `
+        + "plugin version records that approval, and plugin updates after it renew it on their own." };
     }
     return { ready: false, reason: probe.detail, code: probe.code };
   }
