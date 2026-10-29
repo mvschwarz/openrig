@@ -1,11 +1,11 @@
 import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import type { SeatEnv } from "./seat-env.js";
 
 // What a Claude seat needs so it loads the vendored openrig-core plugin (its refocus, compaction-restore and
-// activity hooks). Claude reads CLAUDE_CODE_PLUGIN_DIRS, a colon-separated list, so this has to be the vendored copy
+// activity hooks). Claude reads CLAUDE_CODE_PLUGIN_DIRS with the native path delimiter, so this has to be the vendored copy
 // under the OpenRig home: the copy projected into a seat's folder is named `shared:openrig-core`, and the colon splits
 // it in two. It is an env var, not a launch argument, so the seat's process identity is unchanged. Claude Code reads it
 // from v2.1.280; an older Claude ignores it and the hooks stay unloaded there.
@@ -120,8 +120,8 @@ export function withPluginDirs(seatEnv: SeatEnv, dirs: ReadonlyArray<string | un
     // Claude skips a relative entry in the list, so only an absolute one can already be this plugin. The seat's
     // entries stay as written and the plugin's absolute path goes after them.
     const want = canonical(dir);
-    if (own.split(":").some((entry) => isAbsolute(entry) && canonical(entry) === want)) continue;
-    env = { ...env, [CLAUDE_PLUGIN_DIRS_ENV]: `${own}:${dir}` };
+    if (own.split(delimiter).some((entry) => isAbsolute(entry) && canonical(entry) === want)) continue;
+    env = { ...env, [CLAUDE_PLUGIN_DIRS_ENV]: `${own}${delimiter}${dir}` };
   }
   return env;
 }
