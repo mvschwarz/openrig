@@ -70,10 +70,10 @@ describe("authoritative scoped terminal membership", () => {
     f.add("unqualified", "other");
     expect(f.read()).toMatchObject({ task: { complete: true, members: [{ seat: "a", obligations: [{ qitemId: "ours" }] }] } });
   });
-  it.each(["same-name", "same-id", "name-id"])("reports %s collisions instead of choosing the first scope", mode => {
+  it.each(["same-name", "same-id", "name-id"])("reports bare %s collisions instead of choosing the first scope", mode => {
     const f = fixture();
     f.addSlice("another", mode === "same-name" ? "03-build" : mode === "name-id" ? "OPR.3" : "other", mode === "same-id" ? "OPR.3" : "different");
-    expect(f.read()).toMatchObject({ code: "scope_ambiguous" });
+    expect(f.read(mode === "same-name" ? "slice:03-build" : "slice:OPR.3")).toMatchObject({ code: "scope_ambiguous" });
   });
   it("honors SPEC precedence and exact Unicode, plus, internal-space and percent-literal ids", () => {
     const f = fixture(), dir = f.addSlice("another", "04-other", "révision + 50%", "Other scope");
