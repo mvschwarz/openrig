@@ -85,7 +85,7 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
         ? [{ canonicalSessionName: "dev-driver@acme-build", attachmentType: "tmux", tmuxSession: "dev-driver@acme-build", rigName: "acme-build", logicalId: "dev.driver" }]
         : null,
     resolveScopeView: view => view === "slice:02" ? { task: { kind: "slice", id: "02", name: "Slice 02", complete: true, issues: [], members: [] },
-      members: [{ seat: "dev-driver@acme-build", tmuxSession: "dev-driver@acme-build", readOnly: true, alive: true }] }
+      members: [{ seat: "dev-driver@acme-build", tmuxSession: "dev-driver@acme-build", host: null, readOnly: true, alive: true }] }
       : { code: "scope_not_found", error: "Unknown fixture slice" },
     listRigNames: () => ["acme-build"],
     resolveHost: () => null,
