@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native heartbeat send uses its paired CLI entry (2026-10-30)
+
+The default heartbeat nudge sender used `execFile("rig", ...)`, which cannot
+start the normal Windows npm `rig.cmd` launcher. An owned inert cmd file
+reproduces native `spawn EINVAL` without executing its body. Windows now invokes
+the current Node executable with this installation's CLI index and separate
+send/session/message arguments. POSIX keeps its existing rig lookup. The existing
+ten-second timeout and success/failure result handling remain.
+
+The native invocation seam preserves Unicode, CRLF and cmd metacharacters as one
+message argument and checks both outcome branches. Together with the heartbeat
+suite, 13/13 pass; CLI type checking passes. No real send, queue, heartbeat,
+schedule or daemon is activated by this verification. The initial reproduction
+fixture exposed EINVAL as a synchronous throw; its final check records that
+actual native behavior rather than assuming only callback errors.
+
 ## Requirement lookup preserves empty native PATH entries (2026-10-30)
 
 The native requirement probe discarded empty PATH entries, unlike native command

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { Command } from "commander";
@@ -512,9 +513,14 @@ function printHumanHeartbeat(result: HeartbeatResult): void {
   }
 }
 
-function defaultSend(session: string, text: string): Promise<{ ok: boolean; message: string }> {
+export function defaultSend(session: string, text: string): Promise<{ ok: boolean; message: string }> {
   return new Promise((resolve) => {
-    execFile("rig", ["send", session, text], { timeout: 10_000 }, (error, stdout, stderr) => {
+    // npm's Windows rig.cmd cannot be started with execFile. Use this CLI's
+    // paired Node entry and keep message bytes out of cmd.exe interpretation.
+    const native = process.platform === "win32";
+    const command = native ? process.execPath : "rig";
+    const args = [...(native ? [fileURLToPath(new URL("../index.js", import.meta.url))] : []), "send", session, text];
+    execFile(command, args, { timeout: 10_000 }, (error, stdout, stderr) => {
       if (error) {
         resolve({ ok: false, message: (stderr || error.message).trim() });
       } else {
