@@ -7,7 +7,40 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Main rebase, 2026-10-27
+## Native capability follow-up, 2026-10-29
+
+Based on main `0fcb7040e1abb45061b134de2738f3e7f40af92c`, code revision
+`a7f4823d33fdcfb2ce0bde613befe5c86a1e0e78` adds native listener PID queries,
+Restart Manager database-file holder observations, shared CIM process identity,
+ACP creation times and detached-run marker discovery, local file copying, and
+live probe/scenario-client process-tree termination. Windows file operands retain
+drive, UNC, casing-deny and trailing-separator semantics. Extra destination files
+are retained; local dry-run moves nothing. Remote transfers still require rsync.
+
+Workspace lint/typecheck passed. The latest related selection passed 64 tests
+with three existing rsync integration skips; the scenario deadline selection
+passed three tests. Earlier native holder/listener/process-table selections are
+recorded separately and are not full-suite proof. The native detached ACP test
+finds a marked child after its launcher exits and excludes an unrelated run.
+The query returns PIDs only and uses read-only process memory access for the
+current Windows account without debug privilege. Its NT/PEB layouts are internal
+OS details, following the approach in Microsoft's Azure Pipelines
+`WindowsEnvVarHelper`; inaccessible or unsupported target layouts yield no witness.
+Only the x64 host path has been exercised here.
+
+Full `npm test` failed in the repository-script stage, before workspace tests.
+It exposed a real scenario timeout hang from POSIX group signalling on Windows;
+that owned fixture was manually ended, and the deadline path was then fixed and
+retested. The failed run also includes Bash/npm-shim fixtures, symlink permission
+assumptions, Windows-invalid filenames and generated-lineage drift. It is not
+reported green. General orphan cleanup after a probe root has already exited,
+remote file transfer without rsync, Claude token launch, every-provider hooks,
+desktop/reboot and Linux/macOS acceptance remain incomplete. The database holder
+test uses mocked HTTP confirmation, not a real competing-daemon acceptance test.
+Known-home holder records are checked; an unknown holder home stays unknown.
+The actual local deployment has not adopted these follow-up commits.
+
+## Historical main rebase, 2026-10-27
 
 Rebased all 28 experiment commits onto upstream main
 `a6f61d9a0a8c8425ea13f7861d4dce56eb77ff87`; the previous public head was
