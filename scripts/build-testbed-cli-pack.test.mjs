@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, lstatSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, statSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, isAbsolute, sep } from "node:path";
 import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 import { npmCommand } from "./npm-command.mjs";
 import { packageBuildShell } from "./run-package-build.mjs";
@@ -25,6 +25,12 @@ import { packageBuildShell } from "./run-package-build.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const CLI_DIR = join(REPO_ROOT, "packages", "cli");
+function installedCliRoot(prefix) {
+  const modules = execFileSync(...npmCommand(["root", "-g", "--prefix", prefix]), { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const rel = relative(prefix, modules);
+  assert.ok(isAbsolute(modules) && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel), "npm global root must stay in the owned prefix");
+  return join(modules, "@openrig", "cli");
+}
 // Daemon exports-map surfaces the cli's runtime value-imports resolve to after packaging.
 const DAEMON_SURFACES = [
   "daemon/dist/gateway-human-registry-surface.js",
@@ -127,7 +133,7 @@ test("install RED (resident, docker-free): a clean install materializes a COMPLE
     const tgz = execFileSync(...npmCommand(["pack", "--silent"]), { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
     tgzPath = join(CLI_DIR, tgz);
     execFileSync(...npmCommand(["install", "-g", "--prefix", prefix, "--ignore-scripts", tgzPath]), { cwd: REPO_ROOT, stdio: "inherit" });
-    const bsq3 = join(prefix, "lib", "node_modules", "@openrig", "cli", "node_modules", "better-sqlite3");
+    const bsq3 = join(installedCliRoot(prefix), "node_modules", "better-sqlite3");
     assert.ok(existsSync(bsq3), "a clean install must materialize the cli-level better-sqlite3 dir");
     assert.ok(existsSync(join(bsq3, "binding.gyp")),
       "better-sqlite3 must be COMPLETE (binding.gyp present) — an EMPTY placeholder is the bundled-daemon-deps break #5 the pack-content assertion cannot see");
@@ -149,13 +155,33 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     const tgz = execFileSync(...npmCommand(["pack", "--silent"]), { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
     tgzPath = join(CLI_DIR, tgz);
     execFileSync(...npmCommand(["install", "-g", "--prefix", prefix, tgzPath]), { cwd: REPO_ROOT, stdio: "inherit" });
-    const rigBin = join(prefix, "bin", "rig");
-    const out = execFileSync(rigBin, [
+    const installed = installedCliRoot(prefix);
+    const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
+    const entry = join(installed, manifest.bin.rig);
+    assert.ok(existsSync(entry), "installed bin entry must exist");
+    assert.ok(existsSync(process.platform === "win32" ? join(prefix, "rig.cmd") : join(prefix, "bin", "rig")), "npm must materialize the installed rig shim");
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENRIG|RIGGED)_/i.test(key)));
+    Object.assign(env, { OPENRIG_HOME: home, HOME: home, USERPROFILE: home });
+    // Explicitly exercise the installed in-memory SQLite check even when the
+    // operator's npm configuration happens to suppress lifecycle scripts.
+    execFileSync(process.execPath, [join(installed, "scripts/check-abi.mjs")], { cwd: home, env, stdio: "pipe" });
+    const args = [
       "gateway", "human", "add", "gateuser",
       "--display-name", "Gate User",
       "--binding", "slack:main:vault://slack/gate:primary:handle=UGATE",
       "--delivery-class", "B",
-    ], { encoding: "utf8", env: { ...process.env, OPENRIG_HOME: home } });
+    ];
+    let out;
+    if (process.platform === "win32") {
+      const argumentsFile = join(home, "rig-arguments.json");
+      writeFileSync(argumentsFile, JSON.stringify(args));
+      const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+      out = execFileSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; $rigArgs=@(Get-Content -LiteralPath $env:OPENRIG_TEST_RIG_ARGUMENTS -Raw | ConvertFrom-Json); & $env:OPENRIG_TEST_RIG_COMMAND @rigArgs; exit $LASTEXITCODE"], {
+        encoding: "utf8", cwd: home, windowsHide: true,
+        env: { ...env, OPENRIG_TEST_RIG_ARGUMENTS: argumentsFile, OPENRIG_TEST_RIG_COMMAND: join(prefix, "rig.cmd") },
+      });
+    } else out = execFileSync(join(prefix, "bin", "rig"), args, { encoding: "utf8", cwd: home, env });
     assert.match(out, /"ok":\s*true|gateuser/, "`rig gateway human add` must succeed, proving @openrig/daemon resolved on a clean install");
     assert.ok(existsSync(join(home, "gateway", "humans", "gateuser.yaml")), "the daemon-backed verb must have written the fragment");
   } finally {

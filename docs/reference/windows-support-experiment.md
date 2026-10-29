@@ -7,6 +7,32 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Isolated native install and installed shim, 2026-10-29
+
+The package-install checks now ask the same npm CLI for its global root under
+the owned temporary prefix. The original POSIX-only `prefix/lib/node_modules`
+assumption failed after npm had successfully installed on Windows. The corrected
+fresh-prefix check passed with a complete better-sqlite3 directory, binding.gyp
+and package.json; it uses --ignore-scripts and does not by itself prove the ABI.
+
+The opt-in target-native gate was then explicitly enabled and passed separately.
+It installs the tarball into another temporary prefix, runs the installed ABI
+checker (including its child-process in-memory SQLite open/query), and invokes
+the actual npm-generated rig.cmd from Windows PowerShell. CLI operands travel
+through a fixture JSON file to avoid constructing command text from them. The
+command loads the packaged daemon surface and writes the expected temporary
+human fragment. Inherited OPENRIG/RIGGED variables are removed; HOME,
+USERPROFILE, OPENRIG_HOME and cwd point only to the fixture. The binding is
+synthetic local configuration, with no connector delivery or operator daemon.
+
+Each of the two targeted checks passed one test, with no skips/cancellations.
+Build identity is source 7f1a5d676 plus these verification edits, dirty=true;
+this is fresh-prefix, single-host evidence, not clean-head/general installation
+acceptance. One strengthened run first failed because its test omitted a Node
+filesystem import; that failed receipt is retained and was fixed before the
+passing shim/ABI run. Prefix/home/tarball fixtures were removed by teardown.
+No operator prefix, actual runtime, fleet/seat, Stop or timer was changed.
+
 ## Windows Git reference projection, 2026-10-29
 
 The six tracked static-pack symlinks now project correctly when Git checks them
