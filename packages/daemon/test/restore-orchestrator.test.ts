@@ -3003,8 +3003,8 @@ describe("RestoreOrchestrator", () => {
   it.each([
     ["reached its prompt", (_node: { id: string }, id: string) => { sessionRegistry.updateStartupStatus(id, "ready"); }],
     ["had an output observed", (node: { id: string }) => {
-      db.prepare("INSERT INTO usage_samples (lane, seat_session, node_id, captured_at, total_output_tokens, native_session_id) VALUES ('context', ?, ?, datetime('now'), 120, ?)")
-        .run("dev-impl@test-rig", node.id, "stale-claude-token");
+      db.prepare("INSERT INTO context_usage (node_id, session_id, session_name, total_output_tokens) VALUES (?, ?, ?, 120)")
+        .run(node.id, "stale-claude-token", "dev-impl@test-rig");
     }],
     ["has a token Claude's hook reported", (_node: { id: string }, id: string) => { sessionRegistry.updateResumeToken(id, "claude_id", "stale-claude-token", "hook"); }],
   ])("a Claude seat that %s keeps awaiting-decision when Claude reports its conversation missing", async (_label, setup) => {
