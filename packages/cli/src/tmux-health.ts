@@ -38,8 +38,9 @@ export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
  * timed out (it may have started anyway). A throwaway server that won't start is reported as not checked, not a failure.
  */
 export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }) => string,
-  socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
-  const run = (args: string) => exec(`tmux -L ${socket} -f /dev/null ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
+  socket = `openrig-check-${process.pid}`, platform: string = process.platform): TmuxCaptureResult {
+  const emptyConfig = platform === "win32" ? "NUL" : "/dev/null";
+  const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
   try {
     try { run("new-session -d -s check"); }
     catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
