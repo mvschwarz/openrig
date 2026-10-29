@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
+import {accessSync, constants, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -10,7 +10,7 @@ import {SessionTransport, CAPTURE_READABLE_BUDGET_MS} from '../src/domain/sessio
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
-import {denyDirectoryChildren} from './helpers/directory-permissions.js';
+import {denyDirectoryChildren, denyWindowsFileCreation} from './helpers/directory-permissions.js';
 import Database from 'better-sqlite3';
 import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
 import {migrate} from '../src/db/migrate.js';
@@ -739,6 +739,20 @@ for(const mode of ['manual','automatic'] as const)it(`configured preparation roo
  expect(f.e.hasPendingPostCompactStage(seat)).toBe(false);
  expect(readFileSync(a.mapPath,'utf8')).toContain(a.marker);
  expect(compacts(f)).toHaveLength(1);
+});
+
+it.runIf(process.platform==='win32')('configured preparation root: stops when new directories are allowed but restore-map files are denied',async()=>{
+ const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});
+ const restore=denyWindowsFileCreation(parent);f.policy.preparationRoot=root;
+ try{
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
+  const attempt=f.e.getPreparationState(seat)!;
+  expect(existsSync(dirname(attempt.mapPath))).toBe(true);
+  expect(()=>accessSync(dirname(attempt.mapPath),constants.W_OK|constants.X_OK)).not.toThrow();
+  expect(()=>writeFileSync(attempt.mapPath,'synthetic')).toThrow();
+  expect(f.writes).toHaveLength(0);expect(compacts(f)).toHaveLength(0);
+  expect(existsSync(join(f.home,'compaction'))).toBe(false);
+ }finally{restore();}
 });
 
 for(const kind of ['file','ignore','symlink'] as const) it(`configured preparation root: ${kind} conflict stops without fallback or rewriting`,async()=>{

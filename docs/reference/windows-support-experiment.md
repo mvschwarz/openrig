@@ -1771,3 +1771,20 @@ unrecognized shim. Adjacent settings fixtures now use native path construction
 without weakening configuration/enforcement distinctions. All 29 permission
 drift tests passed on Windows and daemon TypeScript checking passed. No real
 provider command, model call or installed provider configuration was used.
+
+## Compaction preparation create-file rights (2026-10-30)
+
+Windows compaction preparation now checks native directory `FILE_ADD_FILE`
+access instead of `access(W_OK | X_OK)`. A real fixture permits creating the
+attempt directory while denying file creation inside it: the old access check
+passes, an actual map write fails, and the enforcer now stops with
+`preparation_directory_unavailable` without sending preparation or compaction
+input or falling back from the explicitly configured root. POSIX checks retain
+their existing behavior.
+
+The shared native directory check now receives a namespaced Windows path so it
+also handles deep paths beyond legacy MAX_PATH. Both existing manual/automatic
+long-path journeys pass with the original paths and instructions preserved.
+The three-suite run had 115 tests: 113 passed, two file-symlink fixtures could
+not be created on this host (EPERM). No cases were waived; daemon TypeScript
+checking passed. No live compaction was requested.

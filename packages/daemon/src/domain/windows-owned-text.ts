@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, toNamespacedPath } from "node:path";
 import { createWindowsPrivateDirectory, createWindowsPrivateDirectoryAsync } from "./private-text-file.js";
 
 // Open the selected file itself, not the target of a final reparse point. The
@@ -316,7 +316,7 @@ export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
 /** Ask Windows for FILE_ADD_FILE on the existing directory, without creating
  * a child or changing its metadata. The OS evaluates the actual process token. */
 export function checkWindowsDirectoryWriteAccess(directory: string): void {
-  execFileSync(nativeHelper(), ["directory-write-access", directory], {
+  execFileSync(nativeHelper(), ["directory-write-access", toNamespacedPath(directory)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }

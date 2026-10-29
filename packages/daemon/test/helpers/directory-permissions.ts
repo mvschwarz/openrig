@@ -24,6 +24,18 @@ $a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'C
   return () => { acl(directory, "$a=New-Object Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm($env:OPENRIG_TEST_SDDL,[Security.AccessControl.AccessControlSections]::Access);[IO.Directory]::SetAccessControl($env:OPENRIG_TEST_DIRECTORY,$a)", original); };
 }
 
+/** Permit new subdirectories but deny file creation in them (owned fixtures only). */
+export function denyWindowsFileCreation(directory: string): () => void {
+  const original = acl(directory, String.raw`
+$path=$env:OPENRIG_TEST_DIRECTORY; $a=[IO.Directory]::GetAccessControl($path)
+[Console]::Write($a.GetSecurityDescriptorSddlForm('Access'))
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$a.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'CreateFiles','ContainerInherit','None','Deny')))
+[IO.Directory]::SetAccessControl($path,$a)
+`);
+  return () => { acl(directory, "$a=New-Object Security.AccessControl.DirectorySecurity;$a.SetSecurityDescriptorSddlForm($env:OPENRIG_TEST_SDDL,[Security.AccessControl.AccessControlSections]::Access);[IO.Directory]::SetAccessControl($env:OPENRIG_TEST_DIRECTORY,$a)", original); };
+}
+
 /** Only call for this test's newly created directory; restore before cleanup. */
 export function denyDirectoryChildren(directory: string): () => void {
   if (process.platform !== "win32") { chmodSync(directory, 0o500); return () => chmodSync(directory, 0o700); }

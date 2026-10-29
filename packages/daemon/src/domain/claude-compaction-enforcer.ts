@@ -5,7 +5,7 @@ import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } fr
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
-import { readWindowsOwnedText } from "./windows-owned-text.js";
+import { checkWindowsDirectoryWriteAccess, readWindowsOwnedText } from "./windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1264,7 +1264,8 @@ export class ClaudeCompactionEnforcer {
         }
         const parent = path.join(preparationRoot ?? path.join(root, "preparation"), sanitizeSessionKey(input.sessionName), attemptId);
         fs.mkdirSync(parent, { recursive: true });
-        fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
+        if (process.platform === "win32") checkWindowsDirectoryWriteAccess(parent);
+        else fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
         attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
       } catch {
         // An explicit location is a permission choice: never silently move it back into
