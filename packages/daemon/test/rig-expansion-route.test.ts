@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 
 describe("POST /api/rigs/:rigId/expand", () => {
   let db: Database.Database;
@@ -354,7 +355,7 @@ describe("POST /api/rigs/:rigId/expand", () => {
     materializeSpy.mockRestore();
   });
 
-  it("valid numeric version coerces to string per schema parity", async () => {
+  it("keeps a numeric version raw until canonical schema normalization", async () => {
     const rig = seedRig("image-numeric-rig");
     const materializeSpy = vi.spyOn(setup.podInstantiator, "materializeStructured");
     await setup.app.request(`/api/rigs/${rig.id}/expand`, {
@@ -371,12 +372,13 @@ describe("POST /api/rigs/:rigId/expand", () => {
         },
       }),
     });
-    // numeric version COERCES to string — schema parity (rigspec-schema.ts
-    // validates string|number and normalizes with String(versionRaw);
-    // orch-lead ruling 2026-08-28 12:06Z: string-only omission would
-    // recreate the silent-default defect for YAML `version: 3`)
+    // Ingress preserves the authored number; the canonical schema owns the
+    // string conversion, so a numeric version can never become an absent pin.
     const spec = materializeSpy.mock.calls[0]![0] as { pods: Array<{ members: Array<Record<string, unknown>> }> };
-    expect(spec.pods[0]!.members[0]!["session_source"]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" } });
+    expect(spec.pods[0]!.members[0]!["session_source"]).toEqual({ mode: "agent_image", ref: { kind: "image_name", value: "ok", version: 3 } });
+    expect(RigSpecSchema.normalize(spec).pods[0]!.members[0]!.sessionSource).toEqual({
+      mode: "agent_image", ref: { kind: "image_name", value: "ok", version: "3" },
+    });
     materializeSpy.mockRestore();
   });
 
