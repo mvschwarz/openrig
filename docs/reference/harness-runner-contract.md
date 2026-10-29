@@ -79,9 +79,12 @@ limits:
 
 - **`producer` is free text** for your versions. There are no structured version or capability fields.
 - **The launch record is the only identity channel.** Don't report identity on the activity endpoint.
-- **No record means attention.** For a runner preset, a launch with no record within OpenRig's wait leaves the seat
-  needing attention, not ready. So does a launch where OpenRig can't create the record's folder: the runner still starts,
-  without `OPENRIG_LAUNCH_RESULT`.
+- **No record means attention.** For a runner preset:
+  - **a new launch** with no usable record within OpenRig's wait leaves the seat needing attention, not ready. So does a
+    new launch where OpenRig can't create the record's folder: the runner still starts, without `OPENRIG_LAUNCH_RESULT`;
+  - **on a resume,** a folder OpenRig can't create means nothing starts, because the launcher can't be told what to
+    reopen. When the folder exists but no usable record arrives, the resume command has already been sent, and the
+    resume reads unconfirmed (section 8).
 - **OpenRig shows this identity as launcher-reported.** It doesn't observe the conversation itself.
 
 ## 4. Activity: report turn boundaries
@@ -102,15 +105,15 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
 | You gave the agent the prompt for a submitted message | `UserPromptSubmit` / `accepted`, `turnId` = your prompt number | working |
 | The agent is working (message chunks, tool calls) | `active` / `agent_message`; `PreToolUse` / `<tool kind>` | working |
 | You refused a permission request (section 7) | `Notification` / `permission_prompt` | needs input |
-| The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle. While you hold attention (section 7), don't post it: OpenRig reads any `Stop` as idle and clears needs input |
+| The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle. While you hold attention (section 7), don't post it: OpenRig reads any non-exit `Stop` as idle and clears needs input |
 | Optional idle heartbeat | `Stop` / `idle_heartbeat`, with `livenessSeconds` | idle while beats keep coming |
 | The agent process ended | `Stop` / `<preset name>_exited` | unknown, **never idle** |
 | Your runner or the agent hit an error | `Notification` / `runtime_error` | recorded, but not used as activity: the prior activity evidence keeps its usual lifetime. It doesn't itself request or clear attention |
 
-- **Liveness:** state `livenessSeconds` (a whole number of seconds, at most 3600) on every idle `Stop`, the turn's end as
-  well as each beat. OpenRig stops reading the seat idle after 2 × `livenessSeconds` without a newer idle report. Without
-  it, an idle report holds until your next post, even if your runner has died. Never send a `Stop` or a beat while holding
-  permission attention.
+- **Liveness:** state `livenessSeconds` (a whole number of seconds from 1 to 3600; any other value is ignored) on every
+  idle `Stop`, the turn's end as well as each beat. OpenRig stops reading the seat idle after 2 × `livenessSeconds` without
+  a newer idle report. Without it, an idle report holds until your next post, even if your runner has died. Never send a
+  non-exit `Stop` or a beat while holding permission attention.
 - **Exit:** post `Stop` / `<preset name>_exited` only when you observe the agent's process exit.
 
 - **The screen still counts,** but only as evidence of work. On its own it never reads a runner seat idle.

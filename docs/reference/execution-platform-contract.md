@@ -20,18 +20,21 @@ An application service bundled with a rig is a separate responsibility. An artif
 
 ## A minimal composition using existing surfaces
 
-The following is a **member-list fragment**, using existing RigSpec fields, not a complete standalone RigSpec:
+The following is a **fragment of one pod** (`pods[].members`), using existing RigSpec fields, not a complete standalone RigSpec:
 
 ```yaml
-members:
-  - id: coordinator
-    agent_ref: local:agents/coordinator
-    profile: default
-    runtime: claude-code
-  - id: worker
-    agent_ref: local:agents/worker
-    profile: default
-    runtime: example-contained-claude
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: coordinator
+        agent_ref: local:agents/coordinator
+        profile: default
+        runtime: claude-code
+      - id: worker
+        agent_ref: local:agents/worker
+        profile: default
+        runtime: example-contained-claude
 ```
 
 The worker runtime names an author-installed community preset. This preset shape uses existing fields exercised on the 0.7.4 baseline:
@@ -60,13 +63,13 @@ A downstream author can implement this composition today around a qualified prov
 
 Before mutation, resolve the selected host/provider, workspace, image/native versions, reachability, credential references, resource request and ownership. Record existing resources and the selected resource scope. Host headroom includes supervisors, gateway and other team members; a workload memory request is not proof of their combined cap. Report requested, admitted and observed resources separately. Do not infer enforced CPU/memory or isolation policy from accepted flags.
 
-Persist a launch intent before a create operation. Use an attempt/retry identity where the provider supports it; otherwise reconcile the original operation before another create. A useful nonsecret binding receipt identifies:
+Persist a launch intent before a create operation. Use an attempt/retry identity where the provider supports it; otherwise reconcile the original operation before another create. A public binding receipt carries only nonsecret values. If the harness's native resume reference works like a bearer credential (anyone holding it can reopen the conversation), keep it in secret-held receipt data, never in the public receipt. A useful public receipt identifies:
 
 - canonical seat, harness version and native resume-reference type;
 - provider/host/workspace, immutable environment ID and execution generation;
 - image/policy versions, requested resources and observed readiness;
 - inner working directory, private native-state location and projection manifest;
-- native token, creator or attached-consumer disposition, and exact owned resource handles;
+- a public-safe native reference (never a bearer-like resume token), creator or attached-consumer disposition, and exact owned resource handles;
 - lifecycle operations supported, completion observations, pending effects and errors.
 
 A resource name or IP can be reused. Reconcile immutable ID, workspace and any available generation/fingerprint before acting. A lost response is **unconfirmed**, not success or absence. Record provider failures without exposing credentials. Readiness should identify what is ready: provider reachable, filesystem projected, native process started, team identity authenticated, or task completed.
