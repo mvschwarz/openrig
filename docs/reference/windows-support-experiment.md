@@ -134,6 +134,17 @@ sequence, correction lineage and policy checks remain in place. The adjacent
 judgment/policy suites and daemon typecheck pass. Only synthetic project
 receipts were used; no workspace judgment or evidence was changed.
 
+## Native permission diagnostic command selection (2026-10-30)
+
+The production permission observer still checked a fixed COM/EXE/BAT/CMD list,
+reporting a synthetic CMD as available even with explicitly empty PATHEXT.
+The actual observer fixture reproduced that mismatch. Native diagnostic lookup
+now reads PATHEXT with native key casing, defaults only when undefined and
+retains Windows empty PATH entry semantics. The fixture checks Claude, Codex,
+Pi and OMP without executing any of them; extension-named directories stay
+unavailable. Adjacent observer/diagnostic checks and daemon typecheck pass.
+This is command-path observation, not evidence of runtime enforcement or login.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

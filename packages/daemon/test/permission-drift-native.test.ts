@@ -13,6 +13,7 @@ describe.runIf(process.platform === "win32")("native permission diagnostics", ()
     const db = createFullTestDb();
     try {
       vi.stubEnv("PATH", `"${root}"`);
+      vi.stubEnv("PATHEXT", ".EXE;.CMD");
       const rigs = new RigRepository(db), rig = rigs.createRig("native-command-fixture");
       const observer = new PermissionDriftObserver({ db, permissionModes: new ClaudePermissionModeCache(async () => null) });
       for (const [runtime, command] of [["claude-code", "claude"], ["codex", "codex"], ["pi", "pi"], ["omp", "omp"]]) {
@@ -22,6 +23,9 @@ describe.runIf(process.platform === "win32")("native permission diagnostics", ()
         expect(observer.diagnose(node.id)?.commandPath.state).toBe("missing");
         writeFileSync(join(root, `${command}.cmd`), "synthetic, never executed");
         expect(observer.diagnose(node.id)?.commandPath.state).toBe("available");
+        vi.stubEnv("PATHEXT", "");
+        expect(observer.diagnose(node.id)?.commandPath.state).toBe("missing");
+        vi.stubEnv("PATHEXT", ".EXE;.CMD");
       }
     } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
   });

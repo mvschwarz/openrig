@@ -18,10 +18,13 @@ export interface PermissionDriftReader {
 
 function commandAvailable(command: string): boolean {
   const pathValue = readPlatformEnv(process.env, "PATH");
-  if (!pathValue) return false;
+  if (pathValue === undefined) return false;
+  const names = process.platform === "win32"
+    ? (readPlatformEnv(process.env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => command + ext.toLowerCase())
+    : [command];
   for (const entry of pathValue.split(nodePath.delimiter)) {
-    if (!entry) continue;
-    for (const name of process.platform === "win32" ? [command + ".com", command + ".exe", command + ".bat", command + ".cmd"] : [command]) {
+    if (!entry && process.platform !== "win32") continue;
+    for (const name of names) {
       try {
         const candidate = nodePath.join(entry.replace(/^"(.*)"$/, "$1"), name);
         fs.accessSync(candidate, fs.constants.X_OK);
