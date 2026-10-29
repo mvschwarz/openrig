@@ -452,7 +452,7 @@ export class CodexInPlaceRestart {
       const parent = byPid.get(ancestor.ppid);
       if (!parent || visited.has(parent.pid)) break;
       visited.add(parent.pid);
-      if (executableBase(parent) === "node" || executableBase(parent) === "MainThread") {
+      if (executableBase(parent) === "MainThread") {
         launcherFacts.set(parent.pid, await this.io.readProcess(parent.pid));
       }
       ancestor = parent;
@@ -900,12 +900,14 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     // A Codex launcher above the native binary: codex itself, or node running Codex's launcher script.
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
     const facts = launcherFacts.get(parent.pid);
-    const node = name === "node" || (name === "MainThread" && nodePath.basename(facts?.exe ?? "") === "node");
+    const mainThreadNode = name === "MainThread" && nodePath.basename(facts?.exe ?? "") === "node";
     // ps flattens argument boundaries; only exact argv can distinguish an option value from the entry script.
-    const script = nodeLaunchScript(facts?.argv ?? []);
+    const script = mainThreadNode ? nodeLaunchScript(facts?.argv ?? []) : undefined;
     const codexScript = !!script && nodePath.isAbsolute(script)
       && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
-    const launcher = /^codex/i.test(name) || (node && codexScript);
+    const launcher = /^codex/i.test(name)
+      || (name === "node" && processArgv(parent.command).some((arg) => /codex/i.test(arg)))
+      || (mainThreadNode && codexScript);
     if (!launcher) break;
     chain.push(parent);
     current = parent;

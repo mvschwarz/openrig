@@ -398,7 +398,19 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
-  it.each(["node", "MainThread"])("refuses a %s supervisor mentioning Codex outside its launcher script", async betweenName => {
+  it.each([
+    "node --pending-deprecation /absolute/bin/codex.js",
+    "node --max-http-header-size 16384 /absolute/bin/codex.js",
+    "node relative/bin/codex.js",
+    "node /opt/codex/renamed-entry.js",
+  ])("preserves the existing node launcher acceptance for %s without exact argv", async between => {
+    const w = world({ between, facts: { 150: null } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" })).toMatchObject({ ok: true });
+    expect(w.calls).toContain("signalPid 150 TERM");
+  });
+
+  it("refuses a MainThread supervisor mentioning Codex outside its launcher script", async () => {
+    const betweenName = "MainThread";
     for (const between of ["node /opt/supervisor.js --project=codex", "node /opt/codex-supervisor.js", "node -e codex", "node /opt/tools.js /usr/local/bin/codex", "node --require /absolute/bin/codex.js /opt/supervisor.js", "node --eval=0 /absolute/bin/codex.js", "node --title /absolute/bin/codex.js /opt/supervisor.js"]) {
       const w = world({ between, betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv: between.split(" ") }) } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" }), between).toMatchObject({ ok: false, code: "pane_shape_unknown" });
@@ -406,7 +418,8 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
-  it.each(["node", "MainThread"])("recognizes a %s Codex launcher after Node options", async betweenName => {
+  it("recognizes a MainThread Codex launcher after Node options", async () => {
+    const betweenName = "MainThread";
     for (const options of ["--no-warnings", "--enable-source-maps --no-warnings", "--require /opt/preload.js", "--import=/opt/preload.mjs", "--inspect=127.0.0.1:9229", "--"]) {
       const w = world({ between: `node ${options} /absolute/bin/codex.js`, betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv: ["node", ...options.split(" "), "/absolute/bin/codex.js"] }) } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true }), options).toMatchObject({ ok: true, paneShape: "shell_backed" });
@@ -414,7 +427,8 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
-  it.each(["node", "MainThread"])("uses exact argv to distinguish a %s supervisor from a spaced launcher path", async betweenName => {
+  it("uses exact argv to distinguish a MainThread supervisor from a spaced launcher path", async () => {
+    const betweenName = "MainThread";
     const cases = [
       { argv: ["node", "--require", "/tmp/preload /absolute/bin/codex.js", "/opt/supervisor.js"], accepted: false },
       { argv: ["node", "--require", "/tmp/preload with spaces.js", "/opt/tools/bin/codex.js"], accepted: true },
@@ -422,13 +436,15 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     ];
     for (const { argv, accepted } of cases) {
       const w = world({ between: argv.join(" "), betweenName, facts: { 150: facts({ exe: "/usr/bin/node", argv }) } });
-      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject(accepted
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" })).toMatchObject(accepted
         ? { ok: true, paneShape: "shell_backed" } : { ok: false, code: "pane_shape_unknown" });
-      expect(w.calls).toEqual([]);
+      if (accepted) expect(w.calls).toContain("signalPid 150 TERM");
+      else expect(w.calls).toEqual([]);
     }
   });
 
-  it.each(["node", "MainThread"])("refuses a %s launcher with unreadable exact argv", async betweenName => {
+  it("refuses a MainThread launcher with unreadable exact argv", async () => {
+    const betweenName = "MainThread";
     for (const observed of [null, facts({ exe: "/usr/bin/node" }), facts({ exe: "/usr/bin/node", argv: null }), facts({ exe: "/usr/bin/node", argv: [] })]) {
       const w = world({ between: "node /usr/local/bin/codex", betweenName, facts: { 150: observed } });
       expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown" });
