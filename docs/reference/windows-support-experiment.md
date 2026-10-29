@@ -191,6 +191,23 @@ initial `new-session -e` or `respawn-pane -e` transport, preserve every startup/
 configuration path, or establish a general Windows credential-ACL audit. It has
 not been deployed.
 
+The generic executable-path and argv readers now delegate Windows requests to
+the same current-SID native process-facts helper, instead of always returning no
+witness. A batch of at most 128 distinct valid PIDs uses one helper invocation;
+exited/inaccessible targets remain unknown, and only the three established home
+selectors can leave that helper. This supplies the Windows path fallback used by
+Claude restore as well as the generic argv API. Native child fixtures verify
+exact parameters, kernel executable identity, duplicate/invalid PID filtering,
+exited targets and absence of an unrelated environment sentinel.
+
+Discovery recognizes `codex.exe` and native backslash paths. An unavailable cmux
+is queried once per scan, with fresh queries on subsequent scan refresh; this
+does not produce a positive cmux identity. Six process/discovery suites passed
+68 tests with three existing platform skips, and workspace lint/typecheck passed.
+These checks do not prove complete Windows restore or every native process
+architecture. Initial private-config startup experiments still failed to start
+their owned receiver; no initial-launch replacement is claimed or deployed.
+
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
 passed three tests. Earlier native holder/listener/process-table selections are

@@ -193,6 +193,11 @@ public static class OpenRigRunProcesses {
 if($env:OPENRIG_PROCESS_CONSOLE_PID) {
   $members=[OpenRigRunProcesses]::ConsoleMembers([int]$env:OPENRIG_PROCESS_CONSOLE_PID)
   if($null -eq $members) { 'null' } else { ConvertTo-Json -InputObject @($members) -Compress }
+} elseif($env:OPENRIG_PROCESS_QUERY_PIDS) {
+  $rows=@(foreach($requestedPid in ($env:OPENRIG_PROCESS_QUERY_PIDS | ConvertFrom-Json)) {
+    @{pid=[int]$requestedPid;facts=[OpenRigRunProcesses]::Facts([int]$requestedPid)}
+  })
+  ConvertTo-Json -InputObject $rows -Depth 5 -Compress
 } elseif($env:OPENRIG_PROCESS_QUERY_PID) {
   $facts=[OpenRigRunProcesses]::Facts([int]$env:OPENRIG_PROCESS_QUERY_PID)
   if($null -eq $facts) { 'null' } else { ConvertTo-Json -InputObject $facts -Depth 4 -Compress }
@@ -206,8 +211,8 @@ async function query(values: Record<string, string>): Promise<unknown> {
   try {
     const { stdout } = await exec(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(QUERY, "utf16le").toString("base64")],
-      { windowsHide: true, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024,
-        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_PROCESS_CONSOLE_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
+      { windowsHide: true, encoding: "utf8", timeout: 15_000, maxBuffer: 8 * 1024 * 1024,
+        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_PROCESS_QUERY_PIDS: "", OPENRIG_PROCESS_CONSOLE_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
     return JSON.parse(stdout.replace(/^\uFEFF/, ""));
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
@@ -229,6 +234,10 @@ export interface WindowsProcessFacts {
 export async function readWindowsProcessFacts(pid: number): Promise<WindowsProcessFacts | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null;
   const row = await query({ OPENRIG_PROCESS_QUERY_PID: String(pid) }) as Record<string, unknown> | null;
+  return parseProcessFacts(row);
+}
+
+function parseProcessFacts(row: Record<string, unknown> | null): WindowsProcessFacts | null {
   if (!row) return null;
   if (typeof row.cwd !== "string" || typeof row.exe !== "string" || typeof row.command !== "string" || !row.env || typeof row.env !== "object") throw new Error("Invalid native process facts");
   if (!isAbsolute(row.cwd) || !isAbsolute(row.exe) || !row.command) return null;
@@ -241,6 +250,22 @@ export async function readWindowsProcessFacts(pid: number): Promise<WindowsProce
     }
   }
   return { cwd: pathResolve(row.cwd), exe: row.exe, argv: parseWindowsCommandLine(row.command), env };
+}
+
+/** One compiler/OS invocation for a bounded candidate set; never enumerate other
+ * users or return their environment. Exited/inaccessible targets have no facts. */
+export async function readWindowsProcessFactsBatch(requested: number[]): Promise<Map<number, WindowsProcessFacts>> {
+  const pids = [...new Set(requested.filter(pid => Number.isSafeInteger(pid) && pid > 0 && pid <= 2147483647))].slice(0, 128);
+  const result = new Map<number, WindowsProcessFacts>();
+  if (!pids.length) return result;
+  const rows = await query({ OPENRIG_PROCESS_QUERY_PIDS: JSON.stringify(pids) });
+  if (!Array.isArray(rows)) throw new Error("Invalid native process facts batch");
+  for (const row of rows) {
+    if (!row || !pids.includes(row.pid)) throw new Error("Unexpected native process facts identity");
+    const facts = parseProcessFacts(row.facts);
+    if (facts) result.set(row.pid, facts);
+  }
+  return result;
 }
 
 /** Kernel console members, including orphan receivers no longer linked by parent PID. */
