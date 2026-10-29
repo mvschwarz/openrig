@@ -2333,3 +2333,21 @@ The final selected combination passes 13 with 6 existing POSIX-only skips;
 daemon TypeScript checking passes. This is native process/RPC fixture evidence,
 not actual-provider, stock-psmux or running-fleet acceptance. The full Windows
 parity objective remains active.
+
+## Native OMP relative executable lookup (2026-10-30)
+
+OMP's pre-isolation executable resolver also discarded relative Windows PATH
+entries. It now resolves them against the explicit child cwd; the runner passes
+that cwd before applying the child HOME. The compatibility default remains the
+runner cwd. POSIX lookup retains its existing absolute-entry policy, and native
+OMP still requires a regular EXE/COM rather than executing arbitrary batch
+launchers. Mise resolution continues to use the operator environment before
+the selected executable runs under the isolated seat environment.
+
+An owned native executable witness failed resolution before repair and now
+executes from the selected relative tools directory with actual cwd and isolated
+OS-home readback. The witness is a temporary Node executable copy, not installed
+OMP or provider code. The combined resolver/OMP lifecycle/Windows env checks
+pass 57/57; daemon TypeScript checking passes. These checks preserve the
+distinction between executable selection, fixture lifecycle and real OMP
+provider acceptance; no live seat or deployment was changed.

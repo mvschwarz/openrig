@@ -206,7 +206,7 @@ describe("OMP executable resolution before the seat HOME applies", () => {
     expect(resolveRuntimeExecutable("omp", { PATH: "relative:/opt/bin" }, fake, "linux")).toEqual({ ok: true, path: "/opt/omp/omp" });
     expect(fake.runs).toEqual([]);
   });
-  it("selects the Windows native executable while ignoring relative entries and batch shims", () => {
+  it("selects the Windows native executable while ignoring missing entries and batch shims", () => {
     const binary = "C:\\native\\omp.exe";
     const fake = ops({ "C:\\shims\\omp.cmd": "C:\\shims\\omp.cmd", [binary]: binary });
     expect(resolveRuntimeExecutable("omp", { PATH: "relative;C:\\shims;C:\\native" }, fake, "win32")).toEqual({ ok: true, path: binary });

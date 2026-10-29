@@ -1153,6 +1153,7 @@ export function resolveRuntimeExecutable(
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
   platform: NodeJS.Platform = process.platform,
+  cwd = process.cwd(),
 ): { ok: true; path: string } | { ok: false; error: string } {
   const paths = platform === "win32" ? nodePath.win32 : nodePath.posix;
   // Native spawn does not execute npm .cmd/.ps1 shims. OMP ships an .exe;
@@ -1160,7 +1161,7 @@ export function resolveRuntimeExecutable(
   const names = platform === "win32" && !paths.extname(name) ? [name + ".exe", name + ".com"] : [name];
   const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
   const onPath = searchPath.split(paths.delimiter)
-    .map(dir => platform === "win32" ? dir.replace(/^"(.*)"$/, "$1") : dir)
+    .map(dir => platform === "win32" ? paths.resolve(cwd, dir.replace(/^"(.*)"$/, "$1")) : dir)
     .filter((dir) => paths.isAbsolute(dir))
     .flatMap((dir) => names.map(filename => paths.join(dir, filename)))
     .find((candidate) => ops.isExecutable(candidate));
@@ -1274,7 +1275,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // with the runner's own environment.
   let command: string = runtime;
   if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+    const resolved = resolveRuntimeExecutable("omp", process.env, undefined, process.platform, args.cwd);
     if (!resolved.ok) {
       console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
