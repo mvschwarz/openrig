@@ -301,6 +301,15 @@ function nativeHelper(): string {
  * The worker receives only the executable path and performs all log I/O. */
 export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
 
+/** Synchronous append for existing synchronous receipt writers: native owner,
+ * one-link and DACL checks/tightening precede append and durable flush. */
+export function appendWindowsPrivateText(file: string, content: string): void {
+  execFileSync(nativeHelper(), ["append-private", file], {
+    input: Buffer.from(content, "utf8").toString("base64"), windowsHide: true,
+    timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
 function operate(file: string, operation: "read" | "read-owned" | "write", limit: number, content = ""): string {
   try {
     return execFileSync(nativeHelper(), [operation, file, String(limit)], {
