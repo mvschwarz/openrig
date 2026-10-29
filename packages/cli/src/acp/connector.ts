@@ -79,6 +79,9 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
   const log = (entry: Record<string, unknown>) => appendFileSync(options.logPath, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
   const child = spawn(options.agent[0]!, options.agent.slice(1), {
     cwd: options.cwd, stdio: "pipe", env: { ...process.env, [RUN_MARKER]: options.runId },
+    // A Windows agent must own its process group to survive the connector's
+    // console closing after detach. Pipes still carry ACP until release().
+    ...(process.platform === "win32" ? { detached: true, windowsHide: true } : {}),
   });
   child.stderr.on("data", (data: Buffer) => log({ direction: "stderr", text: data.toString() }));
   const spawned = new Promise<void>((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
