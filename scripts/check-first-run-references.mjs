@@ -181,7 +181,7 @@ export async function loadAuthorities(root) {
   const skills = new Map();
   for (const dir of SKILL_ROOTS) {
     for (const file of walk(path.join(root, dir)).filter((p) => path.basename(p) === "SKILL.md")) {
-      skills.set(path.basename(path.dirname(file)), path.relative(root, file));
+      skills.set(path.basename(path.dirname(file)), path.relative(root, file).replaceAll("\\", "/"));
     }
   }
   if (!skills.size) throw new Error("empty shipped skill catalog");
@@ -193,7 +193,7 @@ export async function loadAuthorities(root) {
         resolved.set(name, resolveLibrarySpec({ get: async () => ({ data: entries }) }, name, { kind: "rig" }).then((entry) => {
           const spec = parseYaml(fs.readFileSync(entry.sourcePath, "utf8"));
           const seats = (spec.pods ?? []).flatMap((pod) => (pod.members ?? []).map((m) => `${pod.id}-${m.id}`));
-          return { seats, source: path.relative(root, entry.sourcePath) };
+          return { seats, source: path.relative(root, entry.sourcePath).replaceAll("\\", "/") };
         }).catch(() => null));
       }
       return resolved.get(name);
@@ -240,7 +240,7 @@ export async function checkReferences(root, scope, authority) {
       checked.push({ ...ref, against: found });
     } else {
       let target = repositoryPath(ref.value);
-      if (ref.kind === "link") target = path.join(path.dirname(ref.file), ref.value);
+      if (ref.kind === "link") target = path.posix.join(path.posix.dirname(ref.file), ref.value);
       if (target.startsWith("skills/")) {
         const tail = target.slice("skills/".length);
         const candidates = [target, ...SKILL_ROOTS.map((dir) => `${dir}/${tail}`)];

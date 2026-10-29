@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   SOURCE_DIR,
@@ -1381,7 +1381,7 @@ function sha256(value) {
 function walkSkillFiles(root) {
   const out = [];
   walk(root, (path) => {
-    if (path.endsWith("/SKILL.md")) out.push(path);
+    if (basename(path) === "SKILL.md") out.push(path);
   });
   return out;
 }

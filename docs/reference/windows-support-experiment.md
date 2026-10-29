@@ -7,6 +7,25 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## First-run references and byte-bound guards, 2026-10-29
+
+The refreshed native script log exposed a first-run reference bug: joining
+Markdown links with the host path library produced backslashes on Windows,
+which also bypassed the `skills/` shipped-home fallback. Link resolution now
+uses document path syntax and reports repository-relative authority paths with
+forward slashes. The added global-skill link case and all 16 reference tests pass.
+
+Built-in policy files now explicitly check out with LF: their five exact authority
+hashes bind shipped bytes, so CRLF conversion is a real artifact difference. The
+current files were normalized only after comparing their LF bytes to Git HEAD;
+the pinned hashes were not changed. The leak scanner recognizes CRLF line endings
+for exact-line allowances while still rejecting appended content, a standalone
+CR and adjacent sensitive lines. The reference, policy and scanner suites passed
+26/26 with no skips. A separate skill-inventory test now uses path.basename and
+passed on Windows; this does not resolve the remaining mirror permission/link
+or legacy rsync-check failures. The last full script sweep remains the earlier
+350-test result, not a post-change aggregate.
+
 ## Native scenario subprocess fixtures, 2026-10-29
 
 The repository script failure log exposed two scenario tests that could not
