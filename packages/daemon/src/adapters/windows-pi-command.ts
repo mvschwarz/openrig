@@ -3,7 +3,8 @@ import path from "node:path";
 
 /** Run standard npm Pi through Node, without evaluating a cmd.exe shim. */
 export function resolveWindowsPiCommand(searchPath: string, nodeExecutable: string): { command: string; prefix: string[] } {
-  for (const dir of searchPath.split(path.delimiter)) {
+  for (const pathEntry of searchPath.split(path.delimiter)) {
+    const dir = pathEntry.replace(/^"(.*)"$/, "$1");
     if (!path.isAbsolute(dir)) continue;
     const exe = path.join(dir, "pi.exe");
     if (existsSync(exe)) return { command: realpathSync(exe), prefix: [] };

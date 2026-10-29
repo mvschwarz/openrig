@@ -19,6 +19,7 @@
 // entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
+import { readPlatformEnv } from "../domain/platform-env.js";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
@@ -1156,11 +1157,13 @@ export function resolveRuntimeExecutable(
   // Native spawn does not execute npm .cmd/.ps1 shims. OMP ships an .exe;
   // resolve that file before the isolated seat HOME is applied.
   const names = platform === "win32" && !paths.extname(name) ? [name + ".exe", name + ".com"] : [name];
-  const onPath = (env.PATH ?? "").split(paths.delimiter)
+  const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
+  const onPath = searchPath.split(paths.delimiter)
+    .map(dir => platform === "win32" ? dir.replace(/^"(.*)"$/, "$1") : dir)
     .filter((dir) => paths.isAbsolute(dir))
     .flatMap((dir) => names.map(filename => paths.join(dir, filename)))
     .find((candidate) => ops.isExecutable(candidate));
-  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
+  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${searchPath})` };
   let real: string;
   try {
     real = ops.realpath(onPath);

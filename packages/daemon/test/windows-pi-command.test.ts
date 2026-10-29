@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { resolveWindowsPiCommand } from "../src/adapters/windows-pi-command.js";
 import { buildPiChildEnv } from "../src/adapters/pi-runner-protocol.js";
@@ -12,9 +13,13 @@ describe("Windows Pi executable resolution", () => {
     try {
       mkdirSync(path.join(pkg, "dist"), { recursive: true });
       writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "dist/cli.js" } }));
-      writeFileSync(path.join(pkg, "dist", "cli.js"), "");
+      writeFileSync(path.join(pkg, "dist", "cli.js"), "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
       writeFileSync(path.join(dir, "pi.cmd"), '"%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js" %*');
       expect(resolveWindowsPiCommand(dir, process.execPath)).toEqual({ command: process.execPath, prefix: [path.join(pkg, "dist", "cli.js")] });
+      expect(resolveWindowsPiCommand(`"${dir}"`, process.execPath)).toEqual({ command: process.execPath, prefix: [path.join(pkg, "dist", "cli.js")] });
+      const resolved = resolveWindowsPiCommand(`"${dir}"`, process.execPath);
+      const args = ["中文 space", "a'b", 'double"quote', "", "%PATH%", "amp&word", "tail\\"];
+      expect(JSON.parse(execFileSync(resolved.command, [...resolved.prefix, ...args], { encoding: "utf8", windowsHide: true, timeout: 5000 }))).toEqual(args);
       writeFileSync(path.join(dir, "pi.cmd"), "unknown custom launcher");
       expect(() => resolveWindowsPiCommand(dir, process.execPath)).toThrow("Unrecognized");
       writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "../outside.js" } }));

@@ -200,6 +200,13 @@ describe("OMP executable resolution before the seat HOME applies", () => {
     expect(resolveRuntimeExecutable("omp", { PATH: "relative;C:\\shims;C:\\native" }, fake, "win32")).toEqual({ ok: true, path: binary });
     expect(fake.runs).toEqual([]);
   });
+  it("resolves quoted native directories from copied mixed-case PATH with child precedence", () => {
+    const binary = "C:\\native tools\\omp.exe", other = "C:\\other\\omp.exe";
+    const fake = ops({ [binary]: binary, [other]: other });
+    expect(resolveRuntimeExecutable("omp", { pAtH: '"C:\\native tools"' }, fake, "win32")).toEqual({ ok: true, path: binary });
+    expect(resolveRuntimeExecutable("omp", { PATH: "C:\\other", pAtH: '"C:\\native tools"' }, fake, "win32")).toEqual({ ok: true, path: other });
+    expect(fake.runs).toEqual([]);
+  });
   it("resolves a Windows mise shim using the operator environment", () => {
     const shim = "C:\\shims\\omp.exe", mise = "C:\\tools\\mise.exe", binary = "C:\\installs\\omp.exe";
     const fake = ops({ [shim]: mise, [binary]: binary }, binary);
