@@ -16,6 +16,7 @@ import { authList, authSave, authSwitch, resolveCodexHome } from "../../daemon/s
 import { DEFAULT_HEALTH_POLICY, HealthPolicyStore } from "../../daemon/src/domain/health-policy.js";
 import { ActiveLensStore } from "../../daemon/src/domain/active-lens-store.js";
 import { TerminalViewsStore } from "../../daemon/src/domain/terminal/terminal-views-store.js";
+import { listRecapChain, writeSeatRecap } from "../../daemon/src/domain/context-packs/seat-recap-store.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -25,6 +26,37 @@ function accessPolicy(file: string): string {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_TEST_ACL_FILE: file }, encoding: "utf8", windowsHide: true }).trim();
 }
+it.runIf(process.platform === "win32")("retains recap access and predecessor bytes while superseding an authored recap", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-recap-acl-"));
+  const file = join(root, "RECAP.md");
+  const original = "# Decisions\nOwned predecessor rationale\n";
+  createPrivateTextFile(file, original);
+  const before = accessPolicy(file);
+  writeSeatRecap({ seatDir: root, content: "# Decisions\nOwned successor rationale\n", now: () => 1 });
+  const chain = listRecapChain(root);
+  expect(chain).toHaveLength(1);
+  expect(readFileSync(chain[0]!.path, "utf8")).toBe(original);
+  expect(accessPolicy(chain[0]!.path)).toBe(before);
+  expect(accessPolicy(file)).toBe(before);
+  expect(readFileSync(file, "utf8")).toContain("Owned successor rationale");
+  expect(readdirSync(root).sort()).toEqual(["RECAP.md", "recap-superseded"]);
+  expect(readdirSync(join(root, "recap-superseded"))).toHaveLength(1);
+});
+it.runIf(process.platform === "win32")("rolls back the new recap archive when Windows refuses readonly-current replacement", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-recap-refusal-"));
+  const file = join(root, "RECAP.md");
+  const original = "# Decisions\nOwned retained rationale\n";
+  createPrivateTextFile(file, original);
+  chmodSync(file, 0o444);
+  const before = accessPolicy(file);
+  expect(() => writeSeatRecap({ seatDir: root!, content: "# Decisions\nOwned attempted rationale\n", now: () => 1 })).toThrow();
+  expect(readFileSync(file, "utf8")).toBe(original);
+  expect(accessPolicy(file)).toBe(before);
+  expect(statSync(file).mode & 0o222).toBe(0);
+  expect(listRecapChain(root)).toEqual([]);
+  expect(readdirSync(root).sort()).toEqual(["RECAP.md", "recap-superseded"]);
+  expect(readdirSync(join(root, "recap-superseded"))).toEqual([]);
+});
 it.runIf(process.platform === "win32").each(["lens", "views"])("retains existing protected %s access across repeated operator updates", kind => {
   root = mkdtempSync(join(tmpdir(), "openrig-operator-acl-"));
   const file = join(root, kind === "lens" ? "lens.json" : "views.yaml");

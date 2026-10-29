@@ -273,6 +273,31 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native recap continuity and exclusive-create errors (2026-10-30)
+
+An actual authored recap supersession lost the protected access policy in its
+predecessor archive. Windows recap staging and archives now establish private
+current-SID access before content is written, including the exclusive-copy
+fallback when hard links are unavailable. Existing current recaps use the
+metadata-preserving replacement helper; their selected access policy remains.
+Archives are private snapshots, not clones of arbitrary predecessor policies.
+POSIX publication, collision naming, predecessor bytes and rollback rules remain.
+
+This exposed a second Windows parity defect: private exclusive creation
+reported a generic subprocess error for an existing file. The native creation
+script now identifies only the actual Windows file-exists errors; synchronous
+and asynchronous callers receive EEXIST. A large rejected input separately
+reproduced stdin EOF masking that result. Async creation now settles from the
+process result before considering its input-pipe error; it does not retry.
+
+Complete recap store/durability checks pass 30/30, including same-timestamp
+collisions, unsupported-hard-link fallback, partial-copy and publication-failure
+cleanup. Exclusive-create and native long-path checks pass 4/4. The complete
+native atomic ACL file passes 14/14, including actual recap supersession and a
+readonly-current refusal that preserves current bytes/access and rolls back
+the new archive. Daemon build and typecheck pass. These are owned fixtures;
+no real recap, seat, handover, provider or daemon was changed.
+
 ## Existing operator-store access preservation (2026-10-30)
 
 Active workflow lens updates and saved terminal-view save/remove operations

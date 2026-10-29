@@ -12,7 +12,14 @@ $acl=New-Object Security.AccessControl.FileSecurity
 $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true,$false)
 $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow')))
-$stream=New-Object IO.FileStream($env:OPENRIG_PRIVATE_TEXT_FILE,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'Write,ReadPermissions',[IO.FileShare]::None,4096,[IO.FileOptions]::None,$acl)
+try {
+  $stream=New-Object IO.FileStream($env:OPENRIG_PRIVATE_TEXT_FILE,[IO.FileMode]::CreateNew,[Security.AccessControl.FileSystemRights]'Write,ReadPermissions',[IO.FileShare]::None,4096,[IO.FileOptions]::None,$acl)
+} catch {
+  $cause=$_.Exception
+  while($cause.InnerException){$cause=$cause.InnerException}
+  if(($cause.HResult -band 65535) -in @(80,183)){[Console]::Error.WriteLine('OPENRIG_PRIVATE_FILE_EXISTS');exit 17}
+  throw
+}
 try {
   $actual=$stream.GetAccessControl()
   $rules=$actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
@@ -21,6 +28,12 @@ try {
   try {$stream.Write($bytes,0,$bytes.Length)} finally {[Array]::Clear($bytes,0,$bytes.Length)}
 } finally {$stream.Dispose()}
 `;
+
+function privateCreationError(error: unknown): unknown {
+  const failure = error as Error & { status?: number; code?: string | number; stderr?: string | Buffer };
+  if ((failure.status === 17 || failure.code === 17) && String(failure.stderr).trim() === "OPENRIG_PRIVATE_FILE_EXISTS") failure.code = "EEXIST";
+  return error;
+}
 
 /** Create a new staging file with private access before writing any bytes.
  * Existing paths (including links) are never opened or overwritten. Windows
@@ -31,10 +44,11 @@ export function createPrivateTextFile(file: string, content: string): void {
     writeFileSync(file, content, { mode: 0o600, flag: "wx" });
     return;
   }
-  execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  try { execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(CREATE_PRIVATE_FILE, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_PRIVATE_TEXT_FILE: file }, input: Buffer.from(content, "utf8").toString("base64"),
       windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] });
+  } catch (error) { throw privateCreationError(error); }
 }
 
 /** Windows atomic replacement: establish private access before content, then
@@ -128,11 +142,18 @@ export function openPrivateTextFile(file: string): number {
 
 function runPrivateScript(script: string, values: NodeJS.ProcessEnv, input = ""): Promise<void> {
   return new Promise((resolveRun, reject) => {
+    let inputError: Error | undefined;
     const child = execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
       { env: { ...process.env, ...values }, windowsHide: true, timeout: 10_000, maxBuffer: 64 * 1024 },
-      error => error ? reject(error) : resolveRun());
-    child.stdin?.on("error", reject);
+      (error, _stdout, stderr) => {
+        if (error) reject(privateCreationError(Object.assign(error, { stderr })));
+        else if (inputError) reject(inputError);
+        else resolveRun();
+      });
+    // A constructor refusal can close stdin before its structured error is
+    // delivered. Keep that process error authoritative over the resulting EPIPE.
+    child.stdin?.on("error", error => { inputError = error; });
     child.stdin?.end(input);
   });
 }
