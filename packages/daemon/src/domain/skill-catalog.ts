@@ -18,6 +18,7 @@ import { parse as parseYaml } from "yaml";
 import { memoizeScan, parseSkillFrontmatter, type ScanCache } from "./skill-discovery.js";
 
 const CATALOG_SCHEMA = "openrig.skill-catalog/v1";
+const canonicalPath = process.platform === "win32" ? realpathSync.native : realpathSync;
 const MANIFEST_SCHEMA = "openrig.skill-loadout/v1";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_TOPOLOGY_OWNER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/;
@@ -249,7 +250,7 @@ function gitState(catalogRoot: string): { revision: string; dirtyDirs: Set<strin
   } catch {
     throw new Error(`managed skill catalog is not inside a readable Git repository: ${catalogRoot}`);
   }
-  const rel = nodePath.relative(realpathSync(repoRoot), realpathSync(catalogRoot)).split(nodePath.sep).join("/");
+  const rel = nodePath.relative(canonicalPath(repoRoot), canonicalPath(catalogRoot)).split(nodePath.sep).join("/");
   const status = execFileSync(
     "git",
     ["-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rel || "."],
@@ -761,8 +762,8 @@ function planGitIgnores(input: {
   } catch {
     return [];
   }
-  const canonicalRepoRoot = realpathSync(repoRoot);
-  const canonicalCwd = realpathSync(input.cwd);
+  const canonicalRepoRoot = canonicalPath(repoRoot);
+  const canonicalCwd = canonicalPath(input.cwd);
   const fromCanonicalCwd = (path: string): string => {
     const relative = nodePath.relative(input.cwd, path);
     if (!relative || relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
