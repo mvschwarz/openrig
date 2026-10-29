@@ -7,6 +7,25 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Linked script entries and refreshed failure inventory, 2026-10-29
+
+At `5dc3ea549`, the full repository-script sweep ran 355 tests: 335 passed,
+16 failed, four skipped, none cancelled. This is not full workspace acceptance.
+One failure is a real second package build exiting 3221225477 in Node/npm,
+with a Git Bash segmentation-fault message; no successful install is inferred
+from that run. Other failures include prohibited Windows filenames/file symlinks,
+POSIX modes and the snapshot-refresh fixture's fixed shell lookup.
+
+Subsequent entry tests use Windows directory junctions for directory links. The
+portability report's Windows encoded-filename case copies its standalone script;
+its preserved-link case uses a junction parent. POSIX file-symlink cases remain.
+This proves those Windows entry paths, not privileged file-symlink creation.
+Inspection also found that the import rewriter resolved only argv's real path:
+it now resolves both entry paths, so --preserve-symlinks-main through a linked
+parent actually executes. All 23 rewriter/report tests passed, including real
+rewrites through space/hash/junction paths with and without that flag and the
+unmapped-import rejection. No post-change full aggregate is claimed yet.
+
 ## POSIX install-wrapper contracts from a Windows host, 2026-10-29
 
 All 17 install.sh contract tests now run on Windows using the explicitly selected
