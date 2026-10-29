@@ -148,6 +148,24 @@ export function launchStatusIsRunning(status: string): boolean {
 }
 
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
+/** Whether a saved Claude session is known never to have been used, so starting fresh in its place loses nothing. Its token
+ *  must be the launch's own pre-assigned ID (never reported by Claude's hook, an operator or a resume), OpenRig never saw the
+ *  seat reach its prompt, and no output was ever observed for that conversation. Missing observations alone never make a
+ *  seat unused, and a record that can't be read counts as use. */
+export function claudeSessionNeverUsed(db: Database.Database, session: { resumeToken: string | null; resumeProvenance?: string | null;
+  resumeLastVerified?: string | null; startupStatus?: string; startupCompletedAt?: string | null } | null | undefined): boolean {
+  if (!session?.resumeToken || session.resumeProvenance !== "scrape" || session.resumeLastVerified) return false;
+  if (session.startupStatus === "ready" || session.startupCompletedAt) return false;
+  try {
+    const table = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+    if (table("usage_samples") && db.prepare("SELECT 1 FROM usage_samples WHERE native_session_id = ? AND total_output_tokens > 0 LIMIT 1").get(session.resumeToken)) return false;
+    if (table("context_usage") && db.prepare("SELECT 1 FROM context_usage WHERE session_id = ? AND total_output_tokens > 0 LIMIT 1").get(session.resumeToken)) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | null, currentRuntime: string | null): RestoreSeatFacts {
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
 }
@@ -1353,14 +1371,17 @@ export class RestoreOrchestrator {
 
     const { missingConversationToken, ...restored } = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession);
-    if (missingConversationToken) {
-      // Claude itself reported the saved conversation missing, for example a seat stopped before its first message, whose
-      // token Claude never wrote. The blank attempt is rolled back, so start only this seat fresh, as the rollback's own
-      // advice says. The earlier session keeps its token.
-      warnings?.push(`${launchResult.sessionName}: Claude reported that its saved conversation ${missingConversationToken} doesn't exist, so it started fresh. `
-        + "The token stays on the earlier session; rig seat set-resume-token can select it again.");
-      return this.restoreNodeWithCompensation(entry, rigId, snapshotId, data,
+    if (missingConversationToken && !replacement) {
+      // Claude itself reported the saved conversation missing, and the seat was never used (a seat stopped before its first
+      // message, whose pre-assigned token Claude never wrote). The blank attempt is rolled back, so start only this seat fresh,
+      // as the rollback's own advice says, and say what actually happened. An automatic replacement (an operator's corrected
+      // token) keeps the pause. The earlier session keeps its token.
+      const fresh = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, data,
         { ...opts, freshLogicalIds: [...(opts?.freshLogicalIds ?? []), node.logicalId] }, warnings, preserveStoppedCurrent);
+      warnings?.push(`${launchResult.sessionName}: Claude reported that its saved conversation ${missingConversationToken} doesn't exist, `
+        + (fresh.status === "fresh-primed" ? "so it started fresh. " : `so a fresh start was tried, and it ended ${fresh.status}. `)
+        + "The token stays on the earlier session; rig seat set-resume-token can select it again.");
+      return fresh;
     }
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(keptPane ? { launchStarted: true as const } : {}) };
@@ -1967,8 +1988,10 @@ export class RestoreOrchestrator {
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
                   error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
-                  // Claude's own report: the caller starts only this seat fresh. Not for an explicitly selected history.
-                  ...(startupAdapter?.runtime === "claude-code" && !selected && resumeToken ? { missingConversationToken: resumeToken } : {}),
+                  // Claude's own report, for a seat known never to have been used: the caller starts only this seat fresh. Not
+                  // for an explicitly selected history, or for any history that may have been used.
+                  ...(startupAdapter?.runtime === "claude-code" && !selected && resumeToken && claudeSessionNeverUsed(this.db, session)
+                    ? { missingConversationToken: resumeToken } : {}),
                 };
               }
               return {
