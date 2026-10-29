@@ -475,28 +475,35 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const grantOwnHooks = (): number => {
       const grantLayers = readLayers();
       if (codexCorePluginEnablement(grantLayers).decision !== "allow" || !matchesShippedTree(cachedDir)) return 0;
+      // An existing install is granted only while no layer records a choice for any of these hooks, decided on this read.
+      if (!firstInstall && !noOwnHookChoice(grantLayers)) return 0;
       let freshGrants = 0;
-      let content = this.fs.readFile(this.resolveCodexConfigPath(home));
+      const configPath = this.resolveCodexConfigPath(home);
+      const before = this.fs.readFile(configPath);
+      let content = before;
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
-      for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
-        groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
-          const { key, hash } = codexHookTrust.computeCodexHookTrust(event, {
-            ...handler, timeoutSec: handler.timeout, matcher: group.matcher,
-            keySource: `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json`, groupIndex, handlerIndex,
-          });
-          // Any existing choice in any readable layer/profile wins; never overwrite enabled=false or an old hash.
-          const hasChoice = (doc: unknown): boolean => {
-            if (!doc || typeof doc !== "object") return false;
-            const value = doc as { hooks?: { state?: Record<string, unknown> } };
-            return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
-          };
-          if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
-            content = upsertCodexHookTrust(content, key, hash);
-            freshGrants++;
-          }
-        }));
-      }
-      if (freshGrants > 0) this.fs.writeFile(this.resolveCodexConfigPath(home), content);
+      try {
+        for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
+          groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
+            const { key, hash } = codexHookTrust.computeCodexHookTrust(event, {
+              ...handler, timeoutSec: handler.timeout, matcher: group.matcher,
+              keySource: `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json`, groupIndex, handlerIndex,
+            });
+            // Any existing choice in any readable layer/profile wins; never overwrite enabled=false or an old hash.
+            const hasChoice = (doc: unknown): boolean => {
+              if (!doc || typeof doc !== "object") return false;
+              const value = doc as { hooks?: { state?: Record<string, unknown> } };
+              return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
+            };
+            if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
+              content = upsertCodexHookTrust(content, key, hash);
+              freshGrants++;
+            }
+          }));
+        }
+      } catch { return 0; } // A config the line writer can't extend (an inline hooks table, say) gets no grant; review stays.
+      if (freshGrants === 0 || this.fs.readFile(configPath) !== before) return 0; // A concurrent native choice wins.
+      this.fs.writeFile(configPath, content);
       return freshGrants;
     };
     if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
@@ -1264,8 +1271,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { ready: false, reason: probe.detail, code: probe.code };
   }
 
-  /** The user config enables openrig-core and no readable layer holds a choice for any of its hooks: what an install older
-   *  than the first-install grant leaves (#17). Reported only; a decline also writes no state, so nothing is granted here. */
+  /** The user config enables openrig-core and no readable layer holds a choice for any of its hooks. Plugin setup grants
+   *  OpenRig's own hooks there at daemon start and on a fresh launch (#17); a resumed seat's own home can still show this
+   *  until then. Reported only: nothing is granted here. */
   private ownHooksNeverApproved(home: string | undefined): boolean {
     try {
       const layers = codexReadableConfigLayers(nodePath.dirname(this.resolveCodexConfigPath(home)), this.codexSystemConfigDir)
