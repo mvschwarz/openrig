@@ -398,6 +398,14 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
     }
   });
 
+  it.each(["node", "MainThread"])("refuses a %s supervisor mentioning Codex outside its launcher script", async betweenName => {
+    for (const between of ["node /opt/supervisor.js --project=codex", "node /opt/codex-supervisor.js", "node -e codex", "node /opt/tools.js /usr/local/bin/codex"]) {
+      const w = world({ between, betweenName, facts: { 150: facts({ exe: "/usr/bin/node" }) } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, reason: "regression" }), between).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+      expect(w.calls, between).toEqual([]);
+    }
+  });
+
   it("recognizes a MainThread-named npm launcher only when its OS executable is Node", async () => {
     for (const exe of ["/usr/local/bin/node", "/usr/bin/python3", "", null]) {
       const w = world({ between: "node /usr/local/bin/codex", betweenName: "MainThread",

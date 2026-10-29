@@ -879,7 +879,10 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
     const node = name === "node" || (name === "MainThread"
       && nodePath.basename(launcherExecutables.get(parent.pid) ?? "") === "node");
-    const launcher = /^codex/i.test(name) || (node && processArgv(parent.command).some((arg) => /codex/i.test(arg)));
+    const script = processArgv(parent.command)[1];
+    const codexScript = !!script && nodePath.isAbsolute(script)
+      && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
+    const launcher = /^codex/i.test(name) || (node && codexScript);
     if (!launcher) break;
     chain.push(parent);
     current = parent;
