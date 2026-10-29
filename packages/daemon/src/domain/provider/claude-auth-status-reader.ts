@@ -18,6 +18,7 @@ import type { UsageReadOutcome } from "./usage-windows.js";
 import { killWindowsChildTree } from "../windows-child-tree.js";
 import { resolveWindowsProviderCommand } from "../windows-provider-command.js";
 import { spawnWindowsJobProcess } from "../windows-job-process.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 export type ClaudeAuthFailureReason = "binary_not_found" | "auth_status_failed" | "not_logged_in" | "not_subscription_login";
 
@@ -55,7 +56,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The `claude` executable on the reader's own PATH, as an absolute path, or null. */
 export function resolveClaudeExecutable(env: NodeJS.ProcessEnv): string | null {
-  for (const dir of (env.PATH ?? env.Path ?? "").split(path.delimiter)) {
+  for (const dir of (readPlatformEnv(env, "PATH") ?? "").split(path.delimiter)) {
     if (!dir) continue;
     for (const name of process.platform === "win32" ? ["claude.com", "claude.exe", "claude.bat", "claude.cmd"] : ["claude"]) {
       const candidate = path.join(dir.replace(/^"(.*)"$/, "$1"), name);
@@ -124,7 +125,7 @@ export function runClaudeCommand(file: string, env: NodeJS.ProcessEnv, cwd: stri
     let child: ReturnType<typeof spawn>;
     try {
       const executable = process.platform === "win32" && /\.(cmd|bat)$/i.test(file)
-        ? resolveWindowsProviderCommand("claude", { ...env, PATH: [path.dirname(file), env.PATH ?? env.Path ?? ""].join(path.delimiter) }, cwd)
+        ? resolveWindowsProviderCommand("claude", { ...env, PATH: [path.dirname(file), readPlatformEnv(env, "PATH") ?? ""].join(path.delimiter) }, cwd)
         : { command: file, prefix: [] };
       child = (process.platform === "win32" ? spawnWindowsJobProcess : spawn)(executable.command, [...executable.prefix, ...args], { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
     } catch (error) {

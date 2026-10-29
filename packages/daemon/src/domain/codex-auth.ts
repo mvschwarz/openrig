@@ -23,6 +23,7 @@ import fs from "node:fs";
 import { windowsAuthFile } from "./windows-owned-text.js";
 import { createPrivateTextFile } from "./private-text-file.js";
 import { resolveCodexCommand } from "./windows-provider-command.js";
+import { readPlatformEnv } from "./platform-env.js";
 import { spawnSync } from "node:child_process";
 
 /** Strict profile-name whitelist: alnum-led, then [A-Za-z0-9._-], 1..64 chars. Excludes /, \, ~,
@@ -46,10 +47,12 @@ export interface CodexAuthPaths {
 
 /** Resolve the Codex paths from an env map (default process.env). CODEX_HOME wins; else $HOME/.codex. */
 export function resolveCodexHome(env: NodeJS.ProcessEnv = process.env): CodexAuthPaths {
-  const home = typeof env.HOME === "string" && env.HOME.length > 0 ? env.HOME : accountHome();
+  const selectedHome = readPlatformEnv(env, "HOME");
+  const selectedCodexHome = readPlatformEnv(env, "CODEX_HOME");
+  const home = selectedHome || accountHome();
   const codexHome =
-    typeof env.CODEX_HOME === "string" && env.CODEX_HOME.length > 0
-      ? env.CODEX_HOME
+    selectedCodexHome
+      ? selectedCodexHome
       // HOME unset/empty (cron, systemd, some CI/container shells) must not yield a
       // cwd-relative ".codex" — auth files stay under the account's home.
       : path.join(home, ".codex");

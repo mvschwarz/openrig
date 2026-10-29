@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
+import { readPlatformEnv } from "./platform-env.js";
 
 /** Native spawn cannot execute npm's .cmd launcher. Recognize the installed
  * provider package and invoke its JS entry through Node without cmd.exe quoting. */
@@ -10,7 +11,7 @@ export function resolveCodexCommand(env: NodeJS.ProcessEnv, cwd = process.cwd())
 export function resolveWindowsProviderCommand(name: "codex" | "claude", env: NodeJS.ProcessEnv, cwd = process.cwd()): { command: string; prefix: string[] } {
   if (process.platform !== "win32") return { command: name, prefix: [] };
   const packageName = name === "codex" ? "@openai/codex" : "@anthropic-ai/claude-code";
-  const searchPath = env.PATH ?? env.Path ?? "";
+  const searchPath = readPlatformEnv(env, "PATH") ?? "";
   for (const value of searchPath.split(path.delimiter)) {
     const directory = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
     for (const extension of [".com", ".exe", ".bat", ".cmd"]) {
