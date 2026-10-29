@@ -1952,3 +1952,23 @@ Unicode/spaced absolute Write, backslash-relative Edit and a quoted absolute
 text mention. Native discovery plus hook/bridge checks passed 28 tests with two
 existing skips. Plugin manifests are 0.1.27; mirror checks and staged skill-byte
 digest verification passed. No live transcript was inspected or restored.
+
+## Activity relay native interpreter lookup (2026-10-30)
+
+The plugin's settings-relay recognition now resolves bare Node through native
+Windows environment key precedence and quoted PATH entries. Previously a
+usable same-script settings relay could be missed, leaving the plugin's copy
+active as well. The grammar and same-script byte check are unchanged: missing
+interpreters, an empty winning PATH, or different script bytes still do not
+silence the plugin. The owned reproducer failed before the fix and passes after.
+
+Relay endpoint/invocation/native-path checks had 27 tests: 20 passed and seven
+failed (three refresh fixtures, two file-symlink EPERM cases and two POSIX shell
+invocation cases). Those failures remain unresolved. Mirror checking passed;
+plugin manifests are 0.1.28. No live activity was emitted.
+
+An independent checkout was built and pinned to dd4bc689c9f8ab04b64624a24db1cee57cd57197
+for a new CLI/TUI whole-suite run with stock psmux 3.4.0 and real-Codex opt-in
+disabled. Its start receipt is `workspace-cli-tui-dd4bc68-frozen-r1-metadata.json`
+in the local audit resources. It was still running when this follow-up was
+recorded; this is not a passing/current-head acceptance claim.

@@ -250,8 +250,10 @@ function settingsRelayPath(command) {
 }
 
 function interpreterAvailable(executable, env) {
+  const pathKey = process.platform === "win32" ? Object.keys(env).sort().find(key => key.toUpperCase() === "PATH") : "PATH";
+  const searchPath = pathKey === undefined ? undefined : env[pathKey];
   const candidates = executable === "node"
-    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", process.platform === "win32" ? "node.exe" : "node")) : []
+    ? typeof searchPath === "string" ? searchPath.split(path.delimiter).map(dir => path.resolve((process.platform === "win32" ? dir.replace(/^"(.*)"$/, "$1") : dir) || ".", process.platform === "win32" ? "node.exe" : "node")) : []
     : [executable];
   return candidates.some(candidate => {
     if (process.platform === "win32" && !/^node\.exe$/i.test(path.basename(candidate))) return false;
