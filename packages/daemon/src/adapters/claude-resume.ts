@@ -110,6 +110,7 @@ export class ClaudeResumeAdapter {
     }
     const requiresApiKey = seatToken?.ref.kind === "api-key";
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    if (seatToken) tokenWarnings.push(...(await this.options.claudeManagedLaunch?.tokenPrecedenceWarnings?.(nodeId!, seatToken.ref) ?? []));
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);

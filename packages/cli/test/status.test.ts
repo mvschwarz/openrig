@@ -142,6 +142,47 @@ describe("rig status", () => {
     });
   });
 
+  // Snapshot times come from SQLite datetime('now'): UTC with no zone marker. The age must not shift by the host's offset.
+  describe.each(["UTC", "Asia/Kolkata", "America/Los_Angeles"])("snapshot age under TZ=%s", (timezone) => {
+    let srv: ReturnType<typeof createDaemonServer>;
+    let port: number;
+    let previousTimezone: string | undefined;
+
+    beforeAll(async () => {
+      previousTimezone = process.env.TZ;
+      process.env.TZ = timezone;
+      srv = createDaemonServer(
+        [{ id: "r1", name: "alpha", nodeCount: 1, latestSnapshotAt: "2026-03-24 01:00:00", latestSnapshotId: "snap-1" }],
+        { available: true },
+      );
+      port = await srv.listen();
+    });
+    afterAll(async () => {
+      vi.useRealTimers();
+      await srv.close();
+      if (previousTimezone === undefined) delete process.env.TZ; else process.env.TZ = previousTimezone;
+    });
+
+    it("reports a snapshot taken two minutes ago as 2m ago", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-03-24T01:02:00Z"));
+      const deps: StatusDeps = {
+        lifecycleDeps: mockLifecycleDeps({
+          exists: vi.fn((p: string) => p === STATE_FILE),
+          readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(port)) : null)),
+          fetch: vi.fn(async () => ({ ok: true })),
+        }),
+        clientFactory: (baseUrl) => new DaemonClient(baseUrl),
+      };
+
+      const program = new Command();
+      program.addCommand(statusCommand(deps));
+      const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
+
+      expect(logs.join("\n")).toContain("alpha  1 node(s)  snapshot: 2m ago");
+    });
+  });
+
   // OPR.0.3.3.04.2 (AC-2): state clarity - daemon port, kernel readiness
   // (distinct from daemon health), effective workspace root (default vs override).
   describe("AC-2 state clarity (OPR.0.3.3.04.2)", () => {

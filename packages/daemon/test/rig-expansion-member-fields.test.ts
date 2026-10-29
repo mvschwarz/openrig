@@ -69,6 +69,25 @@ describe("expansion member fidelity", () => {
     expect(await status.json()).toMatchObject({ runtime_home: { variable: "CLAUDE_CONFIG_DIR", home: selected.env.CLAUDE_CONFIG_DIR, source: "member" } });
   });
 
+  it.each(["canonical", "camel", "single-add"])("%s preserves a member token reference through validation and storage", async path => {
+    const rig = setup.rigRepo.createRig("token-rig");
+    const token = { label: "selected-account", file: "/synthetic/selected-token" };
+    if (path === "single-add") {
+      const seed = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "qa", label: "QA",
+        members: [{ id: "terminal", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+      expect(seed.ok).toBe(true);
+      const response = await setup.app.request(`/api/rigs/${rig.id}/pods/qa/members`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rigRoot: "/project/rig", member: { ...member(), claude_token: token } }) });
+      expect(response.status).toBe(201);
+    } else {
+      const response = await routeExpand(rig.id, { ...member(), [path === "camel" ? "claudeToken" : "claude_token"]: token });
+      expect(response.status).toBe(201);
+    }
+    const node = setup.rigRepo.getRig(rig.id)!.nodes.find(n => n.logicalId === "qa.reviewer")!;
+    expect(node.claudeTokenRef).toEqual({ label: token.label, tokenFile: token.file });
+    expect(bindings).toHaveLength(1);
+  });
+
   it("passes canonical member fields intact to the one validator instead of whitelisting them", async () => {
     const rig = setup.rigRepo.createRig("field-rig");
     const spy = vi.spyOn(setup.podInstantiator, "materializeStructured").mockResolvedValue({ ok: false, code: "validation_failed", errors: ["stop at validator"] });

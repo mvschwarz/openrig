@@ -27,8 +27,17 @@ fallback. Explain the window failure and help with the chosen fallback.
 The shared dashboard is the kernel's `operator.human` terminal, an ordinary TUI,
 not an agent or human-message inbox. Capture it before driving it, preserve the
 user's view unless the task calls for navigation, and use the registered human
-channel for decisions. If the TUI has exited, its shell remains; run `rig tui`
-there once.
+channel for decisions. If the TUI has exited but its shell remains, run
+`rig tui` there once. If the terminal session itself is absent, inspect
+`rig ps --nodes --rig kernel --json` for its registered `canonicalSessionName`
+and recover only that seat with `rig seat launch <session> --fresh --reason
+"recover missing shared kernel dashboard"` (normally `operator-human@kernel`).
+Its fresh-start action runs `rig tui`; confirm that with `rig capture <session>`
+before opening `saved:kernel`. Keep healthy agent sessions running and omit
+`--stop`. Restoring selected agent seats does not restore an unselected
+`operator.human`, and opening a view cannot create its missing session. See
+"Incomplete setup and restart" in `$OPENRIG_HOME/reference/getting-started.md`
+for the window, TUI and missing-terminal cases.
 
 When a person asks you to watch something or remind them, in any words, read
 `$OPENRIG_HOME/reference/keeping-a-watch.md` first and follow it.

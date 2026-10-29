@@ -526,6 +526,28 @@ only the stored `env:`. Seats may share a home. Live usage refresh (`rig provide
 daemon's own logins; reading each seat's home would need a native reader per home. OpenRig doesn't copy logins or conversation history between homes, so a conversation saved under a seat's earlier home
 doesn't resume after the seat moves to another one. The `openrig-user` skill has the setup steps.
 
+**A seat's own subscription token.** A Claude member can start on a prepared subscription token from its first launch,
+with no conversation to switch first. Name the token file beside its config dir:
+
+```yaml
+- id: dev
+  runtime: claude-code
+  env:
+    CLAUDE_CONFIG_DIR: /abs/claude-dev
+  claude_token: { label: dev-sub, file: /abs/tokens/dev.token }
+```
+
+The label and the absolute path are stored on the seat when the rig is created, as `rig provider switch --seat <seat>
+--to-account <label> --token-file <path>` stores them. Its launches run the same token step, which reads the file as
+Claude starts; a launch path that can't run it (a pane shell other than a POSIX one, for example) starts without it and
+warns. The file's contents never pass through OpenRig: validation doesn't read it, and they don't reach the spec, the
+seat's record or the launch command. A missing, empty or unreadable file doesn't refuse the spec; the seat starts on its
+config dir's stored login (or a token the daemon gives every seat) and says so. A launch also warns when a setting Claude
+Code ranks above the token would be used instead: an `apiKeyHelper`, or an outranking `env` entry in the user, project
+or local settings. Managed settings aren't inspected. `rig export` writes the seat's current reference, except for a seat
+with an account home or an API-key selection (select those again after import), so a later switch shows there, and `rig provider switch --stored-login` removes it. Only
+`claude-code` members and legacy flat nodes accept it, and there's no rig-level default.
+
 **Switching to an isolated account home.** A running Codex or Claude Code seat can change its native account home
 while staying in its rig:
 
@@ -713,6 +735,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
 | `codex_permissions` | mapping | no | — | Codex-only sandbox and approval envelope, emitted as explicit flags on every managed launch and resume; see [per-member Codex permissions](#per-member-codex-permissions). |
+| `claude_token` | mapping | no | — | Claude-only `{ label, file }`: the seat's own subscription token file, by absolute path, used from its first launch; see "A seat's own subscription token" under [launch environment](#launch-environment). |
 | `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. A relative path resolves against the rig root (the directory containing the rig spec). If that path exists as written, it is used. Otherwise a leading `~` or `~/` expands to the home directory (`~user` does not) and `$VAR` / `${VAR}` expand from the daemon host's environment; a relative result still resolves against the rig root. A reference to an unset variable stays as written, so the cwd is that literal path and works only if it exists. Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. A cwd inside the OpenRig installation fails preflight unless `--cwd` is given. Editing this declaration does not update an existing seat; use [`rig seat set-cwd`](agent-startup-guide.md#change-an-existing-seats-working-directory) to save its future launch directory. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |

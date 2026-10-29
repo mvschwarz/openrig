@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { configListLines } from "../src/config/config-model.js";
+import { demoSnapshot } from "../src/demo-data.js";
+import { healthListLines, healthSummaryLine } from "../src/health/health-model.js";
 import { renderLanes } from "../src/pulse/render-pulse.js";
 import { scopeIdentityLines, type SliceScopeSnap } from "../src/scopes/scopes-model.js";
+import type { FleetSnapshot } from "../src/types.js";
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
@@ -36,4 +40,46 @@ describe("TUI truncation keeps emoji whole", () => {
     expect(texts.some((text) => text.includes("…"))).toBe(true);
     expect(texts.some((text) => LONE_SURROGATE.test(text))).toBe(false);
   });
+
+  it("cuts a health finding's summary before an emoji in the summary line and the findings table", () => {
+    const scope = { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true } as const;
+    const texts: string[] = [];
+    // Every offset of the emoji, so one of them lands on each cut point whatever the column widths are.
+    for (let k = 0; k < 40; k++) {
+      const snap = healthSnapshot(`${"a".repeat(k)}🚀 context pressure keeps rising past the column edge`);
+      texts.push(healthSummaryLine(snap, scope, 70).text, ...healthListLines(snap, scope, 60).map((line) => line.text));
+    }
+    expect(texts.some((text) => text.includes("…"))).toBe(true);
+    expect(texts.filter((text) => LONE_SURROGATE.test(text))).toEqual([]);
+  });
+
+  it("cuts a config value before an emoji instead of through it", () => {
+    const texts = Array.from({ length: 40 }, (_, k) => configListLines([{
+      key: "workspace.root", group: "general", value: `${"v".repeat(k)}😀 tail of a long value`, defaultValue: "", source: "file",
+      visibility: "shown", reason: null, scope: "Displayed daemon instance", application: "Running application unverified.",
+    }], 60)).flat().map((line) => line.text);
+    expect(texts.some((text) => text.includes("…"))).toBe(true);
+    expect(texts.filter((text) => LONE_SURROGATE.test(text))).toEqual([]);
+  });
 });
+
+function healthSnapshot(summary: string): FleetSnapshot {
+  const snap = demoSnapshot();
+  const guard = snap.hosts[0]!.rigs[0]!.pods.flatMap((pod) => pod.agents).find((agent) => agent.name === "dev50.guard")!;
+  Object.assign(guard, { nodeId: "node-guard" });
+  Object.assign(snap, {
+    health: {
+      availability: "loaded", evaluatedAt: "2026-09-05T12:00:00.000Z", total: 1, truncated: false,
+      records: [{
+        schema: "openrig.health/v0alpha1", id: "health-emoji", detector: "context.pressure", category: "context",
+        scope: { type: "seat", rigId: "openrig-build", seatId: "node-guard" }, severity: "warning", confidence: "high",
+        status: "active", startedAt: "2026-09-05T11:30:00.000Z", lastObservedAt: "2026-09-05T11:59:00.000Z",
+        window: { source: "context-usage", startedAt: "2026-09-04T12:00:00.000Z", endedAt: "2026-09-05T12:00:00.000Z", limit: 3, retentionSeconds: 86400 },
+        freshness: { state: "fresh", evaluatedAt: "2026-09-05T12:00:00.000Z", newestSourceAt: "2026-09-05T11:59:00.000Z", maxAgeSeconds: 600, ageSeconds: 60 },
+        summary, evidence: [], threshold: "fresh context utilization >= 95%", explanation: "Sustained context pressure.",
+        suggestedInspection: "Inspect the seat's context source.", indeterminateReason: null,
+      }],
+    },
+  });
+  return snap;
+}

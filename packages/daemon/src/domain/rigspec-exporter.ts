@@ -97,6 +97,7 @@ export class RigSpecExporter {
       if (node.advisor) specNode.advisor = node.advisor;
       const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.db, node.id) : undefined;
       if (rules !== undefined) specNode.claudePermissions = rules;
+      if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") specNode.claudeTokenRef = node.claudeTokenRef;
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (node.cwd) specNode.cwd = node.cwd;
@@ -189,6 +190,7 @@ export class RigSpecExporter {
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
         const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
         if (rules !== undefined) member.claudePermissions = rules;
+        if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") member.claudeTokenRef = node.claudeTokenRef;
         const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
         if (envelope !== undefined) member.codexPermissions = envelope;
         if (node.env) member.env = node.env;

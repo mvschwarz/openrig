@@ -1,4 +1,4 @@
-import { fieldLine, sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
+import { fieldLine, sectionRule, sliceWhole, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { FleetSnapshot, ViewState } from "../types.js";
 
 export interface ConfigEntry {
@@ -127,7 +127,7 @@ export function configValue(entry: ConfigEntry, defaultValue = false): string {
   return String(v);
 }
 function clip(text: string, width: number): string {
-  return text.length <= width ? text : text.slice(0, Math.max(0, width - 1)) + "…";
+  return text.length <= width ? text : sliceWhole(text, Math.max(0, width - 1)) + "…";
 }
 export function configListLines(entries: ConfigEntry[], width: number, selectedKey?: string): ContentLine[] {
   const room = Math.max(20, width);
