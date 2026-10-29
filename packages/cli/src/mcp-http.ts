@@ -15,7 +15,8 @@
 import http from "node:http";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createPrivateTextFile } from "./lib/private-text-file.js";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { DaemonClient } from "./client.js";
@@ -95,8 +96,8 @@ export async function withGrantsLock<T>(file: string, update: () => T, waitMs = 
 
 function writeGrants(file: string, grants: McpGrant[]): void {
   fs.mkdirSync(nodePath.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify({ principals: grants }, null, 2)}\n`, { mode: 0o600 });
+  const temp = `${file}.${randomUUID()}.tmp`;
+  createPrivateTextFile(temp, `${JSON.stringify({ principals: grants }, null, 2)}\n`);
   fs.renameSync(temp, file);
   fs.chmodSync(file, 0o600);
 }

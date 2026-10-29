@@ -1,5 +1,31 @@
 # Native Windows support experiment
 
+## Native MCP file privacy (2026-10-29)
+
+The complete CLI run at unchanged `b6c2c7570b6a12abc79783c0213c550c04f0e07a`
+reports 5953 tests: 5310 passed, 586 failed and 57 pending. It still fails overall.
+Its remaining MCP mode assertions exposed a production gap: `mode: 0600` does
+not establish a private Windows DACL for grant and presence files.
+
+MCP grant and presence publication now creates a fresh UUID staging file with
+a protected current-user-SID DACL before writing content. The same open handle
+verifies its owner and sole explicit FullControl allow rule before writing;
+content is sent through child stdin, never command arguments or environment.
+An existing staging path, including a hard link, is refused. Atomic rename
+retains the DACL. POSIX staging retains exclusive creation and mode `0600`.
+Authentication, grant scope and presence throttling keep their existing rules.
+
+Five native test files passed 39/39, covering exact UTF-8 bytes, private DACL
+after rename, existing/hard-linked path refusal, MCP protocol negotiation,
+grant-service scope, token add/revoke and presence behavior. A separate owned
+native probe confirmed the DACL before adoption; its initial Write-only handle
+could not read the ACL, so the final handle explicitly includes ReadPermissions.
+Tests inspect Windows ACLs instead of accepting synthetic POSIX mode bits.
+CLI TypeScript checking passed. This is an OS-file/HTTP boundary proof using
+synthetic credentials and owned listeners, not a stub-agent or installed fleet
+test. Existing external files are not migrated, and other private-file writers
+and POSIX-UID checks still require their own native review.
+
 ## Git context checkout aliases (2026-10-29)
 
 The full CLI failure receipt led to an owned local Git reproduction: Node's

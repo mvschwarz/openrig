@@ -1,4 +1,5 @@
 import { allowFetchTarget } from "./fetch-guard.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http against the daemon's real routes: the real HTTP listener, the SDK's own HTTP client, and grants in
 // a real token file. With no grants it serves loopback as the env's seat, declared; with grants, every request needs a
@@ -289,7 +290,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
         // Its last call is recorded; no ring was rung (nudge: false), so its last wake is unknown, never idle.
         presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows" } }]);
       expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
-      expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
+      expectPrivateFile(presenceFile);
       expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");
 
       // Revoked: its next request is refused, and the work and its answer stay.
@@ -486,7 +487,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     const stored = fs.readFileSync(tokenFile, "utf8");
     expect(stored).not.toContain(token);
     expect(JSON.parse(stored).principals[0]).toMatchObject({ name: "dana", seat: "dana@team", rigs: ["team"], roots: ["proof"], owner: false });
-    expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenFile);
     const listed = await run(["list"]);
     expect(listed).toContain("dana: seat dana@team");
     expect(listed).not.toContain(JSON.parse(stored).principals[0].tokenSha256);
