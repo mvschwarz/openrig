@@ -597,3 +597,4 @@ export function authSeatsReport(paths: CodexAuthPaths): SeatsReport {
     malformed,
   };
 }
+export { readPlatformEnv } from "./platform-env.js";

@@ -28,6 +28,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import { KernelBootTracker } from "./kernel-boot-tracker.js";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { readPlatformEnv } from "./platform-env.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -363,7 +364,7 @@ export async function probeCodexReadiness(deps: {
 }): Promise<RuntimeAuthStatus> {
   const auth = selectCodexProviderAuth(deps.readConfig());
   if (auth.kind === "openai-login") return deps.run("codex login status");
-  if (!deps.env[auth.envKey]?.trim()) return "unavailable";
+  if (!readPlatformEnv(deps.env, auth.envKey)?.trim()) return "unavailable";
   return deps.run("codex --version");
 }
 
