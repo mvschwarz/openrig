@@ -90,9 +90,9 @@ export class HerdrViewer {
     private readonly platform = process.platform, private readonly root = getDefaultOpenRigPath("private/terminal-viewers"),
     private readonly inspect: InspectViewerSeat = inspectSeat) {}
 
-  ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane, createdOnly?: ViewerMapping): Promise<ViewerResult> {
+  ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     // ponytail: one endpoint queue; per-seat locks if creation throughput needs it.
-    const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent, createPane, createdOnly));
+    const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent, createPane));
     this.pending = result.then(() => {}, () => {});
     return result;
   }
@@ -103,7 +103,7 @@ export class HerdrViewer {
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
     return findAttributedViewerPanes(this.run, entry.cwd);
   }
-  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane, createdOnly?: ViewerMapping): Promise<ViewerResult> {
+  private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     let entry: Entry | undefined;
     const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
@@ -133,11 +133,6 @@ export class HerdrViewer {
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
-      if (createdOnly && (!entry || entry.phase !== "created" || !entry.pane
-        || entry.pane.workspace_id !== createdOnly.workspaceId || entry.pane.pane_id !== createdOnly.paneId
-        || entry.pane.terminal_id !== createdOnly.terminalId || entry.readOnly !== createdOnly.readOnly)) {
-        return unconfirmed("The retained created viewer changed; no create or attach was dispatched.");
-      }
       if (entry && (entry.command !== target.paneCommand || entry.readOnly !== target.readOnly)) {
         return unconfirmed("The seat attachment changed; the existing viewer must be inspected before reprovisioning.");
       }
@@ -157,7 +152,8 @@ export class HerdrViewer {
           if (createPane && error instanceof ViewerCreateNotDispatchedError) {
             // This invocation positively refused BEFORE dispatch, not an empty
             // enumeration or a timeout after a possible provider effect.
-            rmdirSync(cwd); delete journal.entries[id]; save();
+            delete journal.entries[id]; save();
+            try { rmdirSync(cwd); } catch { /* An unused directory must not prevent a later join. */ }
             return unconfirmed(error.message);
           }
           throw error;
@@ -179,7 +175,7 @@ export class HerdrViewer {
       catch { current = null; } // A missing ID alone never proves absence.
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
         || current.workspace_id !== entry.pane.workspace_id || current.cwd !== entry.cwd) {
-        if (createdOnly || !provision || (await this.ownedPanes(entry)).length !== 0) {
+        if (!provision || (await this.ownedPanes(entry)).length !== 0) {
           return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
         }
         // Only a complete empty readback retires provenance. Remove our empty

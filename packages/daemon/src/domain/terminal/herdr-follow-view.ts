@@ -150,7 +150,7 @@ export class HerdrFollowView {
         state.tiles = state.tiles.filter(t => t.key !== state!.closing); delete state.closing; save();
       }
       const observations = new Map<string, { focused: boolean; input: "empty" | "text" | "unknown" }>();
-      // Validate old identities before planning. One failed read retains
+      // Validate ALL old identities before any change. One failed read retains
       // the whole view, rather than presenting an untrusted partial inventory.
       for (const tile of state.tiles) {
         const currentMember = view.task.members.find(m => keyOf(m.key.hostId, m.key.nodeId) === tile.key);
@@ -164,12 +164,8 @@ export class HerdrFollowView {
         let current: ViewerPane;
         try { current = await currentPane(tile.viewer); }
         catch (error) { throw new Error(`${tile.seat}: unknown: ${error instanceof Error ? error.message : String(error)}`); }
-        let verified = await viewers.lookup(tile.member, tile.target);
-        const retainedPhase = !verified.ok ? verified.phase : undefined;
-        if (!verified.ok && verified.phase === "created" && currentMember?.availability === "available") {
-          verified = await viewers.ensure(tile.member, tile.target, stillCurrent, undefined, tile.viewer);
-        }
-        if (!verified.ok) throw new Error(`${tile.seat}: ${verified.phase ?? retainedPhase ?? "unknown"}: ${verified.error} Keeping the whole view.`);
+        const verified = await viewers.lookup(tile.member, tile.target);
+        if (!verified.ok) throw new Error(`${tile.seat}: ${verified.phase ?? "unknown"}: ${verified.error} Keeping the whole view.`);
         if (JSON.stringify(verified.viewer) !== JSON.stringify(tile.viewer)) throw new Error(`${tile.seat}: Viewer mapping changed; keeping the whole view.`);
         observations.set(tile.key, { focused: current.focused!, input: await this.deps.input?.(tile.target) ?? "unknown" });
       }
