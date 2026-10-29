@@ -131,6 +131,22 @@ describe("a Claude member's own subscription token (claude_token)", () => {
     expect(failed.stdout).toBe("rc=1\n");
   });
 
+  // An API-key selection (#2191) isn't a subscription token: re-imported from a spec it would become one, and the
+  // subscription precedence check doesn't apply to it.
+  it("leaves an API-key reference out of export and out of the subscription-token precedence warning", async () => {
+    const db = database(), cwd = tempDir(), repo = new RigRepository(db), rig = repo.createRig("flat");
+    mkdirSync(path.join(cwd, ".claude"));
+    writeFileSync(path.join(cwd, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "/bin/echo not-a-key" }));
+    const node = repo.addNode(rig.id, "dev", { runtime: "claude-code", cwd });
+    const apiKey = { ...ref, kind: "api-key" as const };
+    expect(repo.setNodeClaudeTokenRef(node.id, apiKey)).toBe(true);
+    const exported = new RigSpecExporter({ rigRepo: repo, sessionRegistry: new SessionRegistry(db) }).exportRig(rig.id);
+    expect(LegacyRigSpecCodec.serialize(exported as LegacyRigSpec)).not.toContain("claude_token");
+    const managed = new ClaudeManagedLaunch(db, { PATH: "/usr/bin:/bin", HOME: tempDir() }, {}, async () => undefined);
+    expect(await managed.tokenPrecedenceWarnings(node.id, ref)).not.toEqual([]);
+    expect(await managed.tokenPrecedenceWarnings(node.id, apiKey)).toEqual([]);
+  });
+
   it.each([
     ["a label that doesn't start with a letter or digit", { claude_token: { label: "-dev", file: tokenFile } }],
     ["a relative token file", { claude_token: { label: "dev-sub", file: "tokens/dev.token" } }],
