@@ -10,8 +10,11 @@ import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
 import { commandNamesClaude } from "../native-process-lineage.js";
+import { parseWindowsCommandLine } from "../../adapters/windows-argv.js";
 
 export interface ProcessRow {
+  platform?: "win32";
+  executablePath?: string;
   pid: number;
   ppid: number;
   command: string;
@@ -62,7 +65,7 @@ export type ClaudeRecordSelection =
  *  IS the pane's process. A shell at the root isn't one, even when its arguments name the runtime: `bash -c` keeps its
  *  whole script in argv while a later command runs. (Deliberately local: the two existing walkers are module-private in
  *  the codex adapter and the refresher; a shared extraction is a cleanup for calmer water.) */
-function findDescendants(processes: ProcessRow[], parentPid: number, matches: (command: string) => boolean): number[] {
+function findDescendants(processes: ProcessRow[], parentPid: number, matches: (command: string, row: ProcessRow) => boolean): number[] {
   const byParent = new Map<number, ProcessRow[]>();
   for (const p of processes) {
     const list = byParent.get(p.ppid) ?? [];
@@ -71,23 +74,53 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
   }
   const root = processes.find((p) => p.pid === parentPid);
   const rootArgv0 = basename((root?.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
-  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command) ? [root.pid] : [];
+  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command, root) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;
     for (const child of byParent.get(pid) ?? []) {
-      if (matches(child.command)) out.push(child.pid);
+      if (matches(child.command, child)) out.push(child.pid);
       queue.push(child.pid);
     }
   }
   return out;
 }
 
-function commandBasenameIs(name: string): (command: string) => boolean {
-  return (command) => command.trim().split(/\s+/).filter(Boolean).some((token) => {
+function sameWindowsPath(a: string, b: string): boolean {
+  return a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
+}
+
+function nativeExecutableIs(row: ProcessRow, name: string): boolean {
+  const executable = parseWindowsCommandLine(row.command)[0];
+  if (!executable || !row.executablePath || !sameWindowsPath(executable, row.executablePath)) return false;
+  return basename(executable.replaceAll("\\", "/")).toLowerCase() === `${name}.exe`;
+}
+
+function commandBasenameIs(name: string): (command: string, row: ProcessRow) => boolean {
+  return (command, row) => row.platform === "win32" ? nativeExecutableIs(row, name) : command.trim().split(/\s+/).filter(Boolean).some((token) => {
     const unquoted = token.replace(/^['"]|['"]$/g, "");
     return unquoted.split("/").pop() === name;
   });
+}
+
+function claudeSessionId(row: ProcessRow): string | undefined {
+  if (row.platform !== "win32") {
+    return (row.command.match(/--session-id[= ]([0-9a-f-]{36})/) ?? row.command.match(/--resume[= ]([0-9a-f-]{36})/))?.[1];
+  }
+  const words = parseWindowsCommandLine(row.command);
+  const ids: string[] = [];
+  for (let i = 1; i < words.length && words[i] !== "--"; i++) {
+    const word = words[i]!;
+    const selection = word === "--session-id" || word === "--resume" || /^(?:--session-id|--resume)=/.test(word);
+    const value = word === "--session-id" || word === "--resume" ? words[++i]
+      : /^(?:--session-id|--resume)=/.test(word) ? word.slice(word.indexOf("=") + 1) : undefined;
+    if (selection && value === undefined) return undefined;
+    if (value !== undefined) {
+      if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value)) return undefined;
+      ids.push(value);
+    }
+  }
+  return ids.length === 1 ? ids[0] : undefined;
 }
 
 /** The pane process's Claude session-id LAUNCH ARGUMENT. It is authoritative only after the caller
@@ -104,9 +137,8 @@ export async function paneClaudeSessionIdArgument(
   if (claudePids.length === 0) return { ok: false, reason: `no claude process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   for (const pid of claudePids) {
-    const command = processes.find((p) => p.pid === pid)?.command ?? "";
-    const match = command.match(/--session-id[= ]([0-9a-f-]{36})/) ?? command.match(/--resume[= ]([0-9a-f-]{36})/);
-    if (match?.[1]) ids.add(match[1]);
+    const id = claudeSessionId(processes.find((p) => p.pid === pid)!);
+    if (id) ids.add(id);
   }
   if (ids.size === 1) return { ok: true, id: [...ids][0]! };
   if (ids.size > 1) return { ok: false, reason: `multiple claude session ids under the live pane of ${sessionTarget}: ${[...ids].join(", ")}` };
@@ -174,9 +206,8 @@ export async function resolveIdentityVerifiedClaudeRecord(
   }
   const paneIds = new Set<string>();
   for (const pid of claudePids) {
-    const command = processes.find((process) => process.pid === pid)?.command ?? "";
-    const match = command.match(/--session-id[= ]([0-9a-f-]{36})/) ?? command.match(/--resume[= ]([0-9a-f-]{36})/);
-    if (match?.[1]) paneIds.add(match[1]);
+    const id = claudeSessionId(processes.find((process) => process.pid === pid)!);
+    if (id) paneIds.add(id);
   }
   if (paneIds.size === 0) {
     return { ok: false, reason: `claude process under verified pane ${binding.tmuxPane} carries no session id` };
@@ -319,13 +350,18 @@ export async function resolveIdentityVerifiedPiRecord(
   const processes = await deps.listProcesses();
   // The managed runner is typed into the pane's shell. A program that replaced that shell keeps
   // its pid, so the pane's own process must still read as a shell.
-  const paneCommand = processes.find((process) => process.pid === panePid)?.command.trim().split(/\s+/)[0] ?? "";
-  if (!isShellForeground(basename(paneCommand.replace(/^-/, "")))) {
+  const paneRow = processes.find((process) => process.pid === panePid);
+  const native = paneRow?.platform === "win32";
+  const paneCommand = paneRow?.command.trim().split(/\s+/)[0] ?? "";
+  // This identifies the runner's parent, not an idle/blank shell. The runner's
+  // exact direct-parent, launch-id and sidecar checks below still apply.
+  if (native ? !["powershell", "pwsh"].some(name => nativeExecutableIs(paneRow!, name))
+    : !isShellForeground(basename(paneCommand.replace(/^-/, "")))) {
     return { ok: false, reason: `the process of registered pane ${binding.tmuxPane} is not a shell` };
   }
   // Candidates: every process under the pane naming this seat with a launch id, whatever its shape.
-  const candidates = findDescendants(processes, panePid, (command) => {
-    const tokens = command.trim().split(/\s+/);
+  const candidates = findDescendants(processes, panePid, (command, row) => {
+    const tokens = row.platform === "win32" ? parseWindowsCommandLine(command) : command.trim().split(/\s+/);
     return flagValue(tokens, "--session-name") === input.sessionName && flagValue(tokens, "--launch-id") !== null;
   }).map((pid) => processes.find((process) => process.pid === pid)!);
   if (candidates.length === 0) {
@@ -343,12 +379,17 @@ export async function resolveIdentityVerifiedPiRecord(
   // follow it, so an extra word after the entry path or the state root does not match.
   const command = runner.command.trim();
   const head = `node ${input.runner.entryPath} --session-name ${input.sessionName} --state-root ${input.runner.stateRoot} --cwd `;
-  if (!command.startsWith(head)) {
+  const words = native ? parseWindowsCommandLine(command) : command.split(/\s+/);
+  const matchesHead = native ? runner.platform === "win32" && nativeExecutableIs(runner, "node")
+    && sameWindowsPath(words[1] ?? "", input.runner.entryPath)
+    && words[2] === "--session-name" && words[3] === input.sessionName
+    && words[4] === "--state-root" && sameWindowsPath(words[5] ?? "", input.runner.stateRoot)
+    && words[6] === "--cwd" && !!words[7] : command.startsWith(head);
+  if (!matchesHead) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not start with the managed runner arguments` };
   }
   // The runner's parser keeps the last of a repeated flag, and a Pi launch never passes --runtime,
   // so either one leaves the runner's identity ambiguous.
-  const words = command.split(/\s+/);
   const repeated = ["--session-name", "--state-root", "--cwd", "--launch-id"].filter((flag) => words.filter((word) => word === flag).length !== 1);
   if (repeated.length > 0 || words.includes("--runtime")) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} has ambiguous identity arguments` };

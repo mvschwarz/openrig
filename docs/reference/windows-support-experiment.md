@@ -7,6 +7,21 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Current-occupant parsing after rebase, 2026-10-29
+
+Windows Claude/Codex candidates now parse native argv and compare the executable
+with the OS path witness. Pi uses the same native argv boundary for its known
+PowerShell parent and Node runner, while retaining the registered pane, direct
+parent, launch-id, start-time and sidecar/session-folder checks. A real owned
+PowerShell/Node pair observed through CIM verifies that join; synthetic cases
+also reject stale executable paths, repeated selections and unrelated programs.
+These are process-boundary checks, not real provider-turn or fleet acceptance.
+
+The rebase retains upstream API-key credential checks. Windows API-key file
+privacy validation is still unavailable and refuses launch; subscription-token
+launch remains supported by the native child-environment tests. Initial private
+session environment, warm-shell isolation and full parity validation remain open.
+
 ## Native service-adapter follow-up, 2026-10-29
 
 Windows production service operations now invoke Docker with argv arrays,
