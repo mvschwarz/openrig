@@ -18,6 +18,10 @@ public static class OpenRigOwnedText {
   public static int Main(string[] args) {
     try {
       if(args[0]=="read" || args[0]=="read-owned")Console.Write(Read(args[1],int.Parse(args[2]),args[0]=="read-owned"));
+      else if(args[0]=="auth-mode") { using(var file=Open(args[1],false)) { Private(file); Console.Write("600"); } }
+      else if(args[0]=="auth-read")Console.Write(ReadAuth(args[1]));
+      else if(args[0]=="auth-copy")CopyAuth(args[1],args[2],args[3],args[4]);
+      else if(args[0]=="auth-directory")AuthDirectory(args[1]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -35,8 +39,12 @@ public static class OpenRigOwnedText {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
   [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool MoveFileEx(string source,string dest,uint flags);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
+  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle file,int type,uint requested,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
-  static SafeFileHandle Open(string path,bool write) {
+  static SafeFileHandle Open(string path,bool write,bool fresh=false) {
     byte[] descriptor=null; GCHandle pinned=default(GCHandle);
     var security=new SecurityAttributes(); security.length=Marshal.SizeOf(security);
     if(write) {
@@ -48,7 +56,7 @@ public static class OpenRigOwnedText {
       pinned=GCHandle.Alloc(descriptor,GCHandleType.Pinned); security.descriptor=pinned.AddrOfPinnedObject();
     }
     try {
-      var file=CreateFile(path,write?0x40020000u:0x80000000u,write?0u:1u,ref security,write?4u:3u,0x00200000u,IntPtr.Zero);
+      var file=CreateFile(path,write?0x40020000u:0x80000000u,write?0u:1u,ref security,write?(fresh?1u:4u):3u,0x00200000u,IntPtr.Zero);
       if(file.IsInvalid) {
         int error=Marshal.GetLastWin32Error(); file.Dispose();
         if(error==2 || error==3) throw new FileNotFoundException("input file missing");
@@ -94,6 +102,93 @@ public static class OpenRigOwnedText {
       }
     } finally { Array.Clear(bytes,0,bytes.Length); }
   }
+  static FileInformation Private(SafeFileHandle file) {
+    var info=Regular(file,false,true);
+    if(info.links!=1)throw new InvalidOperationException("auth file must have one link");
+    IntPtr owner,group,dacl,sacl,descriptor;
+    uint error=GetSecurityInfo(file,1,5,out owner,out group,out dacl,out sacl,out descriptor);
+    if(error!=0)throw new Win32Exception((int)error);
+    try {
+      var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);
+      var sd=new RawSecurityDescriptor(bytes,0);
+      var acl=sd.DiscretionaryAcl;
+      using(var identity=WindowsIdentity.GetCurrent()) {
+        if((sd.ControlFlags & ControlFlags.DiscretionaryAclProtected)==0 || acl==null || acl.Count!=1)
+          throw new InvalidOperationException("auth file requires a private DACL");
+        var ace=acl[0] as CommonAce;
+        if(ace==null || ace.AceQualifier!=AceQualifier.AccessAllowed || ace.IsInherited || ace.SecurityIdentifier.Value!=identity.User.Value || (ace.AccessMask & 0x1f01ff)!=0x1f01ff)
+          throw new InvalidOperationException("auth file requires a private DACL");
+      }
+    } finally { LocalFree(descriptor); }
+    return info;
+  }
+  static string ReadAuth(string path) {
+    using(var file=Open(path,false)) {
+      var info=Private(file);
+      if(info.sizeHigh!=0 || info.sizeLow>int.MaxValue)throw new InvalidOperationException("auth file too large");
+      var bytes=new byte[info.sizeLow];
+      try {
+        using(var stream=new FileStream(file,FileAccess.Read)) {
+          int used=0,n;while(used<bytes.Length && (n=stream.Read(bytes,used,bytes.Length-used))>0)used+=n;
+          if(used!=bytes.Length)throw new InvalidOperationException("auth file changed during read");
+          return Convert.ToBase64String(bytes);
+        }
+      } finally { Array.Clear(bytes,0,bytes.Length); }
+    }
+  }
+  static void CopyAuth(string source,string dest,string expectedDevice,string expectedInode) {
+    string temporary=dest+".tmp-"+Guid.NewGuid().ToString("N");
+    try {
+      using(var input=Open(source,false)) {
+        var info=Regular(input,false,true);
+        if(info.links!=1)throw new InvalidOperationException("auth source must have one link");
+        ulong inode=((ulong)info.indexHigh<<32)|info.indexLow;
+        if(expectedDevice!="" && ((ulong)info.volume!=ulong.Parse(expectedDevice,System.Globalization.CultureInfo.InvariantCulture) || inode!=ulong.Parse(expectedInode,System.Globalization.CultureInfo.InvariantCulture)))
+          throw new InvalidOperationException("auth source identity changed");
+        using(var output=Open(temporary,true,true)) {
+          Private(output);
+          using(var reader=new FileStream(input,FileAccess.Read))
+          using(var writer=new FileStream(output,FileAccess.Write)) {
+            var bytes=new byte[8192];long remaining=((long)info.sizeHigh<<32)|info.sizeLow;
+            try {
+              while(remaining>0) {
+                int n=reader.Read(bytes,0,(int)Math.Min(bytes.Length,remaining));
+                if(n==0)throw new InvalidOperationException("auth source changed during copy");
+                writer.Write(bytes,0,n);remaining-=n;
+              }
+              writer.Flush(true);
+            } finally { Array.Clear(bytes,0,bytes.Length); }
+          }
+        }
+      }
+      if(!MoveFileEx(temporary,dest,9))throw new Win32Exception(Marshal.GetLastWin32Error());
+    } finally { if(File.Exists(temporary))File.Delete(temporary); }
+  }
+  static void AuthDirectory(string path) {
+    using(var identity=WindowsIdentity.GetCurrent()) {
+      var acl=new DirectorySecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
+      acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+      if(!Directory.Exists(path))Directory.CreateDirectory(path,acl);
+      var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+      using(var file=CreateFile(path,0x60000u,0,ref security,3,0x02200000u,IntPtr.Zero)) {
+        if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+        FileInformation info;
+        if(!GetFileInformationByHandle(file,out info) || (info.attributes & 0x410u)!=0x10u)throw new InvalidOperationException("auth profile directory must not be a reparse point");
+        IntPtr owner,group,dacl,sacl,descriptor;
+        uint error=GetSecurityInfo(file,1,1,out owner,out group,out dacl,out sacl,out descriptor);
+        if(error!=0)throw new Win32Exception((int)error);
+        try {if(new SecurityIdentifier(owner).Value!=identity.User.Value)throw new InvalidOperationException("auth profile directory must be owned");}
+        finally {LocalFree(descriptor);}
+        var bytes=acl.GetSecurityDescriptorBinaryForm();var pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+        try {
+          bool present,defaulted;IntPtr privateDacl;
+          if(!GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),out present,out privateDacl,out defaulted) || !present)throw new InvalidOperationException("private directory DACL missing");
+          error=SetSecurityInfo(file,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,privateDacl,IntPtr.Zero);
+          if(error!=0)throw new Win32Exception((int)error);
+        } finally {pinned.Free();}
+      }
+    }
+  }
 }
 `;
 
@@ -135,6 +230,13 @@ export function readWindowsRegularText(file: string, limit: number): string {
 export function readWindowsOwnedText(file: string, limit: number): string {
   if (!Number.isSafeInteger(limit) || limit < 0 || limit >= 2147483647) throw new RangeError("Invalid input byte limit");
   return Buffer.from(operate(file, "read-owned", limit), "base64").toString("utf8");
+}
+
+/** Auth operations keep source identity, reparse checks, ACLs and byte copying
+ * on native handles. Auth copy never returns secret bytes to this process. */
+export function windowsAuthFile(operation: "auth-mode" | "auth-read" | "auth-copy" | "auth-directory", file: string, dest = "", expected?: { dev: number | bigint; ino: number | bigint }): string {
+  return execFileSync(nativeHelper(), [operation, file, dest, expected ? String(expected.dev) : "", expected ? String(expected.ino) : ""],
+    { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** Existing files keep their ACL; ownership and one-link checks precede
