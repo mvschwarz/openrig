@@ -4,6 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
+import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
@@ -89,7 +90,8 @@ export class ClaudeManagedLaunch {
     /** Reads one variable from a seat's tmux session environment (the daemon's tmux adapter). */
     private readonly readSessionEnv?: (session: string, key: string) => Promise<string | undefined>,
     /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
-    private readonly pluginsDir?: string) {}
+    private readonly pluginsDir?: string,
+    private readonly platform: NodeJS.Platform = process.platform) {}
 
   /** Names the seat's rig and member declare in `env:`, plus any one-off `rig up --env` names the
    *  launch recorded on the tmux session. Their values are already in the pane shell, which is
@@ -284,10 +286,16 @@ export class ClaudeManagedLaunch {
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
+    if (this.platform === "win32") {
+      for (const key of ["SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA"]) {
+        const entry = Object.entries(process.env).find(([name]) => name.toUpperCase() === key);
+        if (entry?.[1]) env[key] = entry[1];
+      }
+    }
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
-    const candidates = selectedExecutable ? [selectedExecutable] : search.map(dir => path.join(dir, "claude"));
+    const candidates = selectedExecutable ? [selectedExecutable] : search.map(dir => path.join(dir, this.platform === "win32" ? "claude.exe" : "claude"));
     for (const candidate of candidates) {
       if (!path.isAbsolute(candidate)) continue;
       try { accessSync(candidate, constants.X_OK); if (!statSync(candidate).isFile()) continue; }
@@ -398,6 +406,12 @@ export class ClaudeManagedLaunch {
     return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       if (token?.ref.kind === "api-key") this.seatTokenLaunch(target.nodeId, { ref: token.ref, accountHome: target.accountHome });
+      if (this.platform === "win32") {
+        const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
+          .filter(key => !(key in identity) && !(key in publicEnv));
+        const terminalNames = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"];
+        return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...launchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])]);
+      }
       const launch = Object.entries(launchEnv).filter(([key]) => !credentialKeys.includes(key)).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
       const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
         ...Object.keys(launchEnv).filter(key => !credentialKeys.includes(key)), ...(token ? [token.ref.kind === "api-key" ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"] : [])];

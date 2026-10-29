@@ -84,13 +84,18 @@ export function launchExecutable(name: string, searchPath: string, cwd: string, 
  * is reasserted for Codex only; an unset selection retains the pane's defaults.
  */
 export class SeatLaunchEnvironment {
+  private readonly launchPlatform: "posix" | "win32";
+  private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined;
   constructor(private readonly tmux: TmuxAdapter,
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly daemonCwd: string,
     private readonly cliPath?: string,
     private readonly codexHome?: string,
-    private readonly launchPlatform: "posix" | "win32" = "posix",
-    private readonly selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {}
+    platformOrAccountHome: "posix" | "win32" | ((nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) = "posix",
+    selectedAccountHome?: (nodeId: string, runtime: string, ignoreAccountHome?: boolean) => string | undefined) {
+    this.launchPlatform = typeof platformOrAccountHome === "string" ? platformOrAccountHome : "posix";
+    this.selectedAccountHome = typeof platformOrAccountHome === "function" ? platformOrAccountHome : selectedAccountHome;
+  }
 
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());

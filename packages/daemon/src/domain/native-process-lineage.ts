@@ -236,12 +236,12 @@ export function codexCommandResumeToken(command: string): string | null | undefi
 }
 
 /** The native process's own resume identity. Flattened ps text is never positive proof. */
-export function codexProcessResumeToken(row: Pick<NativeProcessRow, "argv">): string | null | undefined {
+export function codexProcessResumeToken(row: Pick<NativeProcessRow, "argv"> & Partial<NativeProcessRow>): string | null | undefined {
   const argv = codexProcessArgv(row);
   return argv ? codexConversationToken(argv.slice(1), "resume", true) : undefined;
 }
 
-function validCodexArgv(row: Pick<NativeProcessRow, "argv">): row is { argv: string[] } {
+function validCodexArgv(row: Pick<NativeProcessRow, "argv"> & Partial<NativeProcessRow>): row is { argv: string[] } {
   let bytes = 0;
   return Array.isArray(row.argv) && row.argv.length > 0 && row.argv.length <= 4096
     && typeof row.argv[0] === "string" && row.argv[0].length > 0
@@ -250,7 +250,13 @@ function validCodexArgv(row: Pick<NativeProcessRow, "argv">): row is { argv: str
 }
 
 /** Exact, bounded argv from a process whose argv[0] also names Codex. No ps-text fallback. */
-export function codexProcessArgv(row: Pick<NativeProcessRow, "argv">): string[] | null {
+export function codexProcessArgv(row: Pick<NativeProcessRow, "argv"> & Partial<NativeProcessRow>): string[] | null {
+  if (row.platform === "win32" && row.command && row.executablePath) {
+    const argv = parseWindowsCommandLine(row.command);
+    const normalize = (value: string) => value.replace(/\//g, "\\").toLowerCase();
+    return argv[0] && normalize(argv[0]) === normalize(row.executablePath)
+      && executableName(argv[0]) === "codex" && validCodexArgv({ argv }) ? argv : null;
+  }
   return validCodexArgv(row) && executableName(row.argv[0]!) === "codex" ? row.argv : null;
 }
 
@@ -809,7 +815,7 @@ export function explainNativeRejection(rows: NativeProcessRow[], panePid: number
   if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return { kind: "conflicting_conversations" };
   if (requireResume) {
     if (!expectedToken) return { kind: "no_recorded_conversation" };
-    if (chain.some((link) => !validCodexArgv(link.process))) return { kind: "not_a_resume" };
+    if (chain.some((link) => !codexProcessArgv(link.process))) return { kind: "not_a_resume" };
     if (identities[0] === undefined) return { kind: "not_a_resume" };
     if (identities[0] === null) return { kind: "names_no_conversation" };
     if (identities[0] !== expectedToken) return { kind: "other_conversation", conversation: identities[0] };
