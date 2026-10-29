@@ -177,6 +177,18 @@ and the existing realpath containment check. The regression verifies native
 and canonical spellings resolve to the same evidence identity. Selected proof
 checks and daemon typecheck pass; this adds no file-symlink acceptance claim.
 
+## Native fresh-server clipboard defaults (2026-10-30)
+
+The Windows defaults applier unconditionally skipped clipboard configuration
+using a psmux 3.3.8 limitation. [psmux 3.4.0 lists set-clipboard](https://raw.githubusercontent.com/psmux/psmux/v3.4.0/docs/configuration.md).
+The applier now attempts it on each freshly created session's independent
+psmux server through an explicit exact target. It never uses the unscoped
+POSIX server write or the once-per-daemon memo. Unsupported-option failures
+remain nonfatal launch warnings. Scope fixtures verify two fresh targets,
+actual adapter argv and failure reporting; daemon typecheck passes. No running
+session or system clipboard was changed. Real native copy/paste acceptance
+remains unverified; source support and mocked transport are separate evidence.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

@@ -2008,12 +2008,22 @@ export class TmuxAdapter {
   }
 
   /**
-   * OPR.0.4.6.02 S1 (guard b2): set a SERVER-scoped option via
-   * `set-option -s <option> <value>` — the daemon configuring its OWN tmux
-   * server (NOT a live-flip of anyone's session). NEVER targets a session
-   * (`-t`): server scope and session scope are distinct and never crossed.
-   * Used for `set-clipboard` / `copy-command`.
+   * Native psmux server scope is selected by its owning session target;
+   * each session has a separate server. Call only for a freshly created target.
    */
+  async setNativeServerOption(sessionName: string, option: string, value: string): Promise<TmuxResult> {
+    if (this.terminalKind !== "psmux") return { ok: false, code: "unsupported", message: "Targeted native server options require psmux." };
+    // psmux has one server per session. The explicit target selects only the
+    // freshly created server; the unscoped POSIX server API must not be used.
+    const exact = exactTarget(sessionName, "pane");
+    try {
+      await this.run(["tmux", "set-option", "-s", "-t", exact, option, value],
+        `tmux set-option -s -t ${shellQuote(exact)} ${shellQuote(option)} ${shellQuote(value)}`);
+      return { ok: true };
+    } catch (err) { return classifyWriteError(err); }
+  }
+
+  /** POSIX server scope: no session target; used for clipboard defaults once per daemon. */
   async setServerOption(option: string, value: string): Promise<TmuxResult> {
     try {
       await this.run(["tmux", "set-option", "-s", option, value],
