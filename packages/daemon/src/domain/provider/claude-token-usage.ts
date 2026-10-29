@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createWindowsPrivateDirectoryAsync } from "../private-text-file.js";
 import { resolveClaudeExecutable, runClaudeCommand } from "./claude-auth-status-reader.js";
 import { UsageWindows, type UsageReadOutcome, type UsageReadingStore } from "./usage-windows.js";
 import type { ClaudeTokenIdentity, ClaudeTokenProbe, ProviderUsageAllowance } from "./provider-types.js";
@@ -69,7 +70,8 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
         token = fs.readFileSync(fd, "utf8").trim();
       } finally { fs.closeSync(fd); }
       if (!token || /\s/.test(token)) return fail("credential_file_unavailable", "token file must hold one nonempty token");
-      scratch = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
+      scratch = process.platform === "win32" ? await createWindowsPrivateDirectoryAsync(os.tmpdir())
+        : fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
       const env: NodeJS.ProcessEnv = { PATH: options.launchPath ?? process.env.PATH, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
         CLAUDE_CODE_OAUTH_TOKEN: token, DISABLE_AUTOUPDATER: "1" };
       if (process.platform === "win32") {

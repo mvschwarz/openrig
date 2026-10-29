@@ -28,8 +28,8 @@ const EVENT = { type: "rate_limit_event", rate_limit_info: { status: "allowed_wa
     seven_day: { utilization: 0.83, resetsAt: 1793196000, status: "allowed_warning", surpassedThreshold: 0.75 },
   } } };
 const answer = () => ({ ok: true as const, observedAt: NOW, ...parseClaudeTokenUsage(JSON.stringify(EVENT))! });
-const A = { label: "First subscription", tokenFile: "/private/first.token" };
-const B = { label: "Second subscription", tokenFile: "/private/second.token" };
+const A = { label: "First subscription", tokenFile: path.join("/private", "first.token") };
+const B = { label: "Second subscription", tokenFile: path.join("/private", "second.token") };
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const f of cleanup.splice(0).reverse()) f(); vi.unstubAllEnvs(); });
 function db() { const d = new Database(":memory:"); migrate(d, ALL_MIGRATIONS); cleanup.push(() => d.close()); return d; }
@@ -47,6 +47,24 @@ function fake(script: string) {
 }
 
 describe("selected Claude credential usage", () => {
+  it.runIf(process.platform === "win32")("creates a native private scratch home before the synthetic CLI starts and removes it afterward", async () => {
+    const f = fake("");
+    const report = path.join(f.root, "scratch-report.json");
+    const aclScript = "$ErrorActionPreference='Stop';$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;$acl=[IO.Directory]::GetAccessControl($env:HOME);$rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]);[Console]::Write(($acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $sid.Value -and $rules.Count -eq 1 -and $rules[0].IdentityReference.Value -eq $sid.Value -and !$rules[0].IsInherited -and $rules[0].AccessControlType -eq 'Allow').ToString())";
+    const script = `const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+      const privateAcl=cp.execFileSync(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-EncodedCommand',${JSON.stringify(Buffer.from(aclScript, "utf16le").toString("base64"))}],{encoding:'utf8',windowsHide:true}).trim()==='True';
+      fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({scratch:process.env.HOME,privateAcl,sameHome:require('node:os').homedir()===process.env.HOME,selected:process.env.CLAUDE_CODE_OAUTH_TOKEN==='SYNTHETIC-TEST-ONLY'}));
+      console.log(JSON.stringify({type:'system',claude_code_version:'2.1.310'}));console.log(JSON.stringify(${JSON.stringify(EVENT)}));`;
+    fs.writeFileSync(path.join(f.root, "node_modules", "@anthropic-ai", "claude-code", "cli.js"), script);
+    let timerRan = false; setTimeout(() => { timerRan = true; }, 0);
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "synthetic", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true });
+    expect(timerRan).toBe(true);
+    const observed = JSON.parse(fs.readFileSync(report, "utf8"));
+    expect(observed).toMatchObject({ privateAcl: true, sameHome: true, selected: true });
+    expect(fs.existsSync(observed.scratch)).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("SYNTHETIC-TEST-ONLY");
+  }, 30_000);
   it("shows the supplied windows, times, label provenance and independent overage refusal", async () => {
     const cache = new ClaudeTokenUsage({ read: vi.fn(async () => answer()), now: () => NOW });
     await cache.refresh(A);

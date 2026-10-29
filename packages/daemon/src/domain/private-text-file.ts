@@ -95,6 +95,13 @@ export function createWindowsPrivateDirectory(parent: string): string {
   return directory;
 }
 
+/** Establish the same private directory boundary without blocking async callers. */
+export async function createWindowsPrivateDirectoryAsync(parent: string): Promise<string> {
+  const directory = join(parent, `.openrig-private-${randomUUID()}`);
+  await runPrivateScript(CREATE_PRIVATE_DIRECTORY, { OPENRIG_PRIVATE_TEXT_DIRECTORY: directory });
+  return directory;
+}
+
 /** An exclusive, private output descriptor for incremental writes. A protected
  * sibling directory establishes the boundary before Node opens its staging
  * file. Linking publishes that already-open inode without replacing any

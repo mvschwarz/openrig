@@ -1606,3 +1606,11 @@ The workflow folder scanner still selected cached rows with a raw SQL path prefi
 The new case fails before correction and passes after it: the vanished row is removed, a present workflow remains, and a similarly named neighboring folder's diagnostic survives. The complete folder-scanner and version-retention files pass 34/34, retaining pinned-version and parse-error repair behavior. This is native folder reconciliation evidence, not full workflow/runtime acceptance.
 
 The three complete workflow-library scanner, library routes and folder-route consumer files also pass 32/32. Type checking and diff whitespace checks pass.
+
+### Native private scratch home for explicit token usage probes (2026-10-30)
+
+An explicitly requested Claude token usage probe bound HOME/USERPROFILE to a temporary directory but created that directory with ordinary mkdtemp, which does not establish a private Windows DACL. Windows probes now await an asynchronous version of the existing verified private-directory creator before launching the CLI. POSIX mkdtemp behavior, the selected-token-only child environment, disabled tools/hooks/MCP, bounded child lifetime and final scratch cleanup remain unchanged. No read/status path gains a probe.
+
+The new actual-child case executes an owned synthetic npm CLI only. Before emitting sanitized usage events, the child inspects its scratch directory's protected current-SID DACL and reports that native os.homedir agrees with HOME and only the selected synthetic token was supplied. The parent confirms the directory is removed afterward, a timer ran during the asynchronous operation, and the token does not appear in the returned reading. This is local isolation evidence, not a real model or provider acceptance run. The API test's synthetic credential references also use host-native path spelling instead of hardcoded POSIX separators.
+
+The complete token-usage file has 19 tests: 16 pass, two fail and the existing POSIX FIFO case is skipped on Windows. Remaining failures are the POSIX UID-warning assertion on a host without process.getuid, and EPERM while creating the file-symlink fixture. Native token-file ownership/ACL warning parity is not established by scratch-directory privacy. These failures remain open; no file-link coverage or host privilege is waived. Type checking and diff whitespace checks pass.
