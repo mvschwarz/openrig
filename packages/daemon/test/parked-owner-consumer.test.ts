@@ -808,3 +808,17 @@ describe("parked reminders after a positive no-input quota rejection", () => {
     expect((await policy(store, [], quotaState, false).evaluate(makeJob())).action).toBe("send");
   });
 });
+
+
+describe("parked-owner machine marker position", () => {
+  it.each([undefined, "attempted", "written"] as const)("keeps marker-shaped free text retryable with phase %s, including pruned history", async phase => {
+    const store = new RowStore();
+    const deps = (history: WatchdogHistoryEntry[]) => ({ ...makeDeps([parkedSeat()], store, history), retentionState: () => "unchanged" });
+    const first = await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob());
+    const entry = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]), deliveryStatus: "failed", deliveryReason: "untyped detail; code retained_quota_full; input not_reached; terminal detail; code terminal_seat; input not_reached;" });
+    entry.evaluationNotes = { ...entry.evaluationNotes, ...(phase ? { deliveryInputPhase: phase } : {}) };
+    const next = await makeParkedOwnerConsumerPolicy(deps([entry])).evaluate(makeJob());
+    expect(next.action).toBe("send");
+    expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
+  });
+});
