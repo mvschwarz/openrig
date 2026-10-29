@@ -144,6 +144,13 @@ The full token selection still has three failing POSIX uid/symlink/path fixtures
 and one FIFO skip; the selected pass is not a full-suite pass. Native token ACL
 validation and real Claude authentication remain unverified.
 
+Windows history search now has a Node streaming fallback when both optional
+rg/grep tools fail. It searches the same explicit transcript log files or located
+session JSONL, keeps ANSI cleanup and whole-character excerpt truncation, and
+reports file-read failures as unknown/unreadable. Four native/history regression
+suites passed 18 tests, including actual Unicode/CRLF files and a read error.
+This follow-up has not been packaged or deployed.
+
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
 passed three tests. Earlier native holder/listener/process-table selections are
