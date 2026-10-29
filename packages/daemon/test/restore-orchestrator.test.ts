@@ -2368,10 +2368,7 @@ describe("RestoreOrchestrator", () => {
       // A current refusal blocks; the persistent not-logged-in footer under the input box does not (#1405).
       const screen = `${gates[mode] ?? "Restored conversation"}\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`
         + (mode === "login-footer" ? "\n                                   Not logged in · Run /login" : "");
-      let launched = false, samples = 0, sent = 0;
-      // In `error`, Claude reports the conversation missing; the second command sent is the fresh start, and Claude opens.
-      const freshId = "00000000-0000-4000-8000-000000000087";
-      const freshUp = () => mode === "error" && sent >= 2;
+      let launched = false, samples = 0;
       const protectedSource = mode.startsWith("hook-") ? "hook" : mode.startsWith("operator-") ? "operator" : null;
       const protectedToken = mode.endsWith("-equal") || mode === "hook-wrong-type" ? token : "protected-other-token";
       const identitySql = "SELECT resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?";
@@ -2389,8 +2386,7 @@ describe("RestoreOrchestrator", () => {
       const listProcesses = vi.fn(async () => {
         samples++;
         const observed = mode.startsWith("join-native-loss") && joinSessionId ? rows.slice(0, 2) : rows;
-        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt,
-          ...(freshUp() && row.pid === 1236 ? { command: `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --session-id ${freshId} --name dev-owner@headerless` } : {}) }));
+        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
       });
       const tmux = {
         ...mockTmux(),
@@ -2430,11 +2426,10 @@ describe("RestoreOrchestrator", () => {
           }
           return "2.1.287";
         }),
-        capturePaneContent: vi.fn(async () => freshUp() ? "Restored conversation\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)" : screen),
+        capturePaneContent: vi.fn(async () => screen),
         listPanes: vi.fn(async () => [{ id: mode === "replaced-pane" && samples > 0 ? "%2" : "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
-        sendText: vi.fn(async () => { sent++; return { ok: true as const }; }),
       } as unknown as TmuxAdapter;
-      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, sessionIdFactory: () => freshId,
+      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
         fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
       });
       const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { "claude-code": adapter } });
@@ -2476,12 +2471,9 @@ describe("RestoreOrchestrator", () => {
         if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
         else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
       } else if (mode === "error") {
-        // Claude's own report: the blank attempt is rolled back and only this seat starts fresh, saying so.
-        expect(outcome.status).toBe("fresh-primed");
-        expect(result.result.warnings).toEqual(expect.arrayContaining([
-          expect.stringContaining(`Claude reported that its saved conversation ${token} doesn't exist, so it started fresh`),
-        ]));
-        expect({ token: latest.resumeToken, startup: latest.startupStatus }).toEqual({ token: freshId, startup: "ready" });
+        // Its token wasn't recorded as the launch's own pre-assigned ID, so its history may have been used: the pause stays.
+        expect(outcome.status).toBe("awaiting-decision");
+        expect(outcome.error).toContain("Original session unresumable");
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
@@ -2494,14 +2486,11 @@ describe("RestoreOrchestrator", () => {
         expect(tmux.killSession).not.toHaveBeenCalled();
       }
       if (mode !== "missing-token") {
-        // `error` launches twice: the resume Claude refused, then the fresh start.
-        const launches = mode === "error" ? 2 : 1;
-        expect(tmux.createSession).toHaveBeenCalledTimes(launches);
-        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
-        expect(tmux.sendText).toHaveBeenCalledTimes(launches); // launch commands only, no startup replay
-        expect(tmux.sendText).toHaveBeenNthCalledWith(1, "dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
-        if (mode === "error") expect(tmux.sendText).toHaveBeenNthCalledWith(2, "dev-owner@headerless", expect.stringContaining(`--session-id ${freshId}`));
-        expect(tmux.sendKeys).toHaveBeenCalledTimes(launches);
+        expect(tmux.createSession).toHaveBeenCalledTimes(1);
+        if (!lostOwnership && mode !== "error") expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
+        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
       }
     });
 
@@ -2920,16 +2909,16 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  // A Claude seat stopped before its first message saved a token for a conversation Claude never wrote. When Claude itself
-  // reports the conversation missing, the blank attempt is rolled back and only that seat starts fresh, with a notice, as
-  // the rollback's own advice says. The token stays where it was.
-  it.each([false, true])("a pod-aware Claude resume whose conversation Claude reports missing starts fresh, with a notice: %s", async keepPane => {
+  // A Claude seat stopped before its first message saved its launch's pre-assigned token for a conversation Claude never
+  // wrote, and never reached its prompt. When Claude itself reports that conversation missing, the blank attempt is rolled
+  // back and only that seat starts fresh, as the rollback's own advice says, with a notice. The token stays where it was.
+  it.each([false, true])("a never-used Claude seat whose conversation Claude reports missing starts fresh, with a notice: %s", async keepPane => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
     const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
     sessionRegistry.updateStatus(session.id, "running");
-    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token", "scrape");
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
     if (!keepPane) sessionRegistry.updateStatus(session.id, "exited");
@@ -2978,6 +2967,110 @@ describe("RestoreOrchestrator", () => {
       expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@test-rig");
       if (keepPane) expect(tmux.killSession).not.toHaveBeenCalled();
     }
+  });
+
+  // The pause stays for any history that may have been used: OpenRig saw the seat reach its prompt, an output was observed
+  // for that conversation, or the token came from Claude's hook. Missing observations alone never make a seat unused.
+  async function missingConversationRestore(setup: (node: { id: string }, sessionId: string) => void,
+    second: Record<string, unknown> = { ok: true, resumeToken: "fresh-claude-token", resumeType: "claude_id" }) {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token", "scrape");
+    setup(node, session.id);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
+      .mockResolvedValueOnce(second);
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+    const result = await createOrchestrator().launchSingleNode(rig.id, node.logicalId, { snapshotId: snap.id, adapters: { "claude-code": mockAdapter } });
+    expect(result.ok).toBe(true);
+    return { result, launchHarness, node };
+  }
+
+  it.each([
+    ["reached its prompt", (_node: { id: string }, id: string) => { sessionRegistry.updateStartupStatus(id, "ready"); }],
+    ["had an output observed", (node: { id: string }) => {
+      db.prepare("INSERT INTO usage_samples (lane, seat_session, node_id, captured_at, total_output_tokens, native_session_id) VALUES ('context', ?, ?, datetime('now'), 120, ?)")
+        .run("dev-impl@test-rig", node.id, "stale-claude-token");
+    }],
+    ["has a token Claude's hook reported", (_node: { id: string }, id: string) => { sessionRegistry.updateResumeToken(id, "claude_id", "stale-claude-token", "hook"); }],
+  ])("a Claude seat that %s keeps awaiting-decision when Claude reports its conversation missing", async (_label, setup) => {
+    const { result, launchHarness, node } = await missingConversationRestore(setup);
+    const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
+    expect(nodeResult!.status).toBe("awaiting-decision");
+    expect(nodeResult!.error).toContain("Original session unresumable");
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    expect(result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("Claude reported that its saved conversation")]));
+  });
+
+  it("says a fresh start was tried, not that it started, when the fresh start fails", async () => {
+    const { result, launchHarness, node } = await missingConversationRestore(() => {}, { ok: false, error: "Claude didn't start" });
+    const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
+    expect(nodeResult!.status).toBe("failed");
+    expect(launchHarness).toHaveBeenCalledTimes(2);
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("Claude reported that its saved conversation stale-claude-token doesn't exist, so a fresh start was tried, and it ended failed."),
+    ]));
+    expect(result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("so it started fresh")]));
+  });
+
+  // An operator's corrected token (rig seat set-resume-token) on the automatic replacement path is an explicit choice: when
+  // Claude reports it missing, the seat keeps awaiting-decision, and the replacement's stop isn't tried a second time.
+  it("an operator's corrected token that Claude reports missing keeps awaiting-decision on the automatic replacement path", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-corrected", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-corrected" });
+    const name = "dev-impl@test-rig";
+    const live = sessionRegistry.registerSession(node.id, name);
+    sessionRegistry.updateStatus(live.id, "running");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "snapshot-token", "scrape");
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateResumeToken(live.id, "claude_id", "corrected-token", "operator");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
+    let up = true;
+    const tmux = mockTmux();
+    Object.assign(tmux, {
+      hasSession: vi.fn(async () => up),
+      probeSession: vi.fn(async () => ({ state: up ? "present" : "absent" })),
+      killSession: vi.fn(async () => { up = false; return { ok: true as const }; }),
+      createSession: vi.fn(async () => { up = true; return { ok: true as const }; }),
+      startServer: vi.fn(async () => ({ ok: true as const })),
+      listSessions: vi.fn(async () => up ? [{ name }] : []),
+    });
+    const launchHarness = vi.fn()
+      .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found for the requested session", recovery: "retry_fresh", missingConversation: true as const })
+      .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" });
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness,
+    };
+    const result = await createOrchestrator({ tmux }).restore(snap.id, { adapters: { "claude-code": mockAdapter },
+      automaticReplacements: [{ nodeId: node.id, sessionId: live.id, resumeType: "claude_id", resumeToken: "corrected-token", corrected: true }] });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const outcome = result.result.nodes.find((n) => n.nodeId === node.id)!;
+    expect(outcome.status).toBe("awaiting-decision");
+    expect(outcome.error).toContain("Original session unresumable");
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    expect(result.result.warnings).not.toEqual(expect.arrayContaining([expect.stringContaining("Claude reported that its saved conversation")]));
   });
 
   it("pod-aware Codex restore with resume type but missing token fails instead of launching fresh", async () => {
