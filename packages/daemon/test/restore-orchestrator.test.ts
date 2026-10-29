@@ -1875,6 +1875,9 @@ describe("RestoreOrchestrator", () => {
     expect(result.launched?.[0]?.status).toBe("awaiting-decision");
     if (keepPane) {
       expect(tmux.killSession).not.toHaveBeenCalled();
+      const rows = sessionRegistry.getSessionsForRig(snap.rigId);
+      expect(rows.some(row => row.status === "running")).toBe(false);
+      expect(rows.find(row => row.id === snap.data.sessions[0]!.id)?.status).toBe("superseded");
       expect(rigRepo.getRig(snap.rigId)!.nodes[0]!.binding?.tmuxPane).toBe("%1");
     } else expect(tmux.killSession).toHaveBeenCalled();
   });
@@ -2914,7 +2917,7 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token");
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
     const snap = snapshotCapture.captureSnapshot(rig.id, "test");
-    sessionRegistry.updateStatus(session.id, "exited");
+    if (!keepPane) sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
     const launchHarness = vi.fn()
@@ -2961,7 +2964,10 @@ describe("RestoreOrchestrator", () => {
       expect(superseded.length).toBeGreaterThan(0);
       const binding = sessionRegistry.getBindingForNode(node.id);
       expect(binding?.tmuxSession).toBe(keepPane ? "dev-impl@test-rig" : undefined);
-      if (keepPane) expect(tmux.killSession).not.toHaveBeenCalled();
+      if (keepPane) {
+        expect(tmux.killSession).not.toHaveBeenCalled();
+        expect(launchedSessions.find(row => row.id === session.id)?.status).toBe("superseded");
+      }
       else expect(tmux.killSession).toHaveBeenCalled();
     }
   });

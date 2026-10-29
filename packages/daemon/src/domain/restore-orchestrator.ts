@@ -1437,7 +1437,8 @@ export class RestoreOrchestrator {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
     }
     if (priorState) {
-      this.restoreNodeState(nodeId, priorState);
+      // Pane takeover already ended the predecessor; keep its retired status.
+      this.restoreNodeState(nodeId, keepPane ? { ...priorState, sessions: [] } : priorState);
     }
     return true;
   }
