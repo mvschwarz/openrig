@@ -145,6 +145,18 @@ Pi and OMP without executing any of them; extension-named directories stay
 unavailable. Adjacent observer/diagnostic checks and daemon typecheck pass.
 This is command-path observation, not evidence of runtime enforcement or login.
 
+## Pi runner selected PATHEXT (2026-10-30)
+
+The Windows Pi resolver still hardcoded EXE before CMD. The actual offline Pi
+runner fixture failed with an EXE decoy and CMD-first PATHEXT. The runner now
+passes its native-cased PATH/PATHEXT to the resolver, which retains selected
+extension order, defaults only when undefined, accepts native COM/EXE and
+continues to require the recognized npm package/shim for CMD. Unsupported
+script candidates are refused. The real runner now reaches its READY handshake
+with the owned offline npm program; explicit-empty extension selection is also
+checked. Related checks report 10 passed and six POSIX skips, with daemon
+typecheck passing. No installed Pi, provider conversation or fleet seat changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

@@ -27,6 +27,7 @@ describe("Windows Pi executable resolution", () => {
       expect(resolveWindowsPiCommand(dir, process.execPath)).toEqual({ command: process.execPath, prefix: [path.join(pkg, "dist", "cli.js")] });
       expect(resolveWindowsPiCommand(`"${dir}"`, process.execPath)).toEqual({ command: process.execPath, prefix: [path.join(pkg, "dist", "cli.js")] });
       const resolved = resolveWindowsPiCommand(`"${dir}"`, process.execPath);
+      expect(() => resolveWindowsPiCommand(dir, process.execPath, dir, "")).toThrow("Pi was not found");
       const args = ["中文 space", "a'b", 'double"quote', "", "%PATH%", "amp&word", "tail\\"];
       expect(JSON.parse(execFileSync(resolved.command, [...resolved.prefix, ...args], { encoding: "utf8", windowsHide: true, timeout: 5000 }))).toEqual(args);
       writeFileSync(path.join(dir, "pi.cmd"), "unknown custom launcher");

@@ -1316,7 +1316,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   let prefix: string[] = [];
   if (runtime === "pi" && process.platform === "win32") {
     try {
-      const resolved = resolveWindowsPiCommand(process.env.PATH ?? "", process.execPath, args.cwd);
+      const resolved = resolveWindowsPiCommand(readPlatformEnv(process.env, "PATH") ?? "", process.execPath, args.cwd, readPlatformEnv(process.env, "PATHEXT"));
       command = resolved.command;
       prefix = resolved.prefix;
     } catch {

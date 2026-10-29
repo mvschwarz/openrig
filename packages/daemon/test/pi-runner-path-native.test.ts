@@ -15,6 +15,7 @@ it.runIf(process.platform === "win32")("resolves relative npm PATH from the actu
   fs.writeFileSync(session, "synthetic session\n");
   fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "entry.cjs" } }));
   fs.writeFileSync(path.join(bin, "pi.cmd"), '"%dp0%\\..\\@earendil-works\\pi-coding-agent\\entry.cjs" %*');
+  fs.writeFileSync(path.join(bin, "pi.exe"), "selection decoy; never execute with CMD-first PATHEXT");
   fs.writeFileSync(path.join(pkg, "entry.cjs"), `
 require('node:fs').writeFileSync(${JSON.stringify(observed)},JSON.stringify({cwd:process.cwd(),argv:process.argv.slice(2)}));
 setTimeout(()=>process.exit(0),3000);
@@ -23,7 +24,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 });`);
   const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
     "--session-name", "fixture", "--state-root", path.join(temp, "state"), "--cwd", cwd, "--launch-id", "native-path-attempt", "--no-approve"], {
-    env: { PATH: path.relative(cwd, bin), HOME: temp, USERPROFILE: temp, SystemRoot: process.env.SystemRoot,
+    env: { PATH: path.relative(cwd, bin), PATHEXT: ".CMD;.EXE", HOME: temp, USERPROFILE: temp, SystemRoot: process.env.SystemRoot,
       TEMP: temp, TMP: temp, OPENRIG_HOME: path.join(temp, "home") },
     windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
