@@ -1881,3 +1881,21 @@ before the fix and now retains `AGENTS.md` with the expected native source and
 target paths. Role guidance lookup and duplicate-name validation are covered.
 All 57 manifest/planner cases passed on Windows; daemon TypeScript checking
 passed. No package was installed into a user workspace.
+
+## Native CLI requirement probes (2026-10-30)
+
+Package CLI requirements previously always used POSIX `command -v`. Windows
+now performs bounded asynchronous filesystem lookup on its native PATH/PATHEXT,
+including quoted directories, mixed-case environment names, explicit paths and
+regular-file checks. This discovers a command file without executing it and does
+not establish that its runtime invocation will succeed. Native lookup records
+no executed shell command (`command: null`). Non-missing filesystem errors and
+timeouts remain unknown. Existing POSIX shell probes are retained, and settled
+probes now clear their timeout timer.
+
+The native fixture finds a synthetic `.cmd`, excludes a directory-shaped
+executable, retains missing results and display-only install hints, and proves
+the shell executor was never called. The downstream install planner preserves
+installed/missing distinctions; Windows system-package install support remains
+manual under its existing policy. Native/POSIX probe and install-planner suites
+passed all 25 tests; daemon TypeScript checking passed. No software was installed.
