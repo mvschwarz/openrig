@@ -1,4 +1,6 @@
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type { HookReviewObservation } from "./kernel-hook-review.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
@@ -1356,7 +1358,7 @@ async function advancePromptRefusals(
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
     const reason = (group.hookReview
-      ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Review the hooks in that seat's pane through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
+      ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Reach that pane on this host with ${tmuxAttachCommand(shellQuote(dest))}. Review the hooks there through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
       : "interactive prompt blocks outstanding work; no input was sent")
       + (route && route.outcome !== "none" && route.outcome !== "parent" ? `; ${route.reason}` : "");
     // Every refusal at a choice prompt: the alert follows queue.wake_human_rung and holds for other choice alerts. Any other
@@ -1373,8 +1375,19 @@ async function advancePromptRefusals(
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
     if (addedKeys.length || kindChanged) {
-      deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
-        .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+      const events = deps.db.transaction(() => {
+        // The original body and its delivery receipt stay immutable. Publish newly
+        // observed hook guidance on this same readable record before any exhausted
+        // or accepted-delivery short-circuit, once per joined hook episode.
+        const events = group.hookReview && addedKeys.includes(group.hookReview)
+          ? deps.queueRepo.updateWithinTransaction({ qitemId: row.qitemId, actorSession: LADDER_ACTOR,
+              summary: reason, transitionNote: `hook-review observed: ${reason}` }).persistedEvents
+          : [];
+        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
+          .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+        return events;
+      })();
+      deps.queueRepo.notifyCommitted(events);
       // An alert that already exists names a reminder that joins it; nothing is sent again for it.
       const addedJobs = [...group.jobs.keys()].filter(id => addedKeys.some(key => key.includes(`|watchdog:${id}|`)));
       if (addedJobs.length) deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: LADDER_ACTOR,
