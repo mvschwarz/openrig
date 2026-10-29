@@ -320,8 +320,14 @@ name or unique frontmatter `id`. Tags must name it exactly: `rig queue create
 --slice <name-or-id> ...` associates a row. Handoff inherits those tags unless
 replaced; merely linking an untagged child does not associate it. A mission-only
 tag does not put a row in every slice. No project is inferred from a tag or the
-caller's working directory. Duplicate names or aliases require disambiguation
-in the configured index; no first-match scope is selected.
+caller's working directory. A bare name or ID claimed by multiple slices is
+`scope_ambiguous`; no first-match scope is selected. Selecting a unique key can
+still follow a slice whose other alias is reused: a row carrying that colliding
+alias must have exactly one `mission:` tag naming exactly one indexed claimant.
+Rows placed in another mission are excluded. Missing, contradictory or otherwise
+unplaceable mission/alias tags make the snapshot incomplete, retaining previous
+viewers. A unique alias on its own retains exact matching. Flat legacy slices
+without an indexed parent mission cannot disambiguate a colliding alias.
 
 Slice keys are case-sensitive and can include Unicode, plus signs and internal
 spaces. They cannot be empty or contain slash, backslash, control characters,
