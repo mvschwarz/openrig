@@ -273,6 +273,24 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## OMP identity registration accepts the same native file (2026-10-30)
+
+The activity identity route still required literal equality between an OMP
+session-file report and the runner sidecar. It now uses the same native regular
+file identity check as resume verification. Session/runtime agreement, current
+registered occupant generation, materialized history and operator-provenance
+priority remain separate requirements. The original reported token spelling is
+preserved; this does not rewrite durable generation/CAS comparisons elsewhere.
+
+An owned actual NTFS hard link reproduces tokenPersisted=false before the repair
+and true afterward for the same history. The complete route/generation/alias
+selection passes 26/26 without skips; its existing different-file, retired
+generation, runtime mismatch and protected operator-token cases remain active.
+Daemon type checking passes. All requests use the local test app and temporary
+SQLite/files; no deployed route, real session or provider is invoked. Hard-link
+evidence is distinct from the directory-junction evidence below and does not
+establish file-symlink acceptance.
+
 ## Native session aliases preserve resume and fork identity (2026-10-30)
 
 Pi-family resume verification and OMP launch verification compared session-file
