@@ -115,6 +115,28 @@ describe("a Claude member's own subscription token (claude_token)", () => {
     expect(await managed.tokenPrecedenceWarnings(node.id, own)).toEqual([]);
   });
 
+  // r2: the token step unsets the outranking names before Claude starts, so a credential in the daemon's or the seat's
+  // environment doesn't outrank the token and isn't warned about. A settings file still does: Claude Code reads it itself.
+  it("doesn't warn about a daemon or seat environment credential the token step removes", async () => {
+    const db = database(), cwd = tempDir(), home = tempDir();
+    const readable = path.join(home, "dev.token");
+    writeFileSync(readable, `${SYNTHETIC}\n`, { mode: 0o600 });
+    const own = { label: "dev-sub", tokenFile: readable };
+    const { node } = await materialize(db, { cwd, claude_token: { label: "dev-sub", file: readable } });
+    db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?").run(JSON.stringify({ ANTHROPIC_AUTH_TOKEN: "placeholder" }), node.id);
+    const managed = new ClaudeManagedLaunch(db, { PATH: "/usr/bin:/bin", HOME: home, ANTHROPIC_API_KEY: "placeholder" }, {}, async () => undefined);
+    // The switch's own check still names both.
+    expect((await managed.credentialPrecedence(node.id)).conflicts.map((c) => c.name)).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+    expect(await managed.tokenPrecedenceWarnings(node.id, own)).toEqual([]);
+    mkdirSync(path.join(cwd, ".claude"));
+    const project = path.join(cwd, ".claude", "settings.json");
+    writeFileSync(project, JSON.stringify({ apiKeyHelper: "/bin/echo not-a-key" }));
+    const [warning, ...rest] = await managed.tokenPrecedenceWarnings(node.id, own);
+    expect(rest).toEqual([]);
+    expect(warning).toContain(`apiKeyHelper (project settings ${project}`);
+    expect(warning).not.toContain("ANTHROPIC_");
+  });
+
   // r1: a pane shell with tracing on must not print the token as the step reads and assigns it.
   it("keeps the token out of a traced shell, restores its tracing, and keeps a required step's failure", () => {
     const dir = tempDir(), tokenFile = path.join(dir, "dev.token");
