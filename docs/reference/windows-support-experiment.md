@@ -2076,3 +2076,24 @@ The combined 41-case check has 29 passed, 9 existing platform skips and 3 failur
 at host-denied file-symlink creation (EPERM). Those link cases remain unverified,
 not waived or converted to a different link type. Daemon and CLI TypeScript
 checking pass. These receipts do not activate the source in the running fleet.
+
+## Proof artifact DACL and long-path checks (2026-10-30)
+
+Explicit proof replacement had a separate Windows access-policy gap: a native
+protected-DACL fixture reproduced inheritance of the parent policy after rename.
+Existing regular Windows artifacts now stage in a private directory and use
+the same metadata-preserving native replacement. Final symlink entries still
+use entry replacement, never the metadata-preserving file-target path. Unique
+private staging no longer collides with a similarly named foreign sibling;
+that sibling remains untouched. Failure checks inject the actual native
+publication boundary rather than a rename that Windows no longer uses.
+
+Native ACL checks for direct text, settings set/reset and proof replacement
+pass. A separate owned long-Unicode-path check (over 280 characters) passes for
+sync/async private directory and file creation plus exclusive descriptor output;
+no implementation change was necessary for those paths. The combined proof,
+ACL and long-path check has 50 cases: 46 pass, 4 fail. Remaining failures are
+host-denied file symlink creation, two POSIX mode-bit expectations, and actual
+read-only artifact replacement. The last remains an implementation gap; native
+ACL preservation alone does not establish read-only replacement parity. CLI
+TypeScript checking passes. No real proof records or user files were modified.

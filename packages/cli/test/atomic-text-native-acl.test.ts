@@ -7,6 +7,7 @@ import { createPrivateTextFile } from "../src/lib/private-text-file.js";
 import { writeTextAtomically } from "../src/atomic-text-write.js";
 import { ConfigStore } from "../src/config-store.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
+import { replaceArtifactFile } from "../src/commands/proof.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -38,4 +39,14 @@ it.runIf(process.platform === "win32").each([ConfigStore, SettingsStore])("prese
   store.reset("transcripts.lines");
   expect(accessPolicy(file)).toBe(before);
   expect(readdirSync(root)).toEqual(["config.json"]);
+});
+it.runIf(process.platform === "win32")("preserves protected artifact access during explicit proof replacement", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-proof-acl-"));
+  const file = join(root, "proof.md");
+  createPrivateTextFile(file, "original synthetic evidence");
+  const before = accessPolicy(file);
+  replaceArtifactFile(file, "replacement synthetic evidence");
+  expect(readFileSync(file, "utf8")).toBe("replacement synthetic evidence");
+  expect(accessPolicy(file)).toBe(before);
+  expect(readdirSync(root)).toEqual(["proof.md"]);
 });
