@@ -21,6 +21,7 @@ function fixture(runtime = "claude-code", pane = "%1", session = "worker@rig") {
 }
 function observed(dead?: boolean, command: string | null = "claude") {
   return { listSessions: async () => [{ name: "worker@rig" }] as never,
+    listPanes: vi.fn(async () => [{ id: "%1" }] as never),
     getPanePid: vi.fn(async () => 4242), getPaneCommand: vi.fn(async () => command),
     readAllPaneProcesses: async () => new Map([["%1", { pid: 4242, command, ...(dead === undefined ? {} : { dead }) }]]) };
 }
@@ -40,6 +41,23 @@ describe("retained pane liveness", () => {
     expect(stale).not.toHaveBeenCalled();
     const [activity] = await attachAgentActivity([entry!], { tmuxAdapter: tmux as unknown as TmuxAdapter });
     expect(activity!.agentActivity).toMatchObject({ state: "unknown", reason: "pane_exited", evidenceSource: "pane_process" });
+  });
+
+  it.each(["claude-code", "codex", "stub"])("a stale binding to another session's dead pane stays unknown: %s", async runtime => {
+    const db = fixture(runtime);
+    const tmux = { ...observed(true), listPanes: vi.fn(async () => [{ id: "%2" }] as never) };
+    await new SeatIdentityReconciler({ db, tmux, listProcesses: async () => [] }).reconcileAll();
+    expect(tmux.listPanes).toHaveBeenCalledWith("worker@rig", true);
+    expect(new SeatIdentityStore(db).getForNode("worker")).toMatchObject({ reason: "tmux_unavailable" });
+    expect(getNodeInventory(db,"rig")[0]!.sessionStatus).toBe("running");
+    expect(getNodeInventory(db,"rig")[0]!.identityVerdict?.reason).not.toBe("pane_exited");
+  });
+  it.each(["missing", "failed"])("dead evidence with %s membership observation stays unknown", async kind => {
+    const db = fixture();
+    const tmux = { ...observed(true), listPanes: kind === "missing" ? undefined : vi.fn(async () => { throw Error("unavailable"); }) };
+    await new SeatIdentityReconciler({ db, tmux }).reconcileAll();
+    expect(new SeatIdentityStore(db).getForNode("worker")).toMatchObject({ reason: "tmux_unavailable" });
+    expect(getNodeInventory(db,"rig")[0]!.sessionStatus).toBe("running");
   });
 
   it("an alive pane with unknown activity is not declared dead", async () => {
@@ -76,7 +94,8 @@ it.skipIf(!hasTmux)("a real private tmux retained exit is not reported running/r
   const env = { ...process.env, TMUX: "" };
   const run = (args: string[]) => file("tmux",["-L",socket,"-f","/dev/null",...args],{env});
   try {
-    const pane = (await run(["new-session","-d","-P","-F","#{pane_id}","-s","worker@rig","/bin/sh"])).stdout.trim();
+    await run(["new-session","-d","-s","worker@rig","/bin/sh"]);
+    const pane = (await run(["new-window","-d","-P","-F","#{pane_id}","-t","worker@rig","/bin/sh"])).stdout.trim();
     expect(pane).toMatch(/^%\d+$/); // bind the created pane, never an empty/default target
     await run(["set-window-option","-t",pane,"remain-on-exit","on"]);
     await run(["send-keys","-t",pane,"exit 0","Enter"]);

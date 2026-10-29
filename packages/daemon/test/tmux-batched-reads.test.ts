@@ -55,6 +55,15 @@ describe("batched tmux reads", () => {
     }
   });
 
+  it("membership can inspect all windows of the exact session without changing default pane listing", async () => {
+    const calls: string[] = [];
+    const tmux = new TmuxAdapter((async (cmd: string) => { calls.push(cmd); return ""; }) as never);
+    await tmux.listPanes("worker@rig");
+    await tmux.listPanes("worker@rig", true);
+    expect(calls[0]).toContain("list-panes -t '=worker@rig:'");
+    expect(calls[1]).toContain("list-panes -s -t '=worker@rig:'");
+  });
+
   it("a tmux failure makes the batch null (callers then read per seat)", async () => {
     const tmux = new TmuxAdapter((async () => { throw new Error("no server running"); }) as never);
     expect(await tmux.readAllSessionWindowActivity()).toBeNull();
