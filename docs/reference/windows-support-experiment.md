@@ -1817,3 +1817,21 @@ same files' private DACLs; these aliases are only test inspection paths and are
 not used during writes. Recorder, private-log and shutdown suites passed 24
 tests with one existing Windows signal skip; daemon TypeScript checking passed.
 Sustained-load throughput and live deployment remain unestablished.
+
+## Native authentication file/profile long paths (2026-10-30)
+
+Synthetic long-path authentication files reproduced native `auth-mode` failure.
+The authentication operations now receive namespaced source/destination paths.
+Profile creation also used legacy .NET directory creation, which still rejected
+the long path after namespacing. It now creates missing directories with native
+`CreateDirectory` and an explicit private security descriptor at creation, then
+retains the existing final-handle owner/reparse validation and DACL setting.
+Native temporary-file deletion also avoids the legacy .NET path limit.
+
+The owned fixture covers private mode/read, exact copied bytes, expected-inode
+mismatch preserving the destination, absence of temporary files, nested profile
+creation/reuse, and refusal of a final directory junction without altering its
+target DACL. The focused case passed. Adjacent CLI auth checks plus this case
+had 17 tests: 14 passed, two file-symlink EPERM failures and one previously
+observed sign-in fixture failure. Daemon build passed. No real credential or
+account data was read, copied or changed, and no provider was invoked.

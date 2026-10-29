@@ -45,6 +45,9 @@ public static class OpenRigOwnedText {
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool MoveFileEx(string source,string dest,uint flags);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateDirectory(string path,ref SecurityAttributes security);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetFileAttributes(string path);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool DeleteFile(string path);
   [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr descriptor);
   [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
@@ -221,14 +224,40 @@ public static class OpenRigOwnedText {
         }
       }
       if(!MoveFileEx(temporary,dest,9))throw new Win32Exception(Marshal.GetLastWin32Error());
-    } finally { if(File.Exists(temporary))File.Delete(temporary); }
+    } finally {
+      if(!DeleteFile(temporary)) {
+        int error=Marshal.GetLastWin32Error();
+        if(error!=2 && error!=3)throw new Win32Exception(error);
+      }
+    }
+  }
+  static void EnsurePrivateDirectory(string path,ref SecurityAttributes security) {
+    uint attributes=GetFileAttributes(path);
+    if(attributes!=uint.MaxValue) {
+      if((attributes & 0x10u)==0)throw new InvalidOperationException("auth profile path must be a directory");
+      return;
+    }
+    int error=Marshal.GetLastWin32Error();
+    if(error!=2 && error!=3)throw new Win32Exception(error);
+    int split=path.LastIndexOf('\\');
+    if(split<0)throw new InvalidOperationException("auth profile path must be absolute");
+    string parent=path.Substring(0,split);
+    if(parent.Length==6 && parent[5]==':')parent+="\\";
+    EnsurePrivateDirectory(parent,ref security);
+    if(!CreateDirectory(path,ref security)) {
+      error=Marshal.GetLastWin32Error();
+      if(error!=183)throw new Win32Exception(error);
+    }
   }
   static void AuthDirectory(string path) {
     using(var identity=WindowsIdentity.GetCurrent()) {
       var acl=new DirectorySecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
       acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
-      if(!Directory.Exists(path))Directory.CreateDirectory(path,acl);
       var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+      var creationBytes=acl.GetSecurityDescriptorBinaryForm();var creation=GCHandle.Alloc(creationBytes,GCHandleType.Pinned);
+      try { security.descriptor=creation.AddrOfPinnedObject();EnsurePrivateDirectory(path,ref security); }
+      finally { creation.Free(); }
+      security.descriptor=IntPtr.Zero;
       using(var file=CreateFile(path,0x60000u,0,ref security,3,0x02200000u,IntPtr.Zero)) {
         if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
         FileInformation info;
@@ -357,7 +386,7 @@ export function readWindowsOwnedText(file: string, limit: number): string {
 /** Auth operations keep source identity, reparse checks, ACLs and byte copying
  * on native handles. Auth copy never returns secret bytes to this process. */
 export function windowsAuthFile(operation: "auth-mode" | "auth-read" | "auth-copy" | "auth-directory", file: string, dest = "", expected?: { dev: number | bigint; ino: number | bigint }): string {
-  return execFileSync(nativeHelper(), [operation, file, dest, expected ? String(expected.dev) : "", expected ? String(expected.ino) : ""],
+  return execFileSync(nativeHelper(), [operation, toNamespacedPath(file), dest ? toNamespacedPath(dest) : "", expected ? String(expected.dev) : "", expected ? String(expected.ino) : ""],
     { encoding: "utf8", windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
 }
 
