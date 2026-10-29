@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -39,6 +39,19 @@ describe("SeatStatusService", () => {
     const canonical = new SeatStatusService({ rigRepo, env: { HOME: home, home: "shadowed", CODEX_HOME: "", codex_home: codex } });
     const result = canonical.getStatusByNodeId(nodes[0]!.id);
     expect(result.ok && result.status.runtime_home).toMatchObject({ home: path.join(home, ".codex"), source: "native_default" });
+  });
+
+  it.runIf(process.platform === "win32")("reports the native profile used by startup when shell HOME differs or is missing", () => {
+    const rig = rigRepo.createRig("native-profile-status");
+    const node = rigRepo.addNode(rig.id, "writer", { runtime: "claude-code" });
+    const profile = path.join(tmpdir(), "synthetic-native-profile");
+    for (const shellHome of [undefined, "", "C:/synthetic-msys-home"]) {
+      const result = new SeatStatusService({ rigRepo, env: { HOME: shellHome, userprofile: profile } }).getStatusByNodeId(node.id);
+      expect(result.ok && result.status.runtime_home).toMatchObject({ home: path.join(profile, ".claude"), source: "native_default" });
+    }
+    // Production fallback agrees with startup's OS home, without opening auth files.
+    const actual = new SeatStatusService({ rigRepo }).getStatusByNodeId(node.id);
+    if (!process.env.CLAUDE_CONFIG_DIR) expect(actual.ok && actual.status.runtime_home).toMatchObject({ home: path.join(homedir(), ".claude"), source: "native_default" });
   });
 
   it("shows an owed restore's delivery failure on the same seat status the operator reads", () => {

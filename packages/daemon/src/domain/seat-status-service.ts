@@ -1,5 +1,6 @@
 import type { ClaudeCompactionEnforcer, ObservedCompaction } from "./claude-compaction-enforcer.js";
 import path from "node:path";
+import { homedir } from "node:os";
 import { readPlatformEnv } from "./platform-env.js";
 import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -76,12 +77,17 @@ interface SeatMatch {
 export class SeatStatusService {
   private rigRepo: RigRepository;
   private env: NodeJS.ProcessEnv;
+  private nativeHome: string | undefined;
   private compactionEnforcer?: Pick<ClaudeCompactionEnforcer, "recoverSeat" | "observedCompaction" | "getOwedRestore">;
 
   constructor(deps: { rigRepo: RigRepository; env?: NodeJS.ProcessEnv; compactionEnforcer?: SeatStatusService["compactionEnforcer"] }) {
     this.compactionEnforcer = deps.compactionEnforcer;
     this.rigRepo = deps.rigRepo;
     this.env = deps.env ?? process.env;
+    // Production startup pins HOME to os.homedir(), rather than the launching
+    // shell's HOME. Explicit test/environment inputs retain their own roots.
+    this.nativeHome = deps.env === undefined ? homedir()
+      : (process.platform === "win32" ? readPlatformEnv(deps.env, "USERPROFILE") : undefined) || readPlatformEnv(deps.env, "HOME");
   }
 
   getStatus(seatRef: string): SeatStatusResult {
@@ -200,7 +206,7 @@ export class SeatStatusService {
     // The daemon's explicit value, as its launches pass it on; else the runtime's native default under HOME.
     const daemon = readPlatformEnv(this.env, variable);
     if (daemon) return { runtime_home: { variable, home: daemon, source: "daemon", ...ignored } };
-    const home = readPlatformEnv(this.env, "HOME");
+    const home = this.nativeHome;
     const native = home ? path.join(home, runtime === "codex" ? ".codex" : ".claude") : null;
     return { runtime_home: { variable, home: native, source: "native_default", ...ignored } };
   }

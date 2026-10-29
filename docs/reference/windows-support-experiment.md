@@ -213,6 +213,17 @@ relative-home refusal checks remain. The complete file passes 12/12 and daemon
 typecheck passes. Status remains configured next-launch context, not login or
 running-process proof; no seat or authentication file changed.
 
+## Seat status native-profile fallback (2026-10-30)
+
+Startup pins the launch HOME to os.homedir(), but status previously inferred
+the native runtime home only from the shell HOME. A status fixture reproduces
+the mismatch with missing/empty HOME or a different MSYS-style HOME. Production
+status now uses the same OS home fallback as startup; explicitly supplied
+environment fixtures select Windows USERPROFILE before HOME. Explicit runtime
+home variables and seat/account precedence still win. The complete status
+file passes 13/13 and daemon typecheck passes, without reading credentials or
+changing any live launch environment.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:
