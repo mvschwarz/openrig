@@ -97,9 +97,10 @@ export class SessionFingerprinter {
     if (pane.activeCommand) {
       const commandPath = process.platform === "win32" ? pane.activeCommand.replaceAll("\\", "/") : pane.activeCommand;
       const cmd = (commandPath.split("/").pop() ?? commandPath).toLowerCase();
+      const providerCommand = process.platform === "win32" ? cmd.replace(/^(claude|codex)\.com$/, "$1") : cmd;
 
       for (const pattern of CLAUDE_PROCESS_PATTERNS) {
-        if (processNameIs(cmd, pattern)) {
+        if (processNameIs(providerCommand, pattern)) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "claude-code", confidence: "high", evidence };
@@ -107,7 +108,7 @@ export class SessionFingerprinter {
       }
 
       for (const pattern of CODEX_PROCESS_PATTERNS) {
-        if (processNameIs(cmd, pattern)) {
+        if (processNameIs(providerCommand, pattern)) {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "codex", confidence: "high", evidence };

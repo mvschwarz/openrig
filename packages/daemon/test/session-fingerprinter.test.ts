@@ -54,6 +54,10 @@ describe("SessionFingerprinter", () => {
     const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(), fsExists: () => false });
     expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Program Files\\Codex\\codex.exe" }))).toMatchObject({ runtimeHint: "codex", confidence: "high" });
     expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Users\\fixture\\claude.exe" }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Program Files\\Codex\\CODEX.COM" }))).toMatchObject({ runtimeHint: "codex", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Users\\fixture\\claude.com" }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "codex-monitor.com" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "claude.cmd" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
     expect(await fp.fingerprint(makePane({ activeCommand: "powershell.exe" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
   });
 

@@ -273,6 +273,21 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native COM discovery hints match supported executables (2026-10-30)
+
+The pane discovery fingerprinter still recognized EXE provider names but not COM,
+despite the native launcher and identity consumers supporting both. Its Windows
+branch now recognizes exact Codex/Claude COM basenames, including native paths,
+case differences and spaces in parent directories. Unrelated monitor names,
+batch launchers and PowerShell wrappers do not become positive provider hints.
+POSIX discovery and the separate native identity gates remain unchanged.
+
+The native fixture fails before this repair. Complete fingerprinter, discovery
+coordinator and scanner files then pass 63/63 without skips; daemon type checking
+passes. This is discovery-hint evidence from supplied pane metadata, not proof of
+a live provider conversation or stock psmux reporting. No discovery scan against
+deployed sessions, claim, seat launch or runtime mutation occurs.
+
 ## Native COM provider identity matches launcher support (2026-10-30)
 
 The native launcher resolver already accepts executable COM files according to
