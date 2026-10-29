@@ -7,6 +7,19 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## POSIX install-wrapper contracts from a Windows host, 2026-10-29
+
+All 17 install.sh contract tests now run on Windows using the explicitly selected
+Git for Windows sh, rather than an absent /bin/sh host executable. Fixture paths
+are spelled for their shell/native consumers and the HTTP-pipe control uses a
+small owned curl forwarding script instead of a privileged file symlink. Every
+case passed without skips: prerequisites, original install/prefix/root/ABI/setup
+failure statuses, a prefix containing spaces, stale PATH refusal, and the actual
+loopback HTTP download piped into sh. Fixture tools prevent a real global npm
+install or setup. install.sh still advertises macOS/Linux; these tests do not
+establish it as a native Windows installer. Native installed rig.cmd/ABI evidence
+remains the separate isolated-package gate described below.
+
 ## Native gate process-load advisory, 2026-10-29
 
 Gate logs showed `ps` failing on Windows and the old catch converting that failure
