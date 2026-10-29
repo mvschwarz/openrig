@@ -11,6 +11,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { spawnRig } = require("./rig-command.cjs");
 const { recordRefocusResult } = require("./refocus-health.cjs");
 
 // Keep the operator's command lookup order; env-node CLI scripts can also use this hook's Node.
@@ -74,7 +75,7 @@ function readConfiguredContent(home) {
   if (contentRef) {
     const timeout = lookupTimeout();
     if (timeout <= MIN_LOOKUP_MS) return { content: null, contentRef, failure: "no time left in the refocus budget" };
-    const result = spawnSync("rig", ["context", "get", contentRef], {
+    const result = spawnRig(["context", "get", contentRef], {
       encoding: "utf8",
       env: childEnv,
       timeout,
@@ -143,7 +144,7 @@ function workPacketEnabled() {
 function readQueueWhoami(timeout = lookupTimeout()) {
   if (timeout <= MIN_LOOKUP_MS) return { unknown: "no time left in the refocus budget" };
   const args = ["queue", "whoami", "--json", ...(workPacketEnabled() ? ["--work-candidates"] : [])];
-  let result = spawnSync("rig", args, {
+  let result = spawnRig(args, {
     encoding: "utf8", env: childEnv, timeout, maxBuffer: 16 * 1024 * 1024,
   });
   // A rig CLI older than this hook rejects the flag. Ask again without it, inside what is left of
@@ -152,7 +153,7 @@ function readQueueWhoami(timeout = lookupTimeout()) {
     && /unknown option/i.test(`${result.stderr || ""}${result.stdout || ""}`)) {
     const remaining = remainingLookupBudget();
     if (remaining > 250) {
-      result = spawnSync("rig", ["queue", "whoami", "--json"], {
+      result = spawnRig(["queue", "whoami", "--json"], {
         encoding: "utf8", env: childEnv, timeout: remaining, maxBuffer: 16 * 1024 * 1024,
       });
     }
@@ -219,7 +220,7 @@ function traceEnv(trees) {
   if (missing.length === 0) return env;
   const timeout = remainingLookupBudget();
   if (timeout <= 250) return env;
-  const result = spawnSync("rig", ["config", "--json"], {
+  const result = spawnRig(["config", "--json"], {
     encoding: "utf8",
     env: childEnv,
     timeout,
