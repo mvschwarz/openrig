@@ -1,5 +1,29 @@
 # Native Windows support experiment
 
+## Current review status (2026-10-30)
+
+This table is a navigation map for the continuing parity review, not a claim
+that every feature or source file has been assessed. The detailed receipts
+below retain their own head, scope and limitations. Public source changes do
+not activate the running daemon or seats.
+
+| Area | Current implementation/evidence | Remaining work or evidence limit |
+| --- | --- | --- |
+| Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
+| Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; npm Claude native identity limitations remain |
+| Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
+| Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
+| Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
+| MCP and local IPC | Actual IPv6 tool call, stdio EOF and separately asserted native forced termination | These checks do not establish whole-runtime acceptance |
+| CLI/TUI regression | New isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`, with its own daemon/CLI/TUI builds and workspace bindings | Started 2026-10-30; result pending at this checkpoint. The earlier `dd4bc689c9f8ab04b64624a24db1cee57cd57197` result remains a separate older receipt |
+| Native platform acceptance | Windows Terminal paths and selected native OS fixtures have individual receipts | Full visual focus, suspend/reboot, all-provider and installed-package acceptance remain incomplete |
+| Runtime-specific upstream limits | Existing Rex refusal and Linux-qualified Herdr behavior are retained | Do not erase those limits or describe an optional patched psmux protocol as stock 3.4.0 support |
+
+The active task still includes finding and filling feasible implementation gaps,
+then verifying the requested scope. A frozen regression run is independent of
+ongoing source work; it must finish and confirm source stability before its
+counts are used. No final completion comment has been posted for this review.
+
 ## Runner readiness from native identity (2026-10-29)
 
 An owned PowerShell/offline-Node reproduction failed for both Pi and stub:
