@@ -985,18 +985,25 @@ export class WorkflowSpecCache {
    * convenience for tests that operate fully outside any install).
    */
   pruneNoiseDirRows(installRoot?: string): number {
-    const guardClause = installRoot ? ` AND source_path NOT LIKE ? || '%'` : "";
-    const params: string[] = installRoot ? [installRoot] : [];
+    const source = process.platform === "win32" ? "replace(source_path, char(92), '/')" : "source_path";
+    const root = process.platform === "win32" && installRoot ? installRoot.replaceAll("\\", "/").replace(/\/+$/, "") : undefined;
+    // A Windows install root is a literal directory boundary, not a LIKE
+    // pattern: '%'/'_' in its name and similarly named siblings are distinct.
+    const guardClause = root !== undefined && process.platform === "win32"
+      ? ` AND NOT (${source} = ? COLLATE NOCASE OR substr(${source}, 1, length(?)) = ? COLLATE NOCASE)`
+      : installRoot ? ` AND source_path NOT LIKE ? || '%'` : "";
+    const params: string[] = root !== undefined && process.platform === "win32"
+      ? [root, `${root}/`, `${root}/`] : installRoot ? [installRoot] : [];
     const result = this.db
       .prepare(
         `DELETE FROM workflow_specs WHERE (
-           source_path LIKE '%/.worktrees/%'
-           OR source_path LIKE '%/node_modules/%'
-           OR source_path LIKE '%/.git/%'
-           OR source_path LIKE '%/dist/%'
-           OR source_path LIKE '%/build/%'
-           OR source_path LIKE '%/.turbo/%'
-           OR source_path LIKE '%/.next/%'
+           ${source} LIKE '%/.worktrees/%'
+           OR ${source} LIKE '%/node_modules/%'
+           OR ${source} LIKE '%/.git/%'
+           OR ${source} LIKE '%/dist/%'
+           OR ${source} LIKE '%/build/%'
+           OR ${source} LIKE '%/.turbo/%'
+           OR ${source} LIKE '%/.next/%'
          )${guardClause}`,
       )
       .run(...params);

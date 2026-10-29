@@ -54,6 +54,23 @@ export function replaceWindowsPrivateTextFile(file: string, content: string): vo
   }
 }
 
+/** Async publication for callers whose serialization already awaits storage.
+ * Private creation precedes bytes; rename preserves the prior destination on
+ * failure without blocking the daemon while PowerShell establishes the DACL. */
+export async function replaceWindowsPrivateTextFileAsync(file: string, content: string): Promise<void> {
+  const staging = `${file}.tmp-${randomUUID()}`;
+  let created = false;
+  try {
+    await createPrivateTextFileAsync(staging, content);
+    created = true;
+    await fs.rename(staging, file);
+  } finally {
+    if (created) {
+      try { await fs.unlink(staging); } catch { /* published, or retain owned private staging on cleanup failure */ }
+    }
+  }
+}
+
 const CREATE_PRIVATE_DIRECTORY = String.raw`
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
 $path=$env:OPENRIG_PRIVATE_TEXT_DIRECTORY

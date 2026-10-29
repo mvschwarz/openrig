@@ -253,4 +253,19 @@ describe("WorkflowSpecCache (PL-004 Phase D)", () => {
     expect(remaining).toHaveLength(1);
     expect(remaining[0]!.sourcePath).toBe(builtinPath);
   });
+
+  it.runIf(process.platform === "win32")("treats the native install root as a literal directory across case and slash variants", () => {
+    const installRoot = join(tmp, "install%_root");
+    const fixtures = [installRoot, join(tmp, "installZZroot"), `${installRoot}-sibling`].map((root, index) => ({
+      file: join(root, "dist", `spec-${index}.yaml`), name: `native-prune-${index}`,
+    }));
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    for (const fixture of fixtures) {
+      mkdirSync(join(fixture.file, ".."), { recursive: true });
+      writeFileSync(fixture.file, SAMPLE_SPEC.replace("test-three-step", fixture.name));
+      cache.readThrough(fixture.file);
+    }
+    expect(cache.pruneNoiseDirRows(installRoot.replaceAll("\\", "/").toUpperCase() + "/")).toBe(2);
+    expect(cache.listAll().map(row => row.sourcePath)).toEqual([fixtures[0]!.file]);
+  });
 });

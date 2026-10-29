@@ -3,6 +3,7 @@ import path from "node:path";
 import type { EventBus } from "../event-bus.js";
 import type { OpenViewResult } from "./terminal-provider.js";
 import type { FollowControls } from "./terminal-follow-policy.js";
+import { replaceWindowsPrivateTextFileAsync } from "../private-text-file.js";
 
 export interface FollowingSelector { view: string; provider: "herdr"; session?: string }
 type Selection = { selector: FollowingSelector; enabled: boolean };
@@ -38,10 +39,15 @@ export class TerminalFollowing {
   }
 
   private key(selector: FollowingSelector): string { return JSON.stringify([selector.provider, selector.session ?? null, selector.view]); }
-  private save(): void {
+  private async save(): Promise<void> {
     mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    const content = JSON.stringify({ version: 1, selections: [...this.selections.values()] }) + "\n";
+    if (process.platform === "win32") {
+      await replaceWindowsPrivateTextFileAsync(this.file, content);
+      return;
+    }
     const temporary = `${this.file}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ version: 1, selections: [...this.selections.values()] }) + "\n", { mode: 0o600 });
+    writeFileSync(temporary, content, { mode: 0o600 });
     renameSync(temporary, this.file);
   }
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -66,7 +72,7 @@ export class TerminalFollowing {
     if (selected.selector.view.startsWith("qitem:") && result.ok && result.following?.state === "empty") {
       this.selections.delete(key); selected.enabled = false;
       result.following.enabled = false;
-      this.save();
+      await this.save();
     }
     this.latest.set(key, result);
     this.deadline(key, selected.enabled ? result.following?.nextAt : undefined);
@@ -85,7 +91,7 @@ export class TerminalFollowing {
       // cannot authorize a second workspace. The provider journals tile IDs.
       if (controls.enabled) this.selections.set(key, selected);
       else this.selections.delete(key);
-      this.save();
+      await this.save();
       return this.apply(selected, controls);
     });
   }
