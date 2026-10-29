@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Ninety top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.7.5`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.7.6`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 What changed in the installed version, and what to do about it, is one read away:
 `rig context get reference/whats-new.md`.
@@ -34,6 +34,8 @@ one command away. Your memory of the fleet is a claim about the past.
   filters to running and **hides detached, exited and attention states** — which are exactly the
   cells you were scanning for. A seat whose tmux session is confirmed gone reads `detached`
   (activity reason `session_missing`), and `rig ps --nodes` says to restore or relaunch it.
+  A verified exited process in a retained pane reads `pane_exited`, instead of running and ready;
+  outstanding work uses the existing recovery-finding route. An unknown observation is not an exit.
   `rig ps --nodes` also shows the model each seat was last seen using (`modelObservation`, with its
   source and time), or unknown; it never shows the configured model in its place. A Claude seat at
   Claude Code's MCP-server approval menu reads as needing input (`mcp_gate`), a Codex seat at its
@@ -227,6 +229,15 @@ unseen — which makes messages the one delivery channel that never gets skipped
   The exercised journey used shell stand-ins, not native agents, and active render cost remains
   unmeasured. See `reference/terminal-sessions.md` for controls and limits. Preview and open
   responses carry `viewDescriptor` (`kind`, `name`); membership grants no input authority.
+  **`rig terminal open slice:<name-or-id> --follow --provider herdr`** follows owners of the
+  slice's exact-tagged pending, in-progress and blocked rows, with every obligation listed.
+  Associate rows with `rig queue create --slice <name-or-id>`; handoffs inherit tags unless replaced.
+  New slice views default to four automatic tiles (`--max-tiles` overrides it). Known empty slices
+  stay following; incomplete reads keep prior viewers, and draft/focus protection still applies.
+  A join refused before a pane split can join on a later refresh, with the original hold reason retained.
+  An attach that ran and then exited to a shell is not restarted automatically; the whole slice view
+  can hold until that tile is resolved. No tested workaround is offered for that case.
+  Slice following targets the Linux Herdr 0.9.5 / protocol 22 path. Mission following is not included in 0.7.6.
   An unconfirmed pane is reported as `pane_unconfirmed`, not counted as opened. Inspect before
   retrying: an unconfirmed result does not prove that nothing opened.
   Add `--session <name>` to select a Herdr session for that request; `--session default`
@@ -262,8 +273,10 @@ unseen — which makes messages the one delivery channel that never gets skipped
   beats a rig match; the rest use the default channel). After a change, invite the app to each
   channel, run `rig slack verify`, and restart the daemon (`rig daemon stop`, then `start`).
   Disabling and enabling Slack instead marks alerts still waiting as already posted, so they're
-  never posted. An emoji reaction on any message posted for an ask reaches the asking seat
+  never posted. By default, an emoji reaction on a message posted for an ask reaches the asking seat
   as a task tagged `human-reaction`: a signal to interpret, not an answer, and the ask stays open.
+  `rig slack setup --reactions off` disables that routing; the default is `route`, and regenerating
+  the app manifest preserves the setting.
   It needs the `reactions:read` scope and the `reaction_added` event (reinstall the app);
   `rig slack verify` warns when the scope is missing. A long ask is posted in numbered thread parts; one that
   still can't be posted comes back to the asking seat as a `slack-undeliverable` task. Replies
@@ -517,6 +530,10 @@ not have to tear one down to change it, and you rarely have to start from nothin
   `append_system_prompt_file`, `plugin_dirs` and `advisor` (an Advisor model). They're copied into
   that seat's own storage, never the project, so one seat in a shared repository can have its own
   persona, prompt or plugins. A bundle's before-install view lists them.
+- **A new Claude member can name a prepared subscription token** with
+  `claude_token: {label: name, file: /abs/token}` beside its `env.CLAUDE_CONFIG_DIR`; the seat stores
+  the file reference and reads it at launch. A missing/unreadable token uses the existing fallback
+  notice, so verify the account actually used.
 - **`rig community-harness list`**: list installed community-harness presets and declared limits
   (not tested by OpenRig). A preset can declare how its app reports the conversation each launch
   made (`launch_result`), reopens one on resume (`resume`) or lets OpenRig name it
@@ -524,7 +541,10 @@ not have to tear one down to change it, and you rarely have to start from nothin
   that's gone reads `missing`, never quietly replaced. A preset's `first_input: true` hands the
   harness its first startup text through a private file named by `OPENRIG_FIRST_INPUT`. Examples for
   Cursor, Hermes and OpenClaw are in `docs/reference/community-harness-examples/`; OpenClaw's local
-  and Gateway-client examples each resume a named conversation.
+  and Gateway-client examples each resume a named conversation. A preset can declare `runner: true`
+  (with `launch_result: true`) so activity follows its runner reports, recorded per launch.
+  `passes_model: true` sends the declared model as `OPENRIG_MODEL`; it does not establish the
+  effective model. Cursor and Hermes examples leave model passing off pending native qualification.
   `docs/reference/community-harness-presets.md` is the contract: what a community harness gets from
   OpenRig and what it doesn't (no turn-cancel verb, no approvals reaching OpenRig), how to write
   one, and how promotion is judged. Whether processes a harness starts outside its pane survive
@@ -1223,6 +1243,13 @@ your circumstances is configuration, and the ones that are not, another agent ca
   never the token, and `--stored-login` moves it back. These seat account and runtime moves were
   tested with stubs, not real accounts, before 0.7.2: check a moved seat's account and conversation
   yourself after the first move.
+- **Move to an existing account home** with `rig provider switch --seat <seat> --to-account <name>
+  --account-home <dir>` (preview with `--dry-run`). It starts a fresh conversation with a handover
+  and retains the seat's address and work. `--clear-account-home` returns to configured defaults.
+- **Claude subscription/API-key switching resumes the same conversation and interrupts work:**
+  `rig provider switch --seat <seat> --to-account api --api-key-file <abs>`; return with
+  `--to-account plan --token-file <abs>`. The API-key path remains unqualified; verify the resulting
+  account and conversation. Do not combine API-key and account-home selectors.
 - **`rig provider status --refresh --provider claude --claude-token-file <absolute path>
   --credential-label <label>`** — read a labelled Claude token's usage on demand. Each refresh spends
   one model turn; status and the TUI show only the cached reading, and the label is yours, not an

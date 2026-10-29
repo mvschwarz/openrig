@@ -411,7 +411,8 @@ Error bodies remain authoritative. `scope_unsupported` is HTTP 400,
 `scope_not_found` is 404, and `scope_ambiguous`/`scope_unavailable` are 409.
 An incomplete queue snapshot is a successful preview with `task.complete:false`;
 ensure returns `viewer_unconfirmed` without a provider effect. Unsupported
-ensure view kinds retain `view_required` (400). Unsupported follow view kinds
+ensure view kinds now return `view_required` (400), where they previously returned
+200 with an error body. Unsupported follow view kinds
 retain `follow_view_required` in a 200 `ok:false` body, as before. A changed
 preview remains `preview_changed` (409). During automatic refresh a missing or
 ambiguous scope retains the existing tiles and names the source problem in the
