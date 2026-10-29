@@ -243,13 +243,14 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
   it("refuses when the opened fd's dev/ino no longer matches the caller's earlier lstat (inode swapped in the window)", () => {
     const src = path.join(root, "src.json");
     fs.writeFileSync(src, JSON.stringify({ k: SENTINEL }), { mode: 0o600 });
-    const before = fs.lstatSync(src);
+    const before = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
     // Simulate a swap in the check-then-use window: same path, a different inode now. Move the
     // original aside rather than deleting it: while it stays allocated the imposter cannot be
     // handed the same inode number (ext4 recycles a freed inode number immediately).
     fs.renameSync(src, path.join(root, "displaced.json"));
     fs.writeFileSync(src, JSON.stringify({ k: "IMPOSTER" }), { mode: 0o600 });
-    expect(fs.lstatSync(src).ino).not.toBe(before.ino); // the swap really happened
+    const after = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
+    expect(after.ino).not.toBe(before.ino); // the swap really happened
     const dest = path.join(root, "dest.json");
     expect(copyOntoFresh(src, dest, { dev: before.dev, ino: before.ino })).toBe(false);
     expect(fs.existsSync(dest)).toBe(false);
@@ -260,7 +261,8 @@ describe("rig auth LEAK-HUNT — fd-first check-then-use / crash-safety (OPR.0.4
     const body = JSON.stringify({ k: SENTINEL });
     fs.writeFileSync(src, body, { mode: 0o600 });
     const dest = path.join(root, "dest.json");
-    expect(copyOntoFresh(src, dest, { dev: fs.lstatSync(src).dev, ino: fs.lstatSync(src).ino })).toBe(true);
+    const identity = process.platform === "win32" ? fs.lstatSync(src, { bigint: true }) : fs.lstatSync(src);
+    expect(copyOntoFresh(src, dest, { dev: identity.dev, ino: identity.ino })).toBe(true);
     expectPrivateFile(dest);
     expect(fs.readFileSync(dest, "utf8")).toBe(body); // fd read+write reproduces the bytes exactly
     expect(orphans(root, "dest.json")).toEqual([]);
