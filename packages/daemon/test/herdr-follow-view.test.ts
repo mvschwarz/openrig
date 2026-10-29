@@ -30,7 +30,7 @@ function fixture() {
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let lateFocus: { seat: string; reads: number } | undefined;
-  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false;
+  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false, failedProcessRead = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -53,6 +53,7 @@ function fixture() {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: selected } });
     }
+    if (command === "pane process-info" && failedProcessRead) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
@@ -98,6 +99,7 @@ function fixture() {
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
   return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
     failViewerRun: () => { failedViewerRun = true; },
+    failProcessRead: () => { failedProcessRead = true; },
     confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
     hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
@@ -151,6 +153,17 @@ describe("stable task-following workspace", () => {
     expect(f.calls.slice(count).some(c => ["run", "split", "close", "create"].includes(c[1]!))).toBe(false);
     expect(f.inputs.get("b")).toBe("text");
     expect([...f.panes.values()].find(p => p.argv.at(-1) === "$b")?.focused).toBe(true);
+  });
+  it("keeps the original failure when membership drops a still-retained uncertain tile", async () => {
+    const f = fixture(); await f.follow(); f.exitViewer("a"); f.failProcessRead();
+    const first = await f.follow();
+    expect(first.error).toContain("first failure: starting: Viewer effect is unconfirmed: first viewer inspection failed");
+    const count = f.calls.length;
+    const later = await f.follow(["b", "c"]);
+    expect(later).toMatchObject({ ok: false, opened: ["a", "b", "c"] });
+    expect(later.error).toContain("current confirmation: starting: The viewer process is not confirmed");
+    expect(later.error).toContain("first failure: starting: Viewer effect is unconfirmed: first viewer inspection failed");
+    expect(f.calls.slice(count).some(c => ["run", "split", "close", "create"].includes(c[1]!))).toBe(false);
   });
   it("clears a resolved failure before reporting a later viewer hold", async () => {
     const f = fixture(); await f.follow(); f.failViewerRun(); await f.follow(["a", "b", "c", "d"]);
