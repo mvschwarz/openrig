@@ -113,10 +113,10 @@ describe("authoritative scoped terminal membership", () => {
 });
 
 
-it("rejects a slice name claimed as another alias even when selected through its unique id", () => {
+it("keeps an unplaced inverse-alias row incomplete when selected through a unique id", () => {
   const f = fixture(); f.addSlice("other-mission", "other", "03-build");
   f.add("wrong-owner", "b", "pending", ["slice:03-build"]);
-  expect(f.read("slice:OPR.3")).toMatchObject({ code: "scope_ambiguous" });
+  expect(f.read("slice:OPR.3")).toMatchObject({ task: { complete: false, members: [] } });
 });
 
 function cachedFixture() {
@@ -150,4 +150,54 @@ it("rereads identities for an existing unwatched legacy root and after a scope e
   expect(f.resolver.resolve("slice:new")).toMatchObject({ code: "scope_not_found" });
   f.addSlice("another", "new");
   expect(f.resolver.resolve("slice:new")).toMatchObject({ task: { complete: true } });
+});
+
+
+describe("mission placement of colliding slice aliases", () => {
+  it("follows repeated release template names by their unique IDs without mixing owners", () => {
+    const f = fixture();
+    f.addSlice("release-0.7.6", "01-regression-checks", "OPR.0.7.6.1");
+    f.addSlice("release-0.6.13", "01-regression-checks", "OPR.0.6.13.1");
+    f.add("current", "a", "pending", ["mission:release-0.7.6", "slice:01-regression-checks"]);
+    f.add("older", "b", "blocked", ["mission:release-0.6.13", "slice:01-regression-checks"]);
+    f.add("by-id", "a", "in-progress", ["slice:OPR.0.7.6.1"]);
+    expect(f.read("slice:OPR.0.7.6.1")).toMatchObject({ task: { complete: true, members: [
+      { seat: "a", obligations: [{ qitemId: "by-id" }, { qitemId: "current" }] }] } });
+    expect(f.read("slice:OPR.0.6.13.1")).toMatchObject({ task: { complete: true, members: [{ seat: "b" }] } });
+    expect(f.read("slice:01-regression-checks")).toMatchObject({ code: "scope_ambiguous" });
+    f.db.prepare("UPDATE queue_items SET state='done'").run();
+    expect(f.read("slice:OPR.0.7.6.1")).toMatchObject({ task: { complete: true, members: [] } });
+  });
+  it.each(["id-name", "name-id", "id-id"])("places a %s alias only through its one indexed mission", mode => {
+    const f = fixture();
+    f.addSlice("other-mission", mode === "id-name" ? "OPR.3" : "other", mode === "name-id" ? "03-build" : mode === "id-id" ? "OPR.3" : "OTHER");
+    const alias = mode === "name-id" ? "03-build" : "OPR.3";
+    const selector = mode === "name-id" ? "slice:OPR.3" : "slice:03-build";
+    f.add("ours", "a", "pending", ["mission:release", `slice:${alias}`]);
+    f.add("theirs", "b", "pending", ["mission:other-mission", `slice:${alias}`]);
+    expect(f.read(selector)).toMatchObject({ task: { complete: true, members: [{ seat: "a" }] } });
+    expect(f.read(`slice:${alias}`)).toMatchObject({ code: "scope_ambiguous" });
+  });
+  it.each([[], ["mission:release", "mission:other-mission"], ["mission:not-a-claimant"]])("retains known owners and reports an unplaceable colliding row with mission tags %j", tags => {
+    const f = fixture(); f.addSlice("other-mission", "03-build", "OTHER");
+    f.add("known", "a", "pending", ["slice:OPR.3"]);
+    f.add("unplaced", "b", "blocked", ["slice:03-build", ...tags]);
+    const result = f.read("slice:OPR.3"); if ("code" in result) throw new Error(result.error);
+    expect(result.task).toMatchObject({ complete: false, members: [{ seat: "a" }] });
+    expect(result.task.issues.join(" ")).toContain("unplaced");
+  });
+  it("does not choose between two same-mission claimants or contradictory alias placements", () => {
+    const f = fixture(); f.addSlice("release", "other", "03-build");
+    f.add("same-mission", "b", "pending", ["slice:03-build", "mission:release"]);
+    expect(f.read("slice:OPR.3")).toMatchObject({ task: { complete: false, members: [] } });
+    f.db.prepare("DELETE FROM queue_items").run();
+    f.addSlice("other-mission", "03-build", "OTHER");
+    f.add("contradictory", "b", "pending", ["slice:OPR.3", "slice:03-build", "mission:other-mission"]);
+    expect(f.read("slice:OPR.3")).toMatchObject({ task: { complete: false, members: [] } });
+  });
+  it("does not invent a mission context for colliding flat legacy slices", () => {
+    const f = fixture();
+    const dir = path.join(f.root, "legacy"); mkdirSync(dir); writeFileSync(path.join(dir, "SPEC.md"), "---\nid: 03-build\n---\n");
+    expect(f.read("slice:legacy")).toMatchObject({ code: "scope_ambiguous" });
+  });
 });
