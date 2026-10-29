@@ -17,6 +17,7 @@ import { DEFAULT_HEALTH_POLICY, HealthPolicyStore } from "../../daemon/src/domai
 import { ActiveLensStore } from "../../daemon/src/domain/active-lens-store.js";
 import { TerminalViewsStore } from "../../daemon/src/domain/terminal/terminal-views-store.js";
 import { listRecapChain, writeSeatRecap } from "../../daemon/src/domain/context-packs/seat-recap-store.js";
+import { ChannelCoverageStore, DeadLetterStore, ThreadCoverageStore } from "../../daemon/src/domain/gateway/slack/state-store.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -26,6 +27,55 @@ function accessPolicy(file: string): string {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_TEST_ACL_FILE: file }, encoding: "utf8", windowsHide: true }).trim();
 }
+it.runIf(process.platform === "win32").each(["dead-letter", "channel", "thread"])("retains protected Slack %s state access across actual store replacement", kind => {
+  root = mkdtempSync(join(tmpdir(), "openrig-slack-state-acl-"));
+  const file = join(root, "state.json");
+  createPrivateTextFile(file, kind === "dead-letter" ? "" : "{}\n");
+  const before = accessPolicy(file);
+  if (kind === "dead-letter") {
+    const store = new DeadLetterStore<{ id: string }>(file);
+    store.replaceAll([{ ev: { id: "owned-event" }, at: "2026-10-30T00:00:00Z", attempts: 1 }]);
+    expect(accessPolicy(file)).toBe(before);
+    expect(new DeadLetterStore(file).readAll()).toEqual(store.readAll());
+    store.replaceAll([]);
+    expect(store.readAll()).toEqual([]);
+  } else if (kind === "channel") {
+    const store = new ChannelCoverageStore(file);
+    store.save("owned-channel", { coverageStart: "1.000001", coveredThrough: "1.000002", seedBasis: "feature-adoption" });
+    expect(accessPolicy(file)).toBe(before);
+    store.save("owned-channel", { coverageStart: "1.000001", coveredThrough: "1.000003", seedBasis: "feature-adoption" });
+    expect(new ChannelCoverageStore(file).all()["owned-channel"]?.coveredThrough).toBe("1.000003");
+  } else {
+    const store = new ThreadCoverageStore(file);
+    store.save("owned-channel:1.000001", { coverageStart: "1.000001", coveredThrough: "1.000002" });
+    expect(accessPolicy(file)).toBe(before);
+    store.save("owned-channel:1.000001", { coverageStart: "1.000001", coveredThrough: "1.000003" });
+    expect(new ThreadCoverageStore(file).read()["owned-channel:1.000001"]?.coveredThrough).toBe("1.000003");
+  }
+  expect(accessPolicy(file)).toBe(before);
+  expect(readdirSync(root)).toEqual(["state.json"]);
+});
+it.runIf(process.platform === "win32")("preserves owed Slack events when Windows refuses dead-letter replacement", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-slack-state-refusal-"));
+  const file = join(root, "dead.jsonl");
+  const original = [{ ev: { id: "owned-owed-event" }, at: "2026-10-30T00:00:00Z", attempts: 1 }];
+  createPrivateTextFile(file, JSON.stringify(original[0]) + "\n");
+  const before = accessPolicy(file);
+  chmodSync(file, 0o444);
+  const store = new DeadLetterStore<{ id: string }>(file);
+  const generation = store.writeGeneration();
+  expect(() => store.replaceAll([])).toThrow();
+  expect(store.readAll()).toEqual(original);
+  expect(store.writeGeneration()).toBe(generation);
+  expect(accessPolicy(file)).toBe(before);
+  expect(accessPolicy(file + ".tmp")).toBe(before);
+  chmodSync(file, 0o666);
+  store.replaceAll([]);
+  expect(store.readAll()).toEqual([]);
+  expect(store.writeGeneration()).toBe(generation + 1);
+  expect(accessPolicy(file)).toBe(before);
+  expect(readdirSync(root)).toEqual(["dead.jsonl"]);
+});
 it.runIf(process.platform === "win32")("retains recap access and predecessor bytes while superseding an authored recap", () => {
   root = mkdtempSync(join(tmpdir(), "openrig-recap-acl-"));
   const file = join(root, "RECAP.md");

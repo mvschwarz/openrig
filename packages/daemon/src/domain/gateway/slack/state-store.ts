@@ -18,6 +18,8 @@
 // FS + clock are injected so the whole thing is unit-testable with no real disk.
 import fs from "node:fs";
 import path from "node:path";
+import { replaceWindowsPrivateTextFile } from "../../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../../windows-owned-text.js";
 
 export interface StateFsOps {
   readFileSync(p: string): string; // throws (ENOENT) when absent — callers treat as empty
@@ -33,8 +35,14 @@ export const nodeStateFs: StateFsOps = {
   // the next record unconditionally so it cannot become part of that torn JSON.
   // Blank lines are already ignored by parseLines; avoid rereading a growing log.
   appendFileSync: (p, d) => fs.appendFileSync(p, "\n" + d),
-  writeFileSync: (p, d) => fs.writeFileSync(p, d),
-  rename: (from, to) => fs.renameSync(from, to),
+  writeFileSync: (p, d) => {
+    if (process.platform === "win32") replaceWindowsPrivateTextFile(p, d);
+    else fs.writeFileSync(p, d);
+  },
+  rename: (from, to) => {
+    if (process.platform === "win32" && fs.existsSync(to) && fs.lstatSync(to).isFile()) replaceWindowsFilePreservingMetadata(to, from);
+    else fs.renameSync(from, to);
+  },
   mkdirp: (dir) => {
     fs.mkdirSync(dir, { recursive: true });
   },

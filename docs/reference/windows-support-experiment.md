@@ -273,6 +273,28 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native Slack durable-state replacement (2026-10-30)
+
+Actual dead-letter replacement, channel checkpoint updates and thread checkpoint
+updates lost an existing protected Windows DACL. Their common production disk
+adapter now stages replacement text privately and preserves the existing regular
+destination's metadata. Append semantics, injected filesystems, new/final-link
+publication and POSIX behavior retain their existing paths. No delivery, retry,
+coverage initialization or checkpoint algorithm changed.
+
+All three protected-store cases fail before repair and pass afterward. A fourth
+native case verifies that a readonly-current refusal retains owed events, the
+write generation and original access, leaves only private staging, and can
+finish cleanly after the fixture removes its readonly flag. Four native cases
+pass (14 unrelated ACL cases filtered). Daemon typecheck passes.
+
+Complete state-store, channel recovery, thread recovery, concurrent dead-letter
+retry and torn-append files pass 72/72. Two fixture portability defects were
+reconciled: memory filesystem keys now normalize host separators, and the
+owned HTTP server registers its already-bound loopback origin before use. The
+request guard remains unchanged. No Slack API, real message, queue, connector,
+coverage checkpoint or retained event was read or changed.
+
 ## Native recap continuity and exclusive-create errors (2026-10-30)
 
 An actual authored recap supersession lost the protected access policy in its
