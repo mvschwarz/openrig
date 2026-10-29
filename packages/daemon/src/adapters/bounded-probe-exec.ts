@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { stopGroup } from "../domain/codex-network-default.js";
+import { killWindowsChildTreeSync } from "../domain/windows-child-tree.js";
 import type { ExecFn } from "./tmux.js";
 
 /** How long a runtime's `--version` or `--help` probe may take before it is ended and recorded as an error.
@@ -34,6 +35,10 @@ let stopping = false;
 function killRunningProbeGroupsNow(): void {
   for (const child of runningProbes) {
     if (child.pid === undefined) continue;
+    if (process.platform === "win32") {
+      killWindowsChildTreeSync(child);
+      continue;
+    }
     try { process.kill(-child.pid, "SIGKILL"); } catch { /* gone, or no process groups here (Windows) */ }
   }
 }
@@ -81,7 +86,8 @@ export class ProbeStoppedError extends Error {
  * one before it listens). Unlike execCommand: stdin is closed (a probe never needs input), the command runs in
  * its own process group, and after `timeoutMs` that whole group is ended (TERM, then KILL, then a bounded wait
  * for the reap; the Codex readers' stopGroup) and the promise rejects with ProbeTimeoutError. Where a group
- * can't be signalled (Windows), the probe process itself is then killed; its own descendants may survive there.
+ * can't be signalled (Windows), native taskkill ends the still-running probe and its tree. Windows cannot
+ * recover a tree by an already-exited root PID; such orphan cleanup remains a separate limitation.
  * Otherwise it answers when the probe exits: what it wrote (after a short drain) on exit 0, or a rejection like
  * execCommand's on any other exit. Only if that 200 ms drain times out (the output pipes are still held open, by
  * a descendant) is the group ended then, so that descendant can't turn a finished probe into a timeout; a healthy

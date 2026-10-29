@@ -71,6 +71,11 @@ export function parseFilePathArg(raw: string, isRegisteredHost: (id: string) => 
       error: `path operand '${raw}' begins with '-' and could be mistaken for an option. If this is a real local file, address it with the ./ prefix (./${raw}).`,
     };
   }
+  // Windows drive paths take precedence over host qualifiers on Windows.
+  // Include drive-relative paths (C:notes), UNC and backslash local escapes.
+  if (process.platform === "win32" && (/^[A-Za-z]:/.test(raw) || raw.startsWith("\\") || raw.startsWith(".\\") || raw.startsWith("..\\"))) {
+    return { ok: true, arg: { kind: "local", path: raw } };
+  }
   // Local-prefix escapes: these are ALWAYS local, colon or not (N18-1).
   if (raw.startsWith("/") || raw.startsWith("./") || raw.startsWith("../") || raw.startsWith("~")) {
     return { ok: true, arg: { kind: "local", path: raw } };
@@ -99,7 +104,7 @@ export function parseFilePathArg(raw: string, isRegisteredHost: (id: string) => 
 
 function expandLocalTilde(p: string): string {
   if (p === "~") return os.homedir();
-  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  if (p.startsWith("~/") || (process.platform === "win32" && p.startsWith("~\\"))) return path.join(os.homedir(), p.slice(2));
   return p;
 }
 
@@ -112,7 +117,10 @@ export function checkLocalPath(raw: string): PathCheck {
   const home = os.homedir();
   const activeOpenRigHome = path.resolve(getOpenRigHome());
   const activeHostsRegistry = path.resolve(getDefaultOpenRigPath("hosts.yaml"));
-  if (resolved === activeHostsRegistry) {
+  // Windows paths are case-insensitive; spelling changes must not bypass the wall.
+  const comparable = (p: string) => process.platform === "win32" ? p.toLowerCase() : p;
+  const within = (candidate: string, root: string) => comparable(candidate) === comparable(root) || comparable(candidate).startsWith(comparable(root) + path.sep);
+  if (comparable(resolved) === comparable(activeHostsRegistry)) {
     return {
       ok: false,
       error: `refused: '${raw}' resolves to the active hosts registry (${activeHostsRegistry}) — the registry itself is not a copy source/target in v0. This is the FR-4 default-deny wall (live OpenRig state; extension requires a ruling).`,
@@ -120,7 +128,7 @@ export function checkLocalPath(raw: string): PathCheck {
   }
   for (const segment of DENIED_SEGMENTS) {
     const deniedRoot = path.join(home, segment);
-    if (resolved === deniedRoot || resolved.startsWith(deniedRoot + path.sep)) {
+    if (within(resolved, deniedRoot)) {
       return {
         ok: false,
         error: `refused: '${raw}' resolves into ${deniedRoot} — ${segment === ".openrig" ? "live OpenRig state (incl. the hosts registry) is not a copy source/target in v0 (crash-safety)" : "credential/agent-home directories are not copy sources/targets"}. This is the FR-4 default-deny wall (a short closed list; extension requires a ruling).`,
@@ -128,8 +136,8 @@ export function checkLocalPath(raw: string): PathCheck {
     }
   }
   if (
-    activeOpenRigHome !== path.join(home, ".openrig") &&
-    (resolved === activeOpenRigHome || resolved.startsWith(activeOpenRigHome + path.sep))
+    comparable(activeOpenRigHome) !== comparable(path.join(home, ".openrig")) &&
+    within(resolved, activeOpenRigHome)
   ) {
     return {
       ok: false,
@@ -137,7 +145,8 @@ export function checkLocalPath(raw: string): PathCheck {
     };
   }
   // rsync distinguishes a directory from its contents by the source's trailing separator.
-  const normalizedPath = raw.endsWith(path.sep) && !resolved.endsWith(path.sep)
+  const trailingSeparator = raw.endsWith(path.sep) || (process.platform === "win32" && raw.endsWith("/"));
+  const normalizedPath = trailingSeparator && !resolved.endsWith(path.sep)
     ? resolved + path.sep : resolved;
   return { ok: true, normalizedPath };
 }
