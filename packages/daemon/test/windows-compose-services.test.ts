@@ -35,7 +35,7 @@ describe.skipIf(process.platform !== "win32")("native Windows Compose services",
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("probes an owned HTTP server without curl and does not follow redirects", async () => {
+  it.each([0, 6000])("probes an owned HTTP server without curl and does not follow redirects (port %s)", async port => {
     let forbidden = 0;
     const server = createServer((req, res) => {
       if (req.url === "/redirect") { res.writeHead(302, { location: "/must-not-follow" }); res.end(); }
@@ -43,7 +43,7 @@ describe.skipIf(process.platform !== "win32")("native Windows Compose services",
       else if (req.url === "/hang") { /* abort deadline owns this socket */ }
       else { res.writeHead(req.url === "/bad" ? 503 : 204); res.end(); }
     });
-    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    server.listen(port, "127.0.0.1"); await once(server, "listening");
     const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     allowFetchTarget(origin);
     const adapter = new ComposeServicesAdapter(noShell, noShell);

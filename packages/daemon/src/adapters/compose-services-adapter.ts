@@ -1,4 +1,6 @@
 import { connect } from "node:net";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
@@ -228,10 +230,17 @@ export class ComposeServicesAdapter {
   async probeHttp(url: string, timeoutMs: number = 5000): Promise<boolean> {
     try {
       if (this.nativeArgv && process.platform === "win32") {
-        const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-        const ok = response.status >= 200 && response.status < 400;
-        await response.body?.cancel();
-        return ok;
+        const target = new URL(url);
+        if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+        return await new Promise<boolean>(resolve => {
+          const request = (target.protocol === "https:" ? httpsRequest : httpRequest)(target, { signal: AbortSignal.timeout(timeoutMs) }, response => {
+            const status = response.statusCode ?? 0;
+            response.destroy();
+            resolve(status >= 200 && status < 400);
+          });
+          request.once("error", () => resolve(false));
+          request.end();
+        });
       }
       const cmd = `curl -sf -o /dev/null -w '%{http_code}' --max-time ${Math.ceil(timeoutMs / 1000)} ${sq(url)} 2>/dev/null`;
       const output = await this.exec(cmd);

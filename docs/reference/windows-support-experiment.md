@@ -106,6 +106,17 @@ missing-command result. The adjacent owned-hook-trust checks and native CLI
 fixture pass; daemon typecheck passes. No installed Codex, real login or plugin
 installation was used, and native plugin registration acceptance remains separate.
 
+## Native HTTP readiness ports (2026-10-30)
+
+An owned loopback HTTP service on port 6000 reproduced a native compose
+readiness failure: fetch rejected the request before it reached the service.
+The POSIX curl path does not impose fetch's browser port restriction. The
+Windows branch now uses Node HTTP/HTTPS requests with the same bounded deadline,
+2xx/3xx verdict, no redirect following and immediate response-body disposal.
+Owned ephemeral and port-6000 fixtures verify success, redirect non-following,
+503 refusal and timeout, alongside TCP checks. Daemon typecheck passes. No
+Docker service, remote target, installed provider or fleet process was used.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:
