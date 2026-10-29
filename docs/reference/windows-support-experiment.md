@@ -51,6 +51,20 @@ The complete token-usage file reports 23 tests: 21 passed, one pending, and one
 file-symlink creation denied by this host (EPERM). The new actual consumer check
 passes and daemon typecheck passes. No real token or provider turn was used.
 
+## Missing multiplexer guidance and scenario limit (2026-10-30)
+
+CLI startup preflight and doctor previously offered only macOS/Linux installation
+instructions when tmux was missing. Both now share native Windows guidance to
+install psmux, expose its tmux.exe alias on PATH and verify it from a new shell,
+with the experimental support limits linked. The doctor missing-dependency
+checks pass for Windows and macOS (two checks); CLI typecheck passes.
+
+The frozen grant-service scenario's missing-tmux failure uses hermetic-env.ts,
+which writes a POSIX shell wrapper with a private `tmux -S` socket. That fixture
+does not establish native psmux daemon startup behavior. Its private-socket
+isolation must not be bypassed to make it run against an operator server.
+Native scenario acceptance remains incomplete; no fleet process was changed.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

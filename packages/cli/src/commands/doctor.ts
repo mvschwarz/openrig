@@ -13,7 +13,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl, tmuxInstallGuidance } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -196,7 +196,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       status: "fail",
       message: "tmux not found.",
       reason: "OpenRig uses tmux to manage agent sessions.",
-      fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
+      fix: tmuxInstallGuidance(deps.platform),
     });
   } else if (tmuxProbe.available && tmuxProbe.version) {
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });

@@ -167,8 +167,9 @@ describe("runDoctorChecks", () => {
     expect(mouseCheck?.fix).toContain("tmux source-file ~/.tmux.conf");
   });
 
-  it("tmux missing -> fail with guidance", () => {
+  it.each(["darwin", "win32"])("tmux missing -> fail with guidance (%s)", platform => {
     const deps = makeDeps({
+      platform,
       exec: (cmd: string) => {
         if (cmd === "tmux -V") throw new Error("not found");
         return "";
@@ -177,7 +178,7 @@ describe("runDoctorChecks", () => {
     const { checks } = runDoctorChecks(deps);
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("fail");
-    expect(tmuxCheck?.fix).toContain("brew");
+    expect(tmuxCheck?.fix).toContain(platform === "win32" ? "psmux" : "brew");
   });
 
   it("tmux mouse check is omitted on non-macOS hosts", () => {

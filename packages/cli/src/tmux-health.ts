@@ -6,6 +6,12 @@ export interface TmuxProbeResult {
   code: "available" | "no_server" | "not_installed" | "unhealthy";
 }
 
+export function tmuxInstallGuidance(platform: string = process.platform): string {
+  return platform === "win32"
+    ? "Install psmux for native Windows and put its directory (including tmux.exe) on PATH before unrelated tmux installations; open a new shell and verify tmux -V. See docs/reference/windows-support-experiment.md for experimental support limits."
+    : "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).";
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

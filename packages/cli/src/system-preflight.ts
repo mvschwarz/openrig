@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
-import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
+import { buildTmuxControlFailure, probeTmuxControlAsync, tmuxInstallGuidance } from "./tmux-health.js";
 import { classifyNodeVersion } from "./node-support.js";
 
 export interface PreflightCheck {
@@ -159,7 +159,7 @@ export class SystemPreflight {
         ok: false,
         error: "tmux was not found in PATH.",
         reason: "OpenRig uses tmux to create and control agent sessions.",
-        fix: "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).",
+        fix: tmuxInstallGuidance(),
       });
     } else if (tmuxProbe.available) {
       checks.push({ name: "tmux", ok: true });
