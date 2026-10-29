@@ -149,12 +149,13 @@ export function launchStatusIsRunning(status: string): boolean {
 
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
 /** Whether a saved Claude session is known never to have been used, so starting fresh in its place loses nothing. Its token
- *  must be the launch's own pre-assigned ID (never reported by Claude's hook, an operator or a resume), OpenRig never saw the
- *  seat reach its prompt, and no output was ever observed for that conversation. Missing observations alone never make a
- *  seat unused, and a record that can't be read counts as use. */
+ *  must be the launch's own pre-assigned ID (never replaced by one Claude's hook, an adoption or an operator reported), OpenRig
+ *  never saw the seat reach its prompt, and no output was ever observed for that conversation. Missing observations alone
+ *  never make a seat unused, and a record that can't be read counts as use. (`resume_last_verified` is stamped on every token
+ *  write, the launch's own included, so it says nothing about use.) */
 export function claudeSessionNeverUsed(db: Database.Database, session: { resumeToken: string | null; resumeProvenance?: string | null;
-  resumeLastVerified?: string | null; startupStatus?: string; startupCompletedAt?: string | null } | null | undefined): boolean {
-  if (!session?.resumeToken || session.resumeProvenance !== "scrape" || session.resumeLastVerified) return false;
+  startupStatus?: string; startupCompletedAt?: string | null } | null | undefined): boolean {
+  if (!session?.resumeToken || session.resumeProvenance !== "scrape") return false;
   if (session.startupStatus === "ready" || session.startupCompletedAt) return false;
   try {
     const table = (name: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
