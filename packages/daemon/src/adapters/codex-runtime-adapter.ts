@@ -439,11 +439,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cacheRoot = nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN);
     const cachedDir = nodePath.join(cacheRoot, version);
     const cached = this.fs.exists(cachedDir);
-    // Codex's "continue without trusting" choice writes no state. An existing install/configuration may therefore be a
-    // decline even with no hooks.state entry. Absent grants still stay under native review. A proven owned grant may
-    // renew its content approval; an unrecorded skip of that exact owned upgrade cannot be distinguished from pending approval.
+    // Codex's "continue without trusting" choice writes no state, so an existing install with no hooks.state entry for any
+    // of OpenRig's hooks may be an unrecorded skip, or an older install that never granted them. OpenRig trusts its own
+    // exact shipped hooks there as on a first install (#17). Any recorded choice for one of them, or a layer it can't read,
+    // leaves native review in place. A proven owned grant may renew its content approval.
     const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
       && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
+    const noOwnHookChoice = (read: CodexConfigLayerRead[]) => {
+      try { return read.every(layer => layer.state === "absent" || (layer.state === "read" && !holdsOwnHookChoice(parseToml(layer.content)))); }
+      catch { return false; }
+    };
     const renewContentApproval = (freshGrant = false) => {
       const configPath = this.resolveCodexConfigPath(home);
       const currentLayers = readLayers();
@@ -465,28 +470,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (content !== before) this.fs.writeFile(configPath, content);
       recordOwnedCodexApproval(configPath, planned.approval);
     };
-    if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
-      renewContentApproval();
-      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
-    }
-    const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
-    const manifest = codexCoreMarketplaceManifest();
-    if (!this.fs.exists(manifestPath) || this.fs.readFile(manifestPath) !== manifest) {
-      this.fs.mkdirp(nodePath.dirname(manifestPath));
-      this.fs.writeFile(manifestPath, manifest);
-    }
-    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
-    if (recorded === undefined) {
-      const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
-      if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
-    }
-    const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
-    if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
     // First install grants declarations; Codex0.164 also requires full-bundle content approval. Existing declaration
     // choices are never rewritten. No cache files or native baseline files are rewritten here.
-    let freshGrants = 0;
-    const grantLayers = readLayers();
-    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShippedTree(cachedDir)) {
+    const grantOwnHooks = (): number => {
+      const grantLayers = readLayers();
+      if (codexCorePluginEnablement(grantLayers).decision !== "allow" || !matchesShippedTree(cachedDir)) return 0;
+      let freshGrants = 0;
       let content = this.fs.readFile(this.resolveCodexConfigPath(home));
       const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
       for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
@@ -507,9 +496,27 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           }
         }));
       }
-      this.fs.writeFile(this.resolveCodexConfigPath(home), content);
+      if (freshGrants > 0) this.fs.writeFile(this.resolveCodexConfigPath(home), content);
+      return freshGrants;
+    };
+    if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      renewContentApproval(noOwnHookChoice(layers) && grantOwnHooks() === 6);
+      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
-    renewContentApproval(freshGrants === 6);
+    const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
+    const manifest = codexCoreMarketplaceManifest();
+    if (!this.fs.exists(manifestPath) || this.fs.readFile(manifestPath) !== manifest) {
+      this.fs.mkdirp(nodePath.dirname(manifestPath));
+      this.fs.writeFile(manifestPath, manifest);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    if (recorded === undefined) {
+      const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
+      if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
+    }
+    const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
+    if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
+    renewContentApproval((firstInstall || noOwnHookChoice(layers)) && grantOwnHooks() === 6);
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
@@ -1260,15 +1267,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   /** The user config enables openrig-core and no readable layer holds a choice for any of its hooks: what an install older
    *  than the first-install grant leaves (#17). Reported only; a decline also writes no state, so nothing is granted here. */
   private ownHooksNeverApproved(home: string | undefined): boolean {
-    const prefix = `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json:`;
-    const hasChoice = (doc: unknown): boolean => !!doc && typeof doc === "object"
-      && (Object.keys((doc as { hooks?: { state?: object } }).hooks?.state ?? {}).some((key) => key.startsWith(prefix))
-        || Object.values(doc).some(hasChoice));
     try {
       const layers = codexReadableConfigLayers(nodePath.dirname(this.resolveCodexConfigPath(home)), this.codexSystemConfigDir)
         .filter((layer) => this.fs.exists(layer.path)).map((layer) => ({ ...layer, content: this.fs.readFile(layer.path) }));
       const user = layers.find((layer) => layer.name === "user config")?.content ?? null;
-      return userLayerEnablesCorePlugin(user) && !layers.some((layer) => hasChoice(parseToml(layer.content)));
+      return userLayerEnablesCorePlugin(user) && !layers.some((layer) => holdsOwnHookChoice(parseToml(layer.content)));
     } catch { return false; } // An unreadable layer may hold a choice.
   }
 
@@ -2070,6 +2073,14 @@ export function computeCodexHookTrust(
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
  * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
+/** Whether a config document, profiles included, holds any `hooks.state` choice for one of openrig-core's own hooks. */
+function holdsOwnHookChoice(doc: unknown): boolean {
+  const prefix = `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json:`;
+  return !!doc && typeof doc === "object"
+    && (Object.keys((doc as { hooks?: { state?: object } }).hooks?.state ?? {}).some((key) => key.startsWith(prefix))
+      || Object.values(doc).some(holdsOwnHookChoice));
+}
+
 export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
   const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;
