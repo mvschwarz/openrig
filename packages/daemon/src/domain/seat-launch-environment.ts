@@ -7,6 +7,7 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
 import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
 import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { readPlatformEnv } from "./platform-env.js";
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -17,9 +18,12 @@ export const SEAT_PUBLIC_ENV_KEYS = [
   "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
 ] as const;
 
-export function publicSeatEnvironment(env: Readonly<Record<string, string | undefined>>): Record<string, string> {
+export function publicSeatEnvironment(env: Readonly<Record<string, string | undefined>>, platform: NodeJS.Platform = process.platform): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const key of SEAT_PUBLIC_ENV_KEYS) if (env[key] !== undefined) result[key] = env[key]!;
+  for (const key of SEAT_PUBLIC_ENV_KEYS) {
+    const value = readPlatformEnv(env, key, platform);
+    if (value !== undefined) result[key] = value;
+  }
   if (result.OPENRIG_URL) {
     try {
       const url = new URL(result.OPENRIG_URL);
@@ -105,10 +109,11 @@ export class SeatLaunchEnvironment {
   private rigBin(): string {
     const cli = realpathSync(this.cliPath ?? pairedCli());
     accessSync(cli, constants.X_OK);
-    if (!statSync(cli).isFile() || !this.sessionEnv.OPENRIG_HOME) throw new Error("Paired CLI or instance home unavailable");
+    const instanceHome = readPlatformEnv(this.sessionEnv, "OPENRIG_HOME", this.launchPlatform === "win32" ? "win32" : "linux");
+    if (!statSync(cli).isFile() || !instanceHome) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
-    const bin = path.resolve(this.daemonCwd, this.sessionEnv.OPENRIG_HOME, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
+    const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {
       // PowerShell, native cmd and Git Bash each need their own argument-preserving entry.
@@ -149,7 +154,8 @@ export class SeatLaunchEnvironment {
     const homeVar = RUNTIME_HOME_VAR[target.runtime as HomeRuntime];
     const clearStep = clearing && homeVar ? `unset ${homeVar}; ${configuredHome !== undefined ? `export ${homeVar}=${shellQuote(configuredHome)}; ` : ""}` : "";
     const codexHome = (target.runtime === "codex" ? accountHome : undefined) ?? target.codexHome ?? this.codexHome;
-    const searchPath = this.sessionEnv.PATH;
+    const platform = this.launchPlatform === "win32" ? "win32" : "linux";
+    const searchPath = readPlatformEnv(this.sessionEnv, "PATH", platform);
     const accountStep = clearStep + (accountHome ? `unset ${ACCOUNT_HOME_PROVIDER_ENV.join(" ")}; ` : "");
     const codexEnv = target.codexCwd !== undefined
       ? [searchPath ? `PATH=${shellQuote(searchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean)
@@ -184,7 +190,7 @@ export class SeatLaunchEnvironment {
         command = codexEntry(searchPath, target.codexCwd, this.launchPlatform === "win32") + command.slice(5);
       }
       const binDir = this.rigBin();
-      const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
+      const env: Record<string, string> = { OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...publicSeatEnvironment(this.sessionEnv, platform), ...publicSeatEnvironment(identity, platform) };
       if (target.codexCwd !== undefined && codexHome) env.CODEX_HOME = codexHome;
       if (accountHome && target.runtime === "claude-code") env.CLAUDE_CONFIG_DIR = accountHome;
       if (this.launchPlatform === "win32") {

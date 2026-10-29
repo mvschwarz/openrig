@@ -52,7 +52,7 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
 export function renderWindowsManagedLaunch(executable: string, args: readonly string[], cwd: string,
   environment: Readonly<Record<string, string>>, inherited: readonly string[], beforeStart = ""): string {
   const names = [...new Set(inherited)];
-  if ([...Object.keys(environment), ...names].some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name !== "PROGRAMFILES(X86)")) throw new Error("Invalid managed environment name");
+  if ([...Object.keys(environment), ...names].some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.toUpperCase() !== "PROGRAMFILES(X86)")) throw new Error("Invalid managed environment name");
   const entries = Object.entries(environment).map(([key, value]) => `${powershellQuote(key)}=${powershellQuote(value)}`).join("; ");
   return `& {\n$openrigChildEnv = @{${entries}}\n`
     + `$openrigPaneEnv=[Environment]::GetEnvironmentVariables('Process')\nforeach ($openrigName in @(${names.map(powershellQuote).join(", ")})) { if ($openrigPaneEnv.Contains($openrigName)) { $openrigChildEnv[$openrigName] = $openrigPaneEnv[$openrigName] } }\n`

@@ -42,6 +42,34 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("reports copied lower-case credential precedence by name without echoing its value", async () => {
+    const f = fixture();
+    delete f.env.ANTHROPIC_API_KEY;
+    f.env.anthropic_api_key = "synthetic-lower-case-private-value";
+    const result = await f.managed.credentialPrecedence("node", { storedLogin: true });
+    expect(result.conflicts.some(conflict => conflict.name === "ANTHROPIC_API_KEY")).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("synthetic-lower-case-private-value");
+  });
+
+  it.runIf(process.platform === "win32")("binds mixed-case copied environment without pane overrides of native home or identity", async () => {
+    const f = fixture();
+    fs.copyFileSync(process.execPath, f.executable);
+    delete f.env.HOME; delete f.env.PATH; delete f.env.OPENRIG_HOME;
+    Object.assign(f.env, { home: f.home, Path: `"${f.home}"`, OpenRig_Home: f.home, claude_config_dir: "./selected config", openrig_node_id: "daemon-wrong", Mixed_Flag: "not-typed", "ProgramFiles(x86)": "not-typed-native-location" });
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    expect(prepared.configDir).toBe(path.join(f.cwd, "selected config"));
+    const source = "console.log(JSON.stringify({home:process.env.HOME,path:process.env.PATH,config:process.env.CLAUDE_CONFIG_DIR,node:process.env.OPENRIG_NODE_ID,instance:process.env.OPENRIG_HOME,mixed:process.env.Mixed_Flag,nativeLocation:process.env['ProgramFiles(x86)']}))";
+    const command = prepared.command(["-e", source]);
+    expect(command).not.toContain("not-typed");
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const paneEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "PROGRAMFILES(X86)"));
+    Object.assign(paneEnv, { HOME: "pane-wrong", openrig_node_id: "pane-wrong", Mixed_Flag: "synthetic-forwarded", "ProgramFiles(x86)": "synthetic-location" });
+    const output = await new Promise<string>((resolve, reject) => native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
+      env: paneEnv, encoding: "utf8", windowsHide: true, timeout: 15000,
+    }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim()), output.trim()).toEqual({ home: f.home, path: f.home, config: path.join(f.cwd, "selected config"), node: "node", instance: f.home, mixed: "synthetic-forwarded", nativeLocation: "synthetic-location" });
+  });
+
   it.runIf(process.platform === "win32").each(["binding", "executable", "cwd", "PATH", "config"] as const)(
     "refuses a changed %s after the capability query without returning a launch command", async change => {
       const f = fixture();

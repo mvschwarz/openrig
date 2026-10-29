@@ -4,6 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
+import { readPlatformEnv } from "./platform-env.js";
 import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
@@ -197,7 +198,7 @@ export class ClaudeManagedLaunch {
     const names = opts.apiKey || opts.settingsOnly ? [] : opts.storedLogin ? [...OUTRANKING_TOKEN_ENV, "CLAUDE_CODE_OAUTH_TOKEN"] : OUTRANKING_TOKEN_ENV;
     const found = (name: string) => name === "CLAUDE_CODE_OAUTH_TOKEN" ? instead : conflicts;
     for (const name of names) {
-      if (this.sessionEnv[name]) {
+      if (readPlatformEnv(this.sessionEnv, name, this.platform)) {
         found(name).push({ name, source: "the daemon's environment, which every managed Claude launch receives",
           remedy: `unset ${name} where the daemon starts, or take it out of recovery.provider_auth_env_allowlist; either reaches every seat` });
       }
@@ -252,7 +253,7 @@ export class ClaudeManagedLaunch {
 
   /** The config dir a seat's Claude selects: its own home from its member or rig `env:`, else the daemon's. */
   private selectedConfigDir(nodeId: string | undefined, ignoreAccountHome = false): string | undefined {
-    return effectiveRuntimeHome(this.db, nodeId, "claude-code", this.sessionEnv.CLAUDE_CONFIG_DIR, ignoreAccountHome);
+    return effectiveRuntimeHome(this.db, nodeId, "claude-code", readPlatformEnv(this.sessionEnv, "CLAUDE_CONFIG_DIR", this.platform), ignoreAccountHome);
   }
 
   /** Bootstrap and the launched child must use the same native selection.
@@ -260,7 +261,7 @@ export class ClaudeManagedLaunch {
    * directory selects <configDir>/.claude.json instead (#154/#225).
    */
   configPaths(cwd: string, nodeId?: string, accountHome?: string | null): { configDir: string; statePath: string } {
-    const { HOME } = this.sessionEnv;
+    const HOME = readPlatformEnv(this.sessionEnv, "HOME", this.platform);
     const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: absolute HOME is required.");
     const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
@@ -276,12 +277,12 @@ export class ClaudeManagedLaunch {
   }
 
   private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string) {
-    const { PATH, HOME } = this.sessionEnv;
+    const PATH = readPlatformEnv(this.sessionEnv, "PATH", this.platform), HOME = readPlatformEnv(this.sessionEnv, "HOME", this.platform);
     const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
-    const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
+    const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, this.platform === "win32" ? p.replace(/^"(.*)"$/, "$1") : p));
     const { configDir } = this.configPaths(cwd, nodeId, accountHome);
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
@@ -340,15 +341,18 @@ export class ClaudeManagedLaunch {
     const context = this.context(cwd, target.nodeId, accountHome, target.executable);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
-    const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-      && !MANAGED_LAUNCH_KEYS.includes(key) && !isCredentialKey(key));
-    if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
+    const nativeName = (key: string) => this.platform === "win32" ? key.toUpperCase() : key;
+    const inheritedKeys = () => Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
+      && !MANAGED_LAUNCH_KEYS.includes(nativeName(key)) && !isCredentialKey(key));
+    const inherited = inheritedKeys();
+    if (inherited.some(key => this.platform === "win32"
+      ? !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && nativeName(key) !== "PROGRAMFILES(X86)"
+      : !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
       if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
       if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
         || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable)) !== JSON.stringify(context)
-        || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key) && !isCredentialKey(key))) !== JSON.stringify(inherited)) {
+        || JSON.stringify(inheritedKeys()) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }
     };
@@ -363,7 +367,7 @@ export class ClaudeManagedLaunch {
       ...(before.session ? { OPENRIG_SESSION_NAME: before.session } : {}),
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
     const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !isCredentialKey(key));
-    const publicEnv = publicSeatEnvironment(this.sessionEnv);
+    const publicEnv = publicSeatEnvironment(this.sessionEnv, this.platform);
     const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
     const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `export ${key}="\${${key}-}"`);
     // A declared name is forwarded only when the pane shell has it set, so a one-off name recorded on
@@ -408,8 +412,9 @@ export class ClaudeManagedLaunch {
       assertCurrent();
       if (token?.ref.kind === "api-key") this.seatTokenLaunch(target.nodeId, { ref: token.ref, accountHome: target.accountHome });
       if (this.platform === "win32") {
+        const boundNames = new Set([...Object.keys(identity), ...Object.keys(publicEnv)].map(nativeName));
         const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
-          .filter(key => !(key in identity) && !(key in publicEnv));
+          .filter(key => !boundNames.has(nativeName(key)));
         const terminalNames = [...PANE_TERMINAL_KEYS, "EDITOR", "VISUAL"];
         const allowedLaunchEnv = Object.fromEntries(Object.entries(launchEnv).filter(([key]) => !isCredentialKey(key)));
         return renderWindowsManagedLaunch(context.executable, args, cwd, { ...context.env, ...publicEnv, ...identity, ...allowedLaunchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])], token?.step);
