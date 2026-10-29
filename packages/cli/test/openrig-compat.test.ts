@@ -18,6 +18,12 @@ afterEach(() => {
 });
 
 describe("openrig-compat", () => {
+  it.runIf(process.platform === "win32")("reads mixed-case injected environment keys with canonical-key precedence", async () => {
+    const { readOpenRigEnv, readOpenRigUrl } = await import("../src/openrig-compat.js");
+    expect(readOpenRigUrl({ OpenRig_Url: "http://localhost:7433/" })).toBe("http://localhost:7433");
+    expect(readOpenRigEnv("OPENRIG_HOME", undefined, { OpenRig_Home: "native-home" })).toBe("native-home");
+    expect(readOpenRigEnv("OPENRIG_HOME", undefined, { OPENRIG_HOME: "", OpenRig_Home: "other-home" })).toBeUndefined();
+  });
   it("getOpenRigHome prefers OPENRIG_HOME when set", async () => {
     process.env.OPENRIG_HOME = "/tmp/custom-openrig-home";
     delete process.env.RIGGED_HOME;

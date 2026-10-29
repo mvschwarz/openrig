@@ -2039,3 +2039,15 @@ and sibling-boundary checks; CLI TypeScript checking passes. Its unrelated
 default-path expectation now uses native `join` rather than a POSIX literal.
 This predicate is only one input to caller-side fixture handling, not authority
 to write to an arbitrary daemon or proof of live Windows runtime acceptance.
+
+## CLI injected environment casing (2026-10-30)
+
+`readOpenRigEnv` now uses the existing platform-aware environment lookup for
+both primary and legacy keys. Native `process.env` has Windows key semantics,
+but ordinary injected environment objects do not: mixed-case OPENRIG_URL was
+previously lost before URL normalization, and mixed-case home keys were lost
+too. The regression failed before the change and the compatibility file now
+passes 10/10; CLI TypeScript checking passes. Canonical-key precedence,
+including an explicitly empty canonical value, and legacy fallback rules remain.
+POSIX lookup remains case-sensitive. No live daemon target or credentials were
+used for these synthetic environment checks.
