@@ -7,6 +7,24 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Gate and reduced-environment scenario fixtures, 2026-10-29
+
+The native failure log exposed directory-link fixtures created without a Windows
+type and Unix-only fake npm executables/PATH separators. Candidate-binding and
+dependency-root tests now use directory junctions on Windows (directory symlinks
+on POSIX), a real owned native fake npm and the host PATH delimiter. These test
+the ordinary gate legs, not a substituted smoke branch. Refusal still precedes
+cleanup, a late HEAD/input/dependency-target change writes no verdict, and a
+refused retry invalidates an older PASS. Native path spelling is normalized only
+in diagnostic assertions.
+
+The Linux-container reduced-environment scenario now explicitly uses POSIX paths,
+including when its synthetic command/SQLite seams run on Windows. Host path.join
+had prevented removal of the container wrapper from PATH in those tests.
+All 39 tests across candidate binding, hermeticity and PR scenario contracts
+passed without skips. This does not prove real container restart or native npm
+engineering legs; the gate's process-load advisory still needs a Windows census.
+
 ## Native runtime mirror drift comparison, 2026-10-29
 
 The failure log revealed that authoring regeneration's native filesystem backend
