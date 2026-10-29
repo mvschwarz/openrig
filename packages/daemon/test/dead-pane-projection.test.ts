@@ -76,13 +76,15 @@ it.skipIf(!hasTmux)("a real private tmux retained exit is not reported running/r
   const env = { ...process.env, TMUX: "" };
   const run = (args: string[]) => file("tmux",["-L",socket,"-f","/dev/null",...args],{env});
   try {
-    await run(["new-session","-d","-s","worker@rig","/bin/sh"]);
-    await run(["set-window-option","-t","=worker@rig","remain-on-exit","on"]);
-    const pane = (await run(["display-message","-p","-t","=worker@rig","#{pane_id}"])).stdout.trim();
+    const pane = (await run(["new-session","-d","-P","-F","#{pane_id}","-s","worker@rig","/bin/sh"])).stdout.trim();
+    expect(pane).toMatch(/^%\d+$/); // bind the created pane, never an empty/default target
+    await run(["set-window-option","-t",pane,"remain-on-exit","on"]);
     await run(["send-keys","-t",pane,"exit 0","Enter"]);
     const tmux = new TmuxAdapter(async cmd => (await shell(cmd.replace(/^tmux /,`tmux -L ${socket} -f /dev/null `),{env})).stdout);
     await vi.waitFor(async () => expect(await tmux.isPaneDead(pane)).toBe(true),{timeout:3000});
+    expect((await tmux.listSessions()).map(s => s.name)).toEqual(["worker@rig"]);
     const db = fixture("claude-code",pane);
+    expect(db.prepare("SELECT tmux_pane FROM bindings WHERE node_id='worker'").get()).toEqual({ tmux_pane:pane });
     await new SeatIdentityReconciler({db,tmux}).reconcileAll();
     expect(getNodeInventory(db,"rig")[0]).toMatchObject({ sessionStatus:"exited", startupStatus:"attention_required", identityVerdict:{reason:"pane_exited"} });
   } finally { await run(["kill-server"]).catch(() => {}); }
