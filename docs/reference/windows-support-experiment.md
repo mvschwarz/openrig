@@ -83,6 +83,17 @@ disabled configuration, with unselected bytes retained. The complete setup
 file passes 73/73 and CLI typecheck passes. No user configuration was changed;
 these are setup-consumer fixtures, not real multiplexer startup acceptance.
 
+Further source reconciliation aligns the Windows setup home with psmux's
+USERPROFILE-first selection, then the OS account profile, then the existing
+HOMEDRIVE/HOMEPATH fallback before HOME. Explicit config paths expand a leading
+tilde; an explicitly empty override is reported without writing a fallback file.
+Sources: [psmux profile resolver](https://raw.githubusercontent.com/psmux/psmux/v3.4.0/src/paths.rs)
+and [config loader](https://raw.githubusercontent.com/psmux/psmux/v3.4.0/src/config.rs).
+The setup fixtures now give HOME and USERPROFILE different values and verify
+the native profile wins, including mixed-case copied keys. Added tilde and
+empty-override cases pass; the complete setup file passes 75/75 and CLI
+typecheck passes. These are isolated consumer checks, not fleet activation.
+
 ## Auth home test module boundary (2026-10-30)
 
 The frozen terminal-header empty-OPENRIG_HOME failure was also a fixture issue:

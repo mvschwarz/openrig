@@ -37,7 +37,7 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   };
 }
 
-it.each(["primary", "rc", "fallback", "explicit", "disabled"])("native setup targets the selected psmux configuration (%s)", async selection => {
+it.each(["primary", "rc", "fallback", "explicit", "tilde", "disabled", "empty"])("native setup targets the selected psmux configuration (%s)", async selection => {
   const home = "C:/synthetic-psmux-home";
   const files = new Map<string, string>([
     [`${home}/.tmux.conf`, "# existing fallback\n"],
@@ -46,12 +46,12 @@ it.each(["primary", "rc", "fallback", "explicit", "disabled"])("native setup tar
   ]);
   const before = new Map(files);
   const expected = selection === "primary" ? `${home}/.psmux.conf` : selection === "rc" ? `${home}/.psmuxrc`
-    : selection === "explicit" ? `${home}/custom.conf` : `${home}/.tmux.conf`;
-  const result = await runSetup(makeDeps({ platform: "win32", env: { HOME: home, ...(selection === "explicit" ? { psmux_config_file: expected } : selection === "disabled" ? { PSMUX_CONFIG_FILE: "NUL" } : {}) },
+    : ["explicit", "tilde"].includes(selection) ? `${home}/custom.conf` : `${home}/.tmux.conf`;
+  const result = await runSetup(makeDeps({ platform: "win32", env: { HOME: "C:/different-msys-home", USERPROFILE: home, ...(selection === "explicit" ? { psmux_config_file: expected } : selection === "tilde" ? { PSMUX_CONFIG_FILE: "~/custom.conf" } : selection === "disabled" ? { PSMUX_CONFIG_FILE: "NUL" } : selection === "empty" ? { PSMUX_CONFIG_FILE: "" } : {}) },
     exists: file => files.has(file), readFile: file => files.get(file) ?? null, writeFile: (file, content) => { files.set(file, content); } }), { herdr: false, ghostty: false });
-  if (selection === "disabled") {
+  if (["disabled", "empty"].includes(selection)) {
     expect(files).toEqual(before);
-    expect(result.steps.find(step => step.id === "tmux_config")?.status).toBe("skipped");
+    expect(result.steps.find(step => step.id === "tmux_config")?.status).toBe(selection === "empty" ? "warn" : "skipped");
   } else {
     expect(files.get(expected)).toContain("# OpenRig managed block");
     for (const [file, content] of before) if (file !== expected) expect(files.get(file)).toBe(content);
@@ -87,7 +87,7 @@ it.each([false, true])("native setup reads copied home/config key variants (blan
   const profile = "C:/synthetic 中文/profile", config = "C:/synthetic config";
   const env = blankCanonical
     ? { HOME: "", home: "C:/shadowed-home", userprofile: profile, xdg_config_home: config }
-    : { home: profile, userprofile: "C:/unused-profile", xdg_config_home: config };
+    : { home: "C:/unused-msys-home", userprofile: profile, xdg_config_home: config };
   await runSetup(makeDeps({ platform: "win32", env, writeFile: writes, readFile: file => { reads.push(file); return null; } }), { herdr: false, ghostty: false });
   expect(writes.mock.calls.some(([file]) => file === `${profile}/.tmux.conf`)).toBe(true);
   expect(writes.mock.calls.some(([file]) => String(file).includes("shadowed-home"))).toBe(false);

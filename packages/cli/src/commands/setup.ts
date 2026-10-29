@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { shellQuote } from "../cross-host-executor.js";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
@@ -616,17 +616,30 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
 
   // 6. tmux config
   const setupEnv = deps.env ?? process.env;
-  const setupHome = readPlatformEnv(setupEnv, "HOME", platform)
-    || (platform === "win32" ? readPlatformEnv(setupEnv, "USERPROFILE", platform) : undefined) || homedir();
+  let setupHome = readPlatformEnv(setupEnv, "HOME", platform) || homedir();
+  if (platform === "win32") {
+    const profile = readPlatformEnv(setupEnv, "USERPROFILE", platform);
+    if (profile) setupHome = profile;
+    else {
+      try { setupHome = userInfo().homedir; }
+      catch {
+        const drive = readPlatformEnv(setupEnv, "HOMEDRIVE", platform), relative = readPlatformEnv(setupEnv, "HOMEPATH", platform);
+        if (drive && relative && deps.exists(drive + relative)) setupHome = drive + relative;
+      }
+    }
+  }
   const nativeConfigs = [`${setupHome}/.psmux.conf`, `${setupHome}/.psmuxrc`, `${setupHome}/.tmux.conf`, `${setupHome}/.config/psmux/psmux.conf`];
-  const selectedConfig = platform === "win32" ? readPlatformEnv(setupEnv, "PSMUX_CONFIG_FILE", platform) : undefined;
+  const rawConfig = platform === "win32" ? readPlatformEnv(setupEnv, "PSMUX_CONFIG_FILE", platform) : undefined;
+  const selectedConfig = rawConfig?.startsWith("~") ? setupHome + rawConfig.slice(1) : rawConfig;
   const disabledConfig = platform === "win32" && selectedConfig?.toUpperCase() === "NUL";
   const TMUX_CONF = platform === "win32"
     ? selectedConfig || nativeConfigs.find(file => deps.exists(file)) || `${setupHome}/.tmux.conf`
     : `${setupHome}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
 
-  if (disabledConfig) {
+  if (selectedConfig === "") {
+    steps.push({ id: "tmux_config", status: "warn", message: "PSMUX_CONFIG_FILE is explicitly empty; psmux cannot read that path. Select a config file or unset the variable; no config file was written." });
+  } else if (disabledConfig) {
     steps.push({ id: "tmux_config", status: "skipped", message: "psmux configuration is disabled by PSMUX_CONFIG_FILE=NUL; no config file was written." });
   } else try {
     const historyLimit = (deps.configStore ?? new ConfigStore()).resolve().terminal.historyLimit;
@@ -657,7 +670,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // Informational only: never enable inheritance automatically or add a setup prompt.
-  const tmuxConfigs = disabledConfig ? [] : platform === "win32" ? [TMUX_CONF] : [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const tmuxConfigs = disabledConfig || selectedConfig === "" ? [] : platform === "win32" ? [TMUX_CONF] : [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
   const customTmux = tmuxConfigs.some(file => {
     try {
       const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
