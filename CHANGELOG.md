@@ -38,8 +38,10 @@ are not established by that result. Changes since 0.7.4:
   0.6.x. Its cause is unknown: the inspected 0.7.4 check already accepts the
   reported process tree. [#2200](https://github.com/mvschwarz/openrig/issues/2200)
   is not fixed in 0.7.5; this is not an established refusal of all staged-script
-  launches. A refused restart does not complete the hook refresh. If Codex asks
-  for hook review, review the hooks you intend to enable.
+  launches. A refused restart does not complete the hook refresh. If it
+  refuses, nothing is stopped: leave the seat running and report the refusal
+  with CLI and daemon versions. If Codex asks for hook review, review the
+  hooks you intend to enable.
 
 ### Follow one task in one workspace
 
