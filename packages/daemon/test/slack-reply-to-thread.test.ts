@@ -399,6 +399,40 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
         expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
       });
+
+      // A typed reply in the ask's thread, from the person it asked.
+      const typed = (text: string, ts: string) => inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: `e-${ts}`, type: "events_api", payload: { event: {
+          type: "message", user: registry.entities[0]!.connectorBindings[0]!.handle, text, ts, thread_ts: "1.1", channel: "C-TEST" } },
+      }) });
+      const answerRows = (qitemId: string) => db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? AND destination_session = 'author@rig'").all(qitemId);
+
+      it("records a typed reply as the answer, resumes the ask once and hands it back once as the answer, even when Slack redelivers", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({
+          q1: { kind: "typed-reply", text: "large", placement: "first-unanswered", unansweredCount: 1 } });
+        expect(repo.getById(answerRowId(ask.qitemId))).toMatchObject({ destinationSession: "author@rig", replyTo: ask.qitemId });
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+
+        typed("large", "990.1"); // Slack redelivers the same event
+        typed("small", "992.1"); // a later reply once the question is answered stays a message
+        await vi.waitFor(() => expect(answerRows(ask.qitemId)).toHaveLength(2));
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({
+          q1: { kind: "typed-reply", text: "large", placement: "first-unanswered", unansweredCount: 1 } });
+        expect(repo.getHumanAnswer(ask.qitemId, human)?.qitemId).toBe(answerRowId(ask.qitemId));
+      });
+
+      it("keeps a typed reply from before its current question posted as a message: the ask stays parked, with no answer", async () => {
+        const ask = await parkedAsk();
+        typed("large", "1.5");
+        await vi.waitFor(() => expect(answerRows(ask.qitemId)).toHaveLength(1));
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+        expect(repo.getById(answerRowId(ask.qitemId))).toBeNull();
+      });
     });
 
     /** With `routed` false, the reaction must make no row: a routed one lands well within the wait (#2233). */
