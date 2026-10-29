@@ -273,6 +273,21 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Hook rig dispatch selected PATHEXT (2026-10-30)
+
+The packaged hook's standalone rig resolver still searched COM, EXE, BAT and
+CMD in a fixed order. It now reads selected PATHEXT using Windows environment
+name rules, retaining its order and explicit empty value; only an undefined
+selection receives the conventional default. Native executable and recognized
+npm entry admission remain unchanged, with no arbitrary batch execution.
+
+Two real owned npm child launches exercise canonical and mixed-case PATHEXT
+with CMD before an inert COM decoy, preserving literal arguments and cwd. The
+same fixtures check COM-first selection and refusal under empty PATHEXT.
+Complete adjacent rig-hook, native environment, plugin refresh and owned-hook
+trust checks pass 47/47; daemon typecheck passes. No installed rig CLI, live
+hook, queue or provider was invoked, and no running plugin was refreshed.
+
 ## Native desktop system-tool selection (2026-10-30)
 
 Windows Terminal opening no longer needs PowerShell's directory or System32 on

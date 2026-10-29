@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const require = createRequire(import.meta.url);
 const scripts = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts");
-const { spawnRig } = require(path.join(scripts, "rig-command.cjs"));
+const { resolveRigCommand, spawnRig } = require(path.join(scripts, "rig-command.cjs"));
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
@@ -26,6 +26,18 @@ function fixture() {
 }
 
 describe.skipIf(process.platform !== "win32")("refocus Windows rig npm dispatch", () => {
+  it.each(["PATHEXT", "pAtHeXt"])("honors selected %s before a COM decoy through the actual npm child", key => {
+    const f = fixture();
+    fs.writeFileSync(path.join(f.bin, "rig.com"), "Owned decoy; must not execute.");
+    for (const name of Object.keys(f.env)) if (name.toUpperCase() === "PATHEXT") delete f.env[name];
+    const env = { ...f.env, [key]: ".CMD;.COM" };
+    const args = ["context", "get", "packs/用户 O'Brien & %PATH%"];
+    const result = spawnRig(args, { env, cwd: f.root, encoding: "utf8", timeout: 5000 });
+    expect(result.status, result.error?.message).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ args, cwd: f.root });
+    expect(resolveRigCommand({ PATH: f.bin, [key]: ".COM;.CMD" })).toMatchObject({ command: fs.realpathSync(path.join(f.bin, "rig.com")), prefix: [] });
+    expect(() => resolveRigCommand({ PATH: f.bin, [key]: "" })).toThrow("No rig executable");
+  });
   it("reproduces direct-spawn failure and preserves literal arguments through the owned npm entry", () => {
     const f = fixture();
     const args = ["context", "get", "packs/Ω O'Brien & %PATH% $(echo x)"];

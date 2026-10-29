@@ -8,9 +8,12 @@ const { spawnSync } = require("node:child_process");
 function resolveRigCommand(env = process.env, cwd = process.cwd()) {
   if (process.platform !== "win32") return { command: "rig", prefix: [] };
   const pathKey = Object.keys(env).sort().find(key => key.toUpperCase() === "PATH");
+  const extKey = Object.keys(env).sort().find(key => key.toUpperCase() === "PATHEXT");
+  const extensions = (extKey === undefined ? ".COM;.EXE;.BAT;.CMD" : env[extKey] ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";").filter(Boolean).map(value => value.toLowerCase());
   for (const value of (pathKey === undefined ? "" : env[pathKey] ?? "").split(path.delimiter)) {
     const dir = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
-    for (const ext of [".com", ".exe", ".bat", ".cmd"]) {
+    for (const ext of extensions) {
       const candidate = path.join(dir, "rig" + ext);
       if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
       if (ext === ".com" || ext === ".exe") return { command: fs.realpathSync(candidate), prefix: [] };
