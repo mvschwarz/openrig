@@ -12,6 +12,7 @@ import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
+import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -74,7 +75,9 @@ export function isStagedSendScriptPath(path: string): boolean {
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
     privateConfig: writeWindowsPrivateConfig,
-    writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
+    writeFile: (p, content, options) => process.platform === "win32"
+      ? createPrivateTextFileAsync(p, content)
+      : fsWriteFile(p, content, { encoding: "utf8", ...options }),
     unlink: (p) => fsUnlink(p),
     tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,

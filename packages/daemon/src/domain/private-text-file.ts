@@ -113,6 +113,15 @@ function runPrivateScript(script: string, values: NodeJS.ProcessEnv, input = "")
   });
 }
 
+/** Exclusive private creation without blocking the daemon on native startup. */
+export async function createPrivateTextFileAsync(file: string, content: string): Promise<void> {
+  if (process.platform !== "win32") {
+    await fs.writeFile(file, content, { mode: 0o600, flag: "wx" });
+    return;
+  }
+  await runPrivateScript(CREATE_PRIVATE_FILE, { OPENRIG_PRIVATE_TEXT_FILE: file }, Buffer.from(content, "utf8").toString("base64"));
+}
+
 const CHECK_PRIVATE_DIRECTORY = String.raw`
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
 $path=$env:OPENRIG_PRIVATE_TEXT_DIRECTORY
