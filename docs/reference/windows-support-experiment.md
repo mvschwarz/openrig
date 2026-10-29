@@ -273,6 +273,23 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Managed Claude native selection honors PATHEXT (2026-10-30)
+
+When no prior executable was frozen, ClaudeManagedLaunch searched only for
+claude.exe. Its Windows native lookup now follows the supplied PATH/PATHEXT
+ordering, including COM and an explicitly empty extension list. An existing
+batch entry selected ahead of a native executable produces an explicit refusal,
+rather than silently selecting a different executable. A recorded executable
+still bypasses PATH lookup and retains its existing frozen-file checks. This
+does not add npm batch support to the managed native launcher.
+
+An owned native fixture fails before the repair, then verifies COM selection,
+selection-order drift invalidation, empty-list refusal and batch-first refusal.
+Both managed-launch and provider-selection files pass 22/22 without skips;
+daemon type checking passes. The capability query is mocked in this selection
+fixture; no installed provider or deployed seat is started. The separate actual
+native EXE/COM process-chain evidence above remains independently scoped.
+
 ## Native COM discovery hints match supported executables (2026-10-30)
 
 The pane discovery fingerprinter still recognized EXE provider names but not COM,

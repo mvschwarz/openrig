@@ -296,11 +296,17 @@ export class ClaudeManagedLaunch {
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
-    const candidates = selectedExecutable ? [selectedExecutable] : search.map(dir => path.join(dir, this.platform === "win32" ? "claude.exe" : "claude"));
+    const names = this.platform === "win32"
+      ? (readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => "claude" + ext.toLowerCase())
+      : ["claude"];
+    const candidates = selectedExecutable ? [selectedExecutable] : search.flatMap(dir => names.map(name => path.join(dir, name)));
     for (const candidate of candidates) {
       if (!path.isAbsolute(candidate)) continue;
       try { accessSync(candidate, constants.X_OK); if (!statSync(candidate).isFile()) continue; }
       catch { continue; }
+      if (this.platform === "win32" && !selectedExecutable && !/\.(exe|com)$/i.test(candidate)) {
+        throw new Error("Claude managed launch requires a native executable on the intended PATH; no batch fallback was selected.");
+      }
       executable = realpathSync(candidate); break;
     }
     if (!executable) throw new Error("Claude managed launch executable is unavailable on the intended PATH; no fallback was selected.");

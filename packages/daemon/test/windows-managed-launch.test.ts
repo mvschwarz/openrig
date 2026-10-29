@@ -42,6 +42,21 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("selects native COM by copied PATHEXT order and refuses empty or batch-first selection", async () => {
+    const f = fixture();
+    const native = path.join(f.home, "claude.com");
+    fs.copyFileSync(process.execPath, native);
+    f.env.Pathext = ".COM;.EXE";
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    expect(prepared.executable).toBe(fs.realpathSync(native));
+    f.env.Pathext = ".EXE;.COM";
+    expect(() => prepared.assertCurrent()).toThrow(/context changed/);
+    f.env.Pathext = "";
+    await expect(f.managed.prepare({ nodeId: "node" }, "auto")).rejects.toThrow(/unavailable/);
+    fs.writeFileSync(path.join(f.home, "claude.cmd"), "@echo unrelated batch");
+    f.env.Pathext = ".CMD;.EXE";
+    await expect(f.managed.prepare({ nodeId: "node" }, "auto")).rejects.toThrow(/native executable/);
+  });
   it.runIf(process.platform === "win32")("reports copied lower-case credential precedence by name without echoing its value", async () => {
     const f = fixture();
     delete f.env.ANTHROPIC_API_KEY;
