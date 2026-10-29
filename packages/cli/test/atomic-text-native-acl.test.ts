@@ -8,6 +8,8 @@ import { writeTextAtomically } from "../src/atomic-text-write.js";
 import { ConfigStore } from "../src/config-store.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { replaceArtifactFile } from "../src/commands/proof.js";
+import { FileWriteService, sha256Hex } from "../../daemon/src/domain/files/file-write-service.js";
+import { realpathSync } from "node:fs";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -94,4 +96,18 @@ it.runIf(process.platform === "win32")("restores readonly when a native delete-s
     await exit;
     clearTimeout(timeout);
   }
+});
+it.runIf(process.platform === "win32")("retains protected file access through the allowlisted file editor and writes its audit", () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-editor-acl-")));
+  const file = join(root, "notes.md"), audit = join(root, "audit.jsonl");
+  createPrivateTextFile(file, "original synthetic content");
+  const before = accessPolicy(file);
+  const service = new FileWriteService({ allowlist: [{ name: "workspace", canonicalPath: root }], auditFilePath: audit });
+  const result = service.writeAtomic({ rootName: "workspace", path: "notes.md", content: "replacement synthetic content",
+    expectedMtime: statSync(file).mtime.toISOString(), expectedContentHash: sha256Hex(readFileSync(file)), actor: "fixture@rig" });
+  expect(result.newContentHash).toBe(sha256Hex("replacement synthetic content"));
+  expect(readFileSync(file, "utf8")).toBe("replacement synthetic content");
+  expect(accessPolicy(file)).toBe(before);
+  expect(JSON.parse(readFileSync(audit, "utf8")).actor).toBe("fixture@rig");
+  expect(readdirSync(root).sort()).toEqual(["audit.jsonl", "notes.md"]);
 });

@@ -2176,3 +2176,29 @@ Daemon TypeScript checking passes. The adjacent enforcer run has 63 cases,
 57 passed and 6 failed; it is not green acceptance. The failures include native
 path expectations and manual-preparation transport outcomes still requiring
 separate diagnosis. The detached ACP cleanup EPERM also remains unresolved.
+
+## Compaction assertions and allowlisted editor parity (2026-10-30)
+
+The six adjacent enforcer failures above were traced to literal forward-slash
+expectations for native marker, skill and RESTORE-MAP paths. Updating those
+expectations to native join/separator semantics makes the same combined
+compaction check pass 63/63; no preparation or delivery behavior was weakened.
+
+The allowlisted file editor had another independent DACL replacement path.
+An owned protected-file experiment failed before repair: file content changed,
+but the access policy inherited the parent directory. Windows editing now
+creates private staging, retains the existing fsync/conflict checks, and uses
+metadata-preserving native replacement. The actual service's replacement,
+protected policy, content hash and audit readback pass with no staging residue.
+POSIX publication and the create-new-file branch retain their previous paths.
+
+The service's standalone default audit path also treated an empty HOME as a
+usable relative prefix. It now falls through to USERPROFILE and then the OS
+home when selectors are absent; the explicit auditFilePath still wins. Normal
+daemon startup already passes its instance audit path, so this default-path
+fix concerns construction without that override, not a claim that the running
+daemon had written to the wrong location. Owned fixtures verify actual audit
+creation under the synthetic USERPROFILE and OS-home path resolution without
+reading or writing actual user state. Home/route checks pass 20 with 1 existing
+platform skip. The broader review-freeze check still encounters host file-link
+creation EPERM. Daemon TypeScript checking passes; no runtime deployment occurs.
