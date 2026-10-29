@@ -859,9 +859,10 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 kernel's `operator.human` terminal seat. Restoring the operator, advisor and
 queue worker does not also restore an unselected terminal. Read
 `rig ps --nodes --rig kernel --json` and use the terminal's registered
-`canonicalSessionName`; the built-in layout uses `operator-human@kernel` in the
-examples below. Check the actual pane with `rig capture operator-human@kernel`:
-a persisted running row alone does not prove that its tmux session is alive.
+`canonicalSessionName` for the `operator.human` row. Replace `<dashboard-session>`
+in the commands below with that name. Check the actual pane with
+`rig capture "<dashboard-session>"`: a persisted running row alone does not prove
+that its tmux session is alive.
 A daemon or transport error is not proof that the terminal is absent.
 
 - If only the viewing window closed and the TUI is still running, reopen it
@@ -871,14 +872,14 @@ A daemon or transport error is not proof that the terminal is absent.
 - If the terminal session itself is absent, start only that existing seat:
 
   ```sh
-  rig seat launch operator-human@kernel --fresh --reason "recover missing shared kernel dashboard"
+  rig seat launch "<dashboard-session>" --fresh --reason "recover missing shared kernel dashboard"
   ```
 
   The terminal has no agent conversation to resume. Its fresh-start action
   runs `rig tui` after the shell is ready; sibling agent sessions stay
   unchanged. This command intentionally omits `--stop`, so it refuses to
   replace a live occupant. Check the result before repeating it, then run
-  `rig capture operator-human@kernel` to confirm the TUI and
+  `rig capture "<dashboard-session>"` to confirm the TUI and
   `rig ps --nodes --rig kernel --full` to check the seats. Once the dashboard
   is running, open its view with `rig terminal open saved:kernel --window`.
 
