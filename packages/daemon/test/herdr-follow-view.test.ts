@@ -53,7 +53,7 @@ function fixture() {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: selected } });
     }
-    if (command === "pane process-info" && failedProcessRead) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
+    if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
