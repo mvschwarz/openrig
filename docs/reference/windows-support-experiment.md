@@ -273,6 +273,22 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Explicit empty Claude config selection reaches background commands (2026-10-30)
+
+The Claude auth reader only applied a truthy config-directory option. An explicit
+empty selection could therefore leave an inherited different directory in place,
+contrary to the existing empty-versus-unset launch semantics. It now applies
+every defined selection, including empty, through the existing native key
+replacement helper. This removes case-variant inherited copies on Windows.
+
+The native fixture fails before the repair, then runs an owned Node child through
+runClaudeCommand and reads back the empty config value and selected working
+directory. Complete Windows Claude reader and empty-launch-path files pass 5/5
+without skips; daemon type checking passes. No installed Claude, real account or
+credential is used. Separately, the complete session-transport and draft-aware
+delivery regression after the native input-path repair passes 391/391 without
+skips. Neither result establishes native visual or all-provider acceptance.
+
 ## Native paths in recorded-client input-box layouts (2026-10-30)
 
 The Codex status/path footer and fresh-session path rows in both clients only

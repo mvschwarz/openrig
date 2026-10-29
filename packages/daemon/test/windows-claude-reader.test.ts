@@ -5,6 +5,18 @@ import os from "node:os";
 import { claudeAuthReaderEnv, claudeAuthStatusReader, resolveClaudeExecutable, runClaudeCommand } from "../src/domain/provider/claude-auth-status-reader.js";
 
 describe.skipIf(process.platform !== "win32")("Windows Claude background commands", () => {
+  it("keeps an explicit empty config directory instead of an inherited case-variant selection", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "claude-empty-config-"));
+    try {
+      const env = claudeAuthReaderEnv({ home: root, claudeConfigDir: "" }, { claude_config_dir: "inherited-wrong", SystemRoot: process.env.SystemRoot });
+      expect(env.CLAUDE_CONFIG_DIR).toBe("");
+      expect(env.claude_config_dir).toBeUndefined();
+      const result = await runClaudeCommand(process.execPath, env, root, 2000, 100,
+        ["-e", "console.log(JSON.stringify({config:process.env.CLAUDE_CONFIG_DIR,cwd:process.cwd()}))"]);
+      expect(result.code).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ config: "", cwd: root });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("selects .exe and removes case-variant seat identity and home overrides", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-claude-reader-"));
     try {

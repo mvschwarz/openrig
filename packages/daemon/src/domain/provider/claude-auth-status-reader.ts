@@ -93,7 +93,7 @@ export function claudeAuthReaderEnv(options: ClaudeAuthReaderOptions, base: Node
     set("HOME", options.home);
     if (process.platform === "win32") set("USERPROFILE", options.home);
   }
-  if (options.claudeConfigDir) set("CLAUDE_CONFIG_DIR", options.claudeConfigDir);
+  if (options.claudeConfigDir !== undefined) set("CLAUDE_CONFIG_DIR", options.claudeConfigDir);
   set("DISABLE_AUTOUPDATER", "1");
   return env;
 }
