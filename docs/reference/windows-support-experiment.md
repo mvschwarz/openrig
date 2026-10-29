@@ -15,7 +15,7 @@ not activate the running daemon or seats.
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
 | MCP and local IPC | Actual IPv6 tool call, stdio EOF and separately asserted native forced termination | These checks do not establish whole-runtime acceptance |
-| CLI/TUI regression | New isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`, with its own daemon/CLI/TUI builds and workspace bindings | Started 2026-10-30; result pending at this checkpoint. The earlier `dd4bc689c9f8ab04b64624a24db1cee57cd57197` result remains a separate older receipt |
+| CLI/TUI regression | Isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`: 7,202 tests, 7,031 passed, 94 failed, 77 pending; source stable | TUI: 1,183 passed, zero failed, 21 pending. CLI: 5,848 passed, 94 failed, 56 pending. This older frozen source does not validate subsequent changes |
 | Native platform acceptance | Windows Terminal paths and selected native OS fixtures have individual receipts | Full visual focus, suspend/reboot, all-provider and installed-package acceptance remain incomplete |
 | Runtime-specific upstream limits | Existing Rex refusal and Linux-qualified Herdr behavior are retained | Do not erase those limits or describe an optional patched psmux protocol as stock 3.4.0 support |
 
@@ -23,6 +23,15 @@ The active task still includes finding and filling feasible implementation gaps,
 then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
+
+## Auth home test module boundary (2026-10-30)
+
+The frozen CLI run exposed three failing HOME-fallback assertions: its OS mock
+did not reach the shared implementation through the CLI's compiled daemon
+re-export. The five mocked account-home cases now live beside the daemon source.
+Two CLI boundary checks retain the real re-export and verify account-home and
+explicit-home path selection without reading credentials. These seven checks
+pass. This corrects test isolation, not production authentication behavior.
 
 ## Runner readiness from native identity (2026-10-29)
 
