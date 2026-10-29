@@ -563,6 +563,8 @@ export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "fa
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
 export type AgentActivityState = "running" | "needs_input" | "idle" | "unknown";
 export type AgentActivityEvidenceSource =
+  /** Explicit pane liveness (including tmux pane_dead), not inferred input or activity. */
+  | "pane_process"
   | "runtime_hook"
   | "pane_heuristic"
   /** ACTIVITY D1+D2 — tmux `#{window_activity}` motion (SeatActivityService). A fact about BYTES on
