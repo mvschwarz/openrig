@@ -14,6 +14,7 @@ interface Canvas {
   version: 1; cwd: string; phase: "creating" | "created" | "starting";
   pane?: ViewerPane; policy: FollowPolicy; tiles: Tile[]; events: string[];
   closing?: string;
+  viewerFailures?: Record<string, { target: string; reason: string }>;
 }
 export interface HerdrFollowDeps {
   socketPath: string;
@@ -64,6 +65,13 @@ export class HerdrFollowView {
     };
     const notice = (line: string) => {
       if (state!.events.at(-1) !== line) state!.events = [...state!.events, line].slice(-60);
+    };
+    const viewerFailure = (key: string, target: ComposedPane, failure: { phase?: string; error: string }) => {
+      const current = `${failure.phase ?? "unknown"}: ${failure.error}`;
+      const attachment = JSON.stringify([target.paneCommand, target.attachArgv, target.readOnly]);
+      const failures = state!.viewerFailures ??= {};
+      if (!failures[key] || failures[key].target !== attachment) failures[key] = { target: attachment, reason: current };
+      return `current confirmation: ${current}; first failure: ${failures[key]!.reason}`;
     };
     try {
       try {
@@ -130,6 +138,9 @@ export class HerdrFollowView {
         throw new Error("The explanation strip process is unconfirmed; pane run was not repeated.");
       }
       const members = view.task.members.map(m => ({ key: keyOf(m.key.hostId, m.key.nodeId), seat: m.seat }));
+      for (const key of Object.keys(state.viewerFailures ?? {})) {
+        if (!members.some(member => member.key === key)) delete state.viewerFailures![key];
+      }
       const controlsToKeys = (seats: string[] = []) => seats.map(seat => {
         const member = members.find(m => m.seat === seat) ?? state!.tiles.find(m => m.seat === seat);
         if (!member) throw new Error(`No current or retained member named ${seat}.`);
@@ -165,8 +176,9 @@ export class HerdrFollowView {
         try { current = await currentPane(tile.viewer); }
         catch (error) { throw new Error(`${tile.seat}: unknown: ${error instanceof Error ? error.message : String(error)}`); }
         const verified = await viewers.lookup(tile.member, tile.target);
-        if (!verified.ok) throw new Error(`${tile.seat}: ${verified.phase ?? "unknown"}: ${verified.error} Keeping the whole view.`);
+        if (!verified.ok) throw new Error(`${tile.seat}: ${viewerFailure(tile.key, tile.target, verified)} Keeping the whole view.`);
         if (JSON.stringify(verified.viewer) !== JSON.stringify(tile.viewer)) throw new Error(`${tile.seat}: Viewer mapping changed; keeping the whole view.`);
+        delete state.viewerFailures?.[tile.key];
         observations.set(tile.key, { focused: current.focused!, input: await this.deps.input?.(tile.target) ?? "unknown" });
       }
       const plan = planFollowingTiles(state.tiles, members, true, observations, policy, now());
@@ -189,12 +201,13 @@ export class HerdrFollowView {
             "--direction", anchor && state!.tiles.length % 2 ? "right" : "down", "--no-focus", "--cwd", cwd]));
           return JSON.stringify({ root_pane: split.pane });
         });
-        const originalFailure = !verified.ok ? `${verified.phase ?? "unknown"}: ${verified.error}` : undefined;
+        if (!verified.ok) { viewerFailure(join.key, target, verified); save(); }
         for (let attempt = 0; !verified.ok && attempt < 5; attempt++) {
           await new Promise(resolve => setTimeout(resolve, 50));
           verified = await viewers.lookup(memberKey, target); // read-only: never repeats a create/run.
         }
-        if (!verified.ok) { notice(`${join.seat}: ${originalFailure}; confirmation: ${verified.phase ?? "unknown"}: ${verified.error}`); continue; }
+        if (!verified.ok) { notice(`${join.seat}: ${viewerFailure(join.key, target, verified)}`); continue; }
+        delete state.viewerFailures?.[join.key];
         state.tiles.push({ key: join.key, seat: join.seat, target, member: { hostId: member.key.hostId, nodeId: member.key.nodeId }, viewer: verified.viewer });
         notice(`${join.seat}: ${join.reason}`); save();
       }
