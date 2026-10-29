@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { refocusTestPython, writeRefocusNpmFixture, writeRefocusCaptureProbe } from "./helpers/refocus-native-fixtures.js";
 import { fileURLToPath } from "node:url";
 import { deriveWorkCandidates, frontmatterIntent, type WorkCandidateLookups } from "../src/domain/current-work.js";
 import { createDb } from "../src/db/connection.js";
@@ -28,7 +29,7 @@ afterEach(() => {
 const nothingElse: WorkCandidateLookups = { getRow: () => null, continuationOf: () => null };
 
 function world() {
-  root = realpathSync(mkdtempSync(join(tmpdir(), "refocus-work-packet-")));
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "refocus-work-packet-")));
   const workspace = join(root, "workspace");
   const missions = join(workspace, "missions");
   const topology = join(root, "topology");
@@ -62,9 +63,20 @@ fi
 exit 1
 `, "utf8");
   chmodSync(rig, 0o755);
+  if (process.platform === "win32") writeRefocusNpmFixture(bin, `
+const fs=require('fs'),args=process.argv.slice(2),env=process.env;
+fs.appendFileSync(env.RIG_CALL_LOG,args.join(' ')+'\\n');
+const verb=args.slice(0,2).join(' ');
+if(verb==='queue whoami'){if(args.includes('--work-candidates')&&env.RIG_REJECT_CANDIDATES){process.stderr.write("error: unknown option '--work-candidates'");process.exit(1);}process.stdout.write(env.RIG_QUEUE_WHOAMI_STDOUT||'');process.exit(0);}
+if(verb==='whoami --json'){console.log(JSON.stringify({identity:{rigName:'demo',sessionName:'builder@demo'}}));process.exit(0);}
+if(verb==='config --json'){console.log('{}');process.exit(0);}
+if(verb==='scope resolve-notes'){const p=require('path').join(args[2],'NOTES.md');console.log(JSON.stringify({ok:true,resolution:fs.existsSync(p)?{path:p,name:'NOTES.md'}:null}));process.exit(0);}
+process.exit(1);
+`);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH || ""}`,
+    PATH: [bin, process.env.PATH || ""].join(delimiter),
+    ...(process.platform === "win32" ? { OPENRIG_NODE: process.execPath, PYTHON: refocusTestPython(), PYTHONIOENCODING: "utf-8" } : {}),
     OPENRIG_TOPOLOGY_ROOT: topology,
     OPENRIG_WORKSPACE_ROOT: workspace,
     OPENRIG_REFOCUS_WORK_NODE: undefined,
@@ -72,9 +84,12 @@ exit 1
     OPENRIG_REFOCUS_NOTES_MAX_AGE_DAYS: undefined,
     RIG_CALL_LOG: calls,
   };
-  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => spawnSync("python3", [TRACE, ...args], {
+  const trace = (args: string[], evidence?: unknown, extra: NodeJS.ProcessEnv = {}) => {
+    const result = spawnSync(refocusTestPython(), [TRACE, ...args], {
     encoding: "utf8", env: { ...env, ...extra }, input: evidence === undefined ? "" : JSON.stringify(evidence),
-  });
+    });
+    return { ...result, stdout: result.stdout?.replace(/\r\n/g, "\n") };
+  };
   return { root, workspace, missions, topology, seat, slice, bin, env, trace,
     calls: () => (existsSync(calls) ? readFileSync(calls, "utf8") : "") };
 }
@@ -339,7 +354,8 @@ describe("trace-to-root --packet — the work packet as text", () => {
     const out = w.trace(["--trees", "work", "--packet", "--work-start", w.slice]).stdout;
     expect(out).toContain("NOTES · NOTES.md\nCurrent state\nAll green.");
     expect(out).not.toContain("old entries");
-    expect(out).toMatch(new RegExp(`OLD NOTES — ${join(w.missions, "release-a/NOTES.md")}, \\d+ days old, source updated, threshold 14 days`));
+    const notesPath = join(w.missions, "release-a/NOTES.md").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(out).toMatch(new RegExp(`OLD NOTES — ${notesPath}, \\d+ days old, source updated, threshold 14 days`));
     expect(out).toContain(`SECTION NOT FOUND — no "CURRENT STATE" heading in ${join(w.slice, "NOTES.md")}`);
     // A fresh file earns no cue; the threshold is configurable.
     expect(out.match(/OLD NOTES/g)).toHaveLength(1);
@@ -364,14 +380,14 @@ describe("trace-to-root --packet — the work packet as text", () => {
     const w = world();
     writeFileSync(join(w.slice, "NOTES.md"), "---\nupdated: 2020-01-01\n---\n## Current state\nSlice notes now\n", "utf8");
     writeFileSync(join(w.slice, "PROGRESS.md"), "## Current state\nSlice progress now\n", "utf8");
-    const fromCwd = spawnSync("python3", [TRACE, "--trees", "work", "--packet"], { encoding: "utf8", env: w.env, cwd: w.slice }).stdout;
+    const fromCwd = spawnSync(refocusTestPython(), [TRACE, "--trees", "work", "--packet"], { encoding: "utf8", env: w.env, cwd: w.slice }).stdout.replace(/\r\n/g, "\n");
     expect(fromCwd).toContain("NOTES · NOTES.md\nCurrent state\nSlice notes now");
     expect(fromCwd).toContain("PROGRESS · PROGRESS.md\nCurrent state\nSlice progress now");
     const full = w.trace(["--trees", "work", "--packet", "--depth", "full", "--work-start", w.slice]).stdout;
     expect(full).toContain("PROGRESS · PROGRESS.md\n## Current state\nSlice progress now");
     expect(full).toMatch(/OLD NOTES — .*NOTES\.md, \d+ days old, source updated, threshold 14 days/);
     // Without --packet, both paths keep today's output.
-    const plainCwd = spawnSync("python3", [TRACE, "--trees", "work"], { encoding: "utf8", env: w.env, cwd: w.slice }).stdout;
+    const plainCwd = spawnSync(refocusTestPython(), [TRACE, "--trees", "work"], { encoding: "utf8", env: w.env, cwd: w.slice }).stdout.replace(/\r\n/g, "\n");
     expect(plainCwd).toMatch(/NOTES · NOTES\.md · \d+ bytes · /);
     expect(plainCwd).not.toContain("PROGRESS ·");
     const plainFull = w.trace(["--trees", "work", "--depth", "full", "--work-start", w.slice]).stdout;
@@ -466,9 +482,10 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
     mkdirSync(home, { recursive: true });
     const argvLog = join(w.root, "python-argv.log");
     const stdinLog = join(w.root, "python-stdin.log");
-    const python = join(w.bin, "python-shim");
+    let python = join(w.bin, "python-shim");
     writeFileSync(python, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${argvLog}"\ncat > "${stdinLog}"\nprintf 'TRACE OK'\n`, "utf8");
     chmodSync(python, 0o755);
+    if (process.platform === "win32") python = writeRefocusCaptureProbe(python);
     const whoami = {
       currentWork: { mission: "release-a", slice: "12-refocus", workNodePath: w.slice, basis: "one typed" },
       currentWorkBasis: "one typed",
@@ -480,7 +497,8 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
       encoding: "utf8",
       env: { ...w.env, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: "builder@demo", OPENRIG_REFOCUS_NOW: "1",
         OPENRIG_REFOCUS_TREES: "work", OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "",
-        PYTHON: python, RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(whoami), ...extra },
+        PYTHON: python, REFOCUS_TEST_ARGV_LOG: argvLog, REFOCUS_TEST_STDIN_LOG: stdinLog,
+        RIG_QUEUE_WHOAMI_STDOUT: JSON.stringify(whoami), ...extra },
     });
     expect(result.status, result.stderr).toBe(0);
     return {
@@ -530,6 +548,13 @@ describe("refocus hook — OPENRIG_REFOCUS_WORK_PACKET switch", () => {
     expect(argv).toContain("--work-candidates -");
     expect(argv).not.toContain("--work-start");
     expect(JSON.parse(stdin).candidates[0].mission).toBe("release-a");
+  });
+
+  it("preserves Unicode candidate evidence on the trace's stdin", () => {
+    const w = world();
+    writeFileSync(join(w.missions, "release-a", "SPEC.md"), "---\nintent: 保留候选归属 Ω\n---\n", "utf8");
+    const { stdin } = fire(w, { OPENRIG_REFOCUS_WORK_PACKET: "1" });
+    expect(JSON.parse(stdin).candidates[0]).toMatchObject({ mission: "release-a", intent: "保留候选归属 Ω" });
   });
 
   it("when on with an older rig CLI that rejects the flag, falls back to the plain whoami (N2)", () => {
