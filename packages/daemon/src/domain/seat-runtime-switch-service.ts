@@ -1,4 +1,8 @@
+import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
+import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
+import fs from "node:fs";
+import { RUNTIME_HOME_VAR } from "./seat-runtime-home.js";
 import { ulid } from "ulid";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -77,6 +81,11 @@ export interface SetRuntimeInput {
   model?: string;
   effort?: string;
   codexConfigProfile?: string;
+  /** Isolated target native account directory; never credential values. */
+  accountHome?: string;
+  /** Return to configured member/rig/daemon/native selection, not a historical credential. */
+  clearAccountHome?: boolean;
+  accountToken?: ClaudeSeatTokenRef;
   /** Target native permission selection; absent or "inherit" means member and rig policy. */
   permissionMode?: string;
   /** How long the successor has to confirm the handover. */
@@ -91,12 +100,16 @@ export interface RuntimeSwitchRefusal {
   switchId?: string;
   /** For a failed switch: whether it committed (it didn't, for every refusal this service returns). */
   committed?: boolean;
+  /** The uncommitted successor/pane exchange still needs recovery; do not retry the switch. */
+  recoveryPending?: boolean;
 }
 
 export interface RuntimeSwitchPlan {
   seat: { ref: string; nodeId: string; rigId: string; session: string };
   from: string;
   to: string;
+  accountHome?: string | null;
+  accountToken?: ClaudeSeatTokenRef;
   settings: RuntimeSwitchMaterials["settings"];
   permission: { mode: string; source: "explicit" | "member_or_rig_policy" };
   dropped: RuntimeSwitchMaterials["dropped"];
@@ -153,12 +166,31 @@ export class SeatRuntimeSwitchService {
     } catch { return null; }
   }
 
+  /** Validate and plan a successor-first runtime/account move, executing it under the seat's lifecycle guard unless dry-run. */
   async setRuntime(input: SetRuntimeInput): Promise<SetRuntimeResult> {
     const refuse = (code: string, message: string, guidance?: string): RuntimeSwitchRefusal => ({ ok: false, code, message, ...(guidance ? { guidance } : {}) });
     if (input.runtime !== "codex" && input.runtime !== "claude-code") {
       return refuse("invalid_runtime_settings", "Choose --runtime codex or --runtime claude-code.");
     }
     const target: SwitchRuntime = input.runtime;
+    if (input.clearAccountHome !== undefined && typeof input.clearAccountHome !== "boolean") return refuse("invalid_runtime_settings", "clearAccountHome must be true or false.");
+    if (input.clearAccountHome && (input.accountHome !== undefined || input.accountToken !== undefined)) return refuse("invalid_runtime_settings", "Choose either an account home/token or clearAccountHome, not both.");
+    if (input.accountHome !== undefined) {
+      if (typeof input.accountHome !== "string" || !nodePath.isAbsolute(input.accountHome) || /[\0\r\n]/.test(input.accountHome)) {
+        return refuse("invalid_runtime_settings", "accountHome must be an absolute directory path on one line.");
+      }
+      try {
+        if (!fs.statSync(input.accountHome).isDirectory()) throw new Error();
+        fs.accessSync(input.accountHome, fs.constants.R_OK | fs.constants.X_OK);
+      } catch { return refuse("invalid_runtime_settings", "The target account home must be an existing readable directory; nothing changed."); }
+    }
+    if (input.accountToken !== undefined) {
+      if (!input.accountHome || target !== "claude-code" || !input.accountToken ||
+          typeof input.accountToken.label !== "string" || typeof input.accountToken.tokenFile !== "string" ||
+          claudeSeatTokenRefProblem(input.accountToken) || claudeSeatTokenFileProblem(input.accountToken)) {
+        return refuse("invalid_runtime_settings", "A selected token needs a Claude account home, a label and a readable non-empty token file; nothing changed.");
+      }
+    }
     const reason = input.reason?.trim();
     if (!reason) return refuse("invalid_runtime_settings", "Give a --reason for the switch; it is recorded with it.");
     const explicit: { model?: string; effort?: string; codexConfigProfile?: string; permissionMode?: string } = {};
@@ -198,13 +230,17 @@ export class SeatRuntimeSwitchService {
     }
     const binding = sessionRegistry.getBindingForNode(node.id);
     const sessionName = binding?.tmuxSession ?? null;
-    const base = { seat: { ref: seatRef, nodeId: node.id, rigId: node.rigId, session: sessionName ?? "" }, from: node.runtime, to: target };
-    if (node.runtime === target) {
+    const base = { seat: { ref: seatRef, nodeId: node.id, rigId: node.rigId, session: sessionName ?? "" }, from: node.runtime, to: target, ...(input.clearAccountHome ? { accountHome: null } : {}) };
+    if (node.runtime === target && input.accountHome === undefined && !(input.clearAccountHome && node.accountHome)) {
       if (explicit.model || explicit.effort || explicit.codexConfigProfile || explicit.permissionMode) {
         return refuse("runtime_unchanged", `${seatRef} already runs ${target}.`,
           "Change settings within one runtime with rig seat set-model, rig seat set-effort or rig seat set-permissions.");
       }
       return { ok: true, dryRun: !!input.dryRun, changed: false, ...base };
+    }
+    if (input.accountHome !== undefined && target === "claude-code" && node.cwd) {
+      const problem = isolatedClaudeAccountProblem(input.accountHome, node.cwd, !!input.accountToken);
+      if (problem) return refuse("invalid_runtime_settings", problem);
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
@@ -258,6 +294,8 @@ export class SeatRuntimeSwitchService {
       ...(envelope ? [{ setting: "codex permission envelope", value: envelope }] : [])];
     const plan: RuntimeSwitchPlan = {
       ...base,
+      ...(input.accountHome !== undefined ? { accountHome: input.accountHome } : {}),
+      ...(input.accountToken ? { accountToken: input.accountToken } : {}),
       settings: materials.settings,
       permission: selection ? { mode: selection.mode, source: "explicit" } : { mode: "inherit", source: "member_or_rig_policy" },
       dropped,
@@ -287,6 +325,7 @@ export class SeatRuntimeSwitchService {
     return { ok: true, switchId: row.id, message: `Confirmed. OpenRig is moving ${row.canonical_session} to you now. Wait for the activation message before acting as the seat.` };
   }
 
+  /** Stage and confirm the successor before commit; failed preparation retains the predecessor and records cleanup needs. */
   private async execute(ctx: {
     input: SetRuntimeInput & { reason: string }; node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number]; seatRef: string; sessionName: string;
     predecessorPane: string; predecessorGeneration: string; target: SwitchRuntime; materials: RuntimeSwitchMaterials;
@@ -326,7 +365,7 @@ export class SeatRuntimeSwitchService {
       db.prepare(`UPDATE seat_runtime_switches SET phase = 'abandoned', outcome = ?, attention = ?, updated_at = ? WHERE id = ? AND committed_at IS NULL`)
         .run(why, retired.ok ? null : `The staged successor couldn't be retired: ${retired.message}`, stamp(), id);
       tmux.finishLaunchBinding(row.staging_session);
-      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`), switchId: id };
+      return { ...failed(`${why}${retired.ok ? "" : ` The staged successor couldn't be retired (${retired.message}); recover with rig seat set-runtime ${ctx.seatRef} --recover.`}`, retired.ok ? undefined : `Recovery is pending for ${ctx.seatRef}. Run rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, ...(!retired.ok ? { recoveryPending: true } : {}) };
     };
 
     // 1. The successor, on the target runtime, beside the predecessor.
@@ -349,14 +388,16 @@ export class SeatRuntimeSwitchService {
         claudePermissions: override.claudePermissions, kernelAuthority: override.kernelAuthority, teamPermissionDefault: override.teamPermissionDefault,
         ...(override.codexPermissions ? { codexPermissions: override.codexPermissions } : {}),
         nonInterruptive: rigRepo.getRigNonInterruptive(node.rigId), launchPosture, ...(permissionMode ? { permissionMode } : {}),
-        seatEnv: withPluginDirs(rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
+        seatEnv: withPluginDirs({ ...rigRepo.getEffectiveSeatEnv(node.id, ctx.input.accountHome === undefined),
+          ...(ctx.input.accountHome !== undefined ? { [RUNTIME_HOME_VAR[target]]: ctx.input.accountHome } : {}) }, [corePluginDir, target === "claude-code" ? materials.seatSkills.pluginDir : undefined]),
         ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       onPaneCreated: (pane) => {
         successorPane = pane;
         db.prepare("UPDATE seat_runtime_switches SET successor_pane = ?, updated_at = ? WHERE id = ?").run(pane, stamp(), id);
       },
       staged: { prepare: (binding, adapter) => materials.prepare(binding, adapter),
-        binding: { ...materials.bindingAdditions(), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
+        binding: { ...materials.bindingAdditions(), ...(ctx.input.accountHome !== undefined ? { accountHome: ctx.input.accountHome, accountToken: ctx.input.accountToken ?? null }
+          : ctx.input.clearAccountHome || node.accountHome ? { accountHome: null, ...(node.accountHome ? { accountToken: null } : {}) } : {}), runtimeSwitchFrom: { runtime: node.runtime!, session: sessionName, pane: ctx.predecessorPane, generation: ctx.predecessorGeneration } } },
     });
     if (!launch.ok) {
       const attention = launch.code === "successor_attention_required" ? " It is waiting at a login, trust or approval prompt." : "";
@@ -426,7 +467,7 @@ export class SeatRuntimeSwitchService {
         db.prepare("UPDATE seat_runtime_switches SET attention = ?, updated_at = ? WHERE id = ?")
           .run(`The commit failed (${(error as Error).message}) and the panes couldn't be exchanged back: ${back.message}`, stamp(), id);
         return { ...failed(`The commit failed (${(error as Error).message}), and the panes couldn't be put back (${back.message}).`,
-          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id };
+          `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true };
       }
       return abandon(`The commit failed: ${(error as Error).message}.`);
     }
@@ -443,6 +484,7 @@ export class SeatRuntimeSwitchService {
       warnings: finished.ok ? warnings : [...warnings, `The switch committed, but ${finished.message} Finish it with rig seat set-runtime ${ctx.seatRef} --recover.`] };
   }
 
+  /** Atomically move runtime, account references and queue custody to the confirmed successor; pane recovery follows separately. */
   private commit(ctx: {
     input: SetRuntimeInput & { reason: string }; node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number]; sessionName: string;
     predecessorPane: string; predecessorGeneration: string; target: SwitchRuntime; materials: RuntimeSwitchMaterials;
@@ -470,6 +512,9 @@ export class SeatRuntimeSwitchService {
         occupant_lifecycle = 'active', continuity_outcome = 'fresh', handover_result = 'complete', previous_occupant = ?, handover_at = ? WHERE id = ?`)
         .run(target, materials.settings.model.value, materials.settings.effort.value, materials.settings.advisor.value, materials.settings.codexConfigProfile.value,
           ...(spec ? [spec.name, spec.version, spec.hash, spec.restorePolicy] : []), ctx.sessionName, at, node.id);
+      db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = CASE WHEN ? THEN ? ELSE claude_token_ref END WHERE id = ?")
+        .run(ctx.input.accountHome ?? null, ctx.input.accountHome !== undefined || node.accountHome ? 1 : 0,
+          ctx.input.accountToken ? JSON.stringify(ctx.input.accountToken) : null, node.id);
       new NativePermissionStore(db).write(node.id, ctx.selection, ctx.input.requestedBy?.trim() || ctx.sessionName, ctx.input.reason);
       // One explicit Codex choice: the switch's mode replaces the seat's envelope here, and the event says so.
       const replaced = target === "codex" && ctx.selection ? clearCodexMemberPermissions(db, node.id) : undefined;

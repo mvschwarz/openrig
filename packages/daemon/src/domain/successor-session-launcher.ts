@@ -85,7 +85,7 @@ export interface StagedLaunch {
   canonicalSession: string;
   /** Target materials (seat storage, projection, pre-launch files), before the harness starts; returns notes. */
   prepare: (binding: NodeBinding, adapter: RuntimeAdapter) => Promise<string[]>;
-  binding?: Partial<Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile" | "runtimeSwitchFrom">>;
+  binding?: Partial<Pick<NodeBinding, "seatSkillsRoot" | "claudeManagedBlockFile" | "runtimeSwitchFrom" | "accountHome" | "accountToken">>;
 }
 
 export type SuccessorLaunchResult =

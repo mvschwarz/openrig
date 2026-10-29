@@ -192,7 +192,7 @@ export interface FourBlockReadModel {
  *  record), else the daemon's. */
 export type SeatAccountConfiguration =
   | { source: "registry"; profileRef: string; recordedAt: string; profileSaved: boolean | null }
-  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" }
+  | { source: "default_login"; home: string | null; homeNote: string; homeFrom?: "member" | "rig" | "account-switch" }
   | { source: "unknown"; reason: string };
 
 export interface SeatConfiguredAccount {
@@ -205,7 +205,7 @@ export interface SeatConfiguredAccount {
   registryNotes?: string[];
   /** A home the seat's `env:` declares that isn't an absolute path, so it isn't used: the seat resolves as if
    *  it declared none. Reported, never refused. */
-  ignoredHome?: { from: "member" | "rig"; variable: string; value: string };
+  ignoredHome?: { from: "member" | "rig" | "account-switch"; variable: string; value: string };
   /** Always unlinked: nothing supported links a configured account to an observed allowance. */
   allowance: { linked: false; reason: string };
   /** What this seat itself was observed reporting. Claude: its own status-line samples, and the seats whose

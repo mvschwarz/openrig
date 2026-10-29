@@ -1,3 +1,4 @@
+import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
@@ -283,4 +284,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeCodexPermissionsSchema,
   identityPrincipalSchema,
   sessionAgentRunnerSchema,
+  nodeAccountHomeSchema,
 ];

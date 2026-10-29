@@ -229,7 +229,7 @@ function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverServ
 }
 
 /** Slice 16: the live runtime switch, sharing the handover's dependencies. */
-function runtimeSwitchService(c: Context): SeatRuntimeSwitchService {
+export function runtimeSwitchService(c: Context): SeatRuntimeSwitchService {
   const instantiator = c.get("podInstantiator" as never) as { runtimeSwitchMaterialContext?: () => { skillsRoot?: string; systemSkills?: string[]; systemWorldError?: string } } | undefined;
   return new SeatRuntimeSwitchService({ ...handoverDeps(c), queueRepo: c.get("queueRepo" as never) as QueueRepository | undefined,
     materialResolution: instantiator?.runtimeSwitchMaterialContext?.(), openrigHome: OPENRIG_HOME });
@@ -247,11 +247,14 @@ seatRoutes.post("/set-runtime/:seatRef", async (c) => {
   const body = parsed as Record<string, unknown>;
   const text = (key: string): string | undefined | null => body[key] === undefined ? undefined : typeof body[key] === "string" ? body[key] as string : null;
   const fields = { runtime: text("runtime"), reason: text("reason"), model: text("model"), effort: text("effort"),
-    codexConfigProfile: text("codexConfigProfile"), permissionMode: text("permissionMode") };
+    codexConfigProfile: text("codexConfigProfile"), permissionMode: text("permissionMode"), accountHome: text("accountHome"), accountLabel: text("accountLabel"), tokenFile: text("tokenFile") };
   const wrong = Object.entries(fields).find(([, value]) => value === null);
   if (wrong) return c.json({ ok: false, code: "invalid_runtime_settings", message: `${wrong[0]} must be a string.` }, 400);
   if (body["dryRun"] !== undefined && typeof body["dryRun"] !== "boolean") {
     return c.json({ ok: false, code: "invalid_runtime_settings", message: "dryRun must be true or false." }, 400);
+  }
+  if (body["clearAccountHome"] !== undefined && typeof body["clearAccountHome"] !== "boolean") {
+    return c.json({ ok: false, code: "invalid_runtime_settings", message: "clearAccountHome must be true or false." }, 400);
   }
   const timeout = body["confirmTimeoutSeconds"];
   if (timeout !== undefined && (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 10 || timeout > 3600)) {
@@ -263,6 +266,9 @@ seatRoutes.post("/set-runtime/:seatRef", async (c) => {
     ...(fields.model ? { model: fields.model } : {}), ...(fields.effort ? { effort: fields.effort } : {}),
     ...(fields.codexConfigProfile ? { codexConfigProfile: fields.codexConfigProfile } : {}),
     ...(fields.permissionMode ? { permissionMode: fields.permissionMode } : {}),
+    ...(fields.accountHome !== undefined ? { accountHome: fields.accountHome! } : {}),
+    ...(body["clearAccountHome"] === true ? { clearAccountHome: true } : {}),
+    ...(fields.tokenFile !== undefined ? { accountToken: { label: fields.accountLabel ?? "selected-account", tokenFile: fields.tokenFile! } } : {}),
     ...(typeof timeout === "number" ? { confirmTimeoutMs: timeout * 1000 } : {}),
   });
   if (result.ok) return c.json(result, "recoveryPending" in result && result.recoveryPending ? 202 : 200);

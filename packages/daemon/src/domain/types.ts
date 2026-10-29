@@ -38,6 +38,8 @@ export interface Node {
   advisor?: string | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
+  /** Explicit native account-home selection; a path only, not credential data. */
+  accountHome?: string | null;
   codexConfigProfile?: string | null;
   /** A Claude seat's own subscription credential, as a reference (operator label and token-file path); null = none. */
   claudeTokenRef?: { label: string; tokenFile: string } | null;

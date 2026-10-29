@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
-import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatRuntimeHome, withoutRuntimeHomes } from "../src/domain/seat-runtime-home.js";
+import { claudeConfigRootFor, declaredRuntimeHomes, effectiveRuntimeHome, seatAccountHome, seatRuntimeHome, withoutRuntimeHomes } from "../src/domain/seat-runtime-home.js";
 
 // A seat's own runtime home comes from its stored `env:`: the member's value, else the rig's.
 const open: Database.Database[] = [];
@@ -17,6 +17,22 @@ function db(rows: { rig?: object; members: Record<string, object | undefined> })
 }
 
 describe("seatRuntimeHome", () => {
+  it("does not fall back to daemon credentials when the stored account selection cannot be read", () => {
+    const d = db({ members: { a: undefined } });
+    d.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT; ALTER TABLE nodes ADD COLUMN runtime TEXT");
+    d.prepare("UPDATE nodes SET account_home = ?, runtime = 'codex' WHERE id = 'a'").run("/accounts/selected");
+    expect(seatAccountHome(d, "a", "codex")).toBe("/accounts/selected");
+    d.close(); open.splice(open.indexOf(d), 1);
+    expect(() => effectiveRuntimeHome(d, "a", "codex", "/accounts/daemon")).toThrow();
+  });
+
+  it("refuses an invalid stored selection rather than silently choosing a different home", () => {
+    const d = db({ members: { a: undefined } });
+    d.exec("ALTER TABLE nodes ADD COLUMN account_home TEXT; ALTER TABLE nodes ADD COLUMN runtime TEXT");
+    d.prepare("UPDATE nodes SET account_home = ?, runtime = 'codex' WHERE id = 'a'").run("relative-home");
+    expect(() => effectiveRuntimeHome(d, "a", "codex", "/accounts/daemon")).toThrow(/stored account-home selection is invalid/);
+  });
+
   it("takes the member's value over the rig's, per runtime", () => {
     const d = db({ rig: { CLAUDE_CONFIG_DIR: "/homes/rig-claude", CODEX_HOME: "/homes/rig-codex" },
       members: { a: { CODEX_HOME: "/homes/a-codex" }, b: undefined } });

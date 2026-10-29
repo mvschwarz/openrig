@@ -1,3 +1,4 @@
+import { providerRoutes } from "../src/routes/provider.js";
 // Slice 16: a live seat moves between Codex and Claude Code, successor first. Real repositories on an in-memory
 // database; tmux and the runtime adapters are fakes that keep which pane each session holds, so the exchange, the
 // rollback and the retirement are observable. Nothing native runs here; the native cases are named in the PR.
@@ -127,6 +128,195 @@ describe("live seat runtime switch", () => {
     predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
   });
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
+
+  it("switches a Codex seat to another account home on the same runtime, committing only after confirmation", async () => {
+    const accountHome = path.join(home, "api-account");
+    fs.mkdirSync(accountHome);
+    const pending = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "review" });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Use API budget", accountHome, model: "gpt-5.5" });
+
+    expect(result).toMatchObject({ ok: true, changed: true, from: "codex", to: "codex", accountHome, recoveryPending: false });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(accountHome);
+    expect(queueRepo.getById(pending.qitemId)).toMatchObject({ destinationSession: SEAT, state: "pending" });
+    expect(sessionRegistry.getBindingForNode(nodeId)).toMatchObject({ tmuxSession: SEAT, tmuxPane: "%5" });
+  });
+
+  it("an unconfirmed account-home successor leaves the source home, settings and token reference unchanged", async () => {
+    const accountHome = path.join(home, "api-account"); fs.mkdirSync(accountHome);
+    const sourceHome = path.join(home, "source-account"); fs.mkdirSync(sourceHome);
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?")
+      .run(sourceHome, JSON.stringify({ label: "old", tokenFile: path.join(home, "old-token") }), nodeId);
+    const before = nodeRow();
+    const svc = service();
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Use API budget", accountHome, model: "other-model", confirmTimeoutMs: 1000 });
+    expect(result).toMatchObject({ ok: false, committed: false });
+    expect(nodeRow()).toEqual(before);
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(sourceHome);
+    expect(rigRepo.getRig((db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id)?.nodes.find(n => n.id === nodeId)?.claudeTokenRef?.label).toBe("old");
+  });
+
+  it.each([true, false])("an explicit return to configured login stages without the old override and commits only after confirmation (%s)", async confirms => {
+    const oldHome = path.join(home, "old-account"); fs.mkdirSync(oldHome);
+    const oldToken = JSON.stringify({ label: "old-account", tokenFile: path.join(home, "old-token") });
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ?, env_json = ? WHERE id = ?")
+      .run(oldHome, oldToken, JSON.stringify({ CODEX_HOME: "/accounts/configured" }), nodeId);
+    const target = adapter("codex");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeNull();
+      expect(binding.accountToken).toBeNull();
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(oldHome);
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { codex: target } });
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Plan reset", clearAccountHome: true, dryRun: true }))
+      .toMatchObject({ ok: true, dryRun: true, changed: true, accountHome: null });
+    if (confirms) successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Plan reset", clearAccountHome: true, confirmTimeoutMs: 1000 });
+    expect(result.ok).toBe(confirms);
+    const row = db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as Record<string, unknown>;
+    expect(row).toEqual({ account_home: confirms ? null : oldHome, claude_token_ref: confirms ? null : oldToken });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBe(confirms ? "/accounts/configured" : oldHome);
+  });
+
+  it("a default-home no-op acknowledges clear without deleting an unrelated legacy token", async () => {
+    const token = JSON.stringify({ label: "legacy", tokenFile: "/tokens/legacy" });
+    db.prepare("UPDATE nodes SET claude_token_ref = ? WHERE id = ?").run(token, nodeId);
+    expect(await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Already default", clearAccountHome: true }))
+      .toMatchObject({ ok: true, changed: false, accountHome: null });
+    expect((db.prepare("SELECT claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { claude_token_ref: string }).claude_token_ref).toBe(token);
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("an ordinary runtime switch without an account override retains legacy launch semantics", async () => {
+    const target = adapter("claude-code");
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeUndefined();
+      expect(binding.accountToken).toBeUndefined();
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { "claude-code": target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Ordinary switch" })).toMatchObject({ ok: true });
+  });
+
+  it.each(["codex", "claude-code"])("a plain switch from %s clears its stale home before the successor starts", async from => {
+    const to = from === "codex" ? "claude-code" : "codex";
+    db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = ? WHERE id = ?").run("/accounts/old-source", JSON.stringify({ label: "old", tokenFile: "/tokens/old" }), nodeId);
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(from, nodeId);
+    const target = adapter(to);
+    vi.mocked(target.launchHarness).mockImplementation(async binding => {
+      expect(binding.accountHome).toBeNull();
+      expect(binding.accountToken).toBeNull();
+      return { ok: true };
+    });
+    const svc = service({ runtimeAdapters: { [to]: target } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: to, reason: "Change runtime" })).toMatchObject({ ok: true });
+    expect(db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId))
+      .toEqual({ account_home: null, claude_token_ref: null });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId)[to === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBeUndefined();
+  });
+
+  it.each(["codex", "claude-code"])("the %s successor gets the target home before any configuration commit", async (runtime) => {
+    const accountHome = path.join(home, "target-account"); fs.mkdirSync(accountHome);
+    const targetAdapter = adapter(runtime);
+    vi.mocked(targetAdapter.launchHarness).mockImplementation(async (binding) => {
+      expect(binding.accountHome).toBe(accountHome);
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CODEX_HOME).toBeUndefined();
+      expect(nodeRow().runtime).toBe("codex");
+      return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: runtime === "codex" ? "codex_id" : "claude_id" };
+    });
+    const svc = service({ runtimeAdapters: { [runtime]: targetAdapter } });
+    successorConfirms(svc);
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime, reason: "Use selected account", accountHome });
+    expect(result).toMatchObject({ ok: true, changed: true, accountHome });
+    expect(rigRepo.getEffectiveSeatEnv(nodeId)[runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(accountHome);
+  });
+
+  it.each(["relative-home", "/does-not-exist/account-home", "bad\npath"])("refuses unusable target home %j before any staging", async accountHome => {
+    const result = await service().setRuntime({ seatRef: SEAT, runtime: "codex", reason: "Change account", accountHome });
+    expect(result).toMatchObject({ ok: false, code: "invalid_runtime_settings" });
+    expect(fakeTmux.createSession).not.toHaveBeenCalled();
+    expect(nodeRow().runtime).toBe("codex");
+  });
+
+  it("the provider-switch route plans the same-runtime account selection through the native switch", async () => {
+    const accountHome = path.join(home, "target-account"); fs.mkdirSync(accountHome);
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      for (const [key, value] of Object.entries({ db, rigRepo, sessionRegistry, eventBus, queueRepo,
+        discoveryRepo: new DiscoveryRepository(db), tmuxAdapter: fakeTmux, runtimeAdapters: { codex: adapter("codex") } })) c.set(key as never, value as never);
+      await next();
+    });
+    app.route("/api/provider", providerRoutes());
+    const response = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, toAccount: "api", accountHome, reason: "Use API budget", dryRun: true }) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, dryRun: true, from: "codex", to: "codex", accountHome });
+    expect(openSwitch()).toBeUndefined();
+    const cleared = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, clearAccountHome: true, reason: "Return to configured login", dryRun: true }) });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ ok: true, dryRun: true, accountHome: null });
+    const invalid = await app.request("/api/provider/switch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: SEAT, clearAccountHome: true, toAccount: "ambiguous", reason: "Invalid" }) });
+    expect(invalid.status).toBe(400);
+  });
+
+  it("a target Claude setup-token reference is staged and committed with its home, replacing any previous token", async () => {
+    const accountHome = path.join(home, "plan-account"); fs.mkdirSync(accountHome);
+    const tokenFile = path.join(home, "plan-token"); fs.writeFileSync(tokenFile, "synthetic-fixture-not-a-token", { mode: 0o600 });
+    const accountToken = { label: "claude-plan", tokenFile };
+    const targetAdapter = adapter("claude-code");
+    vi.mocked(targetAdapter.launchHarness).mockImplementation(async (binding) => {
+      expect(binding).toMatchObject({ accountHome, accountToken });
+      expect(rigRepo.getEffectiveSeatEnv(nodeId).CLAUDE_CONFIG_DIR).toBeUndefined();
+      return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: "claude_id" };
+    });
+    const svc = service({ runtimeAdapters: { "claude-code": targetAdapter } }); successorConfirms(svc);
+    expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Plan reset", accountHome, accountToken }))
+      .toMatchObject({ ok: true, accountHome });
+    const selected = db.prepare("SELECT account_home, claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { account_home: string; claude_token_ref: string };
+    expect(selected.account_home).toBe(accountHome);
+    expect(JSON.parse(selected.claude_token_ref)).toEqual(accountToken);
+    expect(JSON.stringify(selected)).not.toContain("synthetic-fixture-not-a-token");
+  });
+
+  const accounts = [
+    { name: "codex-plan", runtime: "codex", token: false }, { name: "codex-api", runtime: "codex", token: false },
+    { name: "claude-plan", runtime: "claude-code", token: true }, { name: "claude-api", runtime: "claude-code", token: false },
+  ];
+  it.each(accounts.flatMap(from => accounts.map(to => ({ from, to }))))(
+    "moves $from.name to $to.name while retaining the seat's queue, claims and edges", async ({ from, to }) => {
+      const sourceHome = path.join(home, from.name); fs.mkdirSync(sourceHome);
+      const targetHome = from.name === to.name ? sourceHome : path.join(home, to.name); if (targetHome !== sourceHome) fs.mkdirSync(targetHome);
+      const tokenFile = path.join(home, "claude-plan-token"); fs.writeFileSync(tokenFile, "synthetic-fixture-not-a-token", { mode: 0o600 });
+      const token = { label: "claude-plan", tokenFile };
+      db.prepare("UPDATE nodes SET runtime = ?, account_home = ?, claude_token_ref = ?, codex_config_profile = NULL WHERE id = ?")
+        .run(from.runtime, sourceHome, from.token ? JSON.stringify(token) : null, nodeId);
+      const rigId = (db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string }).rig_id;
+      const peer = rigRepo.addNode(rigId, "orch.lead", { runtime: "codex" });
+      rigRepo.addEdge(rigId, peer.id, nodeId, "delegates_to");
+      const edges = rigRepo.getRig(rigId)!.edges;
+      const item = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Build" });
+      queueRepo.claim({ qitemId: item.qitemId, destinationSession: SEAT });
+      const target = adapter(to.runtime);
+      vi.mocked(target.launchHarness).mockImplementation(async binding => {
+        expect(binding.accountHome).toBe(targetHome);
+        expect(binding.accountToken).toEqual(to.token ? token : null);
+        expect(rigRepo.getEffectiveSeatEnv(nodeId)[from.runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(sourceHome);
+        return { ok: true, resumeToken: "11111111-2222-4333-8444-555555555555", resumeType: to.runtime === "codex" ? "codex_id" : "claude_id" };
+      });
+      const svc = service({ runtimeAdapters: { [to.runtime]: target } }); successorConfirms(svc);
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: to.runtime, reason: "Select account", accountHome: targetHome,
+        ...(to.token ? { accountToken: token } : {}) })).toMatchObject({ ok: true, changed: true, claimsMoved: 1 });
+      expect(rigRepo.getRig(rigId)!.edges).toEqual(edges);
+      expect(queueRepo.getById(item.qitemId)).toMatchObject({ destinationSession: SEAT, state: "in-progress" });
+      expect(rigRepo.getEffectiveSeatEnv(nodeId)[to.runtime === "codex" ? "CODEX_HOME" : "CLAUDE_CONFIG_DIR"]).toBe(targetHome);
+      const row = db.prepare("SELECT claude_token_ref FROM nodes WHERE id = ?").get(nodeId) as { claude_token_ref: string | null };
+      expect(row.claude_token_ref ? JSON.parse(row.claude_token_ref) : null).toEqual(to.token ? token : null);
+    });
 
   it("the preview shows the target's settings and where each comes from, what is cleared, and the costs; nothing changes", async () => {
     new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "full_bypass" }, "operator@test", "earlier choice");
@@ -449,6 +639,7 @@ describe("live seat runtime switch", () => {
       });
       a.route("/api/queue", queueRoutes());
       a.route("/api/seat", seatRoutes);
+      a.route("/api/provider", providerRoutes());
       return a;
     };
     const as = (generation: string, session = SEAT) => ({ "Content-Type": "application/json", "X-OpenRig-Session": session, "X-OpenRig-Occupant-Generation": generation });
@@ -459,13 +650,24 @@ describe("live seat runtime switch", () => {
       return openSwitch();
     };
 
+    it("the provider account-home alias also fences a retired predecessor", async () => {
+      await committedSwitch();
+      const response = await app().request("/api/provider/switch", { method: "POST", headers: as(predecessorGeneration),
+        body: JSON.stringify({ seat: SEAT, toAccount: "api", accountHome: home, reason: "Old process tries again" }) });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ ok: false });
+    });
+
     it("a staged successor that couldn't be retired stays fenced, and recovery at the next start retires it", async () => {
       const a = app();
       const work = await queueRepo.create({ sourceSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "owned work", nudge: false });
       fakeTmux.signalPaneProcess.mockImplementation(async () => ({ ok: false, code: "tmux_error", message: "controlled retirement failure" }) as never);
       fakeTmux.isPaneDead.mockImplementation(async () => false);
       const svc = service();
-      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 })).toMatchObject({ ok: false, committed: false });
+      expect(await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "limit", confirmTimeoutMs: 10_000 })).toMatchObject({
+        ok: false, committed: false, recoveryPending: true,
+        guidance: "Recovery is pending for dev.impl@seat-rig. Run rig seat set-runtime dev.impl@seat-rig --recover.",
+      });
       const row = openSwitch();
       expect(row).toMatchObject({ phase: "abandoned", attention: expect.stringMatching(/couldn't be retired/) });
       const claim = await a.request(`/api/queue/${work.qitemId}/claim`, { method: "POST", headers: as(row.successor_generation), body: "{}" });
