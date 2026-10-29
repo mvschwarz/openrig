@@ -202,15 +202,15 @@ describe("#69 production detector with a fake executor", () => {
   const kinds = ["fresh", "fork", "resume", "restore", "last"] as const;
 
   function fixture(kind: typeof kinds[number], detectDaemonSupport?: CodexDaemonSupportDetector,
-    posture: "floor" | "full_bypass" = "floor", profile?: string) {
+    posture: "floor" | "full_bypass" = "floor", profile?: string, selectedPath = launchPath) {
     const tmux = mockTmux();
     const model = "model's name";
     const adapter = new CodexRuntimeAdapter({
       tmux, fsOps: mockFs(), listProcesses: () => [], sleep: async () => {},
-      launchPath, detectDaemonSupport, verifyProfilePreflight: async () => ({ ok: true }),
+      launchPath: selectedPath, detectDaemonSupport, verifyProfilePreflight: async () => ({ ok: true }),
     });
     const restore = new CodexResumeAdapter(tmux, {
-      launchPath, detectDaemonSupport, sleep: async () => {}, maxWaitMs: 0, exec: async () => "",
+      launchPath: selectedPath, detectDaemonSupport, sleep: async () => {}, maxWaitMs: 0, exec: async () => "",
     });
     const run = () => kind === "restore" || kind === "last"
       ? restore.resume("r01-qa", kind === "last" ? "codex_last" : "codex_id", "thread's id", cwd, profile, posture, model)
@@ -221,6 +221,12 @@ describe("#69 production detector with a fake executor", () => {
         });
     return { run, commands: () => sentCommands(tmux) };
   }
+
+  it.each(kinds)("%s keeps an explicitly empty PATH in the dispatched command", async kind => {
+    const actual = fixture(kind, undefined, "floor", undefined, "");
+    await actual.run();
+    expect(actual.commands().find(command => command.includes("codex"))).toContain("env PATH='' ");
+  });
 
   for (const kind of kinds) {
     for (const posture of ["floor", "full_bypass"] as const) {

@@ -2005,3 +2005,22 @@ it, and the Claude environment retains the empty value. No real provider or
 credential was used. Native empty-PATH and adjacent network checks passed all
 49 cases; daemon TypeScript checking passed. Launch/resume command construction
 is a separate remaining audit scope.
+# Codex selected PATH continuation (2026-10-30)
+
+Explicit empty launch PATH now survives the Codex fresh, fork, resume, restore
+and last-session command builders, profile preflight and plugin CLI environment.
+Profile preflight also retains the selected working directory and PATH when no
+independent CODEX_HOME was configured. Undefined PATH retains the inherited
+environment; an explicit empty value does not silently inherit daemon tools.
+
+The five dispatch regressions failed before the fix; their containing test file
+passes 38/38. Profile binding and owned plugin fixture checks pass 35/35, and
+daemon TypeScript checking passes. These checks use injected runtime boundaries
+and owned synthetic files, not real provider or stock psmux launch acceptance.
+
+Separately, the frozen CLI/TUI run at
+`dd4bc689c9f8ab04b64624a24db1cee57cd57197` completed with source stability
+verified: 7,190 cases, 7,017 passed, 96 failed and 77 pending. CLI accounts for
+5,834 passed, 96 failed and 56 skipped; TUI has 1,183 passed and 21 skipped.
+That older frozen head is an investigation receipt, not current-head acceptance
+or runtime activation. Remaining failures still require individual diagnosis.

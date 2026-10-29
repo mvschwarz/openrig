@@ -290,7 +290,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight ?? ((profile, cwd, home) => {
       const selected = home ?? this.codexHome;
-      return defaultProfilePreflight(profile, selected ? { cwd, codexHome: selected, launchPath: this.launchPath } : undefined);
+      return defaultProfilePreflight(profile, { cwd, ...(selected ? { codexHome: selected } : {}), launchPath: this.launchPath });
     });
   }
 
@@ -526,7 +526,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       this.fs.mkdirp(nodePath.dirname(manifestPath));
       this.fs.writeFile(manifestPath, manifest);
     }
-    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath !== undefined ? { PATH: this.launchPath } : {}) };
     if (recorded === undefined) {
       const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
       if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
@@ -2031,7 +2031,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private launchCommand(command: string, home: string | undefined = this.codexHome): string {
-    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
+    const env = [this.launchPath !== undefined ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
     return env.length ? `env ${env.join(" ")} ${command}` : command;
   }
 }
@@ -2953,10 +2953,10 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` through
 // execRuntimeProbe (utf-8, 10s bound, off the event loop). Injected as the
 // adapter's default verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
+async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome?: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const execFn = (cmd: string) => execRuntimeProbe("codex.runtime.profile_preflight", cmd,
-    selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {});
+    selected ? { cwd: selected.cwd, env: { ...process.env, ...(selected.codexHome ? { CODEX_HOME: selected.codexHome } : {}), ...(selected.launchPath !== undefined ? { PATH: selected.launchPath } : {}) } } : {});
   return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 

@@ -22,11 +22,13 @@ function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void
   const version = JSON.parse(fs.readFileSync(path.join(plugin, ".codex-plugin/plugin.json"), "utf8")).version;
   const cache = path.join(home, "plugins/cache/openrig/openrig-core", version);
   const calls: string[][] = [];
-  const adapter = () => new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, codexHome: home,
+  const callEnvs: NodeJS.ProcessEnv[] = [];
+  const adapter = (launchPath?: string) => new CodexRuntimeAdapter({ tmux: {} as TmuxAdapter, codexHome: home, launchPath,
     fsOps: { readFile: p => fs.readFileSync(p, "utf8"), writeFile: (p,c) => fs.writeFileSync(p,c), exists: fs.existsSync, mkdirp: p => fs.mkdirSync(p,{recursive:true}) },
     resolveCorePluginDir: () => plugin, codexSystemConfigDir: path.join(root, "etc"),
-    runCodexCli: async args => {
+    runCodexCli: async (args, env) => {
       calls.push(args);
+      callEnvs.push({ ...env });
       if (args[1] === "add") {
         fs.cpSync(plugin, cache, {recursive:true});
         if (corruptCache) fs.appendFileSync(path.join(cache,"hooks/scripts/refocus.cjs"),"\nmodified");
@@ -38,8 +40,13 @@ function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void
     },
   });
   const read = () => parse(fs.readFileSync(file,"utf8")) as any;
-  return {adapter, read, file, plugin, cache, calls, home};
+  return {adapter, read, file, plugin, cache, calls, callEnvs, home};
 }
+it("retains an explicitly empty PATH for owned plugin CLI operations", async () => {
+  const f = fixture(); await f.adapter("").ensureCodexCorePlugin();
+  expect(f.callEnvs).toHaveLength(2);
+  expect(f.callEnvs.map(env => env.PATH)).toEqual(["", ""]);
+});
 it("a fresh install has all six exact plugin hooks trusted before the first seat starts", async () => {
   const f = fixture(); await f.adapter().ensureCodexCorePlugin();
   const states = f.read().hooks?.state ?? {};
