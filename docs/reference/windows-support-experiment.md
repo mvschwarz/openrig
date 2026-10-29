@@ -10,6 +10,7 @@ not activate the running daemon or seats.
 | Area | Current implementation/evidence | Remaining work or evidence limit |
 | --- | --- | --- |
 | Pane identity and runner readiness | Native process census and owned PowerShell/Node positive/negative fixtures | Stock psmux end-to-end launch/restore acceptance remains incomplete |
+| Native pane shells | PowerShell/pwsh startup transport and managed-runner identity checks; cmd idle-shell census exists | cmd startup transport, wrapper lineage and runner/model readiness are not implemented as a coherent supported path |
 | Codex, Claude, Pi and OMP launch selection | Selected homes, native npm layouts, argv, Pi RPC fixture, Pi/OMP child-cwd fixes | Synthetic programs do not prove real provider conversations; npm Claude native identity limitations remain |
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
@@ -271,6 +272,22 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Remaining native cmd pane path (2026-10-30)
+
+Current source inspection confirms a coordinated implementation gap, rather
+than an external-runtime limitation: sendWindowsShellCommand in tmux.ts refuses
+cmd panes and emits a PowerShell-only staged-script invocation. The idle-shell
+census in native-process-lineage.ts already recognizes bare cmd, but
+windows-managed-runner.ts requires a PowerShell/pwsh pane with the managed
+runner as its direct child, and model-divergence/current-generation-record.ts
+uses the same direct-parent boundary for Pi. The Windows launch renderers also
+produce PowerShell scripts. Removing only the transport refusal would leave
+readiness and model attribution inconsistent. Complete cmd support therefore
+still requires a coherent invocation, owned wrapper lineage, readiness/model
+identity and actual owned-process checks. This remains open implementation
+work; no cmd support, acceptance, source-wide parity or completion is claimed.
+No live pane was entered, started, stopped or reconfigured during this audit.
 
 ## Auth home test module boundary (2026-10-30)
 
