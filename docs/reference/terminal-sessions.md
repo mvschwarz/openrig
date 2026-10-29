@@ -338,7 +338,12 @@ child slice by its exact name or unique ID. Each row counts once even when it
 has both tags. Flat legacy slices without that parent association are not
 inferred into a mission. A child's historical status or composition activation
 flag does not remove its current obligations from the union. Duplicate mission
-IDs or colliding child slice names/IDs are ambiguous, never first-match.
+IDs are ambiguous. Shared child names/IDs are omitted from bare slice matching;
+rows with one indexed claimant mission are placed through their mission tag.
+A shared-key row with missing, contradictory or non-claimant mission tags is
+named in `issues` and makes the snapshot incomplete; known owners remain.
+The launcher reads this same terminal preview and submits its `expectedPlan`
+when opening, rather than using the review-agent roster.
 
 Slice and mission keys are case-sensitive and can include Unicode, plus signs and internal
 spaces. They cannot be empty or contain slash, backslash, control characters,
