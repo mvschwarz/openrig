@@ -324,7 +324,7 @@ export function checkWindowsDirectoryWriteAccess(directory: string): void {
 /** Synchronous append for existing synchronous receipt writers: native owner,
  * one-link and DACL checks/tightening precede append and durable flush. */
 export function appendWindowsPrivateText(file: string, content: string): void {
-  execFileSync(nativeHelper(), ["append-private", file], {
+  execFileSync(nativeHelper(), ["append-private", toNamespacedPath(file)], {
     input: Buffer.from(content, "utf8").toString("base64"), windowsHide: true,
     timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],
   });
@@ -332,7 +332,7 @@ export function appendWindowsPrivateText(file: string, content: string): void {
 
 function operate(file: string, operation: "read" | "read-owned" | "write", limit: number, content = ""): string {
   try {
-    return execFileSync(nativeHelper(), [operation, file, String(limit)], {
+    return execFileSync(nativeHelper(), [operation, toNamespacedPath(file), String(limit)], {
       input: operation === "write" ? Buffer.from(content, "utf8").toString("base64") : "", encoding: "utf8",
       maxBuffer: Math.max(64 * 1024, limit * 2 + 4096), windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] });
   } catch (error) {

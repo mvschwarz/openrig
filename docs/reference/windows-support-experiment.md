@@ -1788,3 +1788,18 @@ long-path journeys pass with the original paths and instructions preserved.
 The three-suite run had 115 tests: 113 passed, two file-symlink fixtures could
 not be created on this host (EPERM). No cases were waived; daemon TypeScript
 checking passed. No live compaction was requested.
+
+## Native owned-text long paths (2026-10-30)
+
+An actual path beyond MAX_PATH was readable through Node but the native bounded
+reader reported it missing. Native regular/owned text reads, owned writes and
+private append now pass namespaced Windows paths to their existing handle-based
+helper. Owner, bounded-length, single-link and DACL logic is unchanged.
+
+The reproducer failed before the change and passes after it: deep Unicode-path
+reads, replacement, two private appends, and multi-hardlink refusal preserve the
+expected bytes. A compaction consumer now reuses its equivalent owned ignore
+file at a deep configured root instead of stopping. These cases plus the native
+directory and private channel-ledger checks passed five tests; daemon TypeScript
+checking passed. This does not establish long-path coverage for every native
+helper operation or runtime/provider acceptance.

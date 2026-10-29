@@ -667,6 +667,15 @@ it('configured preparation root: stays bound to the attempt while later seats us
  expect(readFileSync(first.mapPath,'utf8')).toContain(first.marker);
 });
 
+it.runIf(process.platform==='win32')('configured preparation root: reuses an owned equivalent ignore file beyond MAX_PATH',async()=>{
+ const f=fixture(),root=join(f.home,...Array.from({length:5},()=> 'native long map directory '.repeat(3)));
+ mkdirSync(root,{recursive:true});writeFileSync(join(root,'.gitignore'),'*\n');f.policy.preparationRoot=root;
+ await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'waiting',delivery:'delivered'});
+ expect(f.e.getPreparationState(seat)!.mapPath).toContain(root);
+ expect(readFileSync(join(root,'.gitignore'),'utf8')).toBe('*\n');
+});
+
 for(const mode of ['manual','automatic'] as const)it(`configured preparation root: ${mode} keeps the bounded command and carries the original long path and instruction into restore`,async()=>{
  const f=fixture();
  const root=join(f.home,...Array.from({length:8},()=> 'allowed-map-directory-'.repeat(4)));
