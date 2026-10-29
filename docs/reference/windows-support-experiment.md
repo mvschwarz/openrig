@@ -1866,3 +1866,18 @@ backslashes too, including trailing separators and YAML filename references,
 while retaining exact known-name priority and unknown references verbatim.
 All 73 hydrate cases passed, including native local/path joins and unavailable
 spec preservation; TUI TypeScript checking passed.
+
+## Package export names from native source paths (2026-10-30)
+
+Package planning already joins guidance source paths with native filesystem
+semantics, but manifest name derivation split only on `/`. A Windows guidance
+source such as `guidance\AGENTS.md` therefore became the entire export name.
+Validation and normalization now use a basename operation accepting both
+separator forms; explicit names remain unchanged. Derived agent duplicate-name
+checks use the same separator handling.
+
+The real package resolver/install-planner fixture reproduced the incorrect name
+before the fix and now retains `AGENTS.md` with the expected native source and
+target paths. Role guidance lookup and duplicate-name validation are covered.
+All 57 manifest/planner cases passed on Windows; daemon TypeScript checking
+passed. No package was installed into a user workspace.

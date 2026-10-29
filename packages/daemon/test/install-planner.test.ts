@@ -53,6 +53,14 @@ function resolvePackage(manifestYaml: string) {
 }
 
 describe("InstallPlanner", () => {
+  it.runIf(process.platform === "win32")("plans an unnamed guidance export from a native manifest source path", () => {
+    const yaml = BASIC_MANIFEST.replace("guidance/AGENTS.md", String.raw`guidance\AGENTS.md`).replace("      name: review-guide\n", "");
+    const resolved = resolvePackage(yaml);
+    const plan = new InstallPlanner(mockFs(BASIC_SOURCE_FILES)).plan(resolved, "/repo", "codex");
+    expect(plan.actionable.find(entry => entry.exportType === "guidance")).toMatchObject({
+      exportName: "AGENTS.md", sourcePath: path.join("/pkg", "guidance", "AGENTS.md"), targetPath: path.join("/repo", "AGENTS.md"),
+    });
+  });
   // Test 1: Clean repo -> all safe_projection
   it("clean repo -> all entries classified safe_projection", () => {
     const resolved = resolvePackage(BASIC_MANIFEST);
