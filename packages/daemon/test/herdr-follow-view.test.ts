@@ -30,7 +30,7 @@ function fixture() {
   const frames = new Map<string, ComposerSnapshot | null>();
   let transform = (view: ComposedView) => view;
   let lateFocus: { seat: string; reads: number } | undefined;
-  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false;
+  let clock = 100, lostCreate = false, lostClose = false, readsFailed = false, hideViewers = false, failedViewerRun = false;
   const run = async (args: string[]) => {
     calls.push(args);
     const command = args.slice(0, 2).join(" ");
@@ -59,6 +59,7 @@ function fixture() {
       if (args[3]!.startsWith("/usr/bin/tail")) {
         selected.argv = ["/usr/bin/tail", "-n", "30", "-F", path.join(selected.cwd, "..", "events.log")];
       } else {
+        if (failedViewerRun) { failedViewerRun = false; throw new Error("first attach dispatch failed"); }
         // The shared composer produces one wrapper per actual seat.
         const seat = ["a", "b", "c", "d"].find(s => args[3]!.includes(`'${s}'`))!;
         selected.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`];
@@ -96,6 +97,8 @@ function fixture() {
   };
   const exitViewer = (seat: string) => { [...panes.values()].find(p => p.argv.at(-1) === `$${seat}`)!.argv = ["/bin/bash"]; };
   return { follow, create, panes, calls, rpc, inputs, frames, exitViewer, journal,
+    failViewerRun: () => { failedViewerRun = true; },
+    confirmViewer: (seat: string) => { const entry = JSON.parse(readFileSync(journal(), "utf8")).entries[JSON.stringify(["self", seat])]; panes.get(entry.pane.pane_id)!.argv = ["/usr/bin/tmux", "-S", "/tmp/follow-seats.sock", "attach", "-f", "ignore-size", "-t", `$${seat}`]; },
     hideViewers: () => { hideViewers = true; }, advance: (ms: number) => { clock += ms; },
     loseCreate: () => { lostCreate = true; }, loseClose: () => { lostClose = true; }, failReads: () => { readsFailed = true; },
     changeTarget: () => { transform = view => ({ ...view, opened: view.opened.map(target => target.seat === "a"
@@ -134,11 +137,35 @@ describe("stable task-following workspace", () => {
     expect(held.error).toContain("The viewer process is not confirmed");
     await f.follow(); expect(f.calls.slice(count).some(c => ["run", "close", "split"].includes(c[1]!))).toBe(false);
   });
+  it("keeps the first dispatch failure in later notices across refresh and recreation", async () => {
+    const f = fixture(); await f.follow(); f.focusSeat("b"); f.inputs.set("b", "text"); f.failViewerRun();
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.following!.events.at(-1)).toContain("first failure: starting: Viewer effect is unconfirmed: first attach dispatch failed");
+    const count = f.calls.length;
+    const resumed = f.create();
+    for (let i = 0; i < 2; i++) {
+      const later = await resumed.follow("qitem:task", task(["a", "b", "c", "d"]), { enabled: true }, async () => true);
+      expect(later.following!.events.at(-1)).toContain("current confirmation: starting: The viewer process is not confirmed");
+      expect(later.following!.events.at(-1)).toContain("first failure: starting: Viewer effect is unconfirmed: first attach dispatch failed");
+    }
+    expect(f.calls.slice(count).some(c => ["run", "split", "close", "create"].includes(c[1]!))).toBe(false);
+    expect(f.inputs.get("b")).toBe("text");
+    expect([...f.panes.values()].find(p => p.argv.at(-1) === "$b")?.focused).toBe(true);
+  });
+  it("clears a resolved failure before reporting a later viewer hold", async () => {
+    const f = fixture(); await f.follow(); f.failViewerRun(); await f.follow(["a", "b", "c", "d"]);
+    f.confirmViewer("d");
+    expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ opened: ["a", "b", "c", "d"] });
+    f.exitViewer("d");
+    const held = await f.follow(["a", "b", "c", "d"]);
+    expect(held.error).toContain("first failure: starting: The viewer process is not confirmed");
+    expect(held.error).not.toContain("first attach dispatch failed");
+  });
   it("a known refusal before split preserves its reason and allows a later join", async () => {
     const f = fixture(); await f.follow(); const count = f.calls.length; let reads = 0;
     const held = await f.follow(["a", "b", "c", "d"], {}, true, async () => ++reads !== 3);
     expect(held.opened).toEqual(["a", "b", "c"]);
-    expect(held.following!.events.join("\n")).toContain("d: creating: Membership changed before the split.");
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Membership changed before the split.");
     expect(f.calls.slice(count).some(c => ["split", "run", "close"].includes(c[1]!))).toBe(false);
     expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
     expect(f.calls.slice(count).filter(c => c[1] === "split")).toHaveLength(1);
@@ -151,7 +178,7 @@ describe("stable task-following workspace", () => {
       retainedFile = path.join(entry.cwd, "retained-note"); writeFileSync(retainedFile, "keep this file");
       return false;
     });
-    expect(held.following!.events.join("\n")).toContain("d: creating: Membership changed before the split.");
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Membership changed before the split.");
     expect(JSON.parse(readFileSync(f.journal(), "utf8")).entries[JSON.stringify(["self", "d"])]).toBeUndefined();
     expect(readFileSync(retainedFile, "utf8")).toBe("keep this file");
     expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: true, opened: ["a", "b", "c", "d"] });
@@ -160,7 +187,7 @@ describe("stable task-following workspace", () => {
   it("an uncertain dispatched split keeps its intent even when enumeration is empty", async () => {
     const f = fixture(); await f.follow(); f.loseCreate(); f.hideViewers(); const count = f.calls.length;
     const held = await f.follow(["a", "b", "c", "d"]);
-    expect(held.following!.events.join("\n")).toContain("d: creating: Viewer effect is unconfirmed: lost create response");
+    expect(held.following!.events.join("\n")).toContain("first failure: creating: Viewer effect is unconfirmed: lost create response");
     const before = readFileSync(f.journal(), "utf8");
     await f.follow(["a", "b", "c", "d"]);
     expect(readFileSync(f.journal(), "utf8")).toBe(before);
