@@ -700,6 +700,20 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
   });
 
   describe("keeping the seat's pane (a running seat relaunched in place)", () => {
+    it("keeps a native Windows pane untouched when its default shell cannot be read", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      const live = liveDriver(rigId, nodeIds[0]!);
+      Object.assign(tmux, { isNativeWindows: true, getDefaultShell: vi.fn(async () => null) });
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true });
+      expect(result.launched).toEqual([expect.objectContaining({ status: "failed", error: expect.stringContaining("default shell") })]);
+      expect((tmux as any).signalPaneProcess).not.toHaveBeenCalled();
+      expect((tmux as any).setRemainOnExit).not.toHaveBeenCalled();
+      expect((tmux as any).respawnPane).not.toHaveBeenCalled();
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "running" });
+    });
     function liveDriver(rigId: string, nodeId: string, pane = "%7") {
       const live = sessionRegistry.registerSession(nodeId, "dev-driver@test-rig");
       sessionRegistry.updateStatus(live.id, "running");

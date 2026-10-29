@@ -49,8 +49,8 @@ describe("SuccessorSessionLauncher", () => {
     return { runtime, launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier, isNativeWindows = false): SuccessorSessionLauncher {
+    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand, isNativeWindows } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
@@ -62,6 +62,33 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it("does not terminate a native Windows retiree when its default shell is unknown", async () => {
+    getDefaultShell.mockResolvedValue(null);
+    expect(await launcher(undefined, true).createSuccessor({ node: { id: "node-1", runtime: "codex" }, departingSessionName: "dev-impl@rig" }))
+      .toMatchObject({ ok: false, code: "default_shell_unavailable", replacementStarted: false });
+    expect(signalPaneProcess).not.toHaveBeenCalled(); expect(setRemainOnExit).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled(); expect(launchHarness).not.toHaveBeenCalled();
+  });
+
+  it("uses the confirmed native shell without a second read after stopping the retiree", async () => {
+    const shell = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+    getDefaultShell.mockResolvedValueOnce(shell).mockResolvedValue(null);
+    getPaneCommand.mockResolvedValue("powershell.exe");
+    expect(await launcher(undefined, true).createSuccessor({ node: { id: "node-1", runtime: "codex" }, departingSessionName: "dev-impl@rig" })).toMatchObject({ ok: true });
+    expect(getDefaultShell).toHaveBeenCalledOnce();
+    expect(respawnPane).toHaveBeenCalledWith("%7", shell, expect.anything());
+    expect(getDefaultShell.mock.invocationCallOrder[0]).toBeLessThan(signalPaneProcess.mock.invocationCallOrder[0]!);
+  });
+
+  it("creates no native Windows staging session when its default shell is unknown", async () => {
+    getDefaultShell.mockResolvedValue(null);
+    const onPaneCreated = vi.fn();
+    const staged = {} as Parameters<SuccessorSessionLauncher["stageSuccessor"]>[0]["staged"];
+    expect(await launcher(undefined, true).stageSuccessor({ node: { id: "node-1", runtime: "codex" }, stagingSession: "owned-stage", canonicalSession: "dev-impl@rig", occupantGeneration: "gen", onPaneCreated, staged }))
+      .toMatchObject({ ok: false, code: "default_shell_unavailable" });
+    expect(createSession).not.toHaveBeenCalled(); expect(onPaneCreated).not.toHaveBeenCalled(); expect(launchHarness).not.toHaveBeenCalled();
+  });
 
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({

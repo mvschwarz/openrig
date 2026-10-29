@@ -7,6 +7,23 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Default-shell failure before native pane cutover, 2026-10-29
+
+The callsite audit found a native lifecycle gap: a failed default-shell read
+fell back to /bin/sh after the kept pane's old process had already been stopped.
+Controlled orchestrator and successor tests reproduced the old behavior before
+the fix. For the native Windows multiplexer, takeover now confirms the configured
+shell before changing remain-on-exit or signalling the old process. Unknown shell
+returns default_shell_unavailable, with the existing running session/binding
+preserved. Staging likewise refuses before creating a session. A known native
+shell is used explicitly and read only once, before cutover; no shell is guessed.
+The POSIX fallback contract remains unchanged.
+
+Both complete test files passed: 92 tests, no skips, covering kept-pane record
+preservation, native refusal, confirmed-shell ordering and ordinary successor
+regressions. These mocks/temporary databases stop no actual seat and do not prove
+complete Windows restore or PowerShell idle readiness.
+
 ## Native window routing with inherited Rex markers, 2026-10-29
 
 Consumer review found the Rex fast path running before the Windows platform

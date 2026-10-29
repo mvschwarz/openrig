@@ -602,6 +602,11 @@ export class TmuxAdapter {
     return this.serverArgs.length ? `tmux ${posixJoinArgv([...this.serverArgs])}${command.slice(4)}` : command;
   }
 
+  /** Whether pane commands run in the native Windows multiplexer. */
+  get isNativeWindows(): boolean {
+    return this.terminalKind === "psmux" && process.platform === "win32";
+  }
+
   /**
    * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
    * elements are verbatim (no quoting layer) when argvExec is wired;
