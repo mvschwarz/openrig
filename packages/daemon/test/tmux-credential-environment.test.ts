@@ -29,7 +29,10 @@ for (const transport of ["argv", "legacy"] as const) {
       if (scoped) {
         // source-file hides the tmux client's inputs, but the nested shell argv must be safe too.
         const plan = await (a as unknown as { scopedLaunchCommand(env: Record<string, string>, command: string): Promise<string[] | null> }).scopedLaunchCommand(env, "/bin/sh");
-        expect(plan?.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
+        // This fixture selects the POSIX transport. A native Windows host
+        // refuses its POSIX scoped launcher rather than claiming it can run it.
+        if (process.platform === "win32") expect(plan).toBeNull();
+        else expect(plan?.some(arg => Object.values(credentials).some(value => arg.includes(value)))).toBe(false);
       }
       expect([...writes.values()].some(content => content.includes(credentials.OPENRIG_ACTIVITY_HOOK_TOKEN))).toBe(true);
       for (const call of files.writeFile.mock.calls) expect(call[2]).toEqual({ mode: 0o600, flag: "wx" });

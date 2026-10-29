@@ -7,6 +7,26 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
+## Optional private environment protocol, 2026-10-29
+
+OpenRig can select a versioned file protocol when a psmux backend advertises the
+exact capability. The pinned v3.4.0 source candidate and isolated build guidance
+are in [scripts/windows](../../scripts/windows/README.md). A protected current-SID
+manifest replaces initial/respawn values in client and server argv. Successful
+responses dispose it; uncertain execution retains it without a literal retry.
+Capability observation failures stop the attempt. Stock 3.4.0 still uses its
+existing experimental literal transport, with its argv visibility limitation.
+No binary is installed or selected by this change.
+
+The related five-suite selection passed 68 tests with five platform/opt-in skips;
+workspace build/typecheck passed. A native isolated candidate exercised the
+actual adapter with a manifest path containing spaces and verified exact values,
+user config precedence, later panes, warm-server isolation, rejected malformed
+input, direct respawn and file disposal. Its namespace and pane processes were
+stopped, temporary files removed and default session list unchanged. This is
+synthetic local evidence; interactive PowerShell readiness after respawn and
+stock-backend privacy remain open.
+
 ## Current-occupant parsing after rebase, 2026-10-29
 
 Windows Claude/Codex candidates now parse native argv and compare the executable
