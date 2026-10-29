@@ -8,6 +8,7 @@ import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readNativeProcessArguments } from "./native-process-arguments.js";
 import { readProcessTable } from "./process-table.js";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
+import { readWindowsConsoleProcesses } from "./windows-process-facts.js";
 
 
 export interface NativeProcessRow {
@@ -999,6 +1000,25 @@ function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow 
     && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid) ? root : null;
 }
 
+/** Windows has no foreground process groups. Require a bare interactive shell
+ * and a kernel console census with no other receiver, including orphan children. */
+async function observedIdleShellRoot(rows: NativeProcessRow[], pid: number,
+  consoleProcesses = readWindowsConsoleProcesses): Promise<NativeProcessRow | null> {
+  const root = rows.find(row => row.pid === pid);
+  if (root?.platform !== "win32") return idleShellRoot(rows, pid);
+  if (new Set(rows.map(row => row.pid)).size !== rows.length || !root.startedAt || !root.executablePath) return null;
+  const argv = rowArgv(root);
+  const name = executableName(root.executablePath);
+  if (name !== executableName(root.executableName ?? "") || name !== executableName(argv[0] ?? "")) return null;
+  if (name === "powershell" || name === "pwsh") {
+    if (!argv.slice(1).every(arg => /^-(?:NoLogo|NoProfile|NoExit|Sta|Mta)$/i.test(arg))) return null;
+  } else if (name === "cmd") {
+    if (!argv.slice(1).every(arg => /^\/(?:[dqak]|[vef]:(?:on|off))$/i.test(arg))) return null;
+  } else return null;
+  const members = await consoleProcesses(pid);
+  return members?.length === 1 && members[0] === pid ? root : null;
+}
+
 /** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with
  * nothing else in its group, and it is the same shell both times. A missing, failed or changing listing is not idle:
  * a launch script still starting the runtime holds the foreground the same way a shell label would suggest. */
@@ -1006,12 +1026,13 @@ export async function verifyPaneIdleShell(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
   listProcesses?: NativeProcessLister;
+  consoleProcesses?: typeof readWindowsConsoleProcesses;
 }): Promise<boolean> {
   const sample = async (): Promise<string | null> => {
     try {
       const pid = await input.tmux.getPanePid(input.target);
       if (!pid) return null;
-      const root = idleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid);
+      const root = await observedIdleShellRoot(await (input.listProcesses ?? listNativeProcesses)(), pid, input.consoleProcesses);
       return root ? JSON.stringify(root) : null;
     } catch { return null; }
   };
@@ -1031,7 +1052,7 @@ export interface ClaudeDeliveryObservation {
  *  unknown. */
 export async function observeClaudeDelivery(
   input: Parameters<typeof observeNativePaneProcess>[0],
-  opts: { unknownKeepsIdle?: boolean } = {},
+  opts: { unknownKeepsIdle?: boolean; consoleProcesses?: typeof readWindowsConsoleProcesses } = {},
 ): Promise<ClaudeDeliveryObservation> {
   const unknown = { state: "unknown" as const, detail: "Claude runtime identity could not be established" };
   const sample = async (): Promise<ClaudeDeliveryObservation & { fingerprint?: string }> => {
@@ -1078,7 +1099,7 @@ export async function observeClaudeDelivery(
       // A Codex launcher chain in a Claude seat keeps warn-and-send (#1088 review).
       const other = nativeProcessCandidates(rows, pid, "codex").length === 1 ? selectNativeProcess(rows, pid) : null;
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
-      const root = idleShellRoot(rows, pid);
+      const root = await observedIdleShellRoot(rows, pid, opts.consoleProcesses);
       if (root) {
         return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
       }

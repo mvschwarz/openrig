@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, observeClaudeDelivery, observeCodexForkProcess, explainNativeRejection, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { parseWindowsProcesses, verifyCodexPaneProcess, verifyClaudePaneProcess, verifyPaneIdleShell, observeClaudeDelivery, observeCodexForkProcess, explainNativeRejection, listNativeProcesses, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const born = "2026-10-08T01:00:00Z";
 function rows(): NativeProcessRow[] {
@@ -10,6 +10,31 @@ function rows(): NativeProcessRow[] {
 }
 const verify = (values: NativeProcessRow[], token = "exact-id", foreground = "codex") => verifyCodexPaneProcess({ target: "pane", tmux: { getPanePid: async () => 100, getPaneCommand: async () => foreground }, listProcesses: () => values, expectedToken: token, requireResume: true });
 describe("Windows process ancestry without fabricated foreground groups", () => {
+  it("requires two stable kernel console observations before declaring a Windows shell idle", async () => {
+    const shell = [rows()[0]!];
+    const input = { target: "pane", tmux: { getPanePid: async () => 100 }, listProcesses: () => shell };
+    expect(await verifyPaneIdleShell({ ...input, consoleProcesses: async () => [100] })).toBe(true);
+    // A receiver omitted by an inaccessible CIM row still blocks idle.
+    expect(await verifyPaneIdleShell({ ...input, consoleProcesses: async () => [100, 999] })).toBe(false);
+    expect(await verifyPaneIdleShell({ ...input, consoleProcesses: async () => null })).toBe(false);
+    expect(await verifyPaneIdleShell({ ...input, consoleProcesses: async () => { throw new Error("unavailable"); } })).toBe(false);
+    let samples = 0;
+    expect(await verifyPaneIdleShell({ ...input, consoleProcesses: async () => ++samples === 1 ? [100] : [100, 999] })).toBe(false);
+    expect((await observeClaudeDelivery(input, { consoleProcesses: async () => [100], unknownKeepsIdle: false })).state).toBe("idle_shell");
+    expect((await observeClaudeDelivery(input, { consoleProcesses: async () => [100, 999], unknownKeepsIdle: false })).state).toBe("unknown");
+  });
+
+  it("does not call a running PowerShell command or an inconsistent executable a bare shell", async () => {
+    for (const change of [
+      { command: '"C:\\pwsh.exe" -NoProfile -EncodedCommand YQ==' },
+      { command: '"C:\\pwsh.exe" -File launch.ps1' },
+      { executablePath: "C:\\different.exe" },
+    ]) {
+      const shell = [{ ...rows()[0]!, ...change }];
+      expect(await verifyPaneIdleShell({ target: "pane", tmux: { getPanePid: async () => 100 }, listProcesses: () => shell, consoleProcesses: async () => [100] })).toBe(false);
+    }
+  });
+
   it("explains a quoted Windows resume using the same argv as identity verification", async () => {
     const values = rows();
     values[1]!.command = '"C:\\program space\\codex.exe" resume "exact-id"';

@@ -7,7 +7,29 @@ process observation, snapshot/down/restore, and graceful daemon stop. It remains
 an experimental fork; it is not an upstream Windows support announcement.
 Use in a particular local deployment does not establish general native support.
 
-## Native process-facts follow-up, 2026-10-29
+## Native console-membership follow-up, 2026-10-29
+
+Windows idle-shell proof can query actual console members with AttachConsole /
+GetConsoleProcessList from a separate current-user helper. The helper sends no
+control event and restores its own standard handles after detaching. A known
+bare interactive shell is idle only after two stable process/console samples
+show no other receiving process; a child omitted from a process listing still
+blocks the proof. A PowerShell script/encoded command is not assumed idle just
+because it runs under a shell executable. Claude's returned-to-shell check now
+considers Windows shell candidates but still requires this native proof.
+
+Native console/lineage suites passed 18 tests; existing process-lineage/Claude
+delivery suites passed 297 tests. Workspace lint/typecheck passed. An expanded
+process-table selection had one Windows failure from its POSIX mkfifo fixture
+and two skips; it is not reported green. Isolated psmux 3.4.0 acceptance observed
+one console member and idle=true for an explicitly bare PowerShell, then two
+members and idle=false after an owned Node receiver started. Its unique socket
+namespace was stopped. Default psmux's -NoExit -Command bootstrap remains
+unknown rather than being promoted to idle; its completion needs more evidence.
+The same isolated probe also confirmed both /dev/null and Windows's null device
+work for this psmux version's capture preflight, so that literal was not changed.
+
+## Earlier native process-facts follow-up, 2026-10-29
 
 Codex in-place restart no longer relies on `/proc` on Windows. A shared read-only
 query observes a target's cwd, exact command-line words, kernel executable path

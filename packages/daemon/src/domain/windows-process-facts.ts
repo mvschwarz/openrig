@@ -29,6 +29,11 @@ public static class OpenRigRunProcesses {
   [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr process, IntPtr address, byte[] data, IntPtr size, out IntPtr read);
   [DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr process, out bool wow64);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref int size);
+  [DllImport("kernel32.dll")] static extern bool AttachConsole(uint pid);
+  [DllImport("kernel32.dll")] static extern bool FreeConsole();
+  [DllImport("kernel32.dll")] static extern uint GetConsoleProcessList([Out] uint[] processes, uint capacity);
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+  [DllImport("kernel32.dll")] static extern bool SetStdHandle(int kind, IntPtr handle);
   [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
   [DllImport("ntdll.dll", EntryPoint="NtQueryInformationProcess")] static extern int QueryBasic(IntPtr process, int kind, out BasicInfo info, int size, out int returned);
   [DllImport("ntdll.dll", EntryPoint="NtQueryInformationProcess")] static extern int QueryPointer(IntPtr process, int kind, out IntPtr info, int size, out int returned);
@@ -137,6 +142,37 @@ public static class OpenRigRunProcesses {
     }
     throw new InvalidOperationException();
   }
+  public static uint[] ConsoleMembers(int pid) {
+    IntPtr process=OwnProcess(pid);
+    if(process==IntPtr.Zero) return null;
+    var input=GetStdHandle(-10); var output=GetStdHandle(-11); var error=GetStdHandle(-12);
+    bool attached=false;
+    try {
+      // This helper alone leaves its console; no control event is sent to any target.
+      FreeConsole();
+      attached=AttachConsole((uint)pid);
+      if(!attached) return null;
+      uint capacity=16;
+      for(int attempt=0;attempt<3;attempt++) {
+        var members=new uint[capacity];
+        uint count=GetConsoleProcessList(members,capacity);
+        if(count==0) return null;
+        if(count>capacity) { capacity=count; continue; }
+        var result=new List<uint>(); bool target=false;
+        uint self=(uint)Process.GetCurrentProcess().Id;
+        for(int i=0;i<count;i++) {
+          if(members[i]==pid) target=true;
+          if(members[i]!=self) result.Add(members[i]);
+        }
+        return target ? result.ToArray() : null;
+      }
+      return null;
+    } finally {
+      if(attached) FreeConsole();
+      SetStdHandle(-10,input); SetStdHandle(-11,output); SetStdHandle(-12,error);
+      CloseHandle(process);
+    }
+  }
   public static int[] Find(string marker) {
     var result=new List<int>();
     foreach(var candidate in Process.GetProcesses()) {
@@ -154,7 +190,10 @@ public static class OpenRigRunProcesses {
   }
 }
 '@
-if($env:OPENRIG_PROCESS_QUERY_PID) {
+if($env:OPENRIG_PROCESS_CONSOLE_PID) {
+  $members=[OpenRigRunProcesses]::ConsoleMembers([int]$env:OPENRIG_PROCESS_CONSOLE_PID)
+  if($null -eq $members) { 'null' } else { ConvertTo-Json -InputObject @($members) -Compress }
+} elseif($env:OPENRIG_PROCESS_QUERY_PID) {
   $facts=[OpenRigRunProcesses]::Facts([int]$env:OPENRIG_PROCESS_QUERY_PID)
   if($null -eq $facts) { 'null' } else { ConvertTo-Json -InputObject $facts -Depth 4 -Compress }
 } else {
@@ -168,7 +207,7 @@ async function query(values: Record<string, string>): Promise<unknown> {
     const { stdout } = await exec(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(QUERY, "utf16le").toString("base64")],
       { windowsHide: true, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024,
-        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
+        env: { ...process.env, TEMP: temporary, TMP: temporary, OPENRIG_PROCESS_QUERY_PID: "", OPENRIG_PROCESS_CONSOLE_PID: "", OPENRIG_MARKER_QUERY: "", ...values } });
     return JSON.parse(stdout.replace(/^\uFEFF/, ""));
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
@@ -202,4 +241,13 @@ export async function readWindowsProcessFacts(pid: number): Promise<WindowsProce
     }
   }
   return { cwd: pathResolve(row.cwd), exe: row.exe, argv: parseWindowsCommandLine(row.command), env };
+}
+
+/** Kernel console members, including orphan receivers no longer linked by parent PID. */
+export async function readWindowsConsoleProcesses(pid: number): Promise<number[] | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null;
+  const members = await query({ OPENRIG_PROCESS_CONSOLE_PID: String(pid) });
+  if (members === null) return null;
+  if (!Array.isArray(members) || !members.every(value => Number.isSafeInteger(value) && value > 0) || !members.includes(pid)) throw new Error("Invalid native console membership");
+  return [...new Set(members)].sort((a, b) => a - b);
 }

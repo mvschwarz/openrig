@@ -636,7 +636,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *  Claude is gone. With a bound pane, the process tree must show the pane's shell holding the terminal with
    *  nothing under it; Claude, or a launch script about to start it, is a slow resume. */
   private async paneReturnedToShell(binding: NodeBinding, paneCommand: string | null): Promise<boolean> {
-    if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) return false;
+    if (!paneCommand) return false;
+    const windowsShell = /^(?:powershell|pwsh|cmd)(?:\.exe)?$/i.test(paneCommand);
+    if (!windowsShell && !SHELL_COMMANDS.has(paneCommand)) return false;
+    // A Windows shell label can be a live launch wrapper. The native console
+    // proof below, never the label, decides whether it has no receiving child.
     if (!binding.tmuxPane) return true;
     const observed = await observeClaudeDelivery({ target: binding.tmuxPane, tmux: this.tmux, listProcesses: this.listProcesses },
       { unknownKeepsIdle: false });
