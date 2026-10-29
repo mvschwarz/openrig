@@ -161,7 +161,7 @@ describe("Git context initial download", () => {
   it("leaves an explicitly supplied checkout and its history unchanged", () => {
     const f = fixture(); transport.calls = [];
     const added = addGitContext(f.upstream, { checkout: true }, f.root);
-    expect(added.selected.checkout).toBe(f.upstream);
+    expect(added.selected.checkout).toBe(process.platform === "win32" ? realpathSync.native(f.upstream) : f.upstream);
     expect(git(f.upstream, "rev-parse", "--is-shallow-repository")).toBe("false");
     expect(git(f.upstream, "cat-file", "-t", f.oldBlob)).toBe("blob");
     expect(transport.calls.some(a => a.includes("fetch") || a.includes("clone"))).toBe(false);

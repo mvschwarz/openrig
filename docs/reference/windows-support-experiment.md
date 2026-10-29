@@ -1,5 +1,23 @@
 # Native Windows support experiment
 
+## Git context checkout aliases (2026-10-29)
+
+The full CLI failure receipt led to an owned local Git reproduction: Node's
+portable `realpathSync()` retained the temporary directory's `DAJIAO~1` DOS
+alias, while Git for Windows returned its long path. Both names opened the same
+checkout, but the strict root comparison rejected it as a subdirectory.
+Windows now uses `realpathSync.native()` consistently for checkout-root and pack
+containment resolution; POSIX uses the existing resolver.
+
+Both Git context suites passed 20/20 on native Windows after this change,
+including shallow SHA-1/SHA-256 retrieval, upstream branch inference, updates,
+preserved local changes and merge conflicts, real subdirectory rejection and
+directory-junction escape rejection. Fixture assertions compare the selected
+checkout's exact bytes, retaining Git's CRLF conversion rather than rewriting
+production output. CLI TypeScript checking and diff whitespace checking passed.
+These owned local repositories do not establish authenticated remote transport
+or installed-provider acceptance.
+
 ## Additional owned CLI fixtures (2026-10-29)
 
 The remaining explicit fetch-guard failures in the full `8ad49dd2b` CLI receipt
