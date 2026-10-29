@@ -1917,3 +1917,22 @@ read. Hook/bridge/native-discovery checks passed 28 tests with two existing
 skips; daemon TypeScript checking and skill-mirror checking passed. Plugin
 manifests are 0.1.25; changed skill digests are checked against staged Git bytes,
 not only working-tree bytes. Runtime deployment remains separate.
+
+## Refocus native home and command environment snapshots (2026-10-30)
+
+Refocus state no longer falls back to `/tmp/.openrig` on Windows when HOME is
+absent: it uses the OS home, retaining explicit OPENRIG_HOME and HOME precedence.
+The actual hook fixture verifies baseline and PostCompact pending state in an
+owned native profile, then verifies the explicit instance override. It does not
+run a live refocus trace or read a real user's transcript. POSIX fallback is
+unchanged.
+
+The standalone rig/Python command helpers also accept native-case environment
+snapshot keys rather than only fixed PATH/Path/PYTHON spellings. Windows lookup
+uses Node's sorted-key precedence, retaining an empty winning PATH instead of
+falling through to another alias. Synthetic npm rig resolution and explicit
+interpreter invocation passed. The two focused cases passed; the separately
+running refocus budget/concurrency batch passed 13 cases. Helper edits continued
+during that batch, so it is not an exact-commit acceptance run. Daemon TypeScript
+and mirror checks passed. Both plugin manifests are 0.1.26; no live plugin was
+installed or refreshed.

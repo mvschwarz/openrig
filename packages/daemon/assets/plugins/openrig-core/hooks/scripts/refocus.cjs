@@ -9,6 +9,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const crypto = require("node:crypto");
 const { spawnRig } = require("./rig-command.cjs");
 const { spawnPython } = require("./python-command.cjs");
@@ -359,7 +360,7 @@ function runsForThisSeatsProject(env = process.env) {
   if (event === "SessionStart") process.exit(0);
 
   const seat = process.env.OPENRIG_SESSION_NAME || "unknown-seat";
-  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || "/tmp", ".openrig");
+  const home = process.env.OPENRIG_HOME || path.join(process.env.HOME || (process.platform === "win32" ? os.homedir() : "/tmp"), ".openrig");
   const transcriptPath = input.transcript_path || input.transcriptPath || "";
   let size = 0;
   try { size = fs.statSync(transcriptPath).size; } catch {}

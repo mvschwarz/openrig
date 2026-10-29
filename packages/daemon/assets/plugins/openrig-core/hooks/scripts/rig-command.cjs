@@ -7,7 +7,8 @@ const { spawnSync } = require("node:child_process");
 // only its recognized OpenRig package entry, through this hook's Node, without a shell.
 function resolveRigCommand(env = process.env, cwd = process.cwd()) {
   if (process.platform !== "win32") return { command: "rig", prefix: [] };
-  for (const value of (env.PATH ?? env.Path ?? "").split(path.delimiter)) {
+  const pathKey = Object.keys(env).sort().find(key => key.toUpperCase() === "PATH");
+  for (const value of (pathKey === undefined ? "" : env[pathKey] ?? "").split(path.delimiter)) {
     const dir = path.resolve(cwd, value.replace(/^"(.*)"$/, "$1"));
     for (const ext of [".com", ".exe", ".bat", ".cmd"]) {
       const candidate = path.join(dir, "rig" + ext);
