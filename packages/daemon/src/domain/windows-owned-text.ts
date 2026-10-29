@@ -22,6 +22,8 @@ public static class OpenRigOwnedText {
       else if(args[0]=="auth-read")Console.Write(ReadAuth(args[1]));
       else if(args[0]=="auth-copy")CopyAuth(args[1],args[2],args[3],args[4]);
       else if(args[0]=="auth-directory")AuthDirectory(args[1]);
+      else if(args[0]=="append-private")AppendPrivate(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
+      else if(args[0]=="seal-private") { using(var file=Open(args[1],true,false,true))SealPrivate(file); }
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
@@ -46,7 +48,7 @@ public static class OpenRigOwnedText {
   [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle file,int type,uint requested,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
-  static SafeFileHandle Open(string path,bool write,bool fresh=false) {
+  static SafeFileHandle Open(string path,bool write,bool fresh=false,bool seal=false) {
     byte[] descriptor=null; GCHandle pinned=default(GCHandle);
     var security=new SecurityAttributes(); security.length=Marshal.SizeOf(security);
     if(write) {
@@ -58,7 +60,7 @@ public static class OpenRigOwnedText {
       pinned=GCHandle.Alloc(descriptor,GCHandleType.Pinned); security.descriptor=pinned.AddrOfPinnedObject();
     }
     try {
-      var file=CreateFile(path,write?0x40020000u:0x80000000u,write?0u:1u,ref security,write?(fresh?1u:4u):3u,0x00200000u,IntPtr.Zero);
+      var file=CreateFile(path,write?(seal?0x40060000u:0x40020000u):0x80000000u,write?0u:1u,ref security,write?(fresh?1u:4u):3u,0x00200000u,IntPtr.Zero);
       if(file.IsInvalid) {
         int error=Marshal.GetLastWin32Error(); file.Dispose();
         if(error==2 || error==3) throw new FileNotFoundException("input file missing");
@@ -103,6 +105,31 @@ public static class OpenRigOwnedText {
         using(var stream=new FileStream(file,FileAccess.Write)) { stream.SetLength(0); stream.Write(bytes,0,bytes.Length); }
       }
     } finally { Array.Clear(bytes,0,bytes.Length); }
+  }
+  static void AppendPrivate(string path,byte[] bytes) {
+    try {
+      using(var file=Open(path,true,false,true)) {
+        SealPrivate(file);
+        using(var stream=new FileStream(file,FileAccess.Write)) {
+          stream.Seek(0,SeekOrigin.End);stream.Write(bytes,0,bytes.Length);stream.Flush(true);
+        }
+      }
+    } finally { Array.Clear(bytes,0,bytes.Length); }
+  }
+  static void SealPrivate(SafeFileHandle file) {
+    Regular(file,true,true); // ownership and one-link checks precede ACL changes.
+    using(var identity=WindowsIdentity.GetCurrent()) {
+      var acl=new FileSecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
+      acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,AccessControlType.Allow));
+      var bytes=acl.GetSecurityDescriptorBinaryForm();var pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+      try {
+        bool present,defaulted;IntPtr dacl;
+        if(!GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),out present,out dacl,out defaulted) || !present)throw new InvalidOperationException("private file DACL missing");
+        uint error=SetSecurityInfo(file,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+        if(error!=0)throw new Win32Exception((int)error);
+      } finally { pinned.Free(); }
+    }
+    Private(file);
   }
   static string Assess(SafeFileHandle file) {
     Regular(file,false);
@@ -269,6 +296,10 @@ function nativeHelper(): string {
   });
   return file;
 }
+
+/** Stage the native assembly once before a worker's synchronous log barrier.
+ * The worker receives only the executable path and performs all log I/O. */
+export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
 
 function operate(file: string, operation: "read" | "read-owned" | "write", limit: number, content = ""): string {
   try {
