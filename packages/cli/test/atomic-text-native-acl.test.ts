@@ -13,6 +13,7 @@ import { realpathSync } from "node:fs";
 import { registerBundleProject } from "../../daemon/src/domain/workspace/project-registration.js";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../../daemon/src/domain/codex-auth.js";
+import { DEFAULT_HEALTH_POLICY, HealthPolicyStore } from "../../daemon/src/domain/health-policy.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -146,4 +147,17 @@ it.runIf(process.platform === "win32")("saves and switches synthetic auth with e
   expect(authList({ ...paths, profileDir: outside })).toEqual([]);
   const linked = join(account, "linked-profiles"); symlinkSync(outside, linked, "junction");
   expect(authList({ ...paths, profileDir: linked })).toEqual([]);
+});
+it.runIf(process.platform === "win32")("retains a protected health policy access policy when applying an authored change", () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "health-policy-acl-")));
+  const store = new HealthPolicyStore(root, () => ({ warningPercent: 80, criticalPercent: 95 }));
+  mkdirSync(join(root, "health"));
+  createPrivateTextFile(store.path, JSON.stringify(DEFAULT_HEALTH_POLICY));
+  const before = accessPolicy(store.path);
+  const policy = structuredClone(DEFAULT_HEALTH_POLICY); policy.thresholds.ceremonyTransitions++;
+  expect(store.apply(policy, "fixture@rig").policy).toEqual(policy);
+  expect(accessPolicy(store.path)).toBe(before);
+  expect(store.apply(policy, "fixture@rig").policy).toEqual(policy);
+  expect(readdirSync(join(root, "health")).sort()).toEqual(["policy-history", "policy.json"]);
+  expect(readdirSync(join(root, "health", "policy-history"))).toHaveLength(1);
 });

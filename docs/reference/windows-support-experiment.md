@@ -2430,3 +2430,21 @@ listing and unchanged owned outside-fixture content. Combined seat-storage
 checks pass 24/24, and daemon TypeScript checking passes. Only synthetic test
 storage was cleaned; no actual seat material or live deployment was touched.
 The separately pinned CLI/TUI run remains pending at this source checkpoint.
+
+## Existing health policy access preservation (2026-10-30)
+
+Applying an authored health policy used another rename-only replacement path.
+An actual HealthPolicyStore update against an owned protected-DACL file
+reproduced access-policy loss. Existing regular Windows policies now use private
+staging and metadata-preserving replacement. New policies, final-link entry
+replacement and POSIX writes retain their previous paths. Proposed policy and
+predecessor history, validation and unchanged-policy short circuit remain.
+
+The native fixture failed before repair and now verifies returned/readback
+policy, protected access retention, idempotent application, one history entry
+and no staging residue. The focused case passes; daemon TypeScript checking
+passes. Adjacent health correction/diagnosis checks pass 26/29; all three
+failures occur creating host-denied file symlinks before the relevant boundary
+can be exercised. They remain unverified. This checks existing live-policy
+replacement only, not an exhaustive access-policy audit of history artifacts
+or health stores, and no actual daemon policy or running diagnosis was changed.
