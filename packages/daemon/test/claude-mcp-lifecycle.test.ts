@@ -44,8 +44,10 @@ function setup() {
   vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
   const mcp = { mcpServers: { existing: { command: "never-run-this-fixture" } } };
   // Pre-trust the fixture so ordinary onboarding writes don't obscure MCP isolation.
+  const trust = Object.fromEntries([...new Set([path.resolve(root), fs.realpathSync.native(root)])]
+    .map(key => [key, { hasTrustDialogAccepted: true }]));
   const shared = new Map([
-    [path.join(home, ".claude.json"), JSON.stringify({ ...mcp, projects: { [root]: { hasTrustDialogAccepted: true } }, hasCompletedOnboarding: true })],
+    [path.join(home, ".claude.json"), JSON.stringify({ ...mcp, projects: trust, hasCompletedOnboarding: true })],
     [path.join(root, ".mcp.json"), JSON.stringify(mcp) + "\n"],
   ]);
   for (const [file, bytes] of shared) fs.writeFileSync(file, bytes);
@@ -128,7 +130,11 @@ describe("per-agent Claude MCP selection (#1478)", () => {
       return;
     }
     expect(probes).toHaveLength(1);
-    const argv = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${probes[0]!.command}`], { encoding: "utf8" }).trim().split("\n");
+    // This mock multiplexer observes the POSIX command builder. Use Git Bash
+    // on Windows; the local function prints argv and never invokes a provider.
+    const shell = process.platform === "win32"
+      ? path.join(process.env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe") : "/bin/sh";
+    const argv = execFileSync(shell, ["-c", `claude() { printf '%s\\n' "$@"; }; ${probes[0]!.command}`], { encoding: "utf8" }).trim().split("\n");
     expect(argv).toContain("mcp-history");
     expect(argv.filter(arg => arg === "--strict-mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
     expect(argv.filter(arg => arg === "--mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
