@@ -72,6 +72,13 @@ export function claudeTokenUsageReader(options: { launchPath?: string; timeoutMs
       scratch = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-usage-"));
       const env: NodeJS.ProcessEnv = { PATH: options.launchPath ?? process.env.PATH, HOME: scratch, CLAUDE_CONFIG_DIR: scratch,
         CLAUDE_CODE_OAUTH_TOKEN: token, DISABLE_AUTOUPDATER: "1" };
+      if (process.platform === "win32") {
+        env.USERPROFILE = scratch;
+        env.APPDATA = path.join(scratch, "AppData", "Roaming");
+        env.LOCALAPPDATA = path.join(scratch, "AppData", "Local");
+        env.TEMP = scratch;
+        env.TMP = scratch;
+      }
       for (const key of ["TMPDIR", "SYSTEMROOT", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"]) if (process.env[key]) env[key] = process.env[key];
       const r = await runClaudeCommand(executable, env, scratch, options.timeoutMs ?? 30_000, options.graceMs ?? 1_000,
         ["-p", "Reply with exactly: OK", "--model", "haiku", "--max-turns", "1", "--output-format", "stream-json", "--verbose",

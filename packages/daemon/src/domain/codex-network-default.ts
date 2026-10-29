@@ -13,7 +13,7 @@
 
 import { spawn } from "node:child_process";
 import { killWindowsChildTree } from "./windows-child-tree.js";
-import { resolveCodexCommand } from "./windows-codex-command.js";
+import { resolveCodexCommand } from "./windows-provider-command.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 

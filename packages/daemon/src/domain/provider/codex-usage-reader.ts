@@ -11,7 +11,7 @@
 
 import { spawn } from "node:child_process";
 import { stopGroup } from "../codex-network-default.js";
-import { resolveCodexCommand } from "../windows-codex-command.js";
+import { resolveCodexCommand } from "../windows-provider-command.js";
 
 export type CodexUsageFailureReason =
   | "binary_not_found"

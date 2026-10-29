@@ -35,9 +35,15 @@ afterEach(() => { for (const f of cleanup.splice(0).reverse()) f(); vi.unstubAll
 function db() { const d = new Database(":memory:"); migrate(d, ALL_MIGRATIONS); cleanup.push(() => d.close()); return d; }
 function fake(script: string) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "token-probe-test-")); cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(root, "claude"), `#!${process.execPath}\n${script}`, { mode: 0o700 });
+  if (process.platform === "win32") {
+    const pkg = path.join(root, "node_modules", "@anthropic-ai", "claude-code");
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
+    fs.writeFileSync(path.join(pkg, "cli.js"), script);
+    fs.writeFileSync(path.join(root, "claude.cmd"), '@echo off\r\n"node" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+  } else fs.writeFileSync(path.join(root, "claude"), `#!${process.execPath}\n${script}`, { mode: 0o700 });
   const tokenFile = path.join(root, "selected.token"); fs.writeFileSync(tokenFile, "SYNTHETIC-TEST-ONLY", { mode: 0o600 });
-  return { root, tokenFile };
+  return { root, tokenFile, launchPath: [root, path.dirname(process.execPath)].join(path.delimiter) };
 }
 
 describe("selected Claude credential usage", () => {
@@ -126,18 +132,19 @@ describe("selected Claude credential usage", () => {
 
   it("a failed or expired credential produces no raw error or fabricated usage", async () => {
     const f = fake("console.log('SYNTHETIC-TEST-ONLY invalid credential'); process.exit(1)");
-    const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile: f.tokenFile });
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
     expect(result).toMatchObject({ ok: false, reason: "probe_failed" }); expect(JSON.stringify(result)).not.toContain("SYNTHETIC");
   });
 
   it("uses only the selected token in an isolated real child, with tools/hooks/MCP disabled and no secret in argv/results", async () => {
     const f = fake(`if(process.argv.includes('--version')) { if(process.env.CLAUDE_CODE_OAUTH_TOKEN) process.exit(5); console.log('2.1.310 (Claude Code)'); process.exit(0); }
       const fs=require('fs'); const args=process.argv.slice(2);
+      if(process.platform==='win32' && (require('os').homedir()!==process.env.HOME || process.env.USERPROFILE!==process.env.HOME || !process.env.APPDATA.startsWith(process.env.HOME) || !process.env.LOCALAPPDATA.startsWith(process.env.HOME) || process.env.TEMP!==process.env.HOME))process.exit(7);
       const ok = process.env.CLAUDE_CODE_OAUTH_TOKEN === 'SYNTHETIC-TEST-ONLY' && !process.env.ANTHROPIC_API_KEY && !process.env.OPENRIG_HOME && !process.env.CLAUDECODE && !process.env.TMUX && process.cwd() === fs.realpathSync(process.env.HOME) && process.env.HOME === process.env.CLAUDE_CONFIG_DIR && args[args.indexOf('--tools')+1] === '' && args.includes('--strict-mcp-config') && JSON.parse(args[args.indexOf('--settings')+1]).disableAllHooks;
       if(!ok || args.join(' ').includes(process.env.CLAUDE_CODE_OAUTH_TOKEN)) process.exit(4);
       console.log(JSON.stringify(${JSON.stringify(EVENT)})); console.log(JSON.stringify({type:'result',subtype:'success',is_error:false}));`);
     vi.stubEnv("ANTHROPIC_API_KEY", "UNRELATED-SYNTHETIC-KEY"); vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "UNSELECTED-SYNTHETIC-TOKEN");
-    const r = await claudeTokenUsageReader({ launchPath: f.root, now: () => NOW })({ label: "fixture", tokenFile: f.tokenFile });
+    const r = await claudeTokenUsageReader({ launchPath: f.launchPath, now: () => NOW })({ label: "fixture", tokenFile: f.tokenFile });
     expect(r).toMatchObject({ ok: true, probe: { exitCode: 0, requestOutcome: "completed", cliVersion: "2.1.310" } });
     expect(JSON.stringify(r)).not.toContain("SYNTHETIC");
   });
@@ -163,14 +170,14 @@ describe("selected Claude credential usage", () => {
     if (concern === "owner" && process.getuid) { const current = process.getuid(); uid = vi.spyOn(process, "getuid").mockReturnValue(current + 1); }
     if (concern === "symlink") { tokenFile = path.join(f.root, "alias.token"); fs.symlinkSync(f.tokenFile, tokenFile); }
     try {
-      const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile });
+      const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile });
       expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(concern === "mode" ? "group/others" : concern === "owner" ? "owned by uid" : "symlink")]) } });
     } finally { uid?.mockRestore(); }
   });
 
   it("bounds an unfinished child and reports possible provider spend", async () => {
     const f = fake("setInterval(()=>{},1000)");
-    expect(await claudeTokenUsageReader({ launchPath: f.root, timeoutMs: 80, graceMs: 30 })({ label: "fixture", tokenFile: f.tokenFile })).toMatchObject({ ok: false, reason: "probe_timeout", detail: expect.stringContaining("may have been consumed") });
+    expect(await claudeTokenUsageReader({ launchPath: f.launchPath, timeoutMs: 80, graceMs: 30 })({ label: "fixture", tokenFile: f.tokenFile })).toMatchObject({ ok: false, reason: "probe_timeout", detail: expect.stringContaining("may have been consumed") });
   });
 
   it("plain API/view reads never probe; a selected refresh alone reads one credential", async () => {

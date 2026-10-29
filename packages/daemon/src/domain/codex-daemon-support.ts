@@ -9,7 +9,7 @@
 //   unknown   → failure, timeout or non-Codex output: refuse rather than start a possibly
 //               shared seat.
 
-import { resolveCodexCommand } from "./windows-codex-command.js";
+import { resolveCodexCommand } from "./windows-provider-command.js";
 
 export type CodexDaemonSupport =
   | { kind: "supported" }

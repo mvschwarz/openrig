@@ -132,6 +132,18 @@ This does not validate a real SSH host, authentication, interactive prompts,
 non-OpenSSH SFTP servers or privileged Windows symlink creation. Workspace
 lint/typecheck passed; these changes have not been deployed.
 
+The Claude background-reader follow-up recognizes Windows native executables and
+the declared npm entry using the same provider-command resolver as Codex. Reader
+environments remove case-variant seat variables, replace duplicate home/path keys,
+and set USERPROFILE alongside HOME. Explicit token probes additionally isolate
+APPDATA, LOCALAPPDATA and temporary paths. A live timed-out child tree uses native
+taskkill; a tree whose root already exited still lacks equivalent containment.
+Native reader/Codex/cache regressions passed 43 tests. Three selected synthetic
+token tests separately passed, including native homedir isolation and timeout.
+The full token selection still has three failing POSIX uid/symlink/path fixtures
+and one FIFO skip; the selected pass is not a full-suite pass. Native token ACL
+validation and real Claude authentication remain unverified.
+
 Workspace lint/typecheck passed. The latest related selection passed 64 tests
 with three existing rsync integration skips; the scenario deadline selection
 passed three tests. Earlier native holder/listener/process-table selections are

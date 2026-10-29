@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
-import { resolveCodexCommand } from "../src/domain/windows-codex-command.js";
+import { resolveCodexCommand } from "../src/domain/windows-provider-command.js";
 import { codexDaemonSupportProbe } from "../src/domain/codex-daemon-support.js";
 import { codexUsageReader } from "../src/domain/provider/codex-usage-reader.js";
 
