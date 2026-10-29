@@ -1351,8 +1351,17 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
+    const { missingConversationToken, ...restored } = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
       { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession);
+    if (missingConversationToken) {
+      // Claude itself reported the saved conversation missing, for example a seat stopped before its first message, whose
+      // token Claude never wrote. The blank attempt is rolled back, so start only this seat fresh, as the rollback's own
+      // advice says. The earlier session keeps its token.
+      warnings?.push(`${launchResult.sessionName}: Claude reported that its saved conversation ${missingConversationToken} doesn't exist, so it started fresh. `
+        + "The token stays on the earlier session; rig seat set-resume-token can select it again.");
+      return this.restoreNodeWithCompensation(entry, rigId, snapshotId, data,
+        { ...opts, freshLogicalIds: [...(opts?.freshLogicalIds ?? []), node.logicalId] }, warnings, preserveStoppedCurrent);
+    }
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
@@ -1477,7 +1486,7 @@ export class RestoreOrchestrator {
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
     resumeSource?: import("./types.js").Session | null,
-  ): Promise<RestoreNodeResult> {
+  ): Promise<RestoreNodeResult & { missingConversationToken?: string }> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
     // precedence seam (latest wins), which also says so when the snapshot held another value.
@@ -1958,6 +1967,8 @@ export class RestoreOrchestrator {
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
                   error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+                  // Claude's own report: the caller starts only this seat fresh. Not for an explicitly selected history.
+                  ...(startupAdapter?.runtime === "claude-code" && !selected && resumeToken ? { missingConversationToken: resumeToken } : {}),
                 };
               }
               return {
