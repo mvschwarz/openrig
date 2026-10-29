@@ -290,10 +290,15 @@ describe("local startup reservation", () => {
 });
 
 
-it("keeps a slow child discoverable after the start deadline and excludes a duplicate launch", async () => {
+it.each(["missing", "stale"] as const)("keeps a slow child discoverable with %s old state and excludes a duplicate launch", async (oldState) => {
   vi.useFakeTimers();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-pending-start-"));
   const f = fixture(), fetch = f.deps.fetch;
+  const previousState = oldState === "stale"
+    ? JSON.stringify({ pid: 999, host: "127.0.0.2", port: 19874, db: "old.sqlite", startedAt: "old" })
+    : undefined;
+  if (previousState) f.files.set(STATE_FILE, previousState);
+  f.deps.isProcessAlive = pid => pid === f.child.pid && f.child.exitCode === null;
   let ready = false;
   f.deps.acquireStartLock = () => acquireDaemonStartLock(home);
   f.deps.fetch = async url => {
@@ -309,14 +314,22 @@ it("keeps a slow child discoverable after the start deadline and excludes a dupl
     const outcome = await result;
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toMatch(/pending.*12345/);
+    const message = (outcome as Error).message;
+    expect(message).toContain("Launch endpoint: http://127.0.0.1:19873/healthz");
+    expect(message).not.toContain("127.0.0.2:19874");
+    expect(message).toContain("this check does not publish readiness, adopt the child or release the reservation");
+    expect(message).toContain("stop child PID 12345 and wait for exit");
+    expect(message).toContain(path.join(path.dirname(STATE_FILE), "daemon-start.lock"));
+    expect(message).toContain("only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'");
+    expect(message).toContain("'rig daemon stop' cannot target this unpublished child");
     expect(Date.now() - began).toBeLessThanOrEqual(20_000);
     expect(f.deps.kill).not.toHaveBeenCalled();
     expect(f.child.exitCode).toBeNull();
-    expect(f.files.has(STATE_FILE)).toBe(false);
+    expect(f.files.get(STATE_FILE)).toBe(previousState);
     expect(fs.readFileSync(path.join(home, "daemon-start.lock"), "utf8")).toContain('"childPid":12345');
     ready = true;
     await expect(getDaemonStatus(f.deps)).resolves.toMatchObject({ state: "running", healthy: true, port: opts.port });
-    expect(f.files.has(STATE_FILE)).toBe(false); // A status probe never retroactively publishes start readiness.
+    expect(f.files.get(STATE_FILE)).toBe(previousState); // A status probe never retroactively publishes start readiness.
     await expect(startDaemon(opts, f.deps)).rejects.toThrow(/already reserved/);
     expect(f.deps.spawn).toHaveBeenCalledTimes(1);
   } finally {
