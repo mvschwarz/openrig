@@ -330,6 +330,35 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
+  // #2277: `claude` was missing when the launch ran (an update re-linking it, say). The shell's own not-found line is the
+  // reason, and the launch can't recover, so readiness ends at once.
+  it.each([
+    ["the shell can't find claude", "bash: claude: command not found", undefined],
+    ["the managed launch's executable is gone", "/usr/bin/env: ‘/home/u/.local/share/claude/versions/2.1.3’: No such file or directory",
+      "/home/u/.local/share/claude/versions/2.1.3"],
+  ])("checkReady names a missing claude and fails at once when %s", async (_label, line, claudeExecutable) => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("bash");
+    (tmux.getPanePid as ReturnType<typeof vi.fn>).mockResolvedValue(900);
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(`$ claude --name dev-impl@test-rig\n${line}\nuser@example.test:~/project$ `);
+    const adapter = new ClaudeCodeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-bash", pgid: 900, tpgid: 900, executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+    });
+
+    const result = await adapter.checkReady({ ...makeBinding(), ...(claudeExecutable ? { claudeExecutable } : {}) });
+
+    expect(result).toEqual({
+      ready: false,
+      reason: `claude wasn't found when the launch ran (the pane shows: ${line}). Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.`,
+      code: "returned_to_shell",
+      failed: true,
+    });
+  });
+
   it("checkReady returns awaiting_runtime when the shell label is a launch script still starting Claude", async () => {
     const tmux = mockTmux();
     (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("sh");
@@ -801,6 +830,21 @@ describe("Claude Code runtime adapter", () => {
       ok: false,
       probe: probeEvidence,
       error: "Claude resume failed: pane returned to shell instead of entering Claude",
+      recovery: "retry_fresh",
+    });
+  });
+
+  it("launchHarness names a missing claude when a resume's pane is back at its shell (#2277)", async () => {
+    const tmux = mockTmux();
+    (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh");
+    (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("zsh: command not found: claude\nuser@example.test %");
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+
+    const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig", resumeToken: "abc-123" });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "Claude resume failed: claude wasn't found when the launch ran (the pane shows: zsh: command not found: claude). Claude Code may have been updating or being reinstalled at that moment; relaunch this seat once claude is back.",
       recovery: "retry_fresh",
     });
   });

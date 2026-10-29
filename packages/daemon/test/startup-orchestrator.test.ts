@@ -2465,6 +2465,34 @@ describe("StartupOrchestrator", () => {
     expect(callCount).toBeGreaterThanOrEqual(3);
   });
 
+  it("a readiness failure the wait can't outlast ends startup at once with its reason (#2277)", async () => {
+    const seed = seedSession();
+    const reason = "claude wasn't found when the launch ran (the pane shows: bash: claude: command not found).";
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({ ready: false, reason, code: "returned_to_shell", failed: true as const })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 2_000 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.startupStatus).toBe("failed");
+      expect(result.errors).toEqual([`Startup failed: ${reason}`]);
+    }
+    expect(adapter.checkReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pane back at its shell for another reason still waits for the readiness timeout", async () => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      checkReady: vi.fn(async () => ({ ready: false, reason: "The probe pane returned to a shell instead of staying inside the runtime.", code: "returned_to_shell" })),
+    });
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, { adapter, readinessTimeoutMs: 100 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toEqual([expect.stringContaining("Readiness timeout after 0.1s")]);
+    expect((adapter.checkReady as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(1);
+  });
+
   it("readiness timeout → startup_failed with timeout message", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({
