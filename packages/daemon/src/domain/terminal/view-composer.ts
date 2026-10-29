@@ -20,6 +20,7 @@
 // registry via the injected `resolveHost`.
 
 import { tileAttachArgv } from "./tile-attach.js";
+import { windowsTileAttachArgv } from "./windows-tile-attach.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -60,6 +61,8 @@ export interface ViewMemberInput {
 
 /** The composer's only side-channel: read-only host resolution from the registry. */
 export interface ComposeContext {
+  /** Target OS of local tiles; omitted preserves the POSIX composition contract. */
+  localPlatform?: NodeJS.Platform;
   /** Resolve a host id to its registry entry, or null if the id is unknown. */
   resolveHost(id: string): HostEntry | null;
   /** Panes per page for the target provider; defaults to PANES_PER_PAGE. */
@@ -208,7 +211,8 @@ export function composeView(
       });
       continue;
     }
-    const attachArgv = tileAttachArgv(ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
+    const attachArgv = (ctx.localPlatform === "win32" ? windowsTileAttachArgv : tileAttachArgv)(
+      ctx.localTmux ?? "tmux", ctx.localTmuxServer ?? [], m.tmuxSession, m.readOnly);
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),

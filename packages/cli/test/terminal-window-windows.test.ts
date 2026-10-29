@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
+import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
+import { windowsArguments } from "../../daemon/src/adapters/windows-argv.js";
 // Exact literal quoting used by daemon domain/terminal/view-composer.ts.
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 
@@ -20,6 +22,28 @@ function fixture() {
   return { panes, get, launch, deps, client };
 }
 describe("Windows desktop terminal view", () => {
+  it("keeps a sixteen-pane real composition within the native command-line limit", async () => {
+    const f=fixture();
+    const members=Array.from({length:16},(_,i)=>({seat:'seat'+i,label:'seat'+i,tmuxSession:'seat'+i+'@fixture',host:null,alive:true,readOnly:true}));
+    const composed=composeView('saved',members,{localPlatform:'win32',localTmux:'C:\\Program Files\\psmux\\tmux.exe',localTmuxServer:['-L','owned'],resolveHost:()=>null,panesPerPage:16});
+    f.get.mockResolvedValue({status:200,data:{planId:'current',composed,status:{}}});
+    expect(await openTerminalWindow(f.client,'saved','tmux',f.deps)).toMatchObject({ok:true});
+    const [binary,args]=f.launch.mock.calls[0]! as unknown as [string,string[]];
+    expect(windowsArguments([binary,...args]).length).toBeLessThan(32767);
+  });
+  it("renders the actual daemon composition through the native tile executable", async () => {
+    const f = fixture();
+    const composed = composeView("saved", [{ seat:"owned", label:"owned", tmuxSession:"owned@fixture", host:null, alive:true, readOnly:true }], {
+      localPlatform:"win32", localTmux:"C:\\Program Files\\psmux\\tmux.exe", localTmuxServer:["-L","owned namespace"], resolveHost:()=>null,
+    });
+    f.get.mockResolvedValue({ status:200, data:{ planId:"current", composed, status:{} } });
+    expect(await openTerminalWindow(f.client,"saved","tmux",f.deps,"current")).toMatchObject({ok:true,provider:"tmux",opened:["owned"]});
+    expect(composed.opened[0]!.attachArgv?.[0]).toMatch(/powershell\.exe$/i);
+    const [,args]=f.launch.mock.calls[0]! as unknown as [string,string[]];
+    const at=args.indexOf("-EncodedCommand");
+    const launch=Buffer.from(args[at+1]!,"base64").toString("utf16le");
+    expect(launch).toContain("windows-tile-attach.ps1"); expect(launch).not.toContain("FileName = '/bin/sh'");
+  });
   it("keeps inherited Rex markers on the Windows Terminal route", async () => {
     const f = fixture(); f.deps.env = { TERM_PROGRAM: "rex", REX_SESSION: "inherited" };
     expect(await openTerminalWindow(f.client, "saved", undefined, f.deps)).toMatchObject({ ok: true, provider: "tmux" });

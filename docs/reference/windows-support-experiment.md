@@ -1008,3 +1008,10 @@ would be unsafe. Initial `new-session -e` and `respawn-pane -e` values still use
 argv in production. The separate dynamic-update fixture passed only the tested
 ordering where standby creation preceded the update; later standby replacement
 and every timing are not proven isolated.
+# Native local tile reattachment follow-up (2026-10-29)
+
+An actual composed local tile still selected `/bin/sh` on Windows; launching that executable failed with `ENOENT`. Windows composition now selects a packaged PowerShell helper, while SSH tiles retain the remote POSIX contract. The helper pins the immutable session ID and managed node identity, follows same-owner replacements, rejects foreign replacements, and bounds missing-session retries. It does not create sessions or restart agents.
+
+The bootstrap passes JSON data as base64 and quotes native arguments literally. The Windows Terminal consumer uses the generated argv directly, avoiding double encoding; the 16-pane command has a regression check against the Windows command-length limit. Native fake-executable scenarios exercise detach, replacement, foreign identity, missing replacement, unmanaged sessions and absent initial metadata. These tests do not establish visual Windows Terminal or interactive console acceptance.
+
+The isolated checkout passed 164 targeted tests and the full TypeScript lint command. Its package proof stopped before package assertions because that checkout lacked the UI-local `tailwindcss` dependency. In the original Draft checkout, all 164 targeted tests passed again, and the package proof passed: the extracted tarball contains the regular helper file with matching bytes, and its compiled module resolves the helper inside that extracted package. This is a dirty-source package-content proof, not a fresh-install or GUI acceptance claim. No deployed daemon or fleet has been changed.

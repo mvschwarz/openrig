@@ -12,7 +12,7 @@ import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
 import { renderWindowsLaunch } from "@openrig/daemon/windows-launch";
 
-interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
+interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
@@ -223,6 +223,12 @@ async function openWindowsTerminalView(client: DaemonClient, view: string, reque
   let pages = 0;
   const surfaceArgs = (pane: Pane) => {
     const title = pane.label.replace(/[;\r\n\0]/g, " ");
+    // The daemon's native tile already has an encoded, literal-data bootstrap.
+    // Wrapping that again multiplies its size past CreateProcess's 32K limit.
+    if (pane.attachArgv?.length && /(?:^|[\\/])powershell\.exe$/i.test(pane.attachArgv[0]!)
+      && pane.attachArgv.includes("-EncodedCommand")) {
+      return ["--title", title, "--suppressApplicationTitle", ...pane.attachArgv];
+    }
     const command = renderWindowsLaunch(pane.paneCommand);
     const script = `Remove-Item Env:TMUX -ErrorAction SilentlyContinue; ${command}`;
     return ["--title", title, "--suppressApplicationTitle", "powershell.exe", "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync, statSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, relative, isAbsolute, sep } from "node:path";
 import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 import { npmCommand } from "./npm-command.mjs";
@@ -64,7 +64,7 @@ test("pre-check: @openrig/cli, ships the `rig` bin, and does not depend on the u
   }
 });
 
-test("package proof: the tarball ships the daemon surfaces and no packaged JS imports @openrig/daemon", () => {
+test("package proof: the tarball ships the daemon surfaces and no packaged JS imports @openrig/daemon", async () => {
   // assemble (stages daemon/, rewrites daemon imports) — heavy but no install/native build
   execFileSync(packageBuildShell(process.platform, process.env), [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
   assert.ok(!existsSync(join(CLI_DIR, "node_modules", "@openrig", "daemon")),
@@ -89,6 +89,14 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
     assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
 
     execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
+    const tileHelper = join(extract, "package/daemon/assets/terminal/windows-tile-attach.ps1");
+    assert.equal(lstatSync(tileHelper).isFile(), true);
+    assert.equal(lstatSync(tileHelper).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(tileHelper), readFileSync(join(REPO_ROOT,"packages/daemon/assets/terminal/windows-tile-attach.ps1")));
+    const tileModule = await import(pathToFileURL(join(extract,"package/daemon/dist/domain/terminal/windows-tile-attach.js")).href);
+    const tileArgv = tileModule.windowsTileAttachArgv(process.execPath,[],"owned-fixture",true);
+    assert.ok(Buffer.from(tileArgv.at(-1),"base64").toString("utf16le").includes(tileHelper.replaceAll("'","''")),
+      "the extracted module must resolve the helper inside the extracted package");
     for (const [projected, document] of [
       ["help/help.md", "help.md"],
       ["reference/acp-agents.md", "acp-agents.md"],
