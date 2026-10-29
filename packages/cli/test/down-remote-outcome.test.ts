@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { Command } from "commander";
@@ -39,6 +40,7 @@ describe("remote down operation outcomes", () => {
     app.route("/api/down", downRoutes);
     server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
     if (!server.listening) await new Promise<void>(resolve => server.once("listening", resolve));
+    allowOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });
 

@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -53,6 +54,7 @@ function stubQueueDaemon(total: number): Promise<{ server: Server; url: string }
       res.end(JSON.stringify(rows));
     });
     server.listen(0, "127.0.0.1", () => {
+      allowOwnedHttpFixture(server);
       const addr = server.address() as { port: number };
       resolve({ server, url: `http://127.0.0.1:${addr.port}` });
     });
@@ -144,6 +146,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const previousUrl = process.env.OPENRIG_URL;
+    allowOwnedHttpFixture(server);
     process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const cases = [
       { status: 503, body: { error: "human_registry_unavailable", message: "fixture projection unavailable" }, detail: /HTTP 503.*human_registry_unavailable/ },
@@ -325,6 +328,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const previousUrl = process.env.OPENRIG_URL;
+    allowOwnedHttpFixture(server);
     process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const fragment = join(humansDir(home), "mike.yaml");
     const before = readFileSync(fragment, "utf8");

@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -156,6 +157,7 @@ describe("Chatroom CLI", () => {
       });
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 
@@ -239,6 +241,7 @@ describe("Chatroom CLI", () => {
     });
     const ambiguousPort = await new Promise<number>((resolve) => {
       ambiguousServer.listen(0, () => {
+        allowOwnedHttpFixture(ambiguousServer);
         resolve((ambiguousServer.address() as { port: number }).port);
       });
     });
