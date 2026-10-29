@@ -124,12 +124,13 @@ describe("managed Claude full down/up", () => {
   );
 });
 
-// A pod-aware resume rolls a seat back as unresumable only on the runtime's own report that the
-// conversation doesn't exist. A Claude that returns to its shell for another reason stays failed,
-// with its pane and binding kept so its output can still be read.
+// On Claude's own report that the saved conversation doesn't exist, a pod-aware resume rolls back the blank attempt and
+// starts only that seat fresh, saying so. A Claude that returns to its shell for another reason stays failed, with its pane
+// and binding kept so its output can still be read.
 describe("pod-aware Claude resume failure outcomes", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
+  const fresh = "00000000-0000-4000-8000-000000000007";
   const shellScreens: Record<string, string> = {
     missing: `$ claude --resume ${token}\nNo conversation found with session ID: ${token}\nuser@host:~/project$ `,
     "generic-exit": `$ claude --resume ${token}\nError: Claude exited before its interface opened\nuser@host:~/project$ `,
@@ -153,7 +154,10 @@ describe("pod-aware Claude resume failure outcomes", () => {
     sessionRegistry.updateResumeToken(old.id, "claude_id", token, "scrape");
     sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%old" });
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
-    const atShell = mode === "generic-exit" || mode === "missing";
+    // In `missing`, the second command sent is the fresh start, and Claude then opens.
+    let sent = 0;
+    const freshUp = () => mode === "missing" && sent >= 2;
+    const atShell = () => (mode === "generic-exit" || mode === "missing") && !freshUp();
     let live = true;
     const tmux = {
       hasSession: vi.fn(async () => live),
@@ -164,23 +168,24 @@ describe("pod-aware Claude resume failure outcomes", () => {
       listWindows: vi.fn(async () => []),
       listPanes: vi.fn(async () => live ? [{ id: "%new", index: 0, cwd: "/", width: 80, height: 24, active: true }] : []),
       getPanePid: vi.fn(async () => 100),
-      getPaneCommand: vi.fn(async () => atShell ? "bash" : "sh"),
+      getPaneCommand: vi.fn(async () => atShell() ? "bash" : "sh"),
       // A killed session has no screen to read.
-      capturePaneContent: vi.fn(async () => !live ? null : atShell ? shellScreens[mode] : autoScreen),
+      capturePaneContent: vi.fn(async () => !live ? null : atShell() ? shellScreens[mode] : autoScreen),
       sendText: vi.fn(async () => ({ ok: true })),
-      sendShellCommand: vi.fn(async () => ({ ok: true })),
+      sendShellCommand: vi.fn(async () => { sent += 1; return { ok: true }; }),
       sendKeys: vi.fn(async () => ({ ok: true })),
     } as unknown as TmuxAdapter;
     const startedAt = "Thu Oct  1 05:53:16 2026";
-    const shell = { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "success" ? 101 : 100, executableName: "bash", command: "-bash", startedAt };
-    const listProcesses = async () => mode !== "success" ? [shell] : [
-      shell,
+    const running = () => mode === "success" || freshUp();
+    const shell = () => ({ pid: 100, ppid: 1, pgid: 100, tpgid: running() ? 101 : 100, executableName: "bash", command: "-bash", startedAt });
+    const listProcesses = async () => !running() ? [shell()] : [
+      shell(),
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt },
-      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${token} --name ${name}`, startedAt },
+      { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto ${freshUp() ? `--session-id ${fresh}` : `--resume ${token}`} --name ${name}`, startedAt },
     ];
     const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
     expect(down.errors).toEqual([]);
-    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+    const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, sessionIdFactory: () => fresh,
       claudeManagedLaunch: {
         prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", executable: "/opt/claude.exe" }),
         configPaths: () => ({ configDir: "/fixture", statePath: "/fixture/.claude.json" }),
@@ -212,14 +217,19 @@ describe("pod-aware Claude resume failure outcomes", () => {
       expect(latest).toMatchObject({ status: "running", startup_status: "failed" });
       expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
     } else if (mode === "missing") {
-      expect(outcome.status).toBe("awaiting-decision");
-      expect(outcome.error).toContain("Original session unresumable");
-      expect(outcome.error).toContain("no conversation found for the requested session");
+      expect(outcome.status).toBe("fresh-primed");
+      expect(up.result.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining(`Claude reported that its saved conversation ${token} doesn't exist, so it started fresh`),
+      ]));
+      // A fresh start doesn't bring the conversation back, so the rig isn't fully restored.
       expect(up.result.rigResult).toBe("partially_restored");
+      expect(vi.mocked(tmux.sendShellCommand).mock.calls[1]?.[1]).toContain(`--session-id ${fresh}`);
+      // The blank resume attempt is rolled back before the fresh start.
       expect(tmux.killSession).toHaveBeenCalledExactlyOnceWith(name);
-      expect(live).toBe(false);
-      expect(latest).toMatchObject({ status: "superseded", startup_status: "failed" });
-      expect(binding).toBeNull();
+      expect(live).toBe(true);
+      expect(latest).toMatchObject({ status: "running", startup_status: "ready" });
+      expect(db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(latest.id)).toEqual({ resume_token: fresh });
+      expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
     } else if (mode === "attention") {
       expect(outcome.status).toBe("attention_required");
       expect(tmux.killSession).not.toHaveBeenCalled();

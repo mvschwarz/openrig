@@ -2908,7 +2908,10 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it.each([false, true])("pod-aware missing conversation preserves a reused pane: %s", async keepPane => {
+  // A Claude seat stopped before its first message saved a token for a conversation Claude never wrote. When Claude itself
+  // reports the conversation missing, the blank attempt is rolled back and only that seat starts fresh, with a notice, as
+  // the rollback's own advice says. The token stays where it was.
+  it.each([false, true])("a pod-aware Claude resume whose conversation Claude reports missing starts fresh, with a notice: %s", async keepPane => {
     const rig = rigRepo.createRig("test-rig");
     db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-retry", rig.id, "Dev");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-retry" });
@@ -2947,28 +2950,21 @@ describe("RestoreOrchestrator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const nodeResult = result.launched!.find((n) => n.nodeId === node.id);
-      expect(nodeResult!.status).toBe("awaiting-decision");
-      expect(nodeResult!.error).toContain("Original session unresumable");
-      expect(nodeResult!.error).toContain("The blank session was rolled back; no session is running");
-      // The one-seat command, not a whole-rig re-run, which is refused while sibling seats run.
-      expect(nodeResult!.error).toContain(`deliberately start only this seat fresh: rig seat launch '${node.logicalId}@test-rig' --fresh --reason "<why>".`);
-      expect(nodeResult!.error).not.toContain("Re-run with --fresh");
-      expect(launchHarness).toHaveBeenCalledTimes(1);
+      expect(nodeResult!.status).toBe("fresh-primed");
+      expect(nodeResult!.error).toBeUndefined();
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining("Claude reported that its saved conversation stale-claude-token doesn't exist, so it started fresh"),
+      ]));
+      expect(launchHarness).toHaveBeenCalledTimes(2);
       expect(launchHarness.mock.calls[0]![1].resumeToken).toBe("stale-claude-token");
+      expect(launchHarness.mock.calls[1]![1].resumeToken).toBeUndefined();
 
-      // Rollback assertions: launched session superseded, prior binding restored, no running session
-      const launchedSessions = db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC").all(node.id) as Array<{ id: string; status: string }>;
-      const runningSessions = launchedSessions.filter((s) => s.status === "running");
-      expect(runningSessions).toHaveLength(0);
-      const superseded = launchedSessions.filter((s) => s.status === "superseded");
-      expect(superseded.length).toBeGreaterThan(0);
-      const binding = sessionRegistry.getBindingForNode(node.id);
-      expect(binding?.tmuxSession).toBe(keepPane ? "dev-impl@test-rig" : undefined);
-      if (keepPane) {
-        expect(tmux.killSession).not.toHaveBeenCalled();
-        expect(launchedSessions.find(row => row.id === session.id)?.status).toBe("superseded");
-      }
-      else expect(tmux.killSession).toHaveBeenCalled();
+      // The fresh occupant is the seat's one running session, and the earlier token stays on its own row.
+      const sessions = db.prepare("SELECT id, status, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC").all(node.id) as Array<{ id: string; status: string; resume_token: string | null }>;
+      expect(sessions.filter((s) => s.status === "running").map((s) => s.resume_token)).toEqual(["fresh-claude-token"]);
+      expect(sessions.find((s) => s.id === session.id)?.resume_token).toBe("stale-claude-token");
+      expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@test-rig");
+      if (keepPane) expect(tmux.killSession).not.toHaveBeenCalled();
     }
   });
 
