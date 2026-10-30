@@ -74,7 +74,7 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/.claude-plugin/plugin.json"]).toBe('{"name":"openrig-core","version":"0.1.0"}');
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/.codex-plugin/plugin.json"]).toBe('{"name":"openrig-core","version":"0.1.0","description":"v"}');
     expect(fs._store["/home/test/.openrig/plugins/openrig-core/skills/openrig-user/SKILL.md"]).toBe("# openrig-user vendored");
-    expect(fs._store["/home/test/.openrig/plugins/openrig-core/hooks/claude.json"]).toBe('{"hooks":{}}');
+    expect(JSON.parse(fs._store["/home/test/.openrig/plugins/openrig-core/hooks/claude.json"]!)).toEqual({ hooks: {} });
   });
 
   it("ensureVendored is idempotent — re-running with same content does not re-write (hash-skip)", async () => {

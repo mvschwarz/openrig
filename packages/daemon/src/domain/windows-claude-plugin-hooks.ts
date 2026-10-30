@@ -29,3 +29,9 @@ export function windowsClaudePluginHooks(source: string): string {
 function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/** Exact platform projection used by staging and by the shipped-tree comparator. */
+export function platformPluginFile(pluginName: string, relative: string, contents: string): string {
+  return process.platform === "win32" && pluginName === "openrig-core" && relative.replaceAll("\\", "/") === "hooks/claude.json"
+    ? windowsClaudePluginHooks(contents) : contents;
+}

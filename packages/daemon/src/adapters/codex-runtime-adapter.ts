@@ -86,7 +86,8 @@ const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/open
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 import { recordSeatSkillWrite, seatPluginSkillsLossNote, seatProjectionComplete, seatSkillWriteRefusal, SEAT_SKILLS_BOOTSTRAP_BLOCK_ID } from "../domain/seat-skill-storage.js";
-import { codexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { codexPluginContentHash, shippedCodexPluginContentHash, planOwnedCodexContentApproval, recordOwnedCodexApproval } from "../domain/codex-owned-plugin-trust.js";
+import { platformPluginFile } from "../domain/windows-claude-plugin-hooks.js";
 import { findTomlTable, opensTomlTable, parseTomlRoot, tomlArrayTableHeaderPath, tomlDefines, tomlTableHeaderPath } from "../domain/toml-tables.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
@@ -428,13 +429,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     collect(nodePath.join(shipped, "hooks"));
     ownFiles.push(".codex-plugin/plugin.json");
     const matchesShipped = (dir: string) => ownFiles.every(relative => {
-      try { return fs.readFileSync(nodePath.join(dir, relative)).equals(fs.readFileSync(nodePath.join(shipped, relative))); }
+      try {
+        const source = fs.readFileSync(nodePath.join(shipped, relative));
+        const expected = process.platform === "win32" && relative.replaceAll("\\", "/") === "hooks/claude.json"
+          ? Buffer.from(platformPluginFile("openrig-core", relative, source.toString("utf8"))) : source;
+        return fs.readFileSync(nodePath.join(dir, relative)).equals(expected);
+      }
       catch { return false; }
     });
     if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
     // Installation retains the hook-file predicate; any approval requires the complete shipped tree.
     const matchesShippedTree = (dir: string) => {
-      try { return codexPluginContentHash(dir, true) === codexPluginContentHash(shipped, true); }
+      try { return codexPluginContentHash(dir, true) === shippedCodexPluginContentHash(shipped, true); }
       catch { return false; }
     };
 

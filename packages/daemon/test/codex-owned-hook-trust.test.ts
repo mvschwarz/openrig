@@ -9,7 +9,8 @@ import { createHash } from "node:crypto";
 import { parse } from "smol-toml";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
-import { codexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexContentApproval } from "../src/domain/codex-owned-plugin-trust.js";
+import { codexPluginContentHash, shippedCodexPluginContentHash, codexLegacyPluginTrustPath, planOwnedCodexContentApproval } from "../src/domain/codex-owned-plugin-trust.js";
+import { platformPluginFile } from "../src/domain/windows-claude-plugin-hooks.js";
 
 const shipped = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core");
 const roots: string[] = [];
@@ -18,6 +19,8 @@ function fixture(config = "", corruptCache = false, duringPluginAdd?: () => void
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "owned-codex-hooks-")); roots.push(root);
   const plugin = path.join(root, "plugins/openrig-core"), home = path.join(root, "codex");
   fs.cpSync(shipped, plugin, { recursive: true }); fs.mkdirSync(home);
+  const hooks = path.join(plugin, "hooks/claude.json");
+  fs.writeFileSync(hooks, platformPluginFile("openrig-core", "hooks/claude.json", fs.readFileSync(hooks, "utf8")));
   const file = path.join(home, "config.toml"); fs.writeFileSync(file, config);
   const version = JSON.parse(fs.readFileSync(path.join(plugin, ".codex-plugin/plugin.json"), "utf8")).version;
   const cache = path.join(home, "plugins/cache/openrig/openrig-core", version);
@@ -61,7 +64,7 @@ it("a fresh install has all six exact plugin hooks trusted before the first seat
   "openrig-core@openrig:hooks/codex.json:permission_request:0:0": "sha256:75c66b08f505a22f84def73ecf6d61e98dd1b24ed8ecdcc05306eba3013e64d4"
 };
   expect(Object.fromEntries(Object.entries(states).map(([key,value]:[string,any])=>[key,value.trusted_hash]))).toEqual(expected);
-  expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
+  expect(Object.values(states).every((state: any) => state.trusted_content_hash === shippedCodexPluginContentHash(shipped))).toBe(true);
   expect(f.calls.map(a=>a.slice(0,2))).toEqual([["plugin","marketplace"],["plugin","add"]]);
 });
 it.each(['[plugins."openrig-core@openrig"]\nenabled = false\n','[plugins._default]\nenabled = false\n'])("a disabled plugin stays disabled on restart and upgrade: %s", async config => {
@@ -206,7 +209,7 @@ it("an already-installed owned upgrade renews all six content approvals without 
   const f = await legacyUpgrade();
   fs.appendFileSync(f.file, '\n[hooks.state."outside:stop:0:0"]\nenabled = false\ntrusted_hash = "outside-choice"\n\n\n');
   const before = fs.readFileSync(f.file, "utf8"), baseline = fs.readFileSync(f.baseline, "utf8"), calls = f.calls.length;
-  const expectedContent = codexPluginContentHash(shipped);
+  const expectedContent = shippedCodexPluginContentHash(shipped);
   await f.adapter().ensureCodexCorePlugin();
   const states = Object.entries(f.read().hooks.state).filter(([key]) => key.startsWith("openrig-core@openrig:"));
   expect(states).toHaveLength(6);
@@ -236,7 +239,7 @@ it("an owned upgrade renews content approval on tables Codex saved single-quoted
   const states = Object.entries(f.read().hooks.state).filter(([key]) => key.startsWith("openrig-core@openrig:"));
   expect(states).toHaveLength(6);
   for (const [key, state] of states as Array<[string, any]>) {
-    expect(state.trusted_content_hash).toBe(codexPluginContentHash(shipped));
+    expect(state.trusted_content_hash).toBe(shippedCodexPluginContentHash(shipped));
     expect(text.split("\n").filter(line => line.includes(key) && line.trim().startsWith("[hooks.state."))).toHaveLength(1);
   }
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(true);
@@ -268,15 +271,17 @@ it("the owned receipt carries approval into a later bundle while preserving the 
   const next = path.join(f.home, "next-shipped"); fs.cpSync(shipped, next, { recursive: true });
   fs.appendFileSync(path.join(next, "skills/openrig-user/SKILL.md"), "\nnext shipped revision");
   fs.cpSync(next, f.cache, { recursive: true });
+  const hooks = path.join(f.cache, "hooks/claude.json");
+  fs.writeFileSync(hooks, platformPluginFile("openrig-core", "hooks/claude.json", fs.readFileSync(hooks, "utf8")));
   const plan = planOwnedCodexContentApproval({ configPath: f.file, content: fs.readFileSync(f.file, "utf8"),
     layers: [{ name: "user config", path: f.file, state: "read", content: fs.readFileSync(f.file, "utf8") }], shipped: next, installed: f.cache });
   expect(plan).toBeDefined();
-  expect(Object.values(plan!.hashes)).toEqual(Array(6).fill(codexPluginContentHash(next)));
+  expect(Object.values(plan!.hashes)).toEqual(Array(6).fill(shippedCodexPluginContentHash(next)));
   expect(f.read().hooks.state["openrig-core@openrig:hooks/codex.json:stop:0:0"].trusted_hash).toBe(plan!.approval.declarations["openrig-core@openrig:hooks/codex.json:stop:0:0"]);
 });
 
 it("records an already-approved current legacy bundle for subsequent upgrades", async () => {
-  const f = await legacyUpgrade(), current = codexPluginContentHash(shipped);
+  const f = await legacyUpgrade(), current = shippedCodexPluginContentHash(shipped);
   fs.writeFileSync(f.baseline, current);
   await f.adapter().ensureCodexCorePlugin();
   expect(Object.values(f.read().hooks.state).every((state: any) => state.trusted_content_hash === current)).toBe(true);
@@ -294,7 +299,7 @@ it("renews only the selected Codex home when the daemon has a different default 
   fs.mkdirSync(path.dirname(baseline), { recursive: true }); fs.copyFileSync(f.baseline, baseline);
   await f.adapter().ensureCodexCorePlugin(selected);
   const states = (parse(fs.readFileSync(file, "utf8")) as any).hooks.state;
-  expect(Object.values(states).every((state: any) => state.trusted_content_hash === codexPluginContentHash(shipped))).toBe(true);
+  expect(Object.values(states).every((state: any) => state.trusted_content_hash === shippedCodexPluginContentHash(shipped))).toBe(true);
   expect(fs.readFileSync(f.file, "utf8")).toBe(before);
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(false);
   expect(fs.existsSync(path.join(selected, ".openrig-core-hook-trust.json"))).toBe(true);
@@ -333,7 +338,7 @@ it("R2 keeps an unrelated multiline instruction containing table examples exact"
   expect(f.read().developer_instructions).toBe(before);
   // The examples aren't tables (#2034 r1), so the real tables renew rather than the whole renewal declining.
   for (const [key, state] of Object.entries(f.read().hooks.state) as Array<[string, any]>) {
-    if (key.startsWith("openrig-core@openrig:")) expect(state.trusted_content_hash).toBe(codexPluginContentHash(shipped));
+    if (key.startsWith("openrig-core@openrig:")) expect(state.trusted_content_hash).toBe(shippedCodexPluginContentHash(shipped));
   }
   expect(fs.existsSync(path.join(f.home, ".openrig-core-hook-trust.json"))).toBe(true);
 });

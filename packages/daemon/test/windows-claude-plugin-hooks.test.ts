@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { windowsClaudePluginHooks } from "../src/domain/windows-claude-plugin-hooks.js";
+import { PluginVendorService } from "../src/domain/plugin-vendor-service.js";
+import { codexPluginContentHash, shippedCodexPluginContentHash } from "../src/domain/codex-owned-plugin-trust.js";
 
 const manifestPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
 const source = fs.readFileSync(manifestPath, "utf8");
@@ -37,6 +39,60 @@ it.each(["node arbitrary.js", '"${OPENRIG_NODE:-node}" "${CLAUDE_PLUGIN_ROOT}/..
 });
 
 describe.skipIf(process.platform !== "win32")("native Claude plugin manifest commands", () => {
+  it("stages a native versioned tree, preserves replaced bytes, and fingerprints actual installed bytes without rewriting them", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "native plugin staging "));
+    const assets = path.resolve(import.meta.dirname, "../assets/plugins");
+    const shipped = path.join(assets, "openrig-core");
+    const plugins = path.join(root, "plugins"), installed = path.join(plugins, "openrig-core");
+    const listFiles = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) return listFiles(file).map(child => path.join(entry.name, child));
+      if (!entry.isFile()) throw Error("Unexpected fixture entry type");
+      return [entry.name];
+    });
+    const vendor = new PluginVendorService({ vendoredAssetsDir: assets, userPluginsDir: plugins,
+      httpClient: async () => { throw Error("No network expected"); },
+      fs: { exists: fs.existsSync, readFile: file => fs.readFileSync(file, "utf8"),
+        writeFile: (file, bytes) => fs.writeFileSync(file, bytes), mkdirp: dir => { fs.mkdirSync(dir, { recursive: true }); },
+        listFiles, copyFileExclusive: (src, dest) => fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL) },
+    });
+    try {
+      fs.cpSync(shipped, installed, { recursive: true });
+      for (const manifest of [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]) {
+        const file = path.join(installed, manifest), json = JSON.parse(fs.readFileSync(file, "utf8"));
+        json.version = "0.1.31"; fs.writeFileSync(file, JSON.stringify(json));
+      }
+      await vendor.ensureVendored("openrig-core");
+      const installedHooks = path.join(installed, "hooks/claude.json");
+      expect(fs.readFileSync(installedHooks, "utf8")).toBe(windowsClaudePluginHooks(source));
+      const backups = listFiles(path.join(root, "backups/managed-refresh"));
+      const oldHooks = backups.find(file => file.replaceAll("\\", "/").endsWith("/hooks/claude.json"));
+      expect(oldHooks).toBeDefined();
+      expect(fs.readFileSync(path.join(root, "backups/managed-refresh", oldHooks!), "utf8")).toBe(source);
+      const expected = shippedCodexPluginContentHash(shipped, true);
+      expect(codexPluginContentHash(installed, true)).toBe(expected);
+      expect(codexPluginContentHash(shipped, true)).not.toBe(expected);
+      const before = fs.readFileSync(installedHooks);
+      await vendor.ensureVendored("openrig-core");
+      expect(fs.readFileSync(installedHooks)).toEqual(before);
+      // Actual installed hashes never project, normalize, or overlook altered content.
+      for (const relative of ["hooks/claude.json", "hooks/codex.json", "hooks/scripts/activity-relay.cjs"]) {
+        const file = path.join(installed, relative), original = fs.readFileSync(file);
+        fs.appendFileSync(file, "\nmodified-by-fixture\n");
+        expect(codexPluginContentHash(installed, true), relative).not.toBe(expected);
+        fs.writeFileSync(file, original);
+      }
+      fs.mkdirSync(path.join(installed, ".venv")); fs.writeFileSync(path.join(installed, ".venv/extra"), "not shipped");
+      expect(codexPluginContentHash(installed, true)).not.toBe(expected);
+      fs.rmSync(path.join(installed, ".venv"), { recursive: true });
+      // Equal versions and operator edits keep their existing authority.
+      fs.writeFileSync(installedHooks, "operator-owned equal-version bytes");
+      await vendor.ensureVendored("openrig-core");
+      expect(fs.readFileSync(installedHooks, "utf8")).toBe("operator-owned equal-version bytes");
+      expect(codexPluginContentHash(installed, true)).not.toBe(expected);
+    } finally { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  });
+
   it.each(["explicit", "legacy"])("executes every hook with %s Node selection and Unicode stdin", kind => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "插件 O'Brien %PATH% $HOME "));
     try {

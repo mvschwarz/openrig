@@ -61,6 +61,9 @@ jobs:
       - name: Generated Claude activity hook and status collector
         working-directory: packages/daemon
         run: npx vitest run test/claude-hook-node-invocation.test.ts -t "native PowerShell fallback|generated status collector" --maxWorkers=1
+      - name: Native plugin staging and content authority
+        working-directory: packages/daemon
+        run: npx vitest run test/windows-claude-plugin-hooks.test.ts test/plugin-vendor-service.test.ts test/codex-core-plugin-route.test.ts test/codex-owned-hook-trust.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly

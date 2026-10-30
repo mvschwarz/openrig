@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { parse } from "smol-toml";
 import { CODEX_CORE_PLUGIN_KEY, type CodexConfigLayerRead } from "./codex-core-plugin-install.js";
 import { findTomlTable } from "./toml-tables.js";
+import { platformPluginFile } from "./windows-claude-plugin-hooks.js";
 
 const { computeCodexHookTrust } = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs");
 // Published openrig-core0.1.17: Codex0.164's native baseline and the complete shipped tree agree.
@@ -25,6 +26,16 @@ const readFlags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constant
 
 /** Codex rust-v0.164.0 plugin_fingerprint.rs. Strict comparison also includes entries Codex excludes as generated files. */
 export function codexPluginContentHash(root: string, strict = false): string {
+  return pluginContentHash(root, strict, false);
+}
+
+/** Expected bytes after the shipped openrig-core tree's exact platform projection.
+ * Installed bytes always use codexPluginContentHash, without transformation. */
+export function shippedCodexPluginContentHash(root: string, strict = false): string {
+  return pluginContentHash(root, strict, true);
+}
+
+function pluginContentHash(root: string, strict: boolean, shipped: boolean): string {
   if (!fs.lstatSync(root).isDirectory()) throw new Error("plugin root is not a directory");
   const hash = createHash("sha256").update("codex-plugin-bundle-v1");
   const length = (value: number) => { const bytes = Buffer.alloc(8); bytes.writeBigUInt64LE(BigInt(value)); hash.update(bytes); };
@@ -37,11 +48,19 @@ export function codexPluginContentHash(root: string, strict = false): string {
       hash.update("directory");
       for (const child of fs.readdirSync(file).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) visit(path.join(file, child));
     } else if (before.isFile()) {
-      hash.update("file"); length(before.size);
+      hash.update("file");
       const fd = fs.openSync(file, readFlags);
       try {
         const opened = fs.fstatSync(fd);
         if (!opened.isFile() || opened.ino !== before.ino || opened.dev !== before.dev) throw new Error("plugin file changed while fingerprinting");
+        if (shipped && process.platform === "win32" && path.relative(root, file).replaceAll("\\", "/") === "hooks/claude.json") {
+          const original = fs.readFileSync(fd);
+          if (original.length !== before.size) throw new Error("plugin file changed while fingerprinting");
+          const projected = Buffer.from(platformPluginFile("openrig-core", "hooks/claude.json", original.toString("utf8")));
+          length(projected.length); hash.update(projected);
+          return;
+        }
+        length(before.size);
         const buffer = Buffer.alloc(65536); let total = 0;
         while (total <= before.size) {
           const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, before.size + 1 - total), null);
@@ -84,9 +103,9 @@ export function planOwnedCodexContentApproval(input: {
   configPath: string; content: string; layers: CodexConfigLayerRead[]; shipped: string; installed: string; freshGrant?: boolean;
 }): { hashes: Record<string, string>; approval: OwnedApproval } | undefined {
   try {
-    if (codexPluginContentHash(input.shipped, true) !== codexPluginContentHash(input.installed, true)) return;
-    // The trees just matched byte for byte, so approve the shipped bytes rather than a second read of the cache.
-    const contentHash = codexPluginContentHash(input.shipped);
+    if (shippedCodexPluginContentHash(input.shipped, true) !== codexPluginContentHash(input.installed, true)) return;
+    // Approve the expected projected source bytes rather than rereading the cache.
+    const contentHash = shippedCodexPluginContentHash(input.shipped);
     const declarations: Record<string, string> = {};
     const manifest = JSON.parse(fs.readFileSync(path.join(input.shipped, "hooks/codex.json"), "utf8"));
     for (const [event, groups] of Object.entries(manifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
