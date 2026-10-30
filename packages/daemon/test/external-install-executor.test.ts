@@ -26,6 +26,25 @@ function seedBootstrapRun(db: Database.Database, id: string): void {
 }
 
 describe("ExternalInstallExecutor", () => {
+  it("the default native executor preserves literal argv and journals real nonzero exits", async () => {
+    const localDb = createDb(); migrate(localDb, ALL_MIGRATIONS);
+    try {
+      seedBootstrapRun(localDb, "owned-node");
+      const exec = vi.fn(async () => { throw Error("Shell execution forbidden"); });
+      const executor = new ExternalInstallExecutor({ db: localDb, exec });
+      const literal = "owned 'quote' & semicolon; $env:NOT_EXECUTED 中文";
+      const action = makeAction({ requirementName: "owned-node-fixture", provider: "owned-fixture", commandPreview: "Owned Node fixture",
+        commandArgv: { file: process.execPath, args: ["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", literal] } });
+      const result = await executor.execute("owned-node", [{ action, approved: true },
+        { action: { ...action, commandArgv: { file: process.execPath, args: ["-e", "process.stderr.write('owned failure');process.exitCode=7"] } }, approved: true }]);
+      expect(JSON.parse(result.completed[0]!.stdout!)).toEqual([literal]);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]!.errorMessage).toContain("owned failure");
+      expect(exec).not.toHaveBeenCalled();
+      expect(localDb.prepare("SELECT status FROM bootstrap_actions WHERE bootstrap_id = ? ORDER BY seq").all("owned-node"))
+        .toEqual([{ status: "completed" }, { status: "failed" }]);
+    } finally { localDb.close(); }
+  });
   it("runs approved Windows plans as literal argv, journals failure and continues without executing hints", async () => {
     const localDb = createDb(); migrate(localDb, ALL_MIGRATIONS);
     try {

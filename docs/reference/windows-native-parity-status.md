@@ -358,3 +358,12 @@ bootstrap journal records provider `winget` and completion. This single case
 passes; other bootstrap cases were filtered. Package files and database are owned
 fixtures, runtime instantiation is mocked, and no software is actually installed.
 
+The default argv executor is additionally exercised with real owned Node child
+processes: literal quote/semicolon/environment-like/Unicode arguments survive,
+and a child exiting 7 records failure and its stderr rather than completion.
+The bounded package mapping uses Map lookup so prototype-like or arbitrary tool
+names remain manual-only. Related suites now pass 44 tests and daemon TypeScript
+passes. No WinGet installer was executed; installer timeout/descendant behavior
+and post-install readiness remain unverified. A failed install receipt does not
+prove rollback or that an external installer made no changes.
+

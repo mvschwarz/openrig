@@ -16,6 +16,11 @@ function makeProbe(overrides: Partial<ProbeResult> & { name: string; status: Pro
 }
 
 describe("ExternalInstallPlanner", () => {
+  it.each(["constructor", "__proto__", "toString", "git; echo unexpected", "Git.Git"])("keeps unmapped Windows tool %s manual-only", name => {
+    const plan = new ExternalInstallPlanner({ platform: "win32" }).planInstalls([makeProbe({ name, status: "missing" })]);
+    expect(plan.actions[0]).toMatchObject({ classification: "manual_only", commandPreview: null, provider: null });
+    expect(plan.actions[0]).not.toHaveProperty("commandArgv");
+  });
   // T1: Missing CLI tool on darwin -> auto_approvable, brew install
   it("missing CLI tool on darwin -> auto_approvable with brew install", () => {
     const planner = new ExternalInstallPlanner({ platform: "darwin" });
