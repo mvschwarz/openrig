@@ -18,6 +18,7 @@
 //     holdMs         keep the turn open this long; `session/cancel` ends it early as "cancelled"
 //     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway
 //     permission     ask `session/request_permission` first, then carry on whatever the answer. As an object:
+//                      options      the options offered (default: allow-once, allow_once; reject-once, reject_once)
 //                      waitMs       stop waiting for the answer after this long, and end the turn
 //                      exitAfterMs  exit with status 3 this long after asking, while the request waits
 //                    A `session/cancel` while the request waits ends the turn "cancelled" once it's answered.
@@ -72,7 +73,7 @@ async function prompt(id, params) {
     const asked = ask("session/request_permission", {
       sessionId: params.sessionId,
       toolCall: { toolCallId: `call-${turn}`, title: "Edit notes.txt", kind: "edit" },
-      options: [
+      options: p.options ?? [
         { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
         { optionId: "reject-once", name: "Reject", kind: "reject_once" },
       ],

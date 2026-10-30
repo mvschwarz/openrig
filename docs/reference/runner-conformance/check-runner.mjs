@@ -6,13 +6,12 @@
 //   - a small local endpoint stands in for OpenRig's activity route, and records what your runner posts;
 //   - input arrives the way `rig send` delivers it: one bracketed paste with raw newlines, then Enter.
 //
-//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input] [--answered]
+//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input]
 //                         [--cases 1,2,4] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]
 //
 // `{agent}` in the command is replaced with the fake agent's path, an executable that takes any arguments your runner
 // adds. For example: --runner 'my-runner --agent-command {agent}'. --resume and --first-input say your preset declares
 // `resume: true` and `first_input: true`; without them those cases are skipped, since OpenRig wouldn't pass that input.
-// --answered says your runner implements section 7's answered path (0.7.7); without it case 4b is skipped.
 // The runner gets a clean environment: PATH, HOME, USER, SHELL, LANG and TMPDIR, the OpenRig variables, and any
 // --pass-env names. Exit status: 0 when nothing fails, 1 when a case fails, 2 for a usage or setup problem.
 //
@@ -28,10 +27,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--answered] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
+const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
 
 function parseArgs(argv) {
-  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, answered: false, json: false, keep: false, waitMs: 8000 };
+  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, json: false, keep: false, waitMs: 8000 };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = () => { if (i + 1 >= argv.length) throw new Error(`${flag} needs a value`); return argv[++i]; };
@@ -42,7 +41,6 @@ function parseArgs(argv) {
     else if (flag === "--wait-ms") opts.waitMs = Number(value());
     else if (flag === "--resume") opts.resume = true;
     else if (flag === "--first-input") opts.firstInput = true;
-    else if (flag === "--answered") opts.answered = true;
     else if (flag === "--json") opts.json = true;
     else if (flag === "--keep") opts.keep = true;
     else throw new Error(`unknown option ${flag}`);
@@ -80,7 +78,7 @@ async function waitFor(read, ms = opts.waitMs) {
 const posts = [];
 const tokens = new Map();
 const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
-const ANSWERABLE = new Set(["allow_once", "reject_once", "reject_always"]);
+const ANSWERABLE = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
 const text = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
 // A JSON-RPC id or prompt number as the runner passed it: a number reads as its decimal string, so 7 and "7" match.
 const idText = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : text(value);
@@ -102,11 +100,15 @@ const server = createServer((req, res) => {
     const ask = url.pathname.match(/^\/api\/activity\/permission-requests(?:\/([^/]+)(\/withdraw)?)?$/);
     if (!ask) return send(404, { ok: false, code: "not_found" });
     if (!h) return send(401, { ok: false });
-    // Without a scripted ask, the stand-in is an OpenRig that predates the answered path: 404, so the runner refuses as before.
+    // Without a scripted ask, the stand-in is an OpenRig that predates the answered path: 404, so the runner permits.
     if (!h.asks) return send(404, { ok: false, code: "not_found" });
+    // A scripted `drop` closes the connection unanswered: an OpenRig the runner can't reach.
+    const drop = req.method === "POST" && !ask[1] ? h.asks.script.submit?.drop : req.method === "GET" && h.asks.script.read?.drop;
+    if (drop) return void res.socket.destroy();
     if (req.method === "POST" && !ask[1]) return submitAsk(h, body, raw, send);
     const entry = h.asks.byId.get(decodeURIComponent(ask[1] ?? ""));
     if (!entry) return send(404, { ok: false, code: "not_found" });
+    if (req.method === "GET" && h.asks.script.read) return send(h.asks.script.read.status, { ok: false, code: h.asks.script.read.code });
     if (req.method === "POST" && ask[2]) {
       if (!["turn_cancelled", "turn_ended", "exited"].includes(body?.reason)) return send(400, { ok: false, code: "invalid_permission_request" });
       entry.withdrawn = body.reason;
@@ -130,13 +132,14 @@ const server = createServer((req, res) => {
 function askState(h, entry) {
   const script = h.asks.script;
   if (entry.withdrawn) return script.late ?? { state: "withdrawn" };
-  if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) return script.answer.state === "answered"
-    ? { state: "answered", optionId: script.answer.optionId } : { state: script.answer.state };
+  if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) return script.answer.optionId
+    ? { state: script.answer.state, optionId: script.answer.optionId } : { state: script.answer.state };
   return { state: "pending" };
 }
 
 // Submit, checked as OpenRig checks it: the seat and generation, nativeRef as a string, turnId and requestId as a string
-// or a number, and 2-4 answerable options.
+// or a number. When no one can be asked, OpenRig permits with the agent's allow_once, else allow_always: here when the
+// script says so, or for options a person can't be shown (2-4 with distinct ids). With no allow option it refuses.
 function submitAsk(h, body, raw, send) {
   const script = h.asks.script;
   const problems = [];
@@ -150,10 +153,13 @@ function submitAsk(h, body, raw, send) {
   h.asks.submitted.push({ body, problems });
   if (problems.length) return send(400, { ok: false, code: "invalid_permission_request", error: problems.join("; ") });
   if (body.generation !== h.generation) return send(409, { ok: false, code: "stale_generation" });
-  if (script.submit) return send(script.submit.status, { ok: false, code: script.submit.code });
-  const answerable = options.filter((o) => o.kind !== "allow_always");
-  if (answerable.length < 2 || answerable.length > 4 || new Set(answerable.map((o) => o.optionId)).size !== answerable.length
-    || answerable.some((o) => !OPTION_ID.test(o.optionId) || !ANSWERABLE.has(o.kind))) return send(422, { ok: false, code: "options_unsupported" });
+  if (script.submit?.status) return send(script.submit.status, { ok: false, code: script.submit.code });
+  const allow = options.find((o) => o.kind === "allow_once") ?? options.find((o) => o.kind === "allow_always");
+  const permit = (reason) => allow ? send(200, { ok: true, state: "permitted", optionId: allow.optionId, reason })
+    : send(422, { ok: false, code: "options_unsupported" });
+  if (script.submit?.permitted) return permit("no one can be asked");
+  if (options.length < 2 || options.length > 4 || new Set(options.map((o) => o.optionId)).size !== options.length
+    || options.some((o) => !OPTION_ID.test(o.optionId) || !ANSWERABLE.has(o.kind))) return permit("these options can't be shown to a person");
   const requestId = idText(body.requestId), turnId = idText(body.turnId);
   const key = JSON.stringify([body.generation, text(body.nativeRef), requestId]);
   const earlier = h.asks.byKey.get(key);
@@ -347,38 +353,62 @@ const cases = {
     return r;
   },
 
+  // Section 7's default is permit: when no one can be asked, the agent gets its own allow option at once, allow_once before
+  // allow_always. Only the seat's opt-in refusal (denied_by_seat), or a request with no allow option, is refused at once,
+  // shown, and held as needs input until the next prompt.
   async "4"() {
-    const r = result("4", "Permissions: refused at once, shown, and held as needs input");
-    const h = await launch("4", { scenario: { turns: [{ permission: true, holdMs: scale(1500) }, {}] } });
-    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
-    h.paste(message(h, "edit the notes"));
-    const asked = await waitFor(() => h.sent("session/request_permission")[0]);
-    if (!r.check("the agent's permission request is sent", asked, "the turn never reached the request")) return r;
-    const answer = await waitFor(() => h.answerTo("session/request_permission"), scale(3000));
-    r.check("the request is answered, not left pending", answer, "no answer");
-    r.check("it's answered at once (within 2 s)", answer && answer.at - asked.at <= 2000, answer ? `${answer.at - asked.at} ms` : "no answer");
-    r.check("the answer is a refusal, never an allow option", answer?.msg.result?.outcome?.outcome === "cancelled",
-      `answer: ${JSON.stringify(answer?.msg.result ?? answer?.msg.error)}`);
-    const shown = await waitFor(() => h.hooks("Notification", "permission_prompt")[0], scale(3000));
-    r.check("Notification/permission_prompt is posted", shown, "no permission_prompt post");
-    r.check("what was asked is shown in the pane", await waitFor(() => h.screen().includes("Edit notes.txt"), scale(3000)),
-      "the pane never showed the tool call's title, Edit notes.txt");
-    await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(4000));
-    await sleep(scale(800));
-    r.check("no idle Stop or beat while holding that attention", shown && nonExitStops(h, shown.at).length === 0,
-      `posted ${nonExitStops(h, shown?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", ")}`);
-    const next = Date.now();
-    h.paste(message(h, "carry on"));
-    r.check("the next prompt is accepted as usual, which clears it",
-      await waitFor(() => h.hooks("UserPromptSubmit", "accepted").some((p) => p.at >= next)), "no accepted post for the next prompt");
+    const r = result("4", "Permissions: permitted when no one can be asked; refused and held only on denied_by_seat or no allow option");
+    const option = (optionId, kind) => ({ optionId, name: optionId, kind });
+    const withAlways = [option("allow-once", "allow_once"), option("allow-always", "allow_always"), option("reject-once", "reject_once")];
+    const rejectOnly = [option("reject-once", "reject_once"), option("reject-always", "reject_always")];
+    const cells = [
+      // label, the stand-in's answered path (none: an OpenRig without it, which answers 404), the options, permitted
+      ["404", undefined, withAlways, true],
+      ["unreachable", { submit: { drop: true } }, withAlways, true],
+      ["denied_by_seat", { submit: { status: 409, code: "denied_by_seat" } }, withAlways, false],
+      ["no allow option", undefined, rejectOnly, false],
+    ];
+    await Promise.all(cells.map(async ([label, asks, options, permitted]) => {
+      const h = await launch(`4-${label.replace(/[^a-z0-9]+/g, "-")}`, { scenario: { turns: [{ permission: { options }, holdMs: scale(1500) }, {}] }, asks });
+      if (!r.check(`${label}: the runner opens its conversation`, await ready(h), "no launch record")) return;
+      h.paste(message(h, "edit the notes"));
+      const asked = await waitFor(() => h.sent("session/request_permission")[0]);
+      if (!r.check(`${label}: the agent's permission request is sent`, asked, "the turn never reached the request")) return;
+      // A runner may take a moment to find OpenRig unreachable; everything else is answered at once.
+      const answer = await waitFor(() => h.answerTo("session/request_permission"), scale(label === "unreachable" ? 10000 : 3000));
+      if (!r.check(`${label}: the request is answered, not left pending`, answer, "no answer")) return;
+      if (label !== "unreachable") r.check(`${label}: it's answered at once (within 2 s)`, answer.at - asked.at <= 2000, `${answer.at - asked.at} ms`);
+      const got = answer.msg.result?.outcome;
+      if (permitted) {
+        r.check(`${label}: the agent gets its allow_once option`, got?.outcome === "selected" && got.optionId === "allow-once",
+          `answer: ${JSON.stringify(answer.msg.result ?? answer.msg.error)}`);
+        r.check(`${label}: the turn's end is reported as usual`, await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(4000)),
+          "no Stop/end_turn after the permit");
+        r.check(`${label}: nothing is held as needs input`, h.hooks("Notification", "permission_prompt").length === 0, "the runner posted permission_prompt");
+        return;
+      }
+      r.check(`${label}: the answer is a refusal, never an allow option`, got?.outcome === "cancelled",
+        `answer: ${JSON.stringify(answer.msg.result ?? answer.msg.error)}`);
+      const shown = await waitFor(() => h.hooks("Notification", "permission_prompt")[0], scale(3000));
+      r.check(`${label}: Notification/permission_prompt is posted`, shown, "no permission_prompt post");
+      if (label === "denied_by_seat") r.check(`${label}: what was asked is shown in the pane`, await waitFor(() => h.screen().includes("Edit notes.txt"), scale(3000)),
+        "the pane never showed the tool call's title, Edit notes.txt");
+      await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(4000));
+      await sleep(scale(800));
+      r.check(`${label}: no idle Stop or beat while holding that attention`, shown && nonExitStops(h, shown.at).length === 0,
+        `posted ${nonExitStops(h, shown?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", ")}`);
+      const next = Date.now();
+      h.paste(message(h, "carry on"));
+      r.check(`${label}: the next prompt is accepted as usual, which clears it`,
+        await waitFor(() => h.hooks("UserPromptSubmit", "accepted").some((p) => p.at >= next)), "no accepted post for the next prompt");
+    }));
     return r;
   },
 
-  // Section 7's answered path (0.7.7): the runner submits the live request, reads the chosen person's answer, delivers it
-  // once while that request is live, and withdraws it when the turn or the agent ends. Any refusal is a refusal.
+  // Section 7's answered path: the runner submits the live request, delivers the option that comes back (the person's
+  // answer, or OpenRig's permit) once while that request is live, and withdraws it when the turn or the agent ends.
   async "4b"() {
-    const r = result("4b", "Answered permissions: the chosen person's answer reaches the live request, and nothing else does");
-    if (!opts.answered) return r.skip("the runner doesn't claim section 7's answered path (--answered)");
+    const r = result("4b", "Answered permissions: the person's answer or OpenRig's permit reaches the live request, and nothing else does");
     const options = ["allow-once", "reject-once"];
     const submits = (h) => h.permissionCalls("POST").filter((p) => p.path === "/api/activity/permission-requests");
     const withdraws = (h) => h.permissionCalls("POST", "/withdraw");
@@ -427,29 +457,36 @@ const cases = {
       }
     }
 
-    // Anything but an offered answer is a refusal, and attention is held: an option the request didn't offer, a refused,
-    // stale or withdrawn ask, or a refusal at submit.
-    const refusals = [
-      ["unoffered option", { answer: { afterMs: 300, state: "answered", optionId: "allow-always" } }, false],
-      ["refused ask", { answer: { afterMs: 300, state: "refused" } }, false],
-      ["stale ask", { answer: { afterMs: 300, state: "stale" } }, false],
-      ["withdrawn ask", { answer: { afterMs: 300, state: "withdrawn" } }, false],
-      ["route_unsupported", { submit: { status: 409, code: "route_unsupported" } }, true],
-      ["options_unsupported", { submit: { status: 422, code: "options_unsupported" } }, true],
-      ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, true],
-      ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, true],
+    // OpenRig's permit, at submit or at a read, is delivered like an answer. So is the runner's own permit when OpenRig
+    // can't give an answer: a refusal at submit other than denied_by_seat, a read that gets no answer, or a read status
+    // section 7 doesn't list. A stale or withdrawn ask, or a refused read, can't take an answer: the agent gets cancelled.
+    const outcomes = [
+      ["permitted at submit", { submit: { permitted: true } }, "allow-once"],
+      ["permitted at read", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once" } }, "allow-once"],
+      ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, "allow-once"],
+      ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, "allow-once"],
+      ["unreachable read", { read: { drop: true } }, "allow-once"],
+      ["unlisted read status (500)", { read: { status: 500, code: "internal_error" } }, "allow-once"],
+      ["stale ask", { answer: { afterMs: 300, state: "stale" } }, null],
+      ["withdrawn ask", { answer: { afterMs: 300, state: "withdrawn" } }, null],
+      ["refused read (409)", { read: { status: 409, code: "activity_grant_stale" } }, null],
     ];
-    await Promise.all(refusals.map(async ([label, asks, atSubmit]) => {
-      const h = await open(label.replace(/[^a-z]+/g, "-"), asks, [{ permission: true, holdMs: scale(800) }, {}]);
+    await Promise.all(outcomes.map(async ([label, asks, optionId]) => {
+      const h = await open(label.replace(/[^a-z0-9]+/g, "-"), asks, [{ permission: true, holdMs: scale(800) }, {}]);
       if (!h) return;
-      const got = await waitFor(() => outcome(h), scale(4000));
-      r.check(`${label}: the agent gets cancelled, never an allow option`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
-      if (atSubmit) r.check(`${label}: the runner posts permission_prompt itself`, await waitFor(() => h.hooks("Notification", "permission_prompt")[0], scale(3000)),
-        "no permission_prompt after a refusal at submit");
-      await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(3000));
-      await sleep(scale(600));
-      r.check(`${label}: no idle Stop while attention is held`, nonExitStops(h, got?.at ?? 0).length === 0,
-        nonExitStops(h, got?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", "));
+      // A runner may retry a read that got no answer a few times before it permits.
+      const got = await waitFor(() => outcome(h), scale(label === "unreachable read" ? 10000 : 4000));
+      if (!optionId) {
+        r.check(`${label}: the agent gets cancelled`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
+        return;
+      }
+      r.check(`${label}: the agent gets its allow_once option`, got?.outcome === "selected" && got.optionId === optionId, `got ${JSON.stringify(got)}`);
+      await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(3000));
+      await sleep(scale(300));
+      r.check(`${label}: it's delivered once`, answers(h).length === 1, `${answers(h).length} answers`);
+      r.check(`${label}: the turn's end is reported as usual`, h.hooks("Stop", "end_turn").length > 0, "no Stop/end_turn after the permit");
+      if (label === "permitted at submit") r.check(`${label}: there's no ask to read`, h.permissionCalls("GET").length === 0,
+        `${h.permissionCalls("GET").length} reads`);
     }));
 
     // No answer: the request stays pending and visible, a pasted message isn't an answer, and /abort withdraws it, after
