@@ -674,3 +674,22 @@ passes and 39 unmatched historical cases, still including 13 POSIX fixture skips
 The current workspace build also completes across daemon, UI, CLI and TUI. It is
 an ordinary source build with absent CLI build-identity fields, not a stamped
 package/release or deployment; the earlier package gate is separate evidence.
+
+Current native ACP process-fact suites pass 5/5, including finding a marked
+detached descendant after its parent exits, excluding unrelated markers,
+Windows-cased marker keys with exact values, exact argv/cwd and whitelisted home
+selectors. This does not clear the old companion integration failure: its
+retained report names an `EPERM` during fixture-directory cleanup. The separate
+EOF diagnostic could not independently establish EOF. Neither is evidence that
+changing the production protocol will fix cleanup, so no further speculative
+protocol change or cleanup bypass was added.
+
+The CLI account-home boundary again exercises the three original scenarios
+directly: absent HOME in the default process environment, empty HOME there, and
+an explicitly supplied empty HOME map. Each resolves beneath the actual OS
+account home, with test environment changes restored afterwards; no account
+auth file is read. With explicit-home selection and synthetic auth-seat registry
+checks, ten cases and CLI TypeScript pass. The three original test names now have
+current passing receipts: exact-name reconciliation is 58 later passes and 36
+unmatched cases. These counts do not clear renamed permission tests, link
+privilege limitations, ACP cleanup or the 13 POSIX fixture skips.
