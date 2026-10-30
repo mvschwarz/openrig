@@ -4,6 +4,7 @@ import { TerminalPolicyStore } from "./terminal-policy.js";
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
+import { sessionCommunityRunnerSelect } from "./session-registry.js";
 import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
@@ -24,6 +25,10 @@ export interface SeatStatus {
   runtime: string | null;
   /** Configured cwd for future launches; an existing process can still use its old cwd. */
   launch_cwd: string | null;
+  /** The registered person who answers this seat's runner permission requests; null when no one is chosen. */
+  permissions_to: string | null;
+  /** Whether the seat's newest session was launched as a community runner, the kind that submits permission requests. */
+  runner: boolean;
   current_occupant: string | null;
   session_status: string | null;
   session_reason: SeatIdentityVerdict["reason"];
@@ -151,6 +156,8 @@ export class SeatStatusService {
       pod_namespace: entry.podNamespace ?? null,
       runtime: entry.runtime,
       launch_cwd: entry.cwd,
+      permissions_to: this.rigRepo.getNodePermissionsTo(entry.nodeId),
+      runner: this.launchedAsRunner(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
       session_reason: entry.identityVerdict?.reason ?? null,
@@ -174,6 +181,13 @@ export class SeatStatusService {
     enforcer.recoverSeat({ sessionName: session, cwd: entry.cwd, runtime: entry.runtime });
     const observed = enforcer.observedCompaction(session);
     return observed ? { compaction: { ...observed, owedRestore: enforcer.getOwedRestore(session) } } : {};
+  }
+
+  private launchedAsRunner(nodeId: string): boolean {
+    const db = this.rigRepo.db;
+    const row = db.prepare(`SELECT ${sessionCommunityRunnerSelect(db)} AS community_runner FROM sessions s WHERE s.node_id = ? ORDER BY s.id DESC LIMIT 1`)
+      .get(nodeId) as { community_runner: number | null } | undefined;
+    return row?.community_runner === 1;
   }
 
   private runtimeHomeStatus(nodeId: string, runtime: string | null): Pick<SeatStatus, "runtime_home"> {

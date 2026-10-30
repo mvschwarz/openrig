@@ -18,6 +18,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
@@ -1824,7 +1825,7 @@ export class QueueRepository {
    *  primary user, who may answer anyone's ask. A shared channel's rows are correspondence, never an answer. */
   getHumanAnswer(qitemId: string, actorSession: string, opts: { primaryUser?: boolean } = {}): QueueItem | null {
     const ask = this.getById(qitemId);
-    if (!this.hasReplyToColumn || !ask || this.isSharedChannel(actorSession) || (ask.destinationSession !== actorSession && !opts.primaryUser)
+    if (!this.hasReplyToColumn || !ask || this.isSharedChannel(actorSession) || (!this.answersAsk(ask, actorSession) && !opts.primaryUser)
       || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return null;
     const row = this.db.prepare(`SELECT qitem_id FROM queue_items
       WHERE reply_to = ? AND source_session = ? AND destination_session = ?
@@ -1839,6 +1840,10 @@ export class QueueRepository {
    * on the person it asked belongs to that park's question (`episodeKey`): its ID includes it, and only that ID counts. */
   async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string }): Promise<QueueItem> {
     const { episodeKey, ...create } = input;
+    // A runner's permission request is answered in its ask, and the runner reads the answer back. No reply row: it
+    // would wake the runner's terminal, where typed text reads as a prompt to its agent.
+    const ask = this.getById(input.inboundReplyTo);
+    if (ask && runnerPermissionOrigin(ask)) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
@@ -2137,10 +2142,39 @@ export class QueueRepository {
   }
 
   /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
+  /** A runner's permission ask whose seat has since been relaunched can't be answered: its request died with the
+   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. An unreadable ledger
+   *  closes nothing. */
+  private closeStaleRunnerPermission(qitemId: string): boolean {
+    const item = this.getById(qitemId);
+    const origin = item?.state === "pending" ? runnerPermissionOrigin(item) : null;
+    if (!item || !origin) return false;
+    let current: string | null;
+    try {
+      current = (this.db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
+        .get(origin.nodeId) as { generation_uuid: string } | undefined)?.generation_uuid ?? null;
+    } catch {
+      return false;
+    }
+    if (current === origin.generation) return false;
+    this.update({ qitemId, actorSession: item.sourceSession, state: "canceled",
+      transitionNote: "runner-permission-stale reason=relaunched: a later occupant holds this seat, so any answer here is not sent." });
+    return true;
+  }
+
   isPersonAddress(destination: string): boolean {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** Who may answer an ask: the asked person; and on a runner's permission request, any registered person, since a
+   *  person's yes counts however it arrives there. A shared channel never answers. */
+  answersAsk(item: QueueItem, actorSession: string): boolean {
+    if (item.destinationSession === actorSession) return true;
+    if (!runnerPermissionOrigin(item) || this.isSharedChannel(actorSession)) return false;
+    const registry = this.loadHumanRegistryFn();
+    return registry.ok && resolveRegisteredHumanAddress(actorSession, registry.entities) !== null;
   }
 
   /** A registered shared channel. It takes correspondence, so it never answers, approves, resolves or denies (0.7.3). */
@@ -2276,11 +2310,12 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
+      const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
         destinationSession: input.toSession,
-        humanAlert: input.humanAlert,
+        humanAlert: input.humanAlert ?? (carried ? true : undefined), // a carried permission ask alerts, as Mission Control's does
         nextState: "pending",
       });
       this.transitionLog.append({
@@ -2455,11 +2490,12 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
+      const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
         destinationSession: input.toSession,
-        humanAlert: input.humanAlert,
+        humanAlert: input.humanAlert ?? (carried ? true : undefined), // a carried permission ask alerts, as Mission Control's does
         nextState: "pending",
       });
       this.transitionLog.append({
@@ -3760,11 +3796,12 @@ export class QueueRepository {
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
-        || (item.destinationSession !== input.actorSession && !input.primaryUser)
+        || (!this.answersAsk(item, input.actorSession) && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
 
       let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
-        : `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`;
+        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`
+        : `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${item.destinationSession}`;
       const placed = this.placeTypedReply(item, input.decision);
       if (placed) transitionNote += `; ${placed}`;
       return this.updateInTransactionalContext({
@@ -3816,6 +3853,7 @@ export class QueueRepository {
     /** The click's Slack action_ts: a decision parked on the person it asked takes the click only from after its current question posted. */
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
+    if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
@@ -3828,7 +3866,7 @@ export class QueueRepository {
         return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}),
           ...(decidedForThem ? { decidedForThem } : {}) };
       }
-      if (item.destinationSession !== input.actorSession && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
+      if (!this.answersAsk(item, input.actorSession) && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
@@ -4832,6 +4870,27 @@ export class QueueRepository {
    *  column) are unaffected; only writes when a value is present (NULL is the
    *  default and degrades in the Story consumer). Runs inside the caller's
    *  transaction (create / handoff / handoff-and-complete). */
+  /** A runner's permission ask handed to a person: that person decides, so their row carries the agent's options, as
+   *  Mission Control's route and handoff give it. Any other row is handed on unchanged. */
+  private carryPermissionQuestion(source: QueueItem, successorId: string, toSession: string): boolean {
+    const questions = runnerPermissionOrigin(source) ? this.permissionQuestionsFor(source) : null;
+    if (!questions || !this.hasHumanQuestionsColumn || !this.hasHumanIntentColumn || !this.isPersonAddress(toSession)) return false;
+    this.db.prepare("UPDATE queue_items SET human_questions = ?, human_intent = 'decision' WHERE qitem_id = ?")
+      .run(JSON.stringify(questions), successorId);
+    return true;
+  }
+
+  /** A runner permission ask's options: the row's own, or, when it came through a seat that got none (an agent seat),
+   *  the nearest earlier row's along handed_off_from. */
+  permissionQuestionsFor(item: QueueItem): HumanQuestion[] | null {
+    let current: QueueItem | null = item;
+    for (let hops = 0; current && runnerPermissionOrigin(current) && hops <= 10; hops++) {
+      if (current.humanQuestions?.length) return current.humanQuestions;
+      current = current.handedOffFrom ? this.getById(current.handedOffFrom) : null;
+    }
+    return null;
+  }
+
   private persistSummary(qitemId: string, summary: string | null): void {
     if (this.hasSummaryColumn && summary !== null) {
       this.db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run(summary, qitemId);
