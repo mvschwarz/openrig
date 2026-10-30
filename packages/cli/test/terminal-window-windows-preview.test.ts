@@ -20,8 +20,9 @@ afterEach(async () => {
   }
 });
 
-async function fixture(readOnly = false) {
-  const members = ["seat'中文", "seat-two"].map(seat => ({ seat, tmuxSession: `${seat}@fixture`, readOnly }));
+async function fixture(readOnly = false, count = 2) {
+  const seats = ["seat'中文", "seat-two", ...Array.from({ length: Math.max(0, count - 2) }, (_, i) => `seat-${i + 3}`)];
+  const members = seats.map(seat => ({ seat, tmuxSession: `${seat}@fixture`, readOnly }));
   const saved = { id: "fixture", name: "Fixture", members };
   const providerOpens = vi.fn();
   const provider: TerminalProvider = {
@@ -57,8 +58,8 @@ async function fixture(readOnly = false) {
   return { saved, baseUrl, launch, deps, providerOpens };
 }
 
-it.each([false, true])("carries a real TUI preview plan through native composition to Windows Terminal argv (readOnly=%s)", async readOnly => {
-  const f = await fixture(readOnly);
+it.each([[false, 2], [true, 2], [false, 19], [true, 19]] as const)("carries a real TUI preview plan through native composition to Windows Terminal argv (readOnly=%s, seats=%i)", async (readOnly, count) => {
+  const f = await fixture(readOnly, count);
   const preview = await new TuiClient({ baseUrl: f.baseUrl }).previewTerminal("saved:fixture");
   const result = await openTerminalWindow(new CliClient(f.baseUrl), "saved:fixture", undefined, f.deps, preview.planId);
   expect(result, JSON.stringify(result)).toMatchObject({ ok: true, provider: "tmux", opened: f.saved.members.map(m => m.seat) });
@@ -66,10 +67,13 @@ it.each([false, true])("carries a real TUI preview plan through native compositi
   const [binary, args] = f.launch.mock.calls[0]!;
   expect(binary).toBe("C:\\fixture\\wt.exe");
   const scripts = args.flatMap((arg, i) => arg === "-EncodedCommand" ? [Buffer.from(args[i + 1]!, "base64").toString("utf16le")] : []);
-  expect(scripts).toHaveLength(2);
+  expect(scripts).toHaveLength(count);
   for (const script of scripts) expect(script).toContain("windows-tile-attach.ps1");
   const payloads = scripts.map(script => JSON.parse(Buffer.from(/\)\)\) '([^']+)'$/.exec(script)![1]!, "base64").toString("utf8")));
-  expect(payloads.map(p => p.session)).toEqual(f.saved.members.map(m => m.tmuxSession));
+  // Recursive grid construction emits split commands in tree order.
+  expect(payloads.map(p => p.session).sort()).toEqual(f.saved.members.map(m => m.tmuxSession).sort());
+  expect(args.filter(arg => arg === "new-tab")).toHaveLength(Math.ceil(count / 16));
+  expect(args.filter(arg => arg === "split-pane")).toHaveLength(count - Math.ceil(count / 16));
   expect(payloads.every(p => p.tmux === "C:\\Program Files\\psmux\\psmux.exe" && p.readOnly === readOnly)).toBe(true);
   expect(f.providerOpens).not.toHaveBeenCalled();
 });

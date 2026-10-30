@@ -234,3 +234,11 @@ reach their server, preventing a fetch-guard refusal from looking like a working
 timeout. The original 150 ms deadline and under-350 ms bounds remain unchanged;
 the ready response is read through the real client. Servers are awaited on close.
 
+Native terminal preview coverage now includes nineteen seats across two tabs,
+with both writable and read-only attachment payloads. The real owned HTTP routes,
+TUI preview plan and CLI composition retain every session exactly once, with two
+new-tab and seventeen split-pane operations. Recursive grid command order is not
+seat-list order. The native terminal suites pass 19/19; desktop launch remains
+inert, so this is not visible-window or live source-process acceptance. The old
+macOS/POSIX tmux fixtures remain separate from this native coverage.
+
