@@ -216,3 +216,9 @@ fixture registers only its own ephemeral loopback server with the fetch guard.
 The real CLI-to-HTTP acceptance checks still reject mismatched fields without
 mutation. This scoped result does not establish live workspace or fleet acceptance.
 
+MCP roster discovery now distinguishes a missing directory from a file blocking
+an ancestor on Windows, where both can report ENOENT. A blocked path retains the
+generic incomplete-rosters warning; a genuinely missing nested directory remains
+an empty roster without that warning. The MCP server and owned HTTP telemetry
+fixtures pass 57/57, with CLI TypeScript passing. No live roster or daemon is used.
+

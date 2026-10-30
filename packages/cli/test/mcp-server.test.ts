@@ -466,7 +466,11 @@ describe("MCP Server", () => {
     const blocked = path.join(folder, "a-file");
     fs.writeFileSync(blocked, "not a folder");
     const [here, unreachable] = [await connectTo(folder), await connectTo(path.join(blocked, "rosters"))];
+    const missing = await connectTo(path.join(folder, "missing-parent", "rosters"));
     try {
+      const absent = await missing.team();
+      expect(absent.hostedMembers).toEqual([]);
+      expect(absent.hostedMembersNote).toBeUndefined();
       const found = await here.team();
       expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
         caveat: "Text only", pane: null, activity: "unknown",
@@ -485,6 +489,7 @@ describe("MCP Server", () => {
     } finally {
       await here.close();
       await unreachable.close();
+      await missing.close();
       log.mockRestore();
       fs.rmSync(folder, { recursive: true, force: true });
     }

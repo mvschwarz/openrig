@@ -1,6 +1,7 @@
 // rig_telemetry_events against the daemon's real telemetry route, over HTTP, through the real DaemonClient: the
 // page `rig telemetry events` reads, with a rig name resolved to its id as the other MCP rig tools resolve it.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import type { AddressInfo } from "node:net";
 import { serve, type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -27,7 +28,9 @@ describe("rig_telemetry_events on the daemon's telemetry route", () => {
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: fixture.app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
-    const mcp = createMcpServer(new DaemonClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    allowFetchTarget(url);
+    const mcp = createMcpServer(new DaemonClient(url));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "collector", version: "1.0.0" });
     await mcp.connect(serverTransport);
