@@ -162,7 +162,16 @@ function premiseMatches(markerData, payload) {
   if (!markerTranscript && !markerSession) return true; // legacy marker: no identity to gate on
   const payloadTranscript = firstString(payload.transcript_path, payload.transcriptPath);
   const payloadSession = firstString(payload.session_id, payload.sessionId);
-  if (markerTranscript) return payloadTranscript === markerTranscript;
+  if (markerTranscript) {
+    if (payloadTranscript === markerTranscript) return true;
+    if (process.platform !== "win32" || !payloadTranscript) return false;
+    try {
+      const saved = fs.statSync(markerTranscript, { bigint: true });
+      const current = fs.statSync(payloadTranscript, { bigint: true });
+      return saved.isFile() && current.isFile() && saved.ino !== 0n
+        && saved.dev === current.dev && saved.ino === current.ino;
+    } catch { return false; }
+  }
   return payloadSession === markerSession;
 }
 

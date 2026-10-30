@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Compaction restore bridge transcript aliases
+
+The shipped restore bridge now recognizes different Windows spellings of the same
+existing transcript by device/file identity. An owned actual hook subprocess
+reproduced a valid marker being ignored when its transcript was presented through
+a directory junction and case alias. The bridge now delivers that marker once;
+a distinct transcript is still refused even when the supplied session ID agrees.
+Missing/unreadable additional identity evidence remains a non-match, POSIX behavior
+and exact-spelling behavior remain unchanged.
+
+The native alias fixture and full focused bridge-reader file pass nine checks;
+Node syntax and daemon TypeScript checks pass. Both bundled core-plugin manifests
+are advanced together to 0.1.30; the source-tree packaged-plugin version check
+passes. The previously assembled package still contains 0.1.29 and was not mistaken
+for the new source. No installed plugin, live transcript, provider compaction or
+runtime deployment was changed; those acceptance boundaries remain open.
+
 ### Packaged plugin snapshot output names
 
 The plugin-version snapshot CLI now stages through a short UUID sibling. An owned
