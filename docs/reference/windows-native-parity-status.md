@@ -492,3 +492,11 @@ cases pass alongside existing guard regressions; CLI TypeScript passes. The
 returns nonzero on denied/unavailable observation. No actual foreign process or
 deployed daemon was accessed, and this does not prove listener ownership.
 
+Native owner checks are now exercised through real client HTTP boundaries too:
+an owned loopback endpoint plus injected foreign SID observations receives only
+health requests, with both business reads and writes refused. A second fixture
+reports the test process's PID, uses real native SID/birth observations, confirms
+same-user and permits exactly its owned business read. Together with direct
+consumer and owner regressions, 32 tests pass. Unknown and explicit-routing
+behavior retain the existing policy; no deployed daemon or foreign account is used.
+

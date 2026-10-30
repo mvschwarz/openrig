@@ -6,20 +6,23 @@ import { queueCommand } from "../src/commands/queue.js";
 import { sendCommand } from "../src/commands/send.js";
 import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { allowFetchTarget } from "./fetch-guard.js";
+import { assessLocalDaemonOwner } from "../src/local-daemon-owner.js";
 
 const foreign = { state: "foreign" as const, pid: 42, uid: 502, callerUid: 501 };
 let server: http.Server;
 let base: string;
 let business: string[];
+let healthPid: number;
 beforeEach(async () => {
   vi.stubEnv("OPENRIG_URL", ""); vi.stubEnv("RIGGED_URL", "");
   vi.stubEnv("OPENRIG_SESSION_NAME", ""); vi.stubEnv("RIGGED_SESSION_NAME", "");
   vi.stubEnv("OPENRIG_TRANSPORT_LOCAL_USER_GUARD", "true");
   business = [];
+  healthPid = 42;
   server = http.createServer((req, res) => {
     if (req.url !== "/healthz") business.push(`${req.method} ${req.url}`);
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify(req.url === "/healthz" ? { pid: 42 } : []));
+    res.end(JSON.stringify(req.url === "/healthz" ? { pid: healthPid } : []));
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -41,6 +44,28 @@ function lifecycle(): LifecycleDeps {
   } as unknown as LifecycleDeps;
 }
 describe("optional local user guard at actual CLI consumers", () => {
+  it.runIf(process.platform === "win32")("real native same-user observation permits the owned HTTP read", async () => {
+    healthPid = process.pid;
+    const states: string[] = [];
+    const instance = new DaemonClient(base, { ownerProbe: async url => {
+      const observation = await assessLocalDaemonOwner(url, { timeoutMs: 10000 });
+      states.push(observation.state);
+      return observation;
+    } });
+    expect(await instance.get("/api/owned-native-read")).toMatchObject({ status: 200, data: [] });
+    expect(states).toEqual(["same-user"]);
+    expect(business).toEqual(["GET /api/owned-native-read"]);
+  }, 15000);
+  it("Windows SID corroboration blocks real loopback business reads and writes", async () => {
+    const run = vi.fn(async () => JSON.stringify({ pid: 42, sid: "S-1-5-21-2", callerSid: "S-1-5-21-1", start: "100" }));
+    const instance = new DaemonClient(base, { ownerProbe: url => assessLocalDaemonOwner(url, {
+      platform: "win32", run, timeoutMs: 1000,
+    }) });
+    await expect(instance.get("/api/queue")).rejects.toMatchObject({ code: "foreign_local_daemon" });
+    await expect(instance.post("/api/transport/send", { text: "owned fixture" })).rejects.toMatchObject({ code: "foreign_local_daemon" });
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(business).toEqual([]);
+  });
   it("foreign owner blocks a business read and write without calling either route", async () => {
     const { instance, probe } = client();
     await expect(instance.get("/api/queue")).rejects.toThrow(/different OS user/);
