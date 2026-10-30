@@ -102,7 +102,7 @@ try {
 } catch { [Console]::Error.WriteLine('OpenRig native probe job: ' + $_.Exception.Message); exit 125 }
 `;
 
-/** Windows 10+ background probes only. Never use this for persistent seats. */
+/** Finite Windows 10+ background CLI commands only. Never use this for persistent seats. */
 export function prepareWindowsJobProcess(file: string, args: string[], options: SpawnOptions) {
   const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd();
   if ([file, cwd, ...args].some(value => value.includes("\0"))) throw new TypeError("Native probe arguments must not contain NUL");

@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Finite Codex plugin commands contain native descendants
+
+Owned npm-entry fixtures reproduced detached descendants remaining alive after
+the finite Codex plugin CLI returned, both on exit 0 and exit 7. The Windows
+plugin-command runner now uses the existing Job Object wrapper and disposes its
+invocation after completion. The existing 120-second bound and output bound remain;
+native timeout termination targets the wrapper with SIGKILL. POSIX execution and
+persistent seat launches are unchanged.
+
+Three native cases pass: successful and failing owned CLI exits with detached
+descendant cleanup and output/status preservation, plus the existing offline npm
+entry's exact-argv/home and missing-executable case. The daemon TypeScript check
+passes. The full 120-second timeout was not exercised. No actual Codex provider,
+plugin installation, credentials or live seat was used; installed-plugin and
+provider lifecycle acceptance remain open.
+
 ### Pi missing-command guidance matches the native shell
 
 Pi preflight's missing-executable warning now suggests `where.exe pi` on Windows,

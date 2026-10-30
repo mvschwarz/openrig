@@ -6,6 +6,7 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { resolveCodexCommand } from "../domain/windows-provider-command.js";
+import { prepareWindowsJobProcess } from "../domain/windows-job-process.js";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -55,17 +56,26 @@ import {
 /** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
 export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
 
-export const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
+export const defaultCodexCli: CodexCliRunner = async (args, env) => {
   let selected: ReturnType<typeof resolveCodexCommand>;
-  try { selected = resolveCodexCommand(env); }
-  catch (error) { resolve({ status: null, stdout: "", stderr: (error as Error).message }); return; }
-  execFile(selected.command, [...selected.prefix, ...args], { env, windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
-    const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
-    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
-    const err = String(stderr ?? "");
-    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
-  });
-});
+  let job: ReturnType<typeof prepareWindowsJobProcess> | undefined;
+  try {
+    selected = resolveCodexCommand(env);
+    if (process.platform === "win32") job = prepareWindowsJobProcess(selected.command, [...selected.prefix, ...args], { env });
+  } catch (error) { return { status: null, stdout: "", stderr: (error as Error).message }; }
+  try {
+    return await new Promise((resolve) => {
+      execFile(job?.file ?? selected.command, job?.args ?? [...selected.prefix, ...args],
+        { env, ...job?.options, windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+          ...(job ? { killSignal: "SIGKILL" as const } : {}) }, (error, stdout, stderr) => {
+          const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
+          // A spawn failure has no exit code: keep its message as the reason.
+          const err = String(stderr ?? "");
+          resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
+        });
+    });
+  } finally { job?.dispose(); }
+};
 
 // Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
 const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
