@@ -56,6 +56,14 @@ observation: their mock sets use POSIX absolute paths while the consumer resolve
 native paths. That incomplete regression evidence is not a claim of whole-router
 or installed-bundle acceptance. No operator libraries were changed.
 
+The two mock-router fixtures now resolve their filesystem keys and expected
+paths using the native path module, including content lookup and member listing.
+Their missing-source, source-type, manifest-type, basename-conflict,
+kept-existing, already-installed and substance-refusal cases now reach their
+intended consumer branches on Windows. Both complete files plus the five actual
+native target-collision checks pass 30/30. This supersedes the 8/25 fixture
+observation above; installed-bundle and real provider acceptance remain separate.
+
 ## Native bundle integrity path keys (2026-10-30)
 
 The current owned bootstrap fixture reproduced seven failures when a bundle
