@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Dotted native requirement commands (2026-10-30)
+
+The native requirements lookup treated every dot as a final executable
+extension, so a requirement named `owned.tool` missed `owned.tool.exe` even
+though Windows `where.exe` found it through PATHEXT. An inert owned-file fixture
+reproduced that disagreement without executing the target. The lookup now
+tries PATHEXT candidates after an exact dotted filename, retaining exact-file
+precedence and the existing native PATH rules. The initial fixture assertion
+was corrected to compare physical identities because Windows expanded its DOS
+short temporary path; the product mismatch then reproduced independently.
+
+Both requirements-probe test files and daemon TypeScript checking pass. This
+proves lookup behavior and existing planner classification for owned fixtures,
+not installation or execution of the located program. No system package manager
+or installed provider was invoked.
+
 ### Provider switch platform guidance (2026-10-30)
 
 The provider-switch help no longer says the Codex in-place path is Linux-only:

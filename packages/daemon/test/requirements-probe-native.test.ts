@@ -1,10 +1,26 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { RequirementsProbeRegistry } from "../src/domain/requirements-probe.js";
 import { ExternalInstallPlanner } from "../src/domain/external-install-planner.js";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+
+it.runIf(process.platform === "win32")("finds dotted command names that native where resolves through PATHEXT", async () => {
+  const root = mkdtempSync(join(tmpdir(), "requirements-dotted-"));
+  const file = join(root, "owned.tool.exe");
+  writeFileSync(file, "inert lookup fixture; never execute");
+  const env = { ...process.env, PATH: root, PATHEXT: ".EXE;.CMD" };
+  const exec = vi.fn(async () => { throw new Error("no target execution"); });
+  try {
+    const native = execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"), ["owned.tool"], { env, encoding: "utf8" }).trim();
+    expect(realpathSync.native(native)).toBe(realpathSync.native(file));
+    expect(await new RequirementsProbeRegistry(exec, { env }).probeCli("owned.tool"))
+      .toMatchObject({ status: "installed", detectedPath: file.slice(0, -4) + ".EXE" });
+    expect(exec).not.toHaveBeenCalled();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 it.runIf(process.platform === "win32")("recognizes current-directory PATH entries without executing or planning an install", async () => {
   const name = `openrig-owned-probe-${randomUUID()}`;

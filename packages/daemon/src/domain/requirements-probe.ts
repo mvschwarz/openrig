@@ -235,7 +235,9 @@ export class RequirementsProbeRegistry {
 
   private async findWindowsCommand(name: string): Promise<string | null> {
     const extensions = (readPlatformEnv(this.env, "PATHEXT", "win32") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
-    const names = path.extname(name) ? [name] : extensions.map(extension => name + extension);
+    // A dot can belong to the command's stem (python3.12.exe, for example).
+    // Native lookup also tries PATHEXT after an exact dotted filename.
+    const names = [...new Set([...(path.extname(name) ? [name] : []), ...extensions.map(extension => name + extension)])];
     const explicit = /[\\/]/.test(name);
     const dirs = explicit ? [""] : (readPlatformEnv(this.env, "PATH", "win32") ?? "").split(path.delimiter);
     for (const dir of dirs) for (const file of names) {
