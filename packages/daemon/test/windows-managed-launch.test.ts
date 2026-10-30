@@ -229,27 +229,34 @@ describe("managed Windows launch", () => {
     expect(JSON.parse(output.trim())).toEqual({ selected: true, keyAbsent: true });
   });
 
-  it.runIf(process.platform === "win32")("forwards rig, member and one-off env through the managed child without exposing pane-only variables", async () => {
-    const f = fixture(undefined, { rigEnv: { RIG_FLAG: "declared-rig", HOME: "wrong-home", DECLARED_UNSET: "not-in-pane" }, memberEnv: { MEMBER_FLAG: "declared-member" }, sessionMarker: "ONCE_FLAG", corePlugin: true });
+  it.runIf(process.platform === "win32").each(["present", "absent", "empty"])("forwards declared managed env with pane terminal metadata %s without exposing pane-only variables", async terminal => {
+    const f = fixture(undefined, { rigEnv: { RIG_FLAG: "declared-rig", HOME: "wrong-home", DECLARED_UNSET: "not-in-pane" }, memberEnv: { MEMBER_FLAG: "declared-member", EMPTY_FLAG: "" }, sessionMarker: "ONCE_FLAG", corePlugin: true });
     fs.copyFileSync(process.execPath, f.executable);
+    f.env.TERM_PROGRAM = "daemon-must-not-leak";
+    f.env.TERM_PROGRAM_VERSION = "daemon-version-must-not-leak";
     const launch = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
-    const source = "console.log(JSON.stringify({rig:process.env.RIG_FLAG,member:process.env.MEMBER_FLAG,once:process.env.ONCE_FLAG,unset:process.env.DECLARED_UNSET,leaked:process.env.PANE_ONLY,home:process.env.HOME,plugin:process.env.CLAUDE_CODE_PLUGIN_DIRS,project:process.env.OPENRIG_SEAT_PROJECT_DIR,terminal:process.env.TERM_PROGRAM,version:process.env.TERM_PROGRAM_VERSION}))";
+    const source = "console.log(JSON.stringify({rig:process.env.RIG_FLAG,member:process.env.MEMBER_FLAG,once:process.env.ONCE_FLAG,empty:process.env.EMPTY_FLAG,unset:process.env.DECLARED_UNSET,leaked:process.env.PANE_ONLY,home:process.env.HOME,plugin:process.env.CLAUDE_CODE_PLUGIN_DIRS,project:process.env.OPENRIG_SEAT_PROJECT_DIR,terminal:process.env.TERM_PROGRAM,version:process.env.TERM_PROGRAM_VERSION}))";
     const command = launch.command(["-e", source]);
     expect(command).not.toContain("pane-rig-value");
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     const paneEnv: NodeJS.ProcessEnv = { ...process.env, RIG_FLAG: "pane-rig-value", MEMBER_FLAG: "pane-member-value", ONCE_FLAG: "pane-once-value", PANE_ONLY: "must-not-forward" };
+    paneEnv.EMPTY_FLAG = "";
     paneEnv.CLAUDE_CODE_PLUGIN_DIRS = path.join(f.home, "plugins", "openrig-core");
     paneEnv.OPENRIG_SEAT_PROJECT_DIR = f.cwd;
-    paneEnv.TERM_PROGRAM = "tmux";
-    paneEnv.TERM_PROGRAM_VERSION = "test-terminal-version";
+    for (const key of Object.keys(paneEnv)) if (["TERM_PROGRAM", "TERM_PROGRAM_VERSION"].includes(key.toUpperCase())) delete paneEnv[key];
+    if (terminal !== "absent") {
+      paneEnv.TERM_PROGRAM = terminal === "present" ? "tmux" : "";
+      paneEnv.TERM_PROGRAM_VERSION = terminal === "present" ? "test-terminal-version" : "";
+    }
     delete paneEnv.DECLARED_UNSET;
     const output = await new Promise<string>((resolve, reject) => {
       native.execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], {
         encoding: "utf8", timeout: 30000, windowsHide: true, env: paneEnv,
       }, (error, out, stderr) => error ? reject(new Error(`Native seat-env fixture failed: ${error.message}; stderr=${stderr}`)) : resolve(out));
     });
-    expect(JSON.parse(output.trim())).toEqual({ rig: "pane-rig-value", member: "pane-member-value", once: "pane-once-value", home: f.home,
-      plugin: paneEnv.CLAUDE_CODE_PLUGIN_DIRS, project: f.cwd, terminal: "tmux", version: "test-terminal-version" });
+    expect(JSON.parse(output.trim())).toEqual({ rig: "pane-rig-value", member: "pane-member-value", once: "pane-once-value", empty: "", home: f.home,
+      plugin: paneEnv.CLAUDE_CODE_PLUGIN_DIRS, project: f.cwd,
+      ...(terminal === "present" ? { terminal: "tmux", version: "test-terminal-version" } : {}) });
   }, 40000);
 
   it.each([undefined, "", "./config", "./config space"])("preserves native config selection %s and forwards auth by name", async selected => {

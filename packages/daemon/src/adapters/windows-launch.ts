@@ -50,12 +50,13 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
 
 /** Match managed env -i admission while retaining auth only by pane variable name. */
 export function renderWindowsManagedLaunch(executable: string, args: readonly string[], cwd: string,
-  environment: Readonly<Record<string, string>>, inherited: readonly string[], beforeStart = ""): string {
+  environment: Readonly<Record<string, string>>, inherited: readonly string[], beforeStart = "", nonemptyInherited: readonly string[] = []): string {
   const names = [...new Set(inherited)];
-  if ([...Object.keys(environment), ...names].some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.toUpperCase() !== "PROGRAMFILES(X86)")) throw new Error("Invalid managed environment name");
+  if ([...Object.keys(environment), ...names, ...nonemptyInherited].some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.toUpperCase() !== "PROGRAMFILES(X86)")) throw new Error("Invalid managed environment name");
   const entries = Object.entries(environment).map(([key, value]) => `${powershellQuote(key)}=${powershellQuote(value)}`).join("; ");
   return `& {\n$openrigChildEnv = @{${entries}}\n`
     + `$openrigPaneEnv=[Environment]::GetEnvironmentVariables('Process')\nforeach ($openrigName in @(${names.map(powershellQuote).join(", ")})) { if ($openrigPaneEnv.Contains($openrigName)) { $openrigChildEnv[$openrigName] = $openrigPaneEnv[$openrigName] } }\n`
+    + `foreach ($openrigName in @(${nonemptyInherited.map(powershellQuote).join(", ")})) { if ($openrigChildEnv.ContainsKey($openrigName) -and [string]::IsNullOrEmpty($openrigChildEnv[$openrigName])) { $openrigChildEnv.Remove($openrigName) } }\n`
     + `$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable)}\n`
     + `$openrigStart.WorkingDirectory = ${powershellQuote(cwd)}\n$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n$openrigStart.EnvironmentVariables.Clear()\n`
     + `foreach ($openrigName in $openrigChildEnv.Keys) { $openrigStart.EnvironmentVariables[$openrigName] = $openrigChildEnv[$openrigName] }\n`
