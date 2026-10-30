@@ -45,13 +45,14 @@ function resolveRigCommand(env = process.env, cwd = process.cwd()) {
       if (ext !== ".cmd") throw new Error("Windows rig requires a native executable or recognized npm installation");
       const paired = pairedSeatRig(candidate);
       if (paired) return paired;
-      const root = path.join(dir, "node_modules", "@openrig", "cli");
+      const local = path.basename(dir).toLowerCase() === ".bin";
+      const root = path.join(local ? path.dirname(dir) : path.join(dir, "node_modules"), "@openrig", "cli");
       const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
       const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.rig;
       if (manifest.name !== "@openrig/cli" || typeof entry !== "string" || path.isAbsolute(entry)) throw new Error("Unrecognized Windows rig npm entry");
       const file = path.resolve(root, entry), relative = path.relative(root, file);
       if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("rig npm entry escapes its package");
-      const needle = "%dp0%\\node_modules\\@openrig\\cli\\" + entry.replaceAll("/", "\\");
+      const needle = "%dp0%\\" + (local ? ".." : "node_modules") + "\\@openrig\\cli\\" + entry.replaceAll("/", "\\");
       if (!fs.readFileSync(candidate, "utf8").includes(needle)) throw new Error("Unrecognized Windows rig shim");
       return { command: process.execPath, prefix: [fs.realpathSync(file)] };
     }

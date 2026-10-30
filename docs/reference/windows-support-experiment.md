@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Hook CLI lookup for project-local npm installations
+
+The shipped Windows hook CLI resolver now recognizes project-local
+`node_modules/.bin/rig.cmd` launchers as well as the global npm layout and the
+paired seat shim. Previously it searched for a nested `node_modules` inside
+`.bin`, so an otherwise valid local CLI failed before a hook could invoke it.
+The local layout resolves the declared OpenRig package entry through the hook's
+Node interpreter, without executing cmd.exe. An owned fake CLI verifies literal
+Unicode, spaces, quotes, percent signs, metacharacters, and empty arguments;
+empty PATHEXT still disables suffix discovery and an unrelated shim is refused.
+The helper passes Node syntax checking and the related native hook, paired-seat,
+refocus, and plugin-refresh test files pass. This did not refresh installed
+plugins, run a real refocus, send a message, or modify a live seat.
+
 ### Native destroy-plan target classification
 
 The destroy planner now compares Windows paths with native relative-path

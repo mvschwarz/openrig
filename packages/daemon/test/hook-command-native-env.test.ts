@@ -24,3 +24,25 @@ it.runIf(process.platform === "win32")("resolves rig and explicit Python from na
     expect(result.stdout).toBe("synthetic interpreter");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it.runIf(process.platform === "win32")("runs a local npm rig entry from .bin with literal hook arguments", () => {
+  const root = mkdtempSync(join(tmpdir(), "hook-local-用户 &-"));
+  try {
+    const modules = join(root, "node_modules"), bin = join(modules, ".bin"), pkg = join(modules, "@openrig", "cli");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(pkg, "dist"), { recursive: true });
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@openrig/cli", bin: { rig: "dist/fixture.cjs" } }));
+    writeFileSync(join(pkg, "dist", "fixture.cjs"), "process.stdout.write(JSON.stringify(process.argv.slice(2)))");
+    writeFileSync(join(bin, "rig.cmd"), '@ECHO off\r\n"%_prog%" "%dp0%\\..\\@openrig\\cli\\dist\\fixture.cjs" %*\r\n');
+    const { spawnRig, resolveRigCommand } = require(join(hooks, "rig-command.cjs"));
+    const env = { Path: bin, PATHEXT: ".CMD" };
+    const args = ["context", "用户 & space", "apostrophe'", 'quote"', "%NOT_EXPANDED%", "$(literal)", ""];
+    const result = spawnRig(args, { env, cwd: root, encoding: "utf8", timeout: 5000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(args);
+    expect(() => resolveRigCommand({ ...env, PATHEXT: "" }, root)).toThrow("No rig executable");
+    writeFileSync(join(bin, "rig.cmd"), '@echo unrelated\r\n');
+    expect(() => resolveRigCommand(env, root)).toThrow("Unrecognized Windows rig shim");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
