@@ -93,6 +93,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(1);
   }, 90_000);
 
+  // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
+  // so a runner that keeps the contract still passes. A factor of 3 outgrew case 1's handshake delay and case 2's holds.
+  it("still passes a runner that keeps the contract when --wait-ms triples every bound", async () => {
+    const { code, report } = await check(["--cases", "1,2", "--wait-ms", "24000"]);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"], ["2", "pass"]]);
+    expect(code).toBe(0);
+  }, 180_000);
+
   it("refuses a runner command without {agent}, before starting anything", () => {
     const run = spawnSync(process.execPath, [CHECK, "--runner", "my-runner"], { encoding: "utf8" });
     expect(run.status).toBe(2);
