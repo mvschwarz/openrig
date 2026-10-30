@@ -57,6 +57,16 @@ two changed sources already in that inventory and seven changed production sourc
 outside its regex candidate set. All nine now have a supplemental source hash and
 scoped evidence record. This exposes the candidate set's coverage limit; it does
 not make the unchanged rows current acceptance or prove coverage of every feature.
+
+A delayed repository-script receipt from `5dc3ea5` records 335 passes, 16
+failures and four skips; its wrapper's zero exit did not represent the child
+test result (exit 1). The failures include nine symlink-creation permission
+errors, three POSIX-mode assertions, two invalid native-filename fixtures,
+one snapshot-refresh case and one npm/Node crash during a second package build.
+The current documented snapshot-refresh case passes independently. The old
+process crash's cause and remaining platform-specific assertions are not cleared
+by the later installed gate or by the notification's successful delivery.
+
 ## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured
