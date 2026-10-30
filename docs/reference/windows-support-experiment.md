@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Native transcript boundary replay has a stock psmux check
+
+The earlier rotation report contained 26 passes and one Windows-skipped POSIX
+terminal replay case. A separate opt-in native fixture now passes on stock psmux
+3.4.0: real capture-pane output feeds repeated rotation, preserving one structural
+old boundary and one retained latest boundary alongside its original scrollback
+line, without accumulating duplicates. It uses a synthetic Node receiver and
+separate home, registry, config and namespace. The POSIX fixture remains separate;
+this adds native coverage rather than claiming it ran on Windows. No real seat,
+provider, transcript or daemon was used.
+
 ### Native advertised server flags reach the owned stock server
 
 The stock psmux fixture now checks the daemon's advertised `-S` flags from a
