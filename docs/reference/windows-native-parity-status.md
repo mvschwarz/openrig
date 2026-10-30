@@ -534,3 +534,11 @@ results remain unavailable: four bounded checks pass, with five artifact hashes
 recorded. No install, publish or deployment occurred. Without leak-guard rules,
 the package build's term checks remain skipped; assembly success does not waive
 that limit or establish installed/fleet acceptance.
+
+Current native refocus Python/rig bridge/home suites pass 13/13. The shipped
+helper resolves Python through the Windows launcher when plain `python` is not
+on PATH, executes the real trace against owned Unicode notes and an owned npm
+CLI bridge, and preserves explicit-interpreter failure without retrying through
+another interpreter. No new refocus implementation gap was reproduced. This
+does not prove availability on a host with no Python runtime or restore any
+actual managed session; the fixture roots and CLI replies are synthetic.
