@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Native settings fixture reconciliation (2026-10-30)
+
+After the settings implementation repairs, the remaining settings assertions
+were reconciled with native path semantics: derived defaults and the compaction
+file suffix now use platform separators, and absolute paths are checked with
+`isAbsolute` rather than a leading-slash expression. Explicit authored values,
+configuration provenance, overrides and legacy-default expectations remain
+asserted. No source behavior changed in this fixture-only batch.
+
+The complete settings-store file plus the dedicated long-name/legacy-native
+file now pass 82 checks with no failures or filtered tests. This supersedes the
+earlier 75/81 run for these files only; it does not establish whole-daemon or
+live configuration acceptance.
+
 ### Native settings creation and legacy separator matching (2026-10-30)
 
 An owned settings file with a valid 235-character name failed on first creation
