@@ -1,0 +1,33 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /lib64, /etc, /opt/openrig, /proc, /sys]
+  read_write: [/sandbox/openrig, /tmp]
+network_policies:
+  openrig_mcp:
+    endpoints:
+      - host: host.openshell.internal
+        port: 7781
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/claude
+  openrig_activity:
+    endpoints:
+      - host: host.openshell.internal
+        port: 7782
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/node
+  claude_startup_connectivity:
+    endpoints:
+      - host: platform.claude.com
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/claude

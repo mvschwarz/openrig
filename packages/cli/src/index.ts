@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { environmentCommand, type EnvironmentCommandDeps } from "./commands/environment.js";
 import { Command } from "commander";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -143,6 +144,7 @@ export interface ProgramDeps {
   skillDeps?: StatusDeps;
   agentImageDeps?: StatusDeps;
   communityHarnessDeps?: StatusDeps;
+  environmentDeps?: EnvironmentCommandDeps;
   forkDeps?: StatusDeps;
   workspaceDeps?: WorkspaceDeps;
   whoamiDeps?: StatusDeps;
@@ -227,6 +229,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(skillCommand(depsOverride?.skillDeps));
   program.addCommand(agentImageCommand(depsOverride?.agentImageDeps));
   program.addCommand(communityHarnessCommand(depsOverride?.communityHarnessDeps));
+  program.addCommand(environmentCommand(depsOverride?.environmentDeps));
   program.addCommand(forkCommand(depsOverride?.forkDeps));
   program.addCommand(workspaceCommand(depsOverride?.workspaceDeps));
   program.addCommand(rigModeCommand(depsOverride?.rigModeDeps));

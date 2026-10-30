@@ -1,3 +1,6 @@
+import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
+import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
+import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
 import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
 import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
@@ -10,8 +13,6 @@ import { nodeClaudePermissionsSchema } from "./migrations/139_node_claude_permis
 import { identityPrincipalSchema } from "./migrations/140_identity_principal.js";
 import { sessionAgentRunnerSchema } from "./migrations/141_session_agent_runner.js";
 import { nodeClaudeMcpSchema } from "./migrations/142_node_claude_mcp.js";
-import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
-import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
 import { nodeCodexPermissionsSchema } from "./migrations/137_node_codex_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
@@ -290,5 +291,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeAccountHomeSchema,
   nodeClaudeMcpSchema,
   activityGrantsSchema,
+  environmentBindingsSchema,
   nodePermissionsToSchema,
 ];

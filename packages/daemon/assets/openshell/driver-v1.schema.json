@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.openrig.dev/contracts/environment-driver-v1",
+  "title": "OpenRig environment driver version 1 binding",
+  "type": "object",
+  "required": [
+    "version",
+    "bindingId",
+    "seat",
+    "baseRuntime",
+    "guestRoot",
+    "guestBaseUrl",
+    "placement"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "bindingId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"
+    },
+    "nodeId": {
+      "type": "string"
+    },
+    "seat": {
+      "type": "string"
+    },
+    "baseRuntime": {
+      "const": "claude-code"
+    },
+    "guestRoot": {
+      "const": "/sandbox/openrig"
+    },
+    "guestBaseUrl": {
+      "type": "string"
+    },
+    "coordinationRef": {
+      "type": "string"
+    },
+    "artifactRoot": {
+      "type": "string"
+    },
+    "placement": {
+      "type": "object",
+      "required": [
+        "gateway",
+        "workspace",
+        "name",
+        "image",
+        "provider",
+        "policy"
+      ],
+      "properties": {
+        "gateway": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "policy": {
+          "type": "string"
+        },
+        "policySha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

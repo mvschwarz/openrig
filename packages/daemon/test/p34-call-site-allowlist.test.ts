@@ -55,6 +55,10 @@ import { join } from "node:path";
  *  label is the point: adding a writer means stating what it does, not just
  *  silencing a checker. */
 const SANCTIONED: Record<string, { sites: number; why: string }> = {
+  "domain/environment-artifacts.ts": {
+    sites: 1,
+    why: "verified artifact publication: one non-terminal work receipt note in the same transaction as the durable export receipt; no task closure, notifications after commit",
+  },
   "domain/mission-control/mission-control-write-contract.ts": {
     sites: 2,
     why: "P34 terminal close + successor create (route/handoff) at :160; the non-terminal resolve update at :415",
@@ -210,9 +214,9 @@ describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", (
   it("the LIVE corpus matches the sanctioned set exactly, by CALL SITE", () => {
     const result = checkCallSites(realCorpus(), SANCTIONED);
     expect(result.violations).toEqual([]);
-    // Counts SITES, not files. 14 sites across 5 files.
+    // Counts SITES, not files. 15 sites across 6 files.
     expect(result.examined).toBe(TOTAL_SITES);
-    expect(result.examined).toBe(14);
+    expect(result.examined).toBe(15);
     expect(result.vacuous).toBe(false);
   });
 
@@ -316,6 +320,6 @@ describe("P34 RED 5 — KNOWN-NEGATIVE: a guard that examines nothing must FAIL"
   it("the LIVE run is NOT vacuous and examined the expected number of SITES", () => {
     const live = checkCallSites(realCorpus(), SANCTIONED);
     expect(live.vacuous).toBe(false);
-    expect(live.examined).toBe(14);
+    expect(live.examined).toBe(15);
   });
 });
