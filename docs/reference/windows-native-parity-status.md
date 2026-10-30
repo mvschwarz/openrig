@@ -222,3 +222,9 @@ generic incomplete-rosters warning; a genuinely missing nested directory remains
 an empty roster without that warning. The MCP server and owned HTTP telemetry
 fixtures pass 57/57, with CLI TypeScript passing. No live roster or daemon is used.
 
+Auth home fallback and seat registry fixtures pass 8/8. Registry creation and
+replacement now verify private-file access using the native ACL assertion on
+Windows and mode 0600 on POSIX, rather than interpreting Windows mode bits as
+an access policy. These fixtures use an owned temporary registry and no account
+credentials; OS home fallback resolves a path without reading its contents.
+
