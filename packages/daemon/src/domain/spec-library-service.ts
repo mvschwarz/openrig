@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative, dirname, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -241,12 +241,25 @@ export class SpecLibraryService {
     raw["name"] = trimmedName;
 
     const extension = extname(entry.sourcePath) || ".yaml";
-    const fileSafeName = trimmedName.replace(/[^A-Za-z0-9._-]+/g, "-");
-    const nextPath = join(dirname(entry.sourcePath), `${fileSafeName}${extension}`);
+    let fileSafeName = trimmedName.replace(/[^A-Za-z0-9._-]+/g, "-");
+    const prefix = ".openrig-spec-";
+    if (process.platform === "win32" && (
+      /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(fileSafeName)
+      || fileSafeName.length + extension.length > 255
+      || fileSafeName.toLowerCase().startsWith(prefix)
+    )) fileSafeName = prefix + createHash("sha256").update(trimmedName).digest("hex");
+    let nextPath = join(dirname(entry.sourcePath), `${fileSafeName}${extension}`);
     if (nextPath !== entry.sourcePath) {
       try {
         statSync(nextPath);
-        return { ok: false, code: "conflict", error: `A spec file already exists at ${nextPath}.` };
+        let sameFile = false;
+        try { sameFile = process.platform === "win32" && realpathSync.native(nextPath) === realpathSync.native(entry.sourcePath); }
+        catch { /* An unreadable existing target remains a conflict. */ }
+        if (sameFile) {
+          // A display-name case change may name this very file on Windows.
+          // Keep its existing physical spelling and update the authored name.
+          nextPath = entry.sourcePath;
+        } else return { ok: false, code: "conflict", error: `A spec file already exists at ${nextPath}.` };
       } catch {
         // target path is free
       }

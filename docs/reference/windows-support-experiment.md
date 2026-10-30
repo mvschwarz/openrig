@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Native spec rename handles storage limits and case-only changes
+
+Renaming a user spec to a long valid name failed at file creation on Windows;
+changing only the source filename's case incorrectly conflicted with itself.
+Native rename now uses a bounded hashed storage stem for overlong or reserved
+device names, reserving its generated prefix against literal-name collisions.
+The YAML name remains the requested name. A case-only change updates that same
+physical file without unlinking it. Distinct existing files remain conflicts.
+Two failures were reproduced before repair; the reserved-name storage spelling
+is also checked. Service and route tests pass 20/20 after correcting two existing
+POSIX path spelling assertions; daemon TypeScript checking passes. Only owned
+fixture specs were changed.
+
 ### Native transcript boundary replay has a stock psmux check
 
 The earlier rotation report contained 26 passes and one Windows-skipped POSIX
