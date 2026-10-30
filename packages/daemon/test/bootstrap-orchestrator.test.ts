@@ -201,7 +201,7 @@ describe("BootstrapOrchestrator", () => {
     });
   }
 
-  it.each(["installed", "missing", "unknown", "throws"] as const)("carries a reviewed Windows dependency plan through bootstrap with post-install %s", async postInstall => {
+  it.each(["installed", "missing", "unknown", "throws", "install-failed"] as const)("carries a reviewed Windows dependency plan through bootstrap with post-install %s", async postInstall => {
     writePkg(path.join(tmpDir, "test-pkg"), VALID_MANIFEST_YAML + "\nrequirements:\n  cli_tools:\n    - name: git\n",
       { "skills/helper/SKILL.md": "# Owned helper" });
     const sourceRef = writeSpec(SPEC_WITH_PACKAGES_YAML);
@@ -210,8 +210,11 @@ describe("BootstrapOrchestrator", () => {
       detectedPath: null, provider: null, command: null, installHints: null, error: null }];
     const probe = vi.spyOn(probeRegistry, "probeAll").mockResolvedValueOnce(missing).mockResolvedValueOnce(missing).mockResolvedValueOnce(missing);
     if (postInstall === "throws") probe.mockRejectedValueOnce(Error("owned observation unavailable"));
-    else probe.mockResolvedValueOnce([{ ...missing[0]!, status: postInstall }]);
-    const execArgv = vi.fn(async () => "owned install result");
+    else if (postInstall !== "install-failed") probe.mockResolvedValueOnce([{ ...missing[0]!, status: postInstall }]);
+    const execArgv = vi.fn(async () => {
+      if (postInstall === "install-failed") throw Error("owned installer failed");
+      return "owned install result";
+    });
     const instantiator = createMockInstantiator(db), instantiate = vi.spyOn(instantiator, "instantiate");
     const orch = buildOrchestrator({ platform: "win32", probeRegistry, execArgv, instantiator });
     const plan = await orch.bootstrap({ mode: "plan", sourceRef });
@@ -225,11 +228,13 @@ describe("BootstrapOrchestrator", () => {
     const applied = await orch.bootstrap({ mode: "apply", sourceRef, approvedActionKeys: ["external_install:cli_tool:git"] });
     expect(applied.status, JSON.stringify(applied.errors)).toBe(postInstall === "installed" ? "completed" : "partial");
     expect(instantiate).toHaveBeenCalledTimes(postInstall === "installed" ? 1 : 0);
-    expect(applied.stages.find(stage => stage.stage === "verify_external_installs")?.status).toBe(postInstall === "installed" ? "ok" : "blocked");
+    expect(applied.stages.find(stage => stage.stage === "verify_external_installs")?.status)
+      .toBe(postInstall === "install-failed" ? undefined : postInstall === "installed" ? "ok" : "blocked");
+    expect(probe).toHaveBeenCalledTimes(postInstall === "install-failed" ? 3 : 4);
     expect(execArgv).toHaveBeenCalledExactlyOnceWith("winget.exe", ["install", "--id", "Git.Git", "--exact", "--source", "winget",
       "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]);
     expect(db.prepare("SELECT provider, status FROM bootstrap_actions WHERE bootstrap_id = ? AND action_kind = 'external_install'").get(applied.runId))
-      .toEqual({ provider: "winget", status: "completed" });
+      .toEqual({ provider: "winget", status: postInstall === "install-failed" ? "failed" : "completed" });
   });
 
   it.each([

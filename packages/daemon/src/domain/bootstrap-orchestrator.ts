@@ -616,6 +616,13 @@ export class BootstrapOrchestrator {
 
     // A native installer can exit successfully without exposing a usable CLI
     // to this daemon (for example, a PATH update needs a new login).
+    const nativeIncomplete = [...execSummary.failed, ...execSummary.skipped].filter(result =>
+      taggedActions.some(({ action }) => action.requirementName === result.requirementName && action.provider === "winget"));
+    if (nativeIncomplete.length) {
+      errors.push(`Windows dependency installation did not complete for: ${nativeIncomplete.map(result => result.requirementName).join(", ")}. Inspect the recorded install result before retrying; the host may already have changed.`);
+      this.deps.bootstrapRepo.updateRunStatus(run.id, "partial");
+      return { runId: run.id, status: "partial", stages, errors, warnings };
+    }
     const nativeCompleted = new Set(execSummary.completed.filter(result =>
       taggedActions.some(({ action }) => action.requirementName === result.requirementName && action.provider === "winget"))
       .map(result => result.requirementName));

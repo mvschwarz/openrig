@@ -375,3 +375,10 @@ that the host may already have changed and the daemon PATH may need refreshing.
 Four focused orchestrator cases pass and daemon TypeScript passes. This verifies
 the control flow with injected probes/installation, not an actual WinGet install.
 
+Failed or skipped WinGet dependency actions now also stop bootstrap before
+project resource installation and rig instantiation, returning partial with the
+recorded result retained. A new failed-installer orchestrator case confirms that
+no post-install success probe or instantiation follows it. Existing selective
+approval regressions remain passing; daemon TypeScript passes. This does not
+establish installer rollback, descendant termination or safe automatic retry.
+
