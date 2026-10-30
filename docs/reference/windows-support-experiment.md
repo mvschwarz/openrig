@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Selected npm Claude script aliases
+
+Windows Claude process matching now accepts two spellings of the same selected
+script only when an existing-file identity check establishes the match. An owned
+script reached through a directory junction and filename-case alias previously
+failed the exact string comparison; the regression now passes. Distinct scripts,
+missing files, a different conversation token, and duplicate runtime candidates
+remain refused. Exact spelling remains accepted as before; this is not blanket
+case folding of script paths.
+
+The alias fixture, Windows ancestry fixtures and npm resume-probe fixture pass
+(18 checks). The alias fixture uses actual owned filesystem identity and injected
+process rows; no installed provider or live process is inspected. Real provider
+conversation and stock psmux acceptance remain open.
+
 ### Windows npm Claude resume-metadata probe
 
 The default resume-metadata probe no longer rejects every recognized npm Claude

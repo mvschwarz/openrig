@@ -10,6 +10,7 @@ import { readProcessTable } from "./process-table.js";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readWindowsConsoleProcesses } from "./windows-process-facts.js";
 import { recognizedWindowsClaudeScript } from "./windows-provider-command.js";
+import { sameSessionFile as sameNativeFile } from "../adapters/same-session-file.js";
 
 
 export interface NativeProcessRow {
@@ -684,7 +685,7 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
         || !row.executablePath || windowsExecutableName(row.executablePath) !== expectedName
         || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
         || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
-      if (selectedNode && (parseWindowsCommandLine(row.command)[1] ?? "").replace(/\//g, "\\") !== selectedScript!.replace(/\//g, "\\")) continue;
+      if (selectedNode && !sameNativeFile((parseWindowsCommandLine(row.command)[1] ?? "").replace(/\//g, "\\"), selectedScript!.replace(/\//g, "\\"))) continue;
       const chain: NativeProcessRow[] = [];
       const visited = new Set<number>();
       let current: NativeProcessRow | undefined = row;
