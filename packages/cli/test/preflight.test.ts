@@ -109,7 +109,7 @@ describe("SystemPreflight", () => {
     const tmuxCheck = result.checks.find((c) => c.name === "tmux");
     expect(tmuxCheck!.ok).toBe(false);
     expect(tmuxCheck!.error).toContain("not found");
-    expect(tmuxCheck!.fix).toContain("install tmux");
+    expect(tmuxCheck!.fix).toContain(process.platform === "win32" ? "Install psmux" : "install tmux");
   });
 
   it("tmux installed but default control socket unhealthy → ready: false with guidance", async () => {

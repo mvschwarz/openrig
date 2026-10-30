@@ -56,6 +56,19 @@ function replacementPath(file: string): string {
     : `${file}.tmp`;
 }
 
+function replaceState(fsops: StateFsOps, file: string, body: string): void {
+  const tmp = replacementPath(file);
+  fsops.writeFileSync(tmp, body);
+  try { fsops.rename(tmp, file); }
+  finally {
+    // Native names are unique per attempt. A refused replacement must not
+    // accumulate stale copies; the durable original is still authoritative.
+    if (process.platform === "win32" && fsops === nodeStateFs) {
+      try { fs.unlinkSync(tmp); } catch { /* Already consumed, or preserve the original error. */ }
+    }
+  }
+}
+
 function parseLines(raw: string): unknown[] {
   return raw
     .trim()
@@ -215,9 +228,7 @@ export class DeadLetterStore<T = unknown> {
   replaceAll(entries: DeadLetterEntry<T>[]): void {
     this.fsops.mkdirp(path.dirname(this.file));
     const body = entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : "");
-    const tmp = replacementPath(this.file);
-    this.fsops.writeFileSync(tmp, body);
-    this.fsops.rename(tmp, this.file); // atomic: original intact until this instant
+    replaceState(this.fsops, this.file, body); // original intact until rename
     this.wrote();
   }
 
@@ -361,9 +372,7 @@ export class ChannelCoverageStore {
     const data = this.read();
     Object.defineProperty(data, channel, { value: coverage, enumerable: true, configurable: true });
     this.fsops.mkdirp(path.dirname(this.file));
-    const tmp = replacementPath(this.file);
-    this.fsops.writeFileSync(tmp, JSON.stringify(data) + "\n");
-    this.fsops.rename(tmp, this.file);
+    replaceState(this.fsops, this.file, JSON.stringify(data) + "\n");
   }
 
   initialize(channel: string, at: string, seenFile: string, receiptsFile: string): ChannelCoverage {
@@ -448,8 +457,6 @@ export class ThreadCoverageStore {
     const data = this.read();
     Object.defineProperty(data, key, { value: coverage, enumerable: true, configurable: true });
     this.fsops.mkdirp(path.dirname(this.file));
-    const tmp = replacementPath(this.file);
-    this.fsops.writeFileSync(tmp, JSON.stringify(data) + "\n");
-    this.fsops.rename(tmp, this.file);
+    replaceState(this.fsops, this.file, JSON.stringify(data) + "\n");
   }
 }

@@ -136,7 +136,7 @@ it.runIf(process.platform === "win32")("preserves owed Slack events when Windows
   expect(store.readAll()).toEqual(original);
   expect(store.writeGeneration()).toBe(generation);
   expect(accessPolicy(file)).toBe(before);
-  expect(accessPolicy(file + ".tmp")).toBe(before);
+  expect(readdirSync(root)).toEqual(["dead.jsonl"]);
   chmodSync(file, 0o666);
   store.replaceAll([]);
   expect(store.readAll()).toEqual([]);
