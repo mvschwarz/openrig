@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Workflow guidance manifest aliases
+
+Workflow guidance now recognizes Windows case aliases of `project.yaml`,
+`mission.yaml`, and `slice.yaml`, deduplicates references by native physical path,
+and compares bound-source attribution with that same identity. Previously an
+explicit upper-case slice path could be silently ignored, and another spelling
+of a bound source could lose its attribution. Owned authored-manifest fixtures
+reproduce both defects and now preserve the explicit slice's narrower selection,
+one attributed project source, and the first supplied spelling for display.
+Two different project files remain ambiguous; no fallback catalog or selection
+is invented. The complete workflow-guidance file passes 14/14 checks, and daemon
+type checking passes. These are local synthetic authored files and Git/library
+fixtures, not live workflow adoption, queue mutation, or provider acceptance.
+
 ### History fallback, recap continuity, and workspace preparation checks
 
 The current history-query and recap durability implementations pass 31/31 checks
