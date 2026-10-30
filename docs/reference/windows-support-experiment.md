@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Lifecycle compilation accepts native case aliases of its mission
+
+A slice's valid `../../MISSION.YAML` reference was rejected on Windows even
+though it addressed the authored mission. The compiler's mission identity check
+now uses native canonical paths on Windows, with POSIX behavior retained. An
+owned compilation fixture failed before the change and passes afterward; a
+reference to a distinct mission file still fails. The compiler test file passes
+12/12 after correcting an existing POSIX-only path spelling assertion. Daemon
+TypeScript checking passes. These checks use fixture manifests and an in-memory
+database, without launching workflows or touching real task records.
+
 ### Scoped terminal indexes deduplicate native directory aliases
 
 The same scope index supplied under mixed-case and junction spellings was read
