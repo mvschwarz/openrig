@@ -59,6 +59,11 @@ it.each([true, false])("loads first_input=%s independently from other declaratio
 });
 
 describe("community harness presets", () => {
+  it.runIf(process.platform === "win32")("lists a usable native preset whose YAML extension has different case", () => {
+    const dir = presets({ "synth.YAML": GOOD });
+    expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: true, preset: { name: "synth" } });
+    expect(listCommunityHarnessPresets(dir)).toEqual([expect.objectContaining({ ok: true, preset: expect.objectContaining({ name: "synth" }) })]);
+  });
   it("loads a preset with the fields this format reads", () => {
     const dir = presets({ "synth.yaml": GOOD });
     expect(loadCommunityHarnessPreset("synth", dir)).toEqual({ ok: true, preset: {

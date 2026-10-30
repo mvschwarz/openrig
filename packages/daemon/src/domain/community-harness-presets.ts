@@ -175,7 +175,7 @@ export function communityHarnessStopsRestore(name: string | null | undefined, re
 export function listCommunityHarnessPresets(dir: string = communityHarnessesDir()): CommunityHarnessPresetLookup[] {
   if (!existsSync(dir)) return [];
   let files: string[];
-  try { files = readdirSync(dir).filter(file => file.endsWith(".yaml")).sort(); } catch { return []; }
+  try { files = readdirSync(dir).filter(file => (process.platform === "win32" ? file.toLowerCase() : file).endsWith(".yaml")).sort(); } catch { return []; }
   return files.map(file => loadCommunityHarnessPreset(file.slice(0, -".yaml".length), dir));
 }
 

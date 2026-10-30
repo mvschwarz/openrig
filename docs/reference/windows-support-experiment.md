@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Native community preset listing matches direct loading
+
+On Windows, `synth.YAML` was directly loadable as the `synth` preset but absent
+from the installed-preset list. The list now accepts native extension case
+spellings while preserving the existing lowercase harness-name validation and
+the POSIX filename rule. The owned reproduction failed before repair; 21
+selected preset checks pass afterward, with 34 other tests filtered out. Daemon
+TypeScript checking passes. Workflow folder scanning already uses a
+case-insensitive YAML-extension predicate; that source check required no change.
+No preset command, real provider or seat was launched by these checks.
+
 ### Spec discovery follows native filename case conventions
 
 An owned Windows library containing `.YAML`, mixed-case `.YmL`, and uppercase
