@@ -238,6 +238,8 @@ const CLAUDE_STATUS_WARNINGS = [
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30) or "Restart to apply".
+  /^✔ Update installed · (?:\/restart|Restart) to apply$/,
 ];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
