@@ -14,7 +14,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Daemon and configuration | Native writable-path checks, alias-aware configuration, paired entry points and local stop planning; [doctor](../../packages/cli/test/doctor-native-writable.test.ts), [config](../../packages/cli/test/config-legacy-native-alias.test.ts), [destroy plan](../../packages/cli/test/destroy-native-plan.test.ts). | Actual deployment upgrade/restart and existing-fleet acceptance. |
 | Temporary runtime probes | Owned Job containment, child-tree deadlines, cwd/environment/stdin and error status; [shell probes](../../packages/daemon/test/windows-probe-job.test.ts), [runtime probes](../../packages/daemon/test/runtime-probe-native-timeout.test.ts). | Daemon shutdown during each live provider probe. |
 | Daemon status and home selection | [Three-state status](../../packages/cli/test/daemon-status-three-state.test.ts) passes eight cases. Native path fixtures preserve timeout-as-unverified and positive-refusal semantics; actual owned sibling-home files report both paths with injected process liveness. HOME-MOVED remains covered. | Real daemon/process ownership and deployment lifecycle; injected liveness is not an OS process witness. |
-| Local endpoint user guard | The existing optional guard corroborates reported PID/euid with two process-birth observations on macOS. Host-registry privacy/parity and guard suites pass 68 cases on the native test host. | Windows currently returns unknown (`not_local_mac`); this is an actual missing native guard observation, not a verified same-user result. Health reports PID but has no Windows SID field. The guard is routing mitigation, not authentication or socket-ownership proof. |
+| Local endpoint user guard | The optional guard now corroborates the repeated health PID with two Windows process owner-SID/creation-time observations, comparing the caller SID; macOS PID/euid behavior remains. Native own-process and injected refusal/change/timeout tests pass. | Foreign-user OS access and deployed endpoint behavior remain unverified. The guard is routing mitigation, not authentication or socket-ownership proof; forwarded loopback endpoints retain that limitation. |
 | Cross-host reads and queue recovery | [HTTP coordination](../../packages/cli/test/cross-host-http.test.ts) passes 70 cases after registering its owned slow-response server. Queue [native command](../../packages/cli/test/queue-recovery-command-native.test.ts), [forwarded outcomes](../../packages/cli/test/queue-forwarded-response-outcome.test.ts) and [missing-item guidance](../../packages/cli/test/queue-not-found-guidance.test.ts) pass 33 cases. Windows recovery now uses PowerShell endpoint selection with finally restoration and literal ID quoting; POSIX command format remains. | No actual cross-host daemon/queue is accessed. Native execution substitutes an owned rig function; endpoint restoration and quoting are tested on success and failure. |
 
 ## Runtime launch and continuity
@@ -481,4 +481,14 @@ quotes, shell-like text and Unicode through an inert Start-Process function.
 Source hashes and the report digest are recorded in the local ledger. No actual
 browser/protocol handler is opened; UI lifecycle/client operations are injected,
 so this is not visible browser or deployed UI acceptance.
+
+Windows local-owner checking now uses read-only CIM GetOwnerSid and creation
+time for the exact reported PID, plus the observing caller's SID. Two health/PID
+and OS observations must agree within the deadline; missing, denied, malformed,
+changed or late observations stay unknown. No command line or process environment
+is requested. A real own-process test and injected same/foreign/change/failure
+cases pass alongside existing guard regressions; CLI TypeScript passes. The
+[GetOwnerSid contract](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/getownersid-method-in-class-win32-process)
+returns nonzero on denied/unavailable observation. No actual foreign process or
+deployed daemon was accessed, and this does not prove listener ownership.
 
