@@ -6,6 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import { executeWindowsInstall } from "../src/domain/windows-install-exec.js";
 
+it.runIf(process.platform === "win32")("rejects excessive native installer output instead of recording success", async () => {
+  await expect(executeWindowsInstall(process.execPath,
+    ["-e", "process.stdout.write('x'.repeat(5*1024*1024));setInterval(()=>{},1000)"], 8000))
+    .rejects.toThrow("output exceeded its limit");
+}, 15000);
+
 it.runIf(process.platform === "win32")("installer timeout ends its owned tree and preserves an unrelated child", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "install-job-"));
   const receipt = path.join(root, "pids.json");

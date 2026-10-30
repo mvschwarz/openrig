@@ -390,3 +390,10 @@ tests pass and daemon TypeScript passes. Output is bounded to 4 MiB and the
 production deadline is ten minutes. No real installer ran: external installer
 services, host modifications and rollback remain outside this process-tree proof.
 
+A real owned child producing more than 4 MiB now verifies output-limit rejection
+rather than success. Bootstrap coverage also includes two required native tools
+with only one approved: the other action is journaled skipped, the result is
+partial, and no rig is instantiated. Cumulative install/probe/executor suites
+pass 46 cases; eight selected bootstrap/approval cases pass, with the other
+bootstrap cases filtered. These receipts still do not claim a real installation.
+
