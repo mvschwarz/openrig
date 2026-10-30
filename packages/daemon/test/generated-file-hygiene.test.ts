@@ -170,7 +170,7 @@ describe("generated file Git hygiene", () => {
     const linked = path.join(root, "linked"); git(bare, "worktree", "add", "-q", "-b", "linked", linked);
     const file = write(".codex/plugins/openrig-core/payload.txt", "Managed", linked);
     expect(excludeNewGeneratedFiles(linked, [file])).toEqual([]);
-    expect(git(linked, "check-ignore", "--", file).trim()).toBe(file);
+    expect(execFileSync("git", ["-C", linked, "check-ignore", "--stdin", "-z"], { input: file + "\0", encoding: "utf8" })).toBe(file + "\0");
   });
 
   it.each(["other", "other:openrig-core", "shared:openrig-core-extra"])("does not automatically exclude plugin namespace %s", async effectiveId => {
@@ -193,6 +193,34 @@ describe("generated file Git hygiene", () => {
     mergeManagedBlock(fsOps, plain, "core", "Managed");
     expect(fs.readFileSync(plain, "utf8")).toContain("Managed");
     expect(fs.existsSync(path.join(root, "plain/.git"))).toBe(false);
+  });
+
+  it("recognizes nested tracked generated files using Git path separators", () => {
+    const file = write(".codex/plugins/openrig-core/nested/payload.txt");
+    git(repo, "add", ".");
+    const before = fs.readFileSync(excludePath(repo));
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+  });
+
+  it("excludes a newly generated nested plugin using native paths", () => {
+    const file = write(".codex/plugins/openrig-core/nested/generated.txt");
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([]);
+    git(repo, "check-ignore", "-q", "--", file);
+    expect(fs.readFileSync(excludePath(repo), "utf8")).toContain("/.codex/plugins/openrig-core/nested/generated.txt");
+  });
+
+  it("preserves nested sibling user files when excluding a generated plugin", () => {
+    const linked = path.join(root, "nested-linked");
+    git(repo, "worktree", "add", "-q", "-b", "nested-linked", linked);
+    const name = ".codex/plugins/openrig-core/nested/payload.txt";
+    write(name, "User", linked);
+    const file = write(name, "Managed");
+    const before = fs.readFileSync(excludePath(repo));
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([expect.stringContaining("already exists in worktree")]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+    git(linked, "add", "-A");
+    expect(git(linked, "ls-files", "-z")).toBe(name + "\0");
   });
 
   it("warns without refusing projection when a registered sibling cannot be inspected", () => {

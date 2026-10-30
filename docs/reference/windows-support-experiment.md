@@ -2,6 +2,25 @@
 
 ## Current review status (2026-10-30)
 
+### Generated-file Git hygiene paths (2026-10-30)
+
+An owned native Git fixture exposed two path mismatches in generated-file
+exclusion: Node's non-native realpath retained DOS short names while Git
+reported long names, and native relative paths used backslashes while
+`ls-files` reported slashes. The former caused out-of-repository pathspec
+errors; the latter prevented exact tracked-file and sibling-conflict matches.
+The writer now uses native realpath consistently and slash-separated Git
+relative names. Its bounded inventory and shared-worktree conflict checks
+remain in place.
+
+The new nested tracked and sibling-user cases failed before the repair.
+Ten selected native cases now pass, including an actual new-file exclusion,
+tracked-file preservation, linked-worktree conflict preservation and a bare
+clone's linked worktree. Eighteen tests were filtered out, not platform skips;
+the daemon TypeScript check passed. The bare-worktree fixture reads Git's NUL
+output to avoid its human-output quoting of Windows backslashes. No running
+seat projection or whole-suite acceptance is claimed.
+
 ### Attach context argv (2026-10-30)
 
 The default `attach` context probe now invokes `tmux` with an argument array,
