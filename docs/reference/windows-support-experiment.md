@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Pi, OMP and stub runner witness path aliases
+
+Native managed-runner readiness now joins different entry, cwd and state-root
+spellings when existing Windows filesystem objects have matching device/file IDs
+and the required file/directory type. The prior slash/case spelling comparison is
+retained; failed or unavailable additional identity evidence does not create a
+match. An owned junction fixture reproduced false readiness for Pi, OMP and stub
+before the change, and all three now pass.
+
+The full managed-runner fixture file passes 22 checks, including distinct entry,
+cwd/state directories, wrong launch, competing runner, missing native metadata,
+recycled parent, changed pane, duplicate flags and failed census cases. Daemon
+TypeScript checking passes. Filesystem aliases are real owned objects; process
+rows and terminal observations are injected. No live runner, stock psmux, or
+provider lifecycle acceptance is claimed.
+
 ### Selected npm Claude script aliases
 
 Windows Claude process matching now accepts two spellings of the same selected

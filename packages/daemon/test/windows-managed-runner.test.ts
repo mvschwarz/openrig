@@ -4,6 +4,9 @@ import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../src/d
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
 import { ProcessCensus } from "../src/domain/process-census.js";
 import type { ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const table = vi.hoisted(() => ({ read: vi.fn() }));
 vi.mock("../src/domain/process-table.js", () => ({ readProcessTable: table.read }));
@@ -23,6 +26,28 @@ function fixture(runtime: "pi" | "omp" | "stub" = "pi") {
 beforeEach(() => { table.read.mockReset(); });
 
 describe("native managed runner witness", () => {
+  it.runIf(process.platform === "win32").each(["pi", "omp", "stub"] as const)("joins existing entry/cwd/state aliases for %s while rejecting distinct paths", async runtime => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-witness-alias-"));
+    const alias = path.join(root, "alias");
+    try {
+      const physical = path.join(root, "physical"); fs.mkdirSync(physical);
+      for (const name of ["cwd", "state", "other"]) fs.mkdirSync(path.join(physical, name));
+      fs.writeFileSync(path.join(physical, "runner.js"), "// owned, not executed");
+      fs.writeFileSync(path.join(physical, "other.js"), "// different");
+      fs.symlinkSync(physical, alias, "junction");
+      const f = fixture(runtime);
+      f.input.entryPath = path.join(alias, "runner.js"); f.input.cwd = path.join(alias, "cwd"); f.input.stateRoot = path.join(alias, "state");
+      f.words[1] = path.join(physical, "runner.js");
+      f.words[f.words.indexOf("--cwd") + 1] = path.join(physical, "cwd");
+      if (runtime !== "stub") f.words[f.words.indexOf("--state-root") + 1] = path.join(physical, "state");
+      f.rows[1]!.command = windowsArguments(f.words); table.read.mockResolvedValue(f.rows);
+      expect(await verifyWindowsManagedRunner(f.input)).toBe(true);
+      expect(await verifyWindowsManagedRunner({ ...f.input, entryPath: path.join(physical, "other.js") })).toBe(false);
+      expect(await verifyWindowsManagedRunner({ ...f.input, cwd: path.join(physical, "other") })).toBe(false);
+      if (runtime !== "stub") expect(await verifyWindowsManagedRunner({ ...f.input, stateRoot: path.join(physical, "other") })).toBe(false);
+      expect(await verifyWindowsManagedRunner({ ...f.input, launchId: "other-launch" })).toBe(false);
+    } finally { if (fs.existsSync(alias)) fs.unlinkSync(alias); fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it.each(["pi", "omp", "stub"] as const)("accepts the exact %s direct runner with native executable identity", async runtime => {
     const f = fixture(runtime); table.read.mockResolvedValue(f.rows);
     expect(await verifyWindowsManagedRunner(f.input)).toBe(true);

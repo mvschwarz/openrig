@@ -1,4 +1,5 @@
 import path from "node:path";
+import { statSync } from "node:fs";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readProcessTable } from "./process-table.js";
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
@@ -16,6 +17,15 @@ export interface WindowsRunnerEvidence {
 }
 
 const samePath = (a: string, b: string) => a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
+function samePathOrObject(a: string, b: string, kind: "file" | "directory"): boolean {
+  if (samePath(a, b)) return true;
+  if (process.platform !== "win32") return false;
+  try {
+    const first = statSync(a, { bigint: true }), second = statSync(b, { bigint: true });
+    const correctType = kind === "file" ? first.isFile() && second.isFile() : first.isDirectory() && second.isDirectory();
+    return correctType && first.ino !== 0n && first.dev === second.dev && first.ino === second.ino;
+  } catch { return false; }
+}
 function executable(row: ProcessRow, name: string): boolean {
   const first = parseWindowsCommandLine(row.command)[0];
   return row.platform === "win32" && !!first && !!row.executablePath && samePath(first, row.executablePath)
@@ -55,11 +65,11 @@ export async function verifyWindowsManagedRunner(input: WindowsRunnerEvidence): 
     if (runner.ppid !== runnerParent || !executable(runner, "node")) return false;
     const words = parseWindowsCommandLine(runner.command);
     const head = ["--session-name", input.sessionName, ...(input.runtime === "stub" ? [] : ["--state-root", input.stateRoot ?? ""]), "--cwd", input.cwd, "--launch-id", input.launchId];
-    if (!samePath(words[1] ?? "", input.entryPath)) return false;
+    if (!samePathOrObject(words[1] ?? "", input.entryPath, "file")) return false;
     for (let i = 0; i < head.length; i++) {
       const actual = words[i + 2] ?? "", expected = head[i]!;
       if (i > 0 && ["--state-root", "--cwd"].includes(head[i - 1]!)) {
-        if (!samePath(actual, expected)) return false;
+        if (!samePathOrObject(actual, expected, "directory")) return false;
       } else if (actual !== expected) return false;
     }
     const flags = ["--session-name", "--cwd", "--launch-id", ...(input.runtime === "stub" ? [] : ["--state-root"])];
