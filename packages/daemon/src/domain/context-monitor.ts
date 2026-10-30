@@ -178,11 +178,6 @@ export class ContextMonitor {
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
     try {
-      const prepared = await this.compactionEnforcer.drainPendingPreparedCompact?.({
-        nodeId: session.node_id, sessionName: session.session_name, cwd: session.cwd, runtime: session.runtime,
-        isObservationCurrent: () => this.isCurrentSession(session),
-      });
-      if (prepared && (prepared.triggered || prepared.reason !== "no_pending_stage")) return;
       if (usage && usage.availability === "known" && usage.fresh && usage.usedPercentage != null) {
         await this.compactionEnforcer.maybeAutoCompact({
           nodeId: session.node_id,
@@ -196,6 +191,11 @@ export class ContextMonitor {
         });
         return;
       }
+      const prepared = await this.compactionEnforcer.drainPendingPreparedCompact?.({
+        nodeId: session.node_id, sessionName: session.session_name, cwd: session.cwd, runtime: session.runtime,
+        isObservationCurrent: () => this.isCurrentSession(session),
+      });
+      if (prepared && (prepared.triggered || prepared.reason !== "no_pending_stage")) return;
       if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name, { cwd: session.cwd, runtime: session.runtime })) return;
       await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,

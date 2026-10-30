@@ -1175,7 +1175,7 @@ export class ClaudeCompactionEnforcer {
     let idle;
     do {
       const remaining = attempt.deadlineAt! - this.now();
-      if (remaining <= 0) return failed("preparation_incomplete");
+      if (remaining <= 0) return failed(this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
       try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal); }
       catch { idle = { ok: false, reason: "transport_unavailable" }; }
       this.reconcilePreparations();

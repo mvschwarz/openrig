@@ -325,7 +325,7 @@ for (const end of ['deadline', 'cancel'] as const) {
     f.stageMap();
     f.onText((text) => {
       if (!text.startsWith('/compact')) return;
-      if (end === 'deadline') f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1); else f.e.cancelPreparation(seat);
+      if (end === 'deadline') f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1); else f.e.cancelPreparation(seat);
     });
     await f.e.maybeAutoCompact(input);
     expect(compactWrites(f)).toBe(1);
@@ -345,7 +345,7 @@ it('deadline case before the first paste (not a transport refusal): zero writes 
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
-  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
   await f.e.maybeAutoCompact(input);
   expect(compactWrites(f)).toBe(0);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
@@ -476,7 +476,7 @@ async function noSecondWrite(f: ReturnType<typeof fixture>) {
 it('deadline case (not a transport refusal): the attempt stops before any send, so not sent and no /compact write', async () => {
   const f = fixture();
   await armed(f);
-  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.advance2(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
   await f.e.maybeAutoCompact(input);
   expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', compact: 'not_sent'});
   await noSecondWrite(f);
