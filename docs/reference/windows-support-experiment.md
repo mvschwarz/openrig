@@ -26,6 +26,18 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native ACP command and process checks (2026-10-30)
+
+The current stdio peer, native npm command selection and native process-identity
+files pass 9/9. Checks cover ordered protocol progress/results, original error
+data, permission-request response identity, method-not-found, real owned child
+exit/detach, selected PATHEXT and creation identity becoming unavailable after
+the owned child exits. No installed provider or actual queue was used. These
+checks do not prove stdout-EOF handling while an agent remains alive: an
+attempted synthetic fixture did not independently establish EOF, and its
+uncommitted implementation changes were withdrawn rather than counted as a
+verified repair. Full ACP provider/detach lifecycle acceptance remains separate.
+
 ## Native local-copy physical overlap (2026-10-30)
 
 An owned junction-parent dry-run reproduced a missing overlap refusal: lexical
