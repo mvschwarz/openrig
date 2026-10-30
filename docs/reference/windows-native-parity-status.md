@@ -261,3 +261,13 @@ Four selected bin-wrapper tests also pass, including native directory aliases,
 sibling Node selection and missing-module diagnostics. The separate file-symlink
 wrapper test is not included and retains its unverified privilege limitation.
 
+A further native source audit checked explicit Windows refusal branches and
+remaining POSIX shell/null-device references in CLI sources. Platform-qualified
+desktop and remote-host paths are not automatically native defects. In particular,
+the bundle Git transport's `/dev/null` configuration works with the tested native
+Git: selected real-child checks cover empty global configuration, removal of
+case-variant injected Git variables and sanitized errors, alongside pinned-source
+and owned-archive fixtures. This is local Git execution, not a network fetch or
+complete bundle import acceptance. The scan is a bounded source audit rather than
+proof that every branch or workflow has been exercised.
+
