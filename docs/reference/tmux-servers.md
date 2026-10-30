@@ -159,4 +159,8 @@ The operating-system home, provider credentials and provider conversation histor
 remain shared unless configured separately. This setting does not isolate the
 filesystem or network. Both inherited and isolated servers support the opt-in
 `OPENRIG_TMUX_CONTROL=1` execution path; its control client connects to the same
-server as the daemon's other tmux commands.
+server as the daemon's other tmux commands. On servers older than tmux 3.7c, or
+whose version cannot be recognized as a fixed release, OpenRig uses spawned
+clients instead: starting a control client while another session is created can
+crash those servers (#2304). This avoids creating OpenRig's own control client;
+it cannot protect the server from other tools' control clients.

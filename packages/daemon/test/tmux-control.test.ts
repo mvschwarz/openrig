@@ -136,7 +136,7 @@ function fakeSpawned(answer: (argv: string[]) => string | Promise<string> = () =
     const args = argv.slice(1 + serverArgs.length);
     if (serverArgs.every((arg, i) => arg === argv[i + 1]) && args[0] === "list-sessions" && args[2]?.startsWith("#{version}")) {
       own.push(argv);
-      return "3.6|\n3.6|\n";
+      return "3.8|\n3.8|\n";
     }
     spawned.push(argv);
     return answer(argv);
@@ -292,9 +292,9 @@ describe("tmuxControlExec", () => {
     await exec.close();
   });
 
-  it("starts no client while no server runs, one before tmux 3.2, or one with control sessions only, and asks again only after a while", async () => {
+  it("starts no client without a known fixed server or with control sessions only, and retries after a while", async () => {
     const servers = [
-      () => { throw new Error("no server running on /tmp/tmux-1000/default"); }, () => "3.1c|\n", () => "", () => "3.6|d4e5\n3.6|ffff0000\n",
+      () => { throw new Error("no server running on /tmp/tmux-1000/default"); }, () => "3.1c|\n", () => "3.4|\n", () => "3.7b|\n", () => "next-3.8|\n", () => "", () => "3.8|d4e5\n3.8|ffff0000\n",
     ];
     for (const server of servers) {
       const spawned: string[][] = [];
@@ -548,7 +548,7 @@ describe("tmuxControlExec", () => {
   it("retires a client that finds itself alone as it attaches: the server lost its last other session meanwhile", async () => {
     const client = fakeClient({ checks: [] });
     const spawned: string[][] = [];
-    const probes = ["3.6|\n", "3.6|d4e5\n"];
+    const probes = ["3.8|\n", "3.8|d4e5\n"];
     const exec = tmuxControlExec(async (argv) => {
       if (argv[1] === "list-sessions") return probes.shift()!;
       spawned.push(argv);
@@ -625,13 +625,11 @@ describe("control-mode rules", () => {
     await exec.close();
   });
 
-  it("needs tmux 3.2 or later", () => {
-    expect(supportsControlMode("tmux 3.3a\n")).toBe(true);
-    expect(supportsControlMode("tmux 3.2")).toBe(true);
-    expect(supportsControlMode("tmux next-3.6")).toBe(true);
-    expect(supportsControlMode("tmux 3.1c")).toBe(false);
-    expect(supportsControlMode("tmux 2.9")).toBe(false);
-    expect(supportsControlMode("psmux")).toBe(false);
+  it("#2304 uses control clients only when the server is a known fixed release", () => {
+    for (const version of ["3.3a|", "3.4|", "3.5a|", "3.6|", "3.7|", "3.7a|", "3.7b|", "next-3.8|", "psmux|"]) {
+      expect(supportsControlMode(version), version).toBe(false);
+    }
+    for (const version of ["3.7c|", "3.8|", "4.0|"]) expect(supportsControlMode(version), version).toBe(true);
   });
 
   it("marks its own rows in each listing's format, on its owner's mark, and drops only those rows", () => {
