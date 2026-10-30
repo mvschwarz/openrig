@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Native stub runner launch dispatch
+
+The stub adapter's production launch now renders a native Windows child launch
+with the current Node executable and dispatches it through `sendShellCommand`.
+It no longer types POSIX quotes directly into PowerShell or sends a second Enter
+after the native shell-command dispatcher has already submitted the launch.
+An owned PowerShell/Node fixture reproduced broken runner-path arguments before
+the fix, then verified exact session, cwd, launch ID, posture, and resume arguments
+with Unicode, apostrophes, spaces, and metacharacters. The POSIX launch path is
+unchanged. The native launch and existing stub-adapter files pass 5/5 checks;
+daemon type checking passes. The native fixture uses a fake runner and injected
+terminal transport, not stock psmux or a live managed seat; full stub lifecycle
+and native readiness acceptance remain open.
+
 ### QA fixture-home path casing
 
 The CLI's path-only QA-home predicate now applies its existing Windows case

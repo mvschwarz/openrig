@@ -15,6 +15,8 @@
 
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
+import { shellQuote } from "./shell-quote.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
 import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import { yoloEnabled, type ResolvedLaunchPosture } from "./yolo-mode.js";
@@ -205,9 +207,12 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
         posture,
         resumeToken: opts.resumeToken,
       });
-      const textResult = await this.tmux.sendText(sessionName, cmd);
+      const native = this.platform === "win32";
+      const textResult = native
+        ? await this.tmux.sendShellCommand(sessionName, renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}))
+        : await this.tmux.sendText(sessionName, cmd);
       if (!textResult.ok) return { ok: false, error: `Failed to send stub launch command: ${textResult.message}` };
-      const enterResult = await this.tmux.sendKeys(sessionName, ["Enter"]);
+      const enterResult = native ? { ok: true as const } : await this.tmux.sendKeys(sessionName, ["Enter"]);
       if (!enterResult.ok) return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
 
       const ready = await this.waitForRunnerReady(binding, launchId);
