@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Current native Job and file-holder observations
+
+At source head dfca7a642, the full focused Windows Job/file-holder fixture files
+pass seven checks. These exercise actual owned native subprocesses: literal
+argv/stdio/status, an explicit minimal child environment, owner/root/helper exit,
+descendant cleanup and survival of an unrelated owned canary. Restart Manager
+observes an owned open-file holder with creation time, then no holder after that
+child closes; conflict-policy listener/daemon-record evidence is injected.
+
+No existing daemon, real database, installed provider, or default psmux server is
+operated by these checks. This establishes those bounded cases rather than every
+Windows lifecycle condition. The separate ACP EOF/companion-cleanup limitations
+are not cleared by these results.
+
 ### Static pack Git placeholders across native root aliases
 
 The static-content resolver now canonicalizes Windows roots and indexed file keys
