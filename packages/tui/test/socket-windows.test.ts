@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { controlEndpoint, createControlSocket } from "../src/socket-server.js";
@@ -22,6 +23,30 @@ function ask(endpoint: string, command: string): Promise<Record<string, unknown>
   });
 }
 describe("native Windows TUI control", () => {
+  it.runIf(process.platform === "win32")("uses one control pipe through a directory junction, including an absent run directory", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "tui-pipe-alias-"));
+    const actual = path.join(root, "actual"), alias = path.join(root, "alias");
+    let control: Awaited<ReturnType<typeof createControlSocket>> | undefined;
+    try {
+      fs.mkdirSync(actual);
+      fs.symlinkSync(actual, alias, "junction");
+      const actualPath = path.join(actual, "run", "control.sock");
+      const aliasPath = path.join(alias, "run", "control.sock");
+      control = await createControlSocket({ socketPath: actualPath, view: createViewState({ instanceId: "owned-alias" }) });
+      expect(controlEndpoint(aliasPath)).toBe(control.path);
+      expect((await ask(controlEndpoint(aliasPath), "state")).instanceId).toBe("owned-alias");
+      await expect(createControlSocket({ socketPath: aliasPath, view: createViewState({ instanceId: "competitor" }) })).rejects.toMatchObject({ code: "EADDRINUSE" });
+      expect(fs.existsSync(path.join(actual, "run"))).toBe(false);
+      fs.mkdirSync(path.join(actual, "run"));
+      expect(controlEndpoint(aliasPath)).toBe(control.path);
+      expect(controlEndpoint(actualPath)).toBe(control.path);
+      expect(controlEndpoint(path.join(actual, "run", "another.sock"))).not.toBe(control.path);
+    } finally {
+      await control?.close();
+      if (fs.existsSync(alias)) fs.unlinkSync(alias);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("uses bounded pipe names while Unix endpoints retain their exact paths", () => {
     const file = path.join(os.tmpdir(), "中文", "x".repeat(180), "control.sock");
     expect(controlEndpoint(file, "win32")).toMatch(/^\\\\\.\\pipe\\openrig-tui-[a-f0-9]{64}$/);

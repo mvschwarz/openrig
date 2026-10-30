@@ -26,7 +26,25 @@ export const MAX_SOCKET_PATH_BYTES = 100;
 /** Windows IPC has a flat pipe namespace, not filesystem Unix sockets. */
 export function controlEndpoint(socketPath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32" || /^\\\\[.?]\\pipe\\/i.test(socketPath)) return socketPath;
-  const identity = createHash("sha256").update(path.resolve(socketPath).toLowerCase()).digest("hex");
+  const resolved = path.resolve(socketPath);
+  let parent = path.dirname(resolved);
+  const tail = [path.basename(resolved)];
+  // The pipe itself is not a filesystem entry, and its run directory need not
+  // exist. Resolve the nearest existing parent so junctions and DOS short names
+  // name the same endpoint without creating directories for Windows IPC.
+  for (;;) {
+    try {
+      parent = fs.realpathSync.native(parent);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const next = path.dirname(parent);
+      if (next === parent) break;
+      tail.unshift(path.basename(parent));
+      parent = next;
+    }
+  }
+  const identity = createHash("sha256").update(path.join(parent, ...tail).toLowerCase()).digest("hex");
   return `\\\\.\\pipe\\openrig-tui-${identity}`;
 }
 

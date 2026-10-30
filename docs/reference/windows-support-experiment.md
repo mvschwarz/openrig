@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Windows TUI control identity through directory aliases
+
+Windows TUI control endpoints now hash the physical parent directory identity,
+including its nearest existing ancestor when the `run` directory is absent.
+Previously, two paths through an owned directory junction produced different
+named pipes for the same selected control path. An actual native-pipe fixture
+reproduced that mismatch, then verified that an alias reaches the original TUI,
+a second server cannot bind through the alias, creating the missing directory
+does not change the endpoint, and a different socket basename stays distinct.
+The pipe does not create filesystem socket directories; explicit pipe names and
+POSIX endpoint paths retain their existing handling. Six socket test files pass
+16 checks with 10 platform-conditioned cases skipped on Windows. TUI type
+checking and the local TUI workspace build pass. This is owned temporary IPC
+evidence, not live fleet/TUI adoption or named-pipe ACL acceptance. Updating an
+already running older TUI to this endpoint scheme requires its normal relaunch;
+this pass did not restart any user TUI.
+
 ### Dotted Windows ACP command names
 
 ACP npm-agent resolution now tries the configured PATHEXT entries after an exact
