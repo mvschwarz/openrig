@@ -1049,3 +1049,29 @@ failure, identity/topology, exact retrieval/profile bytes, typed context-root
 precedence, install/list/remove effects and partial-sync cleanup. The native
 entry and its packaging/claim-census updates remain unfinished. No verifier was
 run against a live rig or real user context store.
+
+That verifier gap is now implemented as `node verify-world-native.mjs`. The
+standalone Node entry executes all 29 existing named checks without a POSIX
+shell or text utilities. It reads the shipped shell companion's static check
+definitions as data, never as commands, and rejects a missing/duplicate or
+removed named-check inventory. Operational checks use literal CLI argv and
+parsed JSON, preserving missing-rig skip versus a broken command failure,
+identity/topology, retrieval/profile/token checks, typed context-root precedence
+and the isolated install/list/remove probe. Normal and partial-sync cleanup are
+verified; forced termination cleanup is not claimed tested.
+
+On Windows, native executables, recognized npm CLI entries and exact paired
+seat-bin shims are resolved without executing batch text. The v2 digest uses
+the producer's exact realpath spelling, while file identity checks also support
+native canonical paths; this matters for DOS short-name aliases. Malformed
+paired percent escapes remain refused. The manifest, claim census and taught
+command now include the native entry; the POSIX companion remains shipped.
+
+The complete public-world file passes 24/24 natively, including all existing
+mutation/refusal cases, real owned copy/list/remove effects, partial-sync cleanup,
+an actual v2 generated seat shim under percent/apostrophe paths, and rejection
+after a named check is removed. The production-library generator check passes,
+and generation writes 57 packs with the native entry declared and byte-identical
+to its source. Daemon TypeScript, Node syntax, docs and workflow YAML checks pass.
+Windows CI includes the file but has not run. All CLI/state are owned fixtures;
+this does not validate an installed tarball, real daemon or POSIX-host execution.

@@ -555,6 +555,7 @@ test("PRODUCTION LIBRARY: only the public help, onboarding-width, reference, wor
       "claims.yaml",
       "manifest.yaml",
       "start-here.md",
+      "verify-world-native.mjs",
       "verify-world.sh",
     ]);
     const publicManifest = parseManifest(readFileSync(join(publicDir, "manifest.yaml"), "utf8"), "world-public");

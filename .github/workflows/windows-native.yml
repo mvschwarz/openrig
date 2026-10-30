@@ -52,6 +52,9 @@ jobs:
       - name: Paired hook CLI and native role refocus
         working-directory: packages/daemon
         run: npx vitest run test/hook-paired-seat-rig.test.ts test/hook-command-native-env.test.ts test/refocus-rig-windows.test.ts test/refocus-role.test.ts --maxWorkers=1
+      - name: Public world native verifier
+        working-directory: packages/daemon
+        run: npx vitest run test/public-world-pack.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly
