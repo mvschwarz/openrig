@@ -242,9 +242,11 @@ test("REAL CANON: projected membership == the mirror ship set (no narrowing) —
     assert.deepEqual(got, expected, "pack files[] must equal the mirror ship set for the skill (no dropped assets)");
     // the exact helpers r2 flagged, referenced by the served prose:
     assert.ok(got.includes("find-polluter.sh"), "find-polluter.sh must be projected");
+    assert.ok(got.includes("find-polluter.mjs"), "native find-polluter.mjs must be projected");
     assert.ok(got.includes("condition-based-waiting-example.ts"), "condition-based-waiting-example.ts must be projected");
     // and copied to disk
     assert.ok(existsSync(join(out, "skills", ref, "find-polluter.sh")));
+    assert.ok(existsSync(join(out, "skills", ref, "find-polluter.mjs")));
     assert.ok(existsSync(join(out, "skills", ref, "condition-based-waiting-example.ts")));
   } finally {
     rmSync(out, { recursive: true, force: true });
@@ -263,6 +265,8 @@ test("REAL CANON: referenced helpers are DELIVERED in the served bundle (packed-
     assert.equal(bundle.missingFiles.length, 0, "no dangling files — the referenced helpers are present");
     // the helper the prose points at must be in the served bundle, header AND content:
     assert.match(bundle.text, /find-polluter\.sh/, "helper .sh path must be in the served bundle");
+    assert.match(bundle.text, /find-polluter\.mjs/, "native helper path must be in the served bundle");
+    assert.match(bundle.text, /export async function findPolluter/, "native helper content must be served");
     assert.match(bundle.text, /find-polluter\.sh <file_or_dir_to_check>/, "helper .sh CONTENT must be served");
     assert.match(bundle.text, /condition-based-waiting-example\.ts/, "helper .ts path must be in the served bundle");
   } finally {
