@@ -474,3 +474,10 @@ no daemon deployment, existing seat or provider was activated. An initial local
 receipt-wrapper construction failed before any test ran; the corrected standalone
 runner produced this terminal receipt rather than treating that failure as a pass.
 
+Current UI command/browser-launch suites pass 16/16. The native fixture starts
+system PowerShell with no system tools on PATH and preserves a URL containing
+quotes, shell-like text and Unicode through an inert Start-Process function.
+Source hashes and the report digest are recorded in the local ledger. No actual
+browser/protocol handler is opened; UI lifecycle/client operations are injected,
+so this is not visible browser or deployed UI acceptance.
+
