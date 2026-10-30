@@ -234,6 +234,28 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.read(askId)).toMatchObject({ body: { state, optionId } });
   });
 
+  it.each([
+    ["a typed no", { decision: "no" }],
+    ["the Feed's deny", null],
+  ] as const)("reads %s as the person's refusal, never a grant, when the agent offered no reject option", async (_case, choice) => {
+    const f = fixture();
+    const askId = String((await f.submit({ options: OPTIONS.slice(0, 2) })).body.askId);
+    if (choice) expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
+    else await f.contract.act({ verb: "deny", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    expect((await f.read(askId)).body).toEqual({ ok: true, state: "refused", reason: "said_no" });
+  });
+
+  it.each(["route", "handoff"])("after a person's %s to a colleague, waits for the colleague, whose answer reaches the agent", async (verb) => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb, qitemId: askId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    const successor = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === OTHER_PERSON && row.chainOfRecord?.includes(askId));
+    expect(successor?.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
+    expect(await f.answer(successor!.qitemId, { optionId: "reject" }, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
   it("takes the primary user's ordinary answer from the terminal, as on any ask", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
