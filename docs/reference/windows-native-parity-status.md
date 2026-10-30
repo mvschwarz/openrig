@@ -606,3 +606,14 @@ seat restart. Separately, three native tile/following cases pass: literal argv
 and identity-bound replacement following through an owned executable, unchanged
 POSIX SSH command rendering, and private selector persistence before injected
 provider effects. No actual desktop viewer or remote host is opened.
+
+The ordinary Codex transport's existing shell-label verification now also
+recognizes native PowerShell, pwsh and cmd hosts. It reuses the existing Codex
+process proof rather than treating those labels as provider readiness. Three
+synthetic native-host refusal cases reproduced the previous platform difference;
+the 58-case runtime-delivery suite now passes, including delivery after the
+foreground resolves to a verified matching Codex. A matching child alone behind
+a persistent shell-host label is not foreground proof. Terminal seats and other
+runtime policies are unchanged. No actual queue, watchdog or provider is used.
+The shared session-transport suite also passes 279/279 at this source change;
+daemon TypeScript, docs guard and whitespace checks pass.

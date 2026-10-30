@@ -45,7 +45,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
@@ -3780,7 +3780,9 @@ export class SessionTransport {
     } catch {
       return null;
     }
-    if (!paneCommand || !isShellForeground(paneCommand)) return null;
+    const nativeCodexHost = runtime === "codex" && (this.tmuxAdapter.isNativeWindows || process.platform === "win32")
+      && isWindowsShellHost(paneCommand ?? "");
+    if (!paneCommand || (!isShellForeground(paneCommand) && !nativeCodexHost)) return null;
     if (runtime === "codex" && pane) {
       // Reuse stable, foreground, pane-descendant Codex proof. A resumed process
       // must name this session's token. Stale UI, a Node
