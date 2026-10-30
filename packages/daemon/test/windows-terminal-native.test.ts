@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { pathToFileURL } from "node:url";
+import { verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
@@ -33,6 +34,27 @@ function ownedInvoker(dir: string) {
 }
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
+  it("witnesses an idle stock pane and refuses it after an owned receiver starts", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-idle-"));
+    const session = `owned-idle-${randomUUID()}`;
+    const invoke = ownedInvoker(dir);
+    const adapter = new TmuxAdapter(async () => { throw Error("No POSIX transport"); }, undefined, invoke, "psmux");
+    const ready = path.join(dir, "ready"), script = path.join(dir, "receiver.cjs");
+    writeFileSync(script, `require('fs').writeFileSync(${JSON.stringify(ready)},'owned');setInterval(()=>{},1000);`);
+    try {
+      expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
+      const pane = (await adapter.listPanes(session))[0]!;
+      const input = { target: pane.id, tmux: adapter };
+      await expect.poll(() => verifyPaneIdleShell(input), { timeout: 8000, interval: 200 }).toBe(true);
+      const q = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+      expect(await adapter.sendShellCommand(pane.id, renderWindowsLaunch([process.execPath, script].map(q).join(" ")))).toEqual({ ok: true });
+      await expect.poll(() => existsSync(ready), { timeout: 5000 }).toBe(true);
+      expect(await verifyPaneIdleShell(input)).toBe(false);
+    } finally {
+      await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }, 30000);
   it("delivers a multiline block as one runner submission", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-input-"));
     const session = `openrig-input-${process.pid}-${Date.now()}`;

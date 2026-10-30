@@ -423,3 +423,10 @@ unchanged POSIX successor behavior. The Windows lineage suite also passes its
 synthetic observation cases; daemon TypeScript passes. Actual seat cutover and
 stock psmux successor acceptance are not established by these injected fixtures.
 
+The successor's idle-shell witness now also has a stock psmux 3.4.0 boundary
+receipt. In an owned registry/namespace, the real PowerShell pane passes the
+default native process/console witness; after a synthetic Node receiver starts,
+the same pane is refused as idle. This selected native test passes and its owned
+session is closed before removing the fixture. It does not perform a successor
+cutover or access the default server, an existing seat or provider credentials.
+
