@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Windows npm Claude resume-metadata probe
+
+The default resume-metadata probe no longer rejects every recognized npm Claude
+launcher merely because it has a Node script prefix. It renders the selected Node
+and script into the native command and supplies both to the existing process
+identity verifier, together with the exact resume token. The former early return
+predated the verifier's selected-script support. Unverified process identity still
+cannot establish a resumed or failed conversation.
+
+An owned synthetic npm layout exercises actual PowerShell/Node dispatch and reads
+back the resume argv. With injected missing identity evidence, the probe remains
+inconclusive and its synthetic terminal cleanup is called. The focused check and
+daemon TypeScript check pass. The terminal and identity evidence are injected;
+this does not verify stock psmux, an installed provider, or a real conversation.
+
 ### Paired seat CLI paths containing percent and exclamation marks
 
 The Windows seat-bin shim now doubles literal percent signs in its fixed Node/CLI

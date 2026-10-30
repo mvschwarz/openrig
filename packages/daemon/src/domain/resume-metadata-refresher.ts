@@ -404,15 +404,14 @@ export class ResumeMetadataRefresher {
     // Classic shells retain alias/function resolution. Native probes freeze the
     // executable and apply the selected home only to the launched child.
     let nativeExecutable: string | undefined;
+    let nativeScript: string | undefined;
     let command = configDir ? `CLAUDE_CONFIG_DIR=${shellQuote(configDir)} ${resume}` : resume;
     if (this.tmuxAdapter.isNativeWindows) {
       try {
         const selected = resolveWindowsProviderCommand("claude", process.env, resolveProbeCwd(cwd, this.homeDir));
-        // The existing native Claude identity proof recognises native binaries,
-        // not a Node npm launcher. Do not start an unprovable probe.
-        if (selected.prefix.length) return "inconclusive";
         nativeExecutable = selected.command;
-        command = renderWindowsLaunch(`${shellQuote(nativeExecutable)}${resume.slice("claude".length)}`,
+        nativeScript = selected.prefix[0];
+        command = renderWindowsLaunch(`${[nativeExecutable, ...selected.prefix].map(shellQuote).join(" ")}${resume.slice("claude".length)}`,
           { CLAUDE_CONFIG_DIR: configDir ?? this.claudeConfigDir });
       } catch { return "inconclusive"; }
     }
@@ -448,6 +447,7 @@ export class ResumeMetadataRefresher {
         const paneContent = (await this.tmuxAdapter.capturePaneContent(probeSession, 80)) ?? "";
         const identity = nativeExecutable ? await verifyClaudePaneProcess({ target: probeSession, tmux: this.tmuxAdapter,
           listProcesses: this.listClaudeProcesses, selectedExecutable: nativeExecutable,
+          ...(nativeScript ? { selectedScript: nativeScript } : {}),
           expectedToken: resumeToken, requireResume: true }) : undefined;
         const result = assessNativeResumeProbe({
           runtime: "claude-code",
