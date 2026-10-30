@@ -22,7 +22,7 @@ const git = (cwd: string, ...args: string[]) =>
   });
 
 let root: string;
-beforeEach(() => { root = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), "issue121-"))); });
+beforeEach(() => { root = fs.realpathSync.native(fs.mkdtempSync(nodePath.join(os.tmpdir(), "issue121-"))); });
 afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
 
 function ordinaryRepo(): string {
@@ -38,7 +38,7 @@ function linkedWorktree(): { repo: string; worktree: string; worktreeGitDir: str
   const worktree = nodePath.join(root, "linked worktree");
   git(repo, "worktree", "add", "-q", worktree, "-b", "feature");
   // Git names the per-worktree admin dir itself (it may sanitize the name), so read it from the .git file.
-  const worktreeGitDir = fs.readFileSync(nodePath.join(worktree, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim();
+  const worktreeGitDir = fs.realpathSync.native(fs.readFileSync(nodePath.join(worktree, ".git"), "utf8").replace(/^gitdir:\s*/, "").trim());
   return { repo, worktree, worktreeGitDir };
 }
 
@@ -81,10 +81,13 @@ async function freshLaunchCommand(cwd: string): Promise<string> {
   return vi.mocked(tmux.sendText).mock.calls[0]![1] as string;
 }
 
+// Normalize only assertion spelling; command construction and argv proofs stay native.
+const normalizedCommand = (command: string) => command.replaceAll(String.fromCharCode(92), String.fromCharCode(47));
+
 function addDirs(command: string): string[] {
   const out: string[] = [];
   const re = / --add-dir '((?:[^']|'"'"')*)'/g;
-  for (let m = re.exec(command); m; m = re.exec(command)) out.push(m[1]!.replace(/'"'"'/g, "'"));
+  for (let m = re.exec(command); m; m = re.exec(command)) out.push(nodePath.normalize(m[1]!.replace(/'"'"'/g, "'")));
   return out;
 }
 
@@ -105,7 +108,7 @@ describe("Codex fresh launch git add-dirs (issue #121)", () => {
     for (const dir of dirs) expect(fs.statSync(dir).isDirectory()).toBe(true);
   });
 
-  it.each(["metadata ", "metadata\t"])("preserves whitespace in separate Git metadata directory %j", async (name) => {
+  it.skipIf(process.platform === "win32").each(["metadata ", "metadata\t"])("preserves whitespace in separate Git metadata directory %j", async (name) => {
     const repo = nodePath.join(root, "separate repo");
     const metadata = nodePath.join(root, name);
     fs.mkdirSync(repo);
@@ -142,10 +145,10 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     const resume = await launchCommand(repo, { resumeToken: "thread-1" });
     expect(addDirs(resume)).toEqual(fresh);
     // The dirs are resume's own options, after the conversation id.
-    expect(resume).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
+    expect(normalizedCommand(resume)).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
     const fork = await launchCommand(repo, { fork: true });
     expect(addDirs(fork)).toEqual(fresh);
-    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git'$/);
+    expect(normalizedCommand(fork)).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git'$/);
   });
 
   it("the resume and fork proofs still find the process when the cwd has a space, which ps does not quote", async () => {
@@ -204,7 +207,7 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     // The dirs are resume's own options, after the conversation id, as on every other resume.
-    expect(built.core).toMatch(/ resume 'thread-1' --add-dir '\/shared\/state' --add-dir '[^']* repo\/\.git'$/);
+    expect(normalizedCommand(built.core)).toMatch(/ resume 'thread-1' --add-dir '\/shared\/state' --add-dir '[^']* repo\/\.git'$/);
     // The process line joins argv with spaces and no quoting, so a dir before the id would hide it.
     const line = built.core.replace(/'/g, "");
     expect(codexCommandResumeToken(line)).toBe("thread-1");
@@ -241,10 +244,10 @@ describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writa
     expect(addDirs(await launchCommand(repo))).toEqual(expected);
     const resume = await launchCommand(repo, { resumeToken: "thread-1" });
     expect(addDirs(resume)).toEqual(expected);
-    expect(resume).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
+    expect(normalizedCommand(resume)).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
     const fork = await launchCommand(repo, { fork: true });
     expect(addDirs(fork)).toEqual(expected);
-    expect(fork).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
+    expect(normalizedCommand(fork)).toMatch(/ fork 'parent-thread' --add-dir '[^']*\/\.git' --add-dir '[^']*\/seats\/dev'$/);
   });
 
   it("the resume and fork proofs still find the process when the seat folder's path has a space", async () => {
@@ -278,7 +281,7 @@ describe("Codex restore-path git add-dirs (a pod-less seat restored through Code
     const repo = ordinaryRepo();
     const restore = await restoreCommand(repo);
     expect(addDirs(restore)).toEqual(addDirs(await freshLaunchCommand(repo)));
-    expect(restore).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
+    expect(normalizedCommand(restore)).toMatch(/ resume 'thread-1' --add-dir '[^']*\/\.git'$/);
     // ps shows argv unquoted; the id is still read when the cwd has a space.
     expect(repo).toContain(" ");
     expect(codexCommandResumeToken(restore.slice(restore.indexOf("codex ")).replace(/'/g, ""))).toBe("thread-1");
@@ -317,6 +320,22 @@ describe("prepareCodexSeatFolder", () => {
     fs.mkdirSync(elsewhere);
     fs.mkdirSync(nodePath.join(topology, "rigs", "my-rig"), { recursive: true });
     fs.symlinkSync(elsewhere, nodePath.join(topology, "rigs", "my-rig", "seats"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(prepareCodexSeatFolder("dev-qa@my-rig", topology)).toBeUndefined();
+      expect(fs.readdirSync(elsewhere)).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("refuses a junction segment without writing at its target", () => {
+    const topology = nodePath.join(root, "topology");
+    const elsewhere = nodePath.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.mkdirSync(nodePath.join(topology, "rigs", "my-rig"), { recursive: true });
+    fs.symlinkSync(elsewhere, nodePath.join(topology, "rigs", "my-rig", "seats"), "junction");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(prepareCodexSeatFolder("dev-qa@my-rig", topology)).toBeUndefined();
@@ -378,7 +397,7 @@ describe("resolveCodexGitAddDirs (issue #121)", () => {
     expect(await resolveCodexGitAddDirs(broken)).toEqual([]);
   });
 
-  it("unreadable .git (not ENOENT): []", async () => {
+  it.skipIf(process.platform === "win32")("unreadable .git (not ENOENT): []", async () => {
     const { resolveCodexGitAddDirs } = await import("../src/domain/codex-git-add-dirs.js");
     const parent = nodePath.join(root, "locked");
     fs.mkdirSync(parent);
