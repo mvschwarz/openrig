@@ -34,9 +34,24 @@ const record = (fields) => {
     producer: "minimal-acp-runner test double", ...fields }));
 };
 const show = (text) => process.stdout.write(`${text}\r\n`);
+// One JSON request to OpenRig with the hook token: { status, body }, or status 0 when it couldn't be reached.
+function api(method, path, payload) {
+  return new Promise((resolve) => {
+    const req = request(`${env.OPENRIG_URL}${path}`, { method, timeout: 30_000,
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.OPENRIG_ACTIVITY_HOOK_TOKEN}` } }, (res) => {
+      let text = "";
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => { let body; try { body = JSON.parse(text); } catch { body = undefined; } resolve({ status: res.statusCode, body }); });
+    });
+    req.on("error", () => resolve({ status: 0 }));
+    req.on("timeout", () => { req.destroy(); resolve({ status: 0 }); });
+    req.end(payload ? JSON.stringify(payload) : undefined);
+  });
+}
 
 // The agent, over stdio JSON-RPC.
 const agent = spawn("/bin/sh", ["-c", `exec ${agentCommand} acp`], { stdio: ["pipe", "pipe", "ignore"] });
+agent.stdin.on("error", () => { /* the agent has gone; its exit is reported below */ });
 let nextId = 1;
 const pending = new Map();
 let buffered = "";
@@ -60,10 +75,7 @@ agent.stdout.on("data", (chunk) => {
     if (msg.method === undefined) { pending.get(msg.id)?.(msg); pending.delete(msg.id); continue; }
     if (msg.id === undefined) continue;
     if (msg.method === "session/request_permission") {
-      answer(msg.id, { result: { outcome: breaks.has("allow-permission") ? { outcome: "selected", optionId: msg.params.options[0].optionId } : { outcome: "cancelled" } } });
-      if (!breaks.has("silent-permission")) show(`permission refused: ${msg.params.toolCall?.title}`);
-      attention = true;
-      void post("Notification", "permission_prompt");
+      void onPermission(msg);
     } else if (!breaks.has("ignore-unknown")) {
       answer(msg.id, { error: { code: -32601, message: `Method not found: ${msg.method}` } });
     }
@@ -73,6 +85,7 @@ agent.stdout.on("data", (chunk) => {
 let exiting = false;
 agent.on("exit", async () => {
   if (exiting) return;
+  await withdrawLive("exited");
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
 });
@@ -90,6 +103,62 @@ let turn = 0;
 let busy = false;
 let cancelSent = false;
 const queue = [];
+
+// Permissions. The runner submits the live request to OpenRig's answered path; an OpenRig without it (404) or any refusal
+// means refuse at once and hold attention, as in the first version. An answer is delivered once, while that request is
+// still live, and the ask is withdrawn when the turn is cancelled or ends, or the agent exits.
+let live = null;
+const refuse = (id) => answer(id, { result: { outcome: { outcome: "cancelled" } } });
+const select = (id, optionId) => answer(id, { result: { outcome: { outcome: "selected", optionId } } });
+async function onPermission(msg) {
+  const { toolCall, options } = msg.params;
+  if (!breaks.has("silent-permission")) show(`permission asked: ${toolCall?.title}`);
+  attention = true;
+  const holdAttention = () => void post("Notification", "permission_prompt");
+  if (breaks.has("allow-permission")) { select(msg.id, options[0].optionId); return; }
+  if (breaks.has("no-submit")) { refuse(msg.id); holdAttention(); return; }
+  const askedInTurn = turn;
+  const submitted = await api("POST", "/api/activity/permission-requests", {
+    sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION,
+    nativeRef: sessionId, turnId: String(turn), requestId: breaks.has("numeric-request-id") ? msg.id : String(msg.id),
+    toolCall: { title: toolCall?.title, kind: toolCall?.kind }, options, occurredAt: new Date().toISOString() });
+  if (submitted.status !== 200 || !submitted.body?.askId) {
+    if (breaks.has("grant-on-refusal")) select(msg.id, options[0].optionId); else refuse(msg.id);
+    holdAttention();
+    return;
+  }
+  if (breaks.has("self-prompt")) holdAttention();
+  const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false };
+  live = ask;
+  // The agent may have exited, or ended the turn, while the submit was on its way.
+  if (agent.exitCode !== null || agent.signalCode !== null) { await withdrawLive("exited"); return; }
+  if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
+  for (;;) {
+    const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}?waitSeconds=25`);
+    if (ask.done && !breaks.has("late-deliver")) return;
+    const state = read.body?.state;
+    if (read.status === 200 && state === "pending") continue;
+    if (state === "answered" && (ask.offered.includes(read.body.optionId) || breaks.has("deliver-unoffered"))) {
+      select(ask.id, read.body.optionId);
+      if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
+      attention = false;
+    } else if (!ask.done) refuse(ask.id);
+    ask.done = true;
+    if (live === ask) live = null;
+    return;
+  }
+}
+// Only a cancelled turn's request still has an agent waiting on it; after a turn's end or an exit there's no one to answer.
+function withdrawLive(reason) {
+  const ask = live;
+  if (!ask || ask.done) return Promise.resolve();
+  ask.done = true;
+  live = null;
+  if (reason === "turn_cancelled") refuse(ask.id);
+  if (breaks.has("no-withdraw")) return Promise.resolve();
+  return api("POST", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}/withdraw`, { reason });
+}
+
 async function prompt(text) {
   busy = true;
   cancelSent = false;
@@ -98,6 +167,7 @@ async function prompt(text) {
   attention = false;
   await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+  await withdrawLive("turn_ended");
   if (res.error) {
     if (!breaks.has("no-error-post")) await post("Notification", "runtime_error");
   } else {
@@ -109,6 +179,7 @@ async function prompt(text) {
 }
 function submit(block) {
   if (block === "/abort") { abort(); return; }
+  if (breaks.has("paste-answers") && live && !live.done) { live.done = true; select(live.id, live.offered[0]); attention = false; return; }
   if (breaks.has("abort-in-block") && block.split("\n").includes("/abort")) abort();
   const parts = breaks.has("split-lines") ? block.split("\n") : [block];
   for (const part of parts) {
@@ -120,6 +191,7 @@ function abort() {
   if (!busy) return;
   cancelSent = true;
   notify("session/cancel", { sessionId });
+  void withdrawLive("turn_cancelled");
 }
 
 // Input: raw mode with bracketed paste. Everything up to Enter is one block; Ctrl-C outside a paste aborts.
