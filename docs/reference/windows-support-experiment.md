@@ -16,7 +16,7 @@ not activate the running daemon or seats.
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
 | MCP and local IPC | Actual IPv6 tool call, stdio EOF, separately asserted native forced termination and owned named-pipe drain checks | These checks do not establish whole-runtime acceptance |
-| Native package assembly | Source-stable actual build at 3305fd151, packaged CLI version and actual assembled-plugin version gate | Artifact is dirty=true; clean-head package/install and subsequent-source assembly remain separate |
+| Native package assembly | Source-stable actual build at cc5971d53; isolated native npm install, SQLite ABI and installed rig.cmd daemon-module consumer passed | Artifact is dirty=true; subsequent-source assembly, all-provider and whole-runtime acceptance remain separate |
 | CLI/TUI regression | Isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`: 7,202 tests, 7,031 passed, 94 failed, 77 pending; source stable | TUI: 1,183 passed, zero failed, 21 pending. CLI: 5,848 passed, 94 failed, 56 pending. This older frozen source does not validate subsequent changes |
 | Native platform acceptance | Windows Terminal paths and selected native OS fixtures have individual receipts | Full visual focus, suspend/reboot, all-provider and installed-package acceptance remain incomplete |
 | Runtime-specific upstream limits | Existing Rex refusal and Linux-qualified Herdr behavior are retained | Do not erase those limits or describe an optional patched psmux protocol as stock 3.4.0 support |
@@ -25,6 +25,28 @@ The active task still includes finding and filling feasible implementation gaps,
 then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
+
+## Native installed package and shared TUI environment (2026-10-30)
+
+The actual package build at cc5971d5307d689954af6780ac6a3d7c8e5a2aed
+completed with exit zero and matching head/tracked-diff snapshots before and
+after. The protected untracked diagnostic remains in place, so dirty=true is
+the correct artifact identity. The target-native install gate subsequently
+built/packed the same source, installed dependencies into an owned npm prefix,
+opened an in-memory SQLite database through the installed ABI checker, and
+invoked the installed rig.cmd through PowerShell. Its daemon-backed local
+gateway-human add wrote the expected synthetic fragment in an isolated home.
+The selected gate passed 1/1 in 70 seconds. Its own prefix/home/tarball were
+cleaned; no global CLI, actual daemon, messaging connection or seat was used.
+
+Review then found shared-TUI attachment cleared only the exact key TMUX from
+a copied environment. An actual native Node child still received an owned
+mixed-case Tmux value. The attachment environment now removes native-cased
+aliases on Windows while retaining POSIX case semantics and unrelated values.
+The native child check failed before correction; it and the complete adjacent
+shared-TUI file pass 7/7 afterward. CLI typecheck passes. This is environment
+consumer evidence, not a real psmux attachment or visible-terminal acceptance;
+the installed cc5971d53 artifact predates this subsequent source change.
 
 ## Native activity self-report verification (2026-10-30)
 

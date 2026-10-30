@@ -33,6 +33,26 @@ export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient
   return { session: terminal.canonicalSessionName, serverArgs: readTmuxServerArgs(terminal.tmuxServerArgs) };
 }
 
+<<<<<<< HEAD
 export async function attachSharedTui(target: TmuxAttachment): Promise<number> {
   return attachTmux(target);
+=======
+export function sharedTuiEnvironment(input: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...input };
+  for (const key of Object.keys(env)) {
+    if ((process.platform === "win32" ? key.toUpperCase() : key) === "TMUX") delete env[key];
+  }
+  return env;
+}
+
+export async function attachSharedTui(target: string): Promise<number> {
+  // Attach a new client even inside tmux. switch-client would retarget somebody
+  // else's client when invoked from an agent's child shell.
+  return new Promise((resolve, reject) => {
+    const env = sharedTuiEnvironment();
+    const child = spawn("tmux", ["attach-session", "-t", `=${target}`], { stdio: "inherit", env });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
+  });
+>>>>>>> e3f4372a8 (fix(windows): clear native-cased shared TUI context)
 }
