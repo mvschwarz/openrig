@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Stock psmux chatroom watcher direct argv
+
+Windows chatroom creation now supplies the psmux `--` command separator. Stock
+psmux 3.4.0 otherwise joins positional words into a shell command, losing paths
+with spaces. An opt-in native test reproduced the missing watcher receipt before
+this change and passed afterward: the watcher receives its original argv and
+whoami resolves the owned pane's node through inherited server routing. The test
+uses a separate registry, home, namespace and synthetic receiver; it does not
+start a real daemon, provider or existing seat. This is scoped evidence, not
+complete Windows runtime acceptance.
+
 ### Pi/OMP protocol fixture failures reconciled
 
 The current two protocol files reproduced the previously recorded 15 failures

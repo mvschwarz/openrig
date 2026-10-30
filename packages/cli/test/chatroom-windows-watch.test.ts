@@ -12,8 +12,8 @@ afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 it("selects the paired Node CLI on Windows and keeps the POSIX watcher", () => {
   expect(chatroomWatcherCommand("linux")).toEqual(["rig"]);
   expect(chatroomWatcherCommand("win32")).toEqual([process.execPath, fileURLToPath(new URL("../src/index.js", import.meta.url))]);
-  const argv = chatroomWatchTmuxArgs("owned", chatroomWatcherCommand("win32"));
-  expect(argv.slice(argv.indexOf("-s") + 2)).toEqual([...chatroomWatcherCommand("win32"), "chatroom", "watch", "--", "owned"]);
+  const argv = chatroomWatchTmuxArgs("owned", chatroomWatcherCommand("win32"), "win32");
+  expect(argv.slice(argv.indexOf("-s") + 2)).toEqual(["--", ...chatroomWatcherCommand("win32"), "chatroom", "watch", "--", "owned"]);
 });
 
 it.runIf(process.platform === "win32")("reproduces the cmd-only watcher failure and preserves native watcher argv through an owned child", () => {
@@ -29,7 +29,7 @@ it.runIf(process.platform === "win32")("reproduces the cmd-only watcher failure 
     // Substitute only this CLI's entry with a recorder. No real daemon, psmux
     // session or SSE watch is opened; the actual native child receives argv.
     const argv = chatroomWatchTmuxArgs(rig, [chatroomWatcherCommand("win32")[0]!, entry]);
-    const program = argv.indexOf("-s") + 2;
+    const program = argv.indexOf("-s") + 3;
     const result = spawnSync(argv[program]!, argv.slice(program + 1), { env, encoding: "utf8", timeout: 5000 });
     expect(result.status, result.error?.message).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(["chatroom", "watch", "--", rig]);

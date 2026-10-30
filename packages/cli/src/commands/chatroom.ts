@@ -17,9 +17,12 @@ export function chatroomWatcherCommand(platform: NodeJS.Platform = process.platf
  *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. Some tmux versions
  *  still change a session name (3.5a writes `_` for `:` and `.`, and escapes a backslash or a control character such
  *  as a newline or tab), so `-P -F` prints the name tmux used. */
-export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = ["rig"]): string[] {
+export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = ["rig"], platform: NodeJS.Platform = process.platform): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
   return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
+    // Stock psmux otherwise joins positional words into a shell command, losing
+    // executable and script paths with spaces. `--` selects its direct argv mode.
+    ...(platform === "win32" ? ["--"] : []),
     ...watcher.map(tmuxArg), "chatroom", "watch", "--", tmuxArg(rig)];
 }
 
