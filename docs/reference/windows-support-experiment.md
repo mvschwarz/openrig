@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Project registration physical-path identity (2026-10-30)
+
+An owned existing project was refused as a same-ID/different-root conflict
+when its projects directory was supplied through Windows native long-path
+expansion while the catalog used a DOS-short temporary-root spelling. Project
+root comparison now uses native Windows realpath, including the existing-parent
+fallback for a not-yet-created folder. POSIX canonicalization is unchanged.
+
+The new association case failed before repair and passes afterward, retaining
+one project entry, both rig associations and the existing project contents.
+The full file reports 23 passed and three failed of 26: two host-denied file
+symlink cases and one POSIX permission-bit assertion remain unverified. Daemon
+TypeScript checking passes. No real workspace catalog or running rig changed.
+
 ### Resume-file path review and diagnostics (2026-10-30)
 
 The resume-token validator's native absolute-path diagnostic now names drive

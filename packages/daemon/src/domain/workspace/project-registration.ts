@@ -84,8 +84,9 @@ function writeCatalog(catalogPath: string, text: string): void {
 
 /** The real path, or, for a folder not created yet, its real parent plus its name. */
 function canonical(p: string): string {
-  try { return fs.realpathSync(p); } catch { /* not created yet */ }
-  try { return nodePath.join(fs.realpathSync(nodePath.dirname(p)), nodePath.basename(p)); } catch { return nodePath.resolve(p); }
+  const realpath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+  try { return realpath(p); } catch { /* not created yet */ }
+  try { return nodePath.join(realpath(nodePath.dirname(p)), nodePath.basename(p)); } catch { return nodePath.resolve(p); }
 }
 
 function listFiles(dir: string, prefix = ""): string[] {
