@@ -270,6 +270,58 @@ describe("a runner seat's answered permission path", () => {
     expect(f.queueRepo.getById(unrelated.qitemId)!.state).toBe("done");
   });
 
+  it("follows only the handoff's own successor: an earlier row to the same person with the ask's tags and chain is never picked", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    const earlier = await f.queueRepo.create({ sourceSession: PERSON, destinationSession: OTHER_PERSON, body: "a note about that edit",
+      tags: f.queueRepo.getById(askId)!.tags ?? [], chainOfRecord: [askId], nudge: false });
+    f.queueRepo.update({ qitemId: earlier.qitemId, actorSession: OTHER_PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "read it" });
+    f.db.prepare("UPDATE queue_items SET ts_created = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(earlier.qitemId);
+    await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+  });
+
+  it.each([
+    ["handoff", "a click", { optionId: "always" }, "always"],
+    ["handoff", "a typed no", { decision: "no" }, "reject"],
+    ["handoffAndComplete", "a click", { optionId: "always" }, "always"],
+    ["handoffAndComplete", "a typed no", { decision: "no" }, "reject"],
+  ] as const)("after a plain queue %s to a person, %s on their row reaches the agent", async (verb, _case, choice, optionId) => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    const { created } = await f.queueRepo[verb]({ qitemId: askId, fromSession: PERSON, toSession: OTHER_PERSON, nudge: false });
+    expect(created.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
+    expect(await f.answer(created.qitemId, choice, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId } });
+  });
+
+  it("reads a row set to state denied as the person's no", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    f.db.prepare("UPDATE queue_items SET state = 'denied', closure_reason = 'no-follow-on' WHERE qitem_id = ?").run(askId);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
+  it("reports a replaced occupant's revoked grant as stale, at submit, read and withdraw", async () => {
+    const f = fixture();
+    const first = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    const askId = String((await f.submit({ nodeId: undefined, generation: undefined }, first.token)).body.askId);
+    f.relaunch();
+    f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" }); // the new launch's grant revokes the first
+    expect(await f.submit({ nodeId: undefined, generation: undefined, requestId: "8" }, first.token)).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+    expect(await f.read(askId, 0, first.token)).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+    expect(await f.withdraw(askId, "turn_ended", first.token)).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+  });
+
+  it("reports a grant reissued for the same occupant as revoked, since it can still be the live request", async () => {
+    const f = fixture();
+    const first = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" }); // a lost response, issued again
+    expect(await f.submit({ nodeId: undefined, generation: undefined }, first.token)).toMatchObject({ status: 401, body: { code: "activity_grant_revoked" } });
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.read(askId, 0, first.token)).toMatchObject({ status: 401, body: { code: "activity_grant_revoked" } });
+  });
+
   it("never permits a handoff it can't follow: with no local successor the request stays pending, and withdrawing leaves the row", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
