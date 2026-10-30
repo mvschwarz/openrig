@@ -484,6 +484,47 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           expect(answerRows(ask.qitemId)).toHaveLength(1);
         } finally { spy.mockRestore(); }
       });
+
+      // The click path keeps its own rules until its follow-up: only a typed reply stores its words as the answer.
+      it("stores no earlier typed answer under a re-park's question when the person clicks", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "And the users?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again for the second question" });
+        await postPendingNotice(ask.qitemId);
+        click("q2", "yes", "996.1");
+        await vi.waitFor(() => expect(resolvedCount(ask.qitemId)).toBe(2));
+        expect(repo.getById(ask.qitemId)?.humanAnswers?.q2).toBeUndefined();
+      });
+
+      it("returns nothing again when a re-park's interrupted answer is replayed after the ask closes", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "And the users?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again for the second question" });
+        await postPendingNotice(ask.qitemId);
+        const act = MissionControlWriteContract.prototype.act;
+        let interrupt = true;
+        const spy = vi.spyOn(MissionControlWriteContract.prototype, "act").mockImplementation(async function (this: MissionControlWriteContract, input) {
+          const result = await act.call(this, input);
+          if (input.verb === "resolve" && interrupt) { interrupt = false; throw new Error("stopped after the resolve committed"); }
+          return result;
+        });
+        try {
+          typed("yes", "995.1");
+          await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+          expect(interrupt).toBe(false);
+          repo.update({ qitemId: ask.qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "decided" });
+          typed("yes", "995.1"); // the interrupted event again, after the ask closed
+          await new Promise((r) => setTimeout(r, 100));
+          expect(answerRows(ask.qitemId)).toHaveLength(2);
+          expect(humanAnswerRows(ask.qitemId)).toHaveLength(2);
+          expect(resolvedCount(ask.qitemId)).toBe(2);
+          expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1), q2: typedAnswer("yes", 0) });
+        } finally { spy.mockRestore(); }
+      });
     });
 
     /** With `routed` false, the reaction must make no row: a routed one lands well within the wait (#2233). */
