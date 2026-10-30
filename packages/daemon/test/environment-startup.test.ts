@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync, mkdirSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
-import { EnvironmentError, EnvironmentPlatform, sha256 } from "../src/domain/environment-platform.js";
+import { EnvironmentError, EnvironmentPlatform, sha256, type EnvironmentBinding } from "../src/domain/environment-platform.js";
 import { EnvironmentLifecycle } from "../src/domain/environment-lifecycle.js";
 import { EnvironmentStartup } from "../src/domain/environment-startup.js";
 import { OpenShellDriver } from "../src/adapters/openshell-driver.js";
@@ -155,7 +155,8 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   const history = Buffer.from(JSON.stringify({ sessionId: first.resumeToken, type: "user", message: { content: "unchanged retained history" } }) + "\n");
   f.files.set(`/sandbox/openrig/${nativePath}`, history);
   Object.assign(f.platform.driver, { checkpointFiles: async () => [{ path: nativePath, sha256: sha256(history), bytes: history.length }],
-    captureCleanup: async () => ({ version: 1, host: "fixture", uid: 1000, socket: "/owned/engine.sock", dev: 1, ino: 2 }),
+    captureCleanup: async (binding: EnvironmentBinding, socket: string) => ({ version: 1, host: "fixture", uid: 1000, socket, socketDevice: 1, socketInode: 2,
+      resourceId: binding.resource!.id, workspace: binding.placement.workspace, workloadId: "a".repeat(64), supervisorId: "b".repeat(64), volumes: [] }),
     cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }) });
   const lifecycle = new EnvironmentLifecycle(f.platform, undefined, join(f.root, "retained"));
   const checkpoint = await lifecycle.checkpoint("binding-one", { operationId: "context-checkpoint", generation: "generation-one" });
@@ -168,6 +169,11 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   f.db.prepare("INSERT INTO node_startup_context(node_id,projection_entries_json,resolved_files_json,startup_actions_json,runtime) VALUES (?,?,?,?,?)")
     .run(f.node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify([{ type: "send_text", text: "NEVER REPLAY", phase: "after_ready" }]), "openshell-claude");
   const snapshot = f.app.snapshotCapture.captureSnapshot(f.rig.id, "manual");
+  // Delete captures the predecessor's actual host/engine before recreate compares its successor.
+  expect(await lifecycle.effect("binding-one", { operationId: "context-delete", generation: "generation-one", effect: "delete-owned", engineSocket: "/owned/engine.sock" }))
+    .toMatchObject({ state: "confirmed", remaining: { workload: false, supervisor: false, volumes: false } });
+  const inventory = f.db.prepare("SELECT receipt_json FROM environment_operations WHERE operation_id='inventory-resource-one'").get() as { receipt_json: string };
+  expect(JSON.parse(inventory.receipt_json)).toMatchObject({ host: "fixture", uid: 1000, socket: "/owned/engine.sock", socketDevice: 1, socketInode: 2, resourceId: "resource-one" });
   f.resource.id = "successor-resource"; f.resource.name = "worker-successor";
   await lifecycle.recreate("binding-one", { operationId: "context-recreate", generation: "generation-one", checkpointId: checkpoint.checkpointId,
     resumeType: "community:openshell-claude", resumeToken: first.resumeToken!, placement: { ...f.platform.get("binding-one")!.placement, name: "worker-successor" } });
