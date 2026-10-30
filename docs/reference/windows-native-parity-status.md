@@ -85,6 +85,12 @@ five cases pass without changing the fetch guard. This is not CLI-wide acceptanc
 The separate frozen CLI attempt at `e36cef0` is explicitly marked canceled after
 missing CLI/TUI compiled inputs were found; its JSON report is absent. Its stable
 source metadata supplies no usable test totals and is excluded from acceptance.
+Its separate `r2` attempt did complete at unchanged `e36cef0`: 5830 passes,
+97 failures and 56 skips. Current reproduction of two bundle-link modules found
+four failures from POSIX-only prepared-path fixtures. Supplying native absolute
+paths and checking the decoded JSON error preserves archive identity, one-install
+dispatch and no retry after unknown outcome; all 17 module cases pass. Neither
+the old 97-failure total nor these scoped passes establish current CLI acceptance.
 
 The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
 512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
