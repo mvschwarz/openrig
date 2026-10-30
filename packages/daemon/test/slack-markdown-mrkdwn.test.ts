@@ -102,7 +102,7 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
     expect(md("~~~\nx", "~~~")).toBe("~~~\nx");
   });
 
-  it("delivers a code block split across Slack messages as code in every part", async () => {
+  it("delivers a backtick code block split across Slack messages as a complete ``` block in every part", async () => {
     const home = mkdtempSync(join(tmpdir(), "slack-mrkdwn-"));
     try {
       const posts: Array<{ blocks: Array<{ text?: { text: string } }> }> = [];
@@ -211,5 +211,20 @@ describe("list items in a row body render as native Slack lists", () => {
       { type: "section", text: { type: "mrkdwn", text: "```\ncode\n```" } },
       list([{ style: "bullet", indent: 0, items: [[t("one")], [t("two")]] }]),
     ]);
+  });
+
+  it("links a bare https URL in a list item, and keeps it byte for byte", () => {
+    const url = "https://docs.python.org/3/reference/datamodel.html#object.__init__";
+    expect(buildBodyBlocks(`- PR: https://github.com/o/r/pull/1\n- see ${url}.\n- https://u:p@example.com`)).toEqual([list([{ style: "bullet", indent: 0, items: [
+      [t("PR: "), { type: "link", url: "https://github.com/o/r/pull/1" }],
+      [t("see "), { type: "link", url }, t(".")],
+      [t("https://u:p@example.com")],
+    ] }])]);
+  });
+
+  it("keeps a bare URL out of bold conversion in mrkdwn text", () => {
+    const url = "https://docs.python.org/3/reference/datamodel.html#object.__init__";
+    expect(md(`see ${url} and **b**`)).toBe(`see ${url} and *b*`);
+    expect(md("https://example.com/a?x=1&y=__z__")).toBe("https://example.com/a?x=1&amp;y=__z__");
   });
 });

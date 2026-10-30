@@ -241,6 +241,8 @@ function inlineMarkdownToMrkdwn(line: string): string {
     .replace(/`[^`\n]+`/g, hold)
     .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => link(m, url, label))
     .replace(/&lt;(https:\/\/[^\s|]+?)(?:\|(.+?))?&gt;/g, (m, url: string, label?: string) => link(m, url, label))
+    // A bare URL is held as written: Slack links it, and `__` or `**` inside it is not bold.
+    .replace(/https:\/\/[^\s<>|`]+/g, hold)
     .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
     .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*"));
 }
@@ -303,8 +305,8 @@ type RichInline =
   | { type: "text"; text: string; style?: { bold?: boolean; code?: boolean } }
   | { type: "link"; url: string; text?: string };
 
-// Code spans, Markdown links, Slack links, then **bold**, __bold__ and *bold*.
-const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
+// Code spans, Markdown links, Slack links, bare https URLs, then **bold**, __bold__ and *bold*.
+const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|(https:\/\/[^\s<>|`]+)|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
 
 /** One already-redacted list item as rich text elements. Rich text is never parsed for
  *  mentions or links, so plain text needs no escaping; a link element is emitted only for a
@@ -319,10 +321,17 @@ function richInline(text: string): RichInline[] {
   let at = 0;
   for (const m of text.matchAll(RICH_INLINE)) {
     plain(text.slice(at, m.index));
-    const [all, code, mdLabel, mdUrl, slackUrl, slackLabel, b1, b2, b3] = m;
+    const [all, code, mdLabel, mdUrl, slackUrl, slackLabel, bare, b1, b2, b3] = m;
     const url = mdUrl ?? slackUrl;
     const label = mdLabel ?? slackLabel;
     if (code !== undefined) out.push({ type: "text", text: code, style: { code: true } });
+    else if (bare !== undefined) {
+      // Sentence punctuation after a bare URL stays text, as Slack's own linking does.
+      const url = bare.replace(/[.,;:!?)\]]+$/, "");
+      if (isSafeHttpsUrl(url)) out.push({ type: "link", url });
+      else plain(url);
+      plain(bare.slice(url.length));
+    }
     else if (url === undefined) out.push({ type: "text", text: b1 ?? b2 ?? b3 ?? all, style: { bold: true } });
     else if (isSafeHttpsUrl(url) && !/[<>|]/.test(url)) out.push(label ? { type: "link", url, text: label } : { type: "link", url });
     else plain(all);
