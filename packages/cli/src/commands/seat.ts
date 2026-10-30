@@ -205,7 +205,7 @@ function printHuman(status: SeatStatusResponse): void {
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
   // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
   if (status.permissions_to || status.runner) {
-    console.log(`Runner permission requests answered by: ${status.permissions_to ?? "no one (refused, attention held)"}`);
+    console.log(`Runner permission requests answered by: ${status.permissions_to === "deny" ? "no one: refused (--deny)" : status.permissions_to ?? "the default person"}`);
   }
   if (status.runtime_home) {
     const h = status.runtime_home;
@@ -865,36 +865,40 @@ Examples:
   cmd
     .command("set-permissions-to")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .option("--to <person>", "The registered person who answers this seat's runner permission requests, such as mike@external")
-    .option("--clear", "Choose no one: the seat's runner refuses permission requests and holds attention, as before")
+    .option("--to <person>", "The registered person who answers this seat's runner permission requests instead of the default person, such as mike@external")
+    .option("--clear", "Remove the override: the default person answers again")
+    .option("--deny", "Opt in to refusing every runner permission request on this seat")
     .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
     .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
     .option("--json", "JSON output for agents")
-    .description("Choose the registered person who answers a runner seat's permission requests (audited)")
+    .description("Choose who answers a runner seat's permission requests instead of the default person, or opt in to refusing them (audited)")
     .addHelpText("after", `
-A runner seat's agent can ask permission for a tool call. With a person chosen, the
-runner sends the request to OpenRig, the person gets one ask with the agent's own
-options (allow_always is hidden), and their choice goes back to that one request.
-Being chosen grants nothing by itself: each answer is the person's own choice, and
-they should answer only when they hold the authority for the effect.
+A runner seat's agent can ask permission for a tool call. The runner sends the
+request to OpenRig, and one person gets an ordinary ask with every option the agent
+offered; the answer goes back to that one request. That person is the default person
+(rig gateway default), unless this override names someone else. When no one can be
+asked, OpenRig's default is to permit the request.
 
 Only a registered person can be chosen (rig gateway human list). A seat address is
-refused. Unset, or after --clear, the runner refuses every request and holds
-attention. See docs/reference/harness-runner-contract.md, section 7.
+refused. --clear removes the override. --deny is the opt-in for a seat whose requests
+should all be refused. See docs/reference/harness-runner-contract.md, section 7.
 Examples:
   rig seat set-permissions-to dev-runner@my-rig --to mike@external --reason "Mike approves tool calls"
-  rig seat set-permissions-to dev-runner@my-rig --clear --reason "back to refusal only" --json`)
-    .action(async (seat: string, opts: { to?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
-      if (Boolean(opts.clear) === (opts.to !== undefined)) {
-        console.error("Pass exactly one of --to <person> or --clear.");
+  rig seat set-permissions-to dev-runner@my-rig --deny --reason "high-stakes repo: refuse every request"
+  rig seat set-permissions-to dev-runner@my-rig --clear --reason "back to the default person" --json`)
+    .action(async (seat: string, opts: { to?: string; clear?: boolean; deny?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if ([Boolean(opts.clear), Boolean(opts.deny), opts.to !== undefined].filter(Boolean).length !== 1) {
+        console.error("Pass exactly one of --to <person>, --clear or --deny.");
         process.exitCode = 1;
         return;
       }
-      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { to: opts.to, reason: opts.reason, operator: opts.operator };
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator }
+        : opts.deny ? { deny: true, reason: opts.reason, operator: opts.operator }
+        : { to: opts.to, reason: opts.reason, operator: opts.operator };
       await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const name = `${s?.logicalId}@${s?.rigName}`;
-        const owner = (value: unknown) => typeof value === "string" ? value : "no one (requests are refused)";
+        const owner = (value: unknown) => value === "deny" ? "refused (--deny)" : typeof value === "string" ? value : "the default person";
         console.log(data["changed"] === false
           ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
           : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);

@@ -1825,7 +1825,7 @@ export class QueueRepository {
    *  primary user, who may answer anyone's ask. A shared channel's rows are correspondence, never an answer. */
   getHumanAnswer(qitemId: string, actorSession: string, opts: { primaryUser?: boolean } = {}): QueueItem | null {
     const ask = this.getById(qitemId);
-    if (!this.hasReplyToColumn || !ask || this.isSharedChannel(actorSession) || (ask.destinationSession !== actorSession && !opts.primaryUser)
+    if (!this.hasReplyToColumn || !ask || this.isSharedChannel(actorSession) || (!this.answersAsk(ask, actorSession) && !opts.primaryUser)
       || ask.humanIntent === "update" || !this.isPersonAddress(ask.destinationSession)) return null;
     const row = this.db.prepare(`SELECT qitem_id FROM queue_items
       WHERE reply_to = ? AND source_session = ? AND destination_session = ?
@@ -2166,6 +2166,15 @@ export class QueueRepository {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  }
+
+  /** Who may answer an ask: the asked person; and on a runner's permission request, any registered person, since a
+   *  person's yes counts however it arrives there. A shared channel never answers. */
+  answersAsk(item: QueueItem, actorSession: string): boolean {
+    if (item.destinationSession === actorSession) return true;
+    if (!runnerPermissionOrigin(item) || this.isSharedChannel(actorSession)) return false;
+    const registry = this.loadHumanRegistryFn();
+    return registry.ok && resolveRegisteredHumanAddress(actorSession, registry.entities) !== null;
   }
 
   /** A registered shared channel. It takes correspondence, so it never answers, approves, resolves or denies (0.7.3). */
@@ -3785,11 +3794,12 @@ export class QueueRepository {
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
-        || (item.destinationSession !== input.actorSession && !input.primaryUser)
+        || (!this.answersAsk(item, input.actorSession) && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
 
       let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
-        : `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`;
+        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`
+        : `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${item.destinationSession}`;
       const placed = this.placeTypedReply(item, input.decision);
       if (placed) transitionNote += `; ${placed}`;
       return this.updateInTransactionalContext({
@@ -3854,7 +3864,7 @@ export class QueueRepository {
         return { status: "not-applicable" as const, reason: `state-${item.state}`, ...(onRecord ? { answerOnRecord: true as const } : {}),
           ...(decidedForThem ? { decidedForThem } : {}) };
       }
-      if (item.destinationSession !== input.actorSession && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
+      if (!this.answersAsk(item, input.actorSession) && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};

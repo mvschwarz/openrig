@@ -1,13 +1,14 @@
 // Answered permissions for a runner seat (the harness runner contract §7, "the answered path"). A runner whose agent asks
-// permission submits the request; OpenRig opens one ask to the registered person the seat's operator chose
-// (`rig seat set-permissions-to`), with exactly the agent's offered options as its choices; the runner reads that person's
-// one answer back and gives it to that same live request. Nothing here grants: an unselected owner, a stale or withdrawn
-// request, a typed reply or a close without an offered option all leave the agent's request refused, as before.
+// permission submits the request; OpenRig opens one ordinary ask to the default person, or to the person the seat's
+// operator chose instead (`rig seat set-permissions-to`), with exactly the agent's offered options as its choices; the
+// runner reads the one answer back and gives it to that same live request. Nothing here grants: no one to ask, a stale or
+// withdrawn request, a typed reply or a close without an offered option all leave the agent's request refused, as before.
 
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
+import { resolveDefaultPerson } from "./gateway/participants.js";
 import { MAX_OPTION_LABEL, MAX_QUESTION_TEXT } from "./human-questions.js";
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
 import type { EventBus } from "./event-bus.js";
@@ -19,11 +20,33 @@ const GENERATION_TAG = "permission-generation:";
 const TURN_TAG = "permission-turn:";
 const WITHDRAWN_NOTE = "runner-permission-withdrawn";
 const STALE_NOTE = "runner-permission-stale";
+/** The agent's own allow and reject options, kept on the ask so a person's yes or no in words maps to them. */
+const ALLOW_TAG = "permission-allow:";
+const REJECT_TAG = "permission-reject:";
 const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
-/** allow_always is hidden from the answerer in this version, so one answer can't become standing policy. */
-const ANSWERABLE_KINDS = new Set(["allow_once", "reject_once", "reject_always"]);
+const ANSWERABLE_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
+/** What each ACP option kind means to the agent, told to the person beside the option. */
+const NATIVE_MEANING: Record<string, string> = {
+  allow_once: "allows this one tool call",
+  allow_always: "the agent's harness remembers this choice and allows similar requests without asking; OpenRig doesn't record or revoke it",
+  reject_once: "refuses this one tool call",
+  reject_always: "the agent's harness remembers this refusal for similar requests",
+};
 const WITHDRAW_REASONS = new Set(["turn_cancelled", "turn_ended", "exited"]);
 const MAX_AGENT_TEXT = 500;
+/** The seat setting that opts in to refusing every request; OpenRig's default is to ask a person, or permit. */
+export const PERMISSIONS_DENY = "deny";
+const SAID_YES = new Set(["yes", "y", "yep", "yeah", "ok", "okay", "sure", "fine", "allow", "allowed", "approve", "approved",
+  "accept", "accepted", "permit", "permitted", "go", "go ahead", "do it", "lgtm"]);
+const SAID_NO = new Set(["no", "n", "nope", "deny", "denied", "reject", "rejected", "refuse", "refused", "decline", "declined",
+  "don't", "dont", "do not", "stop", "no thanks"]);
+
+/** A person's typed reply that plainly says yes or no; anything else says neither. */
+function typedYesOrNo(answer: unknown): "yes" | "no" | null {
+  if (!answer || typeof answer !== "object" || (answer as { kind?: unknown }).kind !== "typed-reply") return null;
+  const words = String((answer as { text?: unknown }).text ?? "").trim().toLowerCase().replace(/[.!?,;:]+$/, "").replace(/\s+/g, " ");
+  return SAID_YES.has(words) ? "yes" : SAID_NO.has(words) ? "no" : null;
+}
 
 export type PermissionOwnerRefusal = { ok: false; code: "permissions_to_not_a_person" | "permissions_to_unavailable"; message: string };
 
@@ -46,6 +69,20 @@ export function resolvePermissionOwner(ref: string, registry: () => LoadResult):
   return { ok: true, address };
 }
 
+/** With no override, the default person answers, as for any ask that names no one: the chosen default, else the only
+ *  registered person. With no one to ask, the request stays refused (what to do then is still to be decided). */
+export function defaultPermissionOwner(registry: () => LoadResult): { ok: true; address: string } | { ok: false; message: string } {
+  let loaded: LoadResult;
+  try {
+    loaded = registry();
+  } catch (error) {
+    return { ok: false, message: `the registered people can't be read: ${(error as Error).message}` };
+  }
+  if (!loaded.ok) return { ok: false, message: `the registered people can't be read: ${loaded.error}` };
+  const fallback = resolveDefaultPerson(loaded.entities);
+  return fallback.person ? { ok: true, address: fallback.person.address } : { ok: false, message: fallback.reason };
+}
+
 export type RunnerPermissionSeat = { nodeId: string; sessionName: string; generation: string };
 export type RunnerPermissionOption = { optionId: string; name: string; kind: string };
 export type RunnerPermissionRequest = {
@@ -56,12 +93,15 @@ export type RunnerPermissionRequest = {
   options: RunnerPermissionOption[];
 };
 
-export type SubmitRefusalCode = "route_unsupported" | "duplicate_request" | "invalid_permission_request" | "options_unsupported";
-export type SubmitResult = { ok: true; askId: string; created: boolean } | { ok: false; code: SubmitRefusalCode; message: string };
+export type SubmitRefusalCode = "denied_by_seat" | "duplicate_request" | "invalid_permission_request" | "options_unsupported";
+export type SubmitResult =
+  | { ok: true; askId: string; created: boolean }
+  | { ok: true; state: "permitted"; optionId: string; reason: string }
+  | { ok: false; code: SubmitRefusalCode; message: string };
 export type ReadResult =
   | { ok: true; state: "pending" | "withdrawn" | "stale" }
-  | { ok: true; state: "answered"; optionId: string }
-  | { ok: true; state: "refused"; reason: "typed_reply" | "closed_without_an_offered_option" }
+  | { ok: true; state: "answered" | "permitted"; optionId: string }
+  | { ok: true; state: "refused"; reason: "no_allow_offered" }
   | { ok: false; code: "not_found"; message: string };
 export type WithdrawResult = ReadResult | { ok: false; code: "invalid_permission_request"; message: string };
 
@@ -114,18 +154,22 @@ export class RunnerPermissions {
 
   async submit(seat: RunnerPermissionSeat, request: RunnerPermissionRequest): Promise<SubmitResult> {
     const selected = this.deps.ownerOf(seat.nodeId);
-    if (!selected) {
-      return { ok: false, code: "route_unsupported",
-        message: "No one is chosen to answer this seat's permission requests (rig seat set-permissions-to). Refuse the request and hold attention." };
+    if (selected === PERMISSIONS_DENY) {
+      return { ok: false, code: "denied_by_seat",
+        message: "This seat's operator chose to refuse its runner's permission requests (rig seat set-permissions-to --deny). Refuse the request and hold attention." };
     }
-    const owner = resolvePermissionOwner(selected, this.deps.humanRegistry);
-    if (!owner.ok) return { ok: false, code: "route_unsupported", message: `This seat's chosen answer owner can't answer: ${owner.message}` };
-    const answerable = request.options.filter((option) => option.kind !== "allow_always");
-    const ids = new Set(answerable.map((option) => option.optionId));
-    if (answerable.length < 2 || answerable.length > 4 || ids.size !== answerable.length
-      || answerable.some((option) => !OPTION_ID.test(option.optionId) || !ANSWERABLE_KINDS.has(option.kind))) {
-      return { ok: false, code: "options_unsupported",
-        message: "These options can't be offered to a person: after allow_always is hidden, 2-4 options with distinct ids of letters, digits, \"-\" or \"_\", each allow_once, reject_once or reject_always, are needed. Refuse the request and hold attention." };
+    const allow = request.options.find((option) => option.kind === "allow_once") ?? request.options.find((option) => option.kind === "allow_always");
+    const reject = request.options.find((option) => option.kind === "reject_once") ?? request.options.find((option) => option.kind === "reject_always");
+    // OpenRig's default is permit: when no one can be asked, the agent gets its own allow option at once.
+    const permit = (why: string): SubmitResult => allow
+      ? { ok: true, state: "permitted", optionId: allow.optionId, reason: why }
+      : { ok: false, code: "options_unsupported", message: `No one can be asked (${why}), and the agent offered no allow option to permit.` };
+    const owner = selected ? resolvePermissionOwner(selected, this.deps.humanRegistry) : defaultPermissionOwner(this.deps.humanRegistry);
+    if (!owner.ok) return permit(selected ? `the person chosen for this seat can't be asked: ${owner.message}` : `no one can be asked: ${owner.message}`);
+    const ids = new Set(request.options.map((option) => option.optionId));
+    if (request.options.length < 2 || request.options.length > 4 || ids.size !== request.options.length
+      || request.options.some((option) => !OPTION_ID.test(option.optionId) || !ANSWERABLE_KINDS.has(option.kind))) {
+      return permit("these options can't be shown to a person: an ask takes 2-4 options with distinct ids of letters, digits, \"-\" or \"_\"");
     }
 
     this.withdrawEarlierGenerations(seat);
@@ -140,7 +184,7 @@ export class RunnerPermissions {
     const title = clip(request.toolCall.title ?? "a tool call", MAX_AGENT_TEXT);
     const kind = clip(request.toolCall.kind ?? "other", MAX_AGENT_TEXT);
     const selection = this.latestSelection(seat.nodeId);
-    const offered = request.options.map((option) => `- ${clip(option.name, MAX_AGENT_TEXT)} (${option.kind}, ${option.optionId})${option.kind === "allow_always" ? ": hidden in this version" : ""}`);
+    const offered = request.options.map((option) => `- ${clip(option.name, MAX_AGENT_TEXT)} (${option.kind}, ${option.optionId}): ${NATIVE_MEANING[option.kind]}.`);
     await this.deps.queueRepo.create({
       qitemId: askId,
       sourceSession: seat.sessionName,
@@ -149,20 +193,22 @@ export class RunnerPermissions {
       humanAlert: true,
       summary: clip(`Permission: ${seat.sessionName} asks to ${title} (${kind})`, 200),
       humanQuestions: [{ id: QUESTION_ID, question: clip(`Allow ${seat.sessionName} to ${title} (${kind})?`, MAX_QUESTION_TEXT),
-        options: answerable.map((option) => ({ id: option.optionId, label: clip(option.name, MAX_OPTION_LABEL) })) }],
-      tags: [RUNNER_PERMISSION_TAG, `${NODE_TAG}${seat.nodeId}`, `${GENERATION_TAG}${seat.generation}`, `${TURN_TAG}${request.turnId}`],
+        options: request.options.map((option) => ({ id: option.optionId,
+          label: clip(option.kind.endsWith("_always") ? `${option.name} (remembered by the agent)` : option.name, MAX_OPTION_LABEL) })) }],
+      tags: [RUNNER_PERMISSION_TAG, `${NODE_TAG}${seat.nodeId}`, `${GENERATION_TAG}${seat.generation}`, `${TURN_TAG}${request.turnId}`,
+        ...(allow ? [`${ALLOW_TAG}${allow.optionId}`] : []), ...(reject ? [`${REJECT_TAG}${reject.optionId}`] : [])],
       nudge: false,
       body: [
         `${seat.sessionName}'s agent asks permission for one tool call, and is waiting on it.`,
         "",
         `- **Tool call:** ${title} (${kind}), as the agent described it.`,
         `- **Conversation:** ${request.nativeRef}, turn ${request.turnId}, request ${request.requestId}.`,
-        `- **Why you:** ${selection ?? "you are the seat's chosen permission answer owner"}.`,
+        `- **Why you:** ${selected ? selection ?? "you are the seat's chosen permission answer owner" : "you are the default person, and no one else is chosen for this seat"}.`,
         "",
         "**The options the agent offered:**",
         ...offered,
         "",
-        "Choose one only if you hold the authority for this effect. Your choice goes to this one request, once. A typed reply is read as words, never as approval. If the agent's turn ends first, your answer isn't sent.",
+        "Your choice goes to this one request, once. A reply of just yes or no counts as the agent's allow or reject. Closing this without choosing counts as no answer, and then OpenRig's default applies: the request is permitted. If the agent's turn ends first, your answer isn't sent.",
       ].join("\n"),
     });
     return { ok: true, askId, created: true };
@@ -176,7 +222,8 @@ export class RunnerPermissions {
     if (!item || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
     const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
     const callerMatches = !seat?.generation || seat.generation === origin.generation;
-    if (item.state === "pending") {
+    // Still open (pending, or claimed or parked by the person): no answer yet.
+    if (item.state === "pending" || item.state === "in-progress" || item.state === "blocked") {
       if (askIsCurrent && callerMatches) return { ok: true, state: "pending" };
       if (!askIsCurrent) this.close(item, STALE_NOTE, "relaunched: a later occupant holds this seat");
       return { ok: true, state: "stale" };
@@ -188,8 +235,14 @@ export class RunnerPermissions {
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
     const answer = item.humanAnswers?.[QUESTION_ID];
     const offered = item.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
-    if (item.state === "done" && typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
-    return { ok: true, state: "refused", reason: answer && typeof answer === "object" ? "typed_reply" : "closed_without_an_offered_option" };
+    if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
+    // A plain no in words, or a deny from the Feed, is the agent's reject; a plain yes is its allow.
+    const allowId = tagValue(item, ALLOW_TAG), rejectId = tagValue(item, REJECT_TAG);
+    const said = item.closureReason === "denied" ? "no" : typedYesOrNo(answer);
+    if (said === "no" && rejectId) return { ok: true, state: "answered", optionId: rejectId };
+    if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
+    // Closed without an option is no answer, so OpenRig's default applies: permit.
+    return allowId ? { ok: true, state: "permitted", optionId: allowId } : { ok: true, state: "refused", reason: "no_allow_offered" };
   }
 
   /** Wait up to `waitMs` for the ask to change, then read it. Subscribes before reading, so a change between the two isn't missed. */

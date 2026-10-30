@@ -28,7 +28,7 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
 import fs from "node:fs";
 import path from "node:path";
-import { resolvePermissionOwner } from "./runner-permissions.js";
+import { PERMISSIONS_DENY, resolvePermissionOwner } from "./runner-permissions.js";
 import type { LoadResult as HumanRegistryLoadResult } from "./gateway/human-registry.js";
 import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
@@ -428,15 +428,17 @@ export class SeatLifecycleService {
   }
 
   /**
-   * Choose (or clear, with null) the registered person who answers this seat's runner permission requests. Only a
-   * registered person can be chosen; the canonical address is stored. Being chosen grants nothing by itself: each answer
-   * is that person's own choice of an offered option. Audited as node.permissions_to_changed.
+   * Choose (or clear, with null) the registered person who answers this seat's runner permission requests instead of the
+   * default person, or `deny`, the explicit opt-in to refuse every request. Only a registered person can be chosen; the
+   * canonical address is stored. Audited as node.permissions_to_changed.
    */
   setPermissionsTo(input: SeatSettingTarget & { to: string | null; reason: string; operator?: string | null }): SetPermissionsToResult {
     const required = this.requireReason(input.reason);
     if (required) return required;
     let to: string | null = null;
-    if (input.to !== null) {
+    if (input.to === PERMISSIONS_DENY) {
+      to = PERMISSIONS_DENY; // the explicit opt-in to refuse every request
+    } else if (input.to !== null) {
       if (!input.to?.trim()) {
         return { ok: false, code: "missing_permissions_to", message: "A registered person is required (--to <person>), or --clear." };
       }

@@ -25,6 +25,7 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
 import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import { PERMISSIONS_DENY } from "../domain/runner-permissions.js";
 
 export const seatRoutes = new Hono();
 
@@ -482,12 +483,13 @@ seatRoutes.post("/set-permissions-to/:seatRef", async (c) => {
   const actor = transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"].trim() : "");
   if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
   const clear = body["clear"] === true;
-  if (clear && body["to"] !== undefined) {
-    return c.json({ ok: false, code: "missing_permissions_to", message: "Pass a person or clear, not both." }, 400);
+  const deny = body["deny"] === true;
+  if ([clear, deny, body["to"] !== undefined].filter(Boolean).length > 1) {
+    return c.json({ ok: false, code: "missing_permissions_to", message: "Pass one of a person, clear or deny." }, 400);
   }
   const result = seatLifecycleService(c).setPermissionsTo({
     seatRef: c.req.param("seatRef"),
-    to: clear ? null : typeof body["to"] === "string" ? body["to"] : "",
+    to: deny ? PERMISSIONS_DENY : clear ? null : typeof body["to"] === "string" ? body["to"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     operator: actor,
   });

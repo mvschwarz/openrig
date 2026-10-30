@@ -163,7 +163,8 @@ export class MissionControlWriteContract {
     const source = this.requireMutableQitem(input.qitemId);
     // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
     const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
-    const acting = this.asActor(input, parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null));
+    const asked = parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    const acting = this.asActor(input, runnerPermissionOrigin(source) && this.queueRepo.answersAsk(source, input.actorSession) ? null : asked);
     input = acting.input;
 
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {
@@ -529,12 +530,11 @@ export class MissionControlWriteContract {
     if (!ask) {
       throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
     }
-    // A runner's permission request is answered only by the person its seat's operator chose: being the primary user
-    // doesn't confer authority over another person's permission choice.
-    const primaryUser = input.authority === "primary-user" && !runnerPermissionOrigin(ask);
-    input = this.asActor(input, ask.destinationSession).input;
-    // The asked person answers, or the primary user does on anyone's ask (except a runner's permission request).
-    if ((ask.destinationSession !== input.actorSession && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
+    const primaryUser = input.authority === "primary-user";
+    // A runner's permission request takes any registered person's answer, so it isn't "someone else's" to settle.
+    input = this.asActor(input, runnerPermissionOrigin(ask) && this.queueRepo.answersAsk(ask, input.actorSession) ? null : ask.destinationSession).input;
+    // The asked person answers, or the primary user does on anyone's ask (and any registered person on a runner's request).
+    if ((!this.queueRepo.answersAsk(ask, input.actorSession) && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
       throw new MissionControlWriteContractError("answer_not_recorded",
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }

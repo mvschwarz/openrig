@@ -699,7 +699,7 @@ function permissionContext(c: Context, installTokenAccepted: boolean): Permissio
 }
 
 const PERMISSION_REFUSAL_STATUS: Record<string, 400 | 409 | 422> = {
-  route_unsupported: 409, duplicate_request: 409, options_unsupported: 422, invalid_permission_request: 400,
+  denied_by_seat: 409, duplicate_request: 409, options_unsupported: 422, invalid_permission_request: 400,
 };
 
 /** Submit one live agent request. The seat and generation are the grant's, or, for the install-wide token, the named
@@ -742,6 +742,8 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   if (!parsed.ok) return c.json({ ok: false, code: "invalid_permission_request", error: parsed.message }, 400);
   const result = await ctx.permissions.submit(seat, parsed.request);
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
+  // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.
+  if ("state" in result) return c.json(result);
   // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
   if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body)))) {
     recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
