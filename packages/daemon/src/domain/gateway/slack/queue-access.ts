@@ -66,6 +66,8 @@ export interface CreateQitemInput {
   inReplyTo?: string;
   /** A current typed/button answer, never a reaction or a recovered late message. */
   humanAnswer?: boolean;
+  /** The answer is a typed thread reply: on a decision parked on its person, its row belongs to the current question. */
+  typedReply?: boolean;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -77,6 +79,8 @@ export interface InboundQueuePort {
   answersPark?(qitemId: string, actorSession: string, ts: string | undefined): boolean;
   /** This person's returned answer to the current question of a decision parked on them; never an earlier one. */
   getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
+  /** This person's returned answer to the ask that carries this event's footer, so a replay after close finds its own. */
+  getHumanAnswerForEvent?(qitemId: string, actorSession: string, footer: string): { qitemId: string; body: string } | null;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -236,6 +240,7 @@ export function makeQueuePorts(
       return item !== null && queueRepo.answersPark(item, actorSession, ts);
     },
     getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
+    getHumanAnswerForEvent: (qitemId, actorSession, footer) => queueRepo.humanAnswerForEvent(qitemId, actorSession, footer),
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
@@ -254,7 +259,7 @@ export function makeQueuePorts(
       const created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
           // A parked decision's answer belongs to its current question, so a re-park gets its own.
-          ...(ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
+          ...(input.typedReply && ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
       return (created as unknown as { qitemId: string }).qitemId;
     },

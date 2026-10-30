@@ -79,7 +79,8 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -128,10 +129,10 @@ export function makeHumanReplyResolver(
     }
 
     try {
-      // A question parked on the person it asked takes their reply as its answer, stored in the resume's own transaction.
-      // A reply whose order against the question is uncertain stays words in context, as the agent is told.
+      // A question parked on the person it asked takes their typed reply as its answer, stored in the resume's own
+      // transaction. A click's return stores nothing here, and a reply whose order is uncertain stays words in context.
       await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision,
-        ...(parkedOnAsked && !uncertain ? { answerText: input.decision } : {}) });
+        ...(input.typedReply && parkedOnAsked && !uncertain ? { answerText: input.decision } : {}) });
       return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;
