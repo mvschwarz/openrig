@@ -4,6 +4,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { randomUUID } from "node:crypto";
+import { OpenShellPodmanObserver, type PodmanCleanupSelection } from "./openshell-podman-observer.js";
+import type { NativeObservation } from "../domain/environment-lifecycle.js";
 import { EnvironmentError, regularBytes, sha256, type EnvironmentBinding, type EnvironmentDriver, type EnvironmentResource, type Placement } from "../domain/environment-platform.js";
 
 const runFile = promisify(execFile);
@@ -73,6 +75,37 @@ export class OpenShellDriver implements EnvironmentDriver {
     await this.guest(binding, ["--stat", source]);
     await this.checked(binding);
     await this.command([...this.prefix(binding.placement), "download", binding.placement.name, source, destination]);
+  }
+  async captureCleanup(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection> {
+    await this.checked(binding);
+    return new OpenShellPodmanObserver().capture(binding, socket);
+  }
+  async cleanupState(binding: EnvironmentBinding, selection?: PodmanCleanupSelection) {
+    return new OpenShellPodmanObserver().observe(binding, selection);
+  }
+  async nativeIdentity(binding: EnvironmentBinding): Promise<NativeObservation> {
+    const observed = await this.guest(binding, ["--identity"]);
+    if (typeof observed.running !== "boolean" || typeof observed.nativeId !== "string" || typeof observed.generation !== "string")
+      throw new EnvironmentError("environment_native_unconfirmed", "The exact native execution is not observed");
+    return observed as NativeObservation;
+  }
+  async stopNative(binding: EnvironmentBinding, native: NativeObservation, _operationId: string): Promise<void> {
+    await this.guest(binding, ["--stop-native", native.nativeId, "--generation", native.generation]);
+  }
+  async checkpointFiles(binding: EnvironmentBinding, _native: NativeObservation): Promise<Array<{ path: string; sha256: string; bytes: number }>> {
+    const result = await this.guest(binding, ["--checkpoint-files"]);
+    if (!Array.isArray(result.files) || result.files.length !== 1) throw new EnvironmentError("environment_checkpoint_invalid", "The guest did not return one exact history contract");
+    return result.files;
+  }
+  async stopCompute(binding: EnvironmentBinding, _operationId: string): Promise<void> {
+    await this.checked(binding);
+    await this.command([...this.prefix(binding.placement), "stop", binding.placement.name]);
+  }
+  async deleteEnvironment(binding: EnvironmentBinding, _operationId: string): Promise<void> {
+    const actual = await this.inspect(binding);
+    if (!binding.resource || actual.id !== binding.resource.id || actual.name !== binding.resource.name || actual.workspace !== binding.resource.workspace)
+      throw new EnvironmentError("environment_identity_changed", "The selected compute changed before deletion");
+    await this.command([...this.prefix(binding.placement), "delete", binding.placement.name]);
   }
   connectArgs(binding: EnvironmentBinding): string[] { return [...this.prefix(binding.placement), "connect", binding.placement.name]; }
 }

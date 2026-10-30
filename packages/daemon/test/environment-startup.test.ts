@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { EnvironmentError, EnvironmentPlatform, sha256 } from "../src/domain/environment-platform.js";
+import { EnvironmentLifecycle } from "../src/domain/environment-lifecycle.js";
 import { EnvironmentStartup } from "../src/domain/environment-startup.js";
 import { OpenShellDriver } from "../src/adapters/openshell-driver.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
@@ -26,7 +27,7 @@ async function fixture() {
       return { ok: true, ...native };
     }
     if (!native) throw new EnvironmentError("environment_native_unconfirmed", "Native is not observed");
-    return { ok: true, ...native, pid: 1 };
+    return { ok: true, ...native, pid: 1, running: true };
   });
   // The fixed CLI boundary is replaced; no OpenShell executable or provider is invoked.
   const driver = Object.assign(new OpenShellDriver(async () => { throw new Error("unexpected vendor invocation"); }), {
@@ -46,7 +47,7 @@ async function fixture() {
   const plan = { runtime: "openshell-claude", cwd: root, entries: [], conflicts: [], noOps: [], diagnostics: [], startup: { files: [], actions: [] } } as ProjectionPlan;
   const tmux = { sendShellCommand: vi.fn(async () => ({ ok: true as const })) };
   await startup.project(plan, binding);
-  return { root, db, files, startup, platform, activity, guest, tmux, binding, losePrepare: () => { losePrepare = true; } };
+  return { root, db, files, resource, startup, platform, activity, guest, tmux, binding, losePrepare: () => { losePrepare = true; } };
 }
 it("stages all resolved startup inputs before native dispatch and binds separate work/activity connections", async () => {
   const f = await fixture(), role = join(f.root, "role.md"); writeFileSync(role, "Current nonce and useful task guidance");
@@ -78,7 +79,43 @@ it("blocks a changed required source before issuing a grant or preparing native"
   expect(f.activity).not.toHaveBeenCalled(); expect(f.guest).not.toHaveBeenCalled(); expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
 });
 it("refuses an exact-resume request without launching a fresh native", async () => {
-  const f = await fixture(), result = await f.startup.launch(f.binding, { resumeToken: "saved-conversation" }, f.tmux);
-  expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
+  const f = await fixture();
+  await expect(f.startup.launch(f.binding, { resumeToken: "saved-conversation", resumeType: "community:openshell-claude" }, f.tmux)).rejects.toMatchObject({ code: "environment_checkpoint_missing" });
   expect(f.activity).not.toHaveBeenCalled(); expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+});
+
+it("preserves running destination bytes and export generation before an attempted new-generation projection", async () => {
+  const f = await fixture(); expect((await f.startup.launch(f.binding, {}, f.tmux)).ok).toBe(true);
+  const before = sha256(f.files.get("/sandbox/openrig/work/CLAUDE.md")!);
+  const plan = { runtime: "openshell-claude", cwd: f.root, entries: [], conflicts: [], noOps: [], diagnostics: [], startup: { files: [], actions: [] } } as ProjectionPlan;
+  await expect(f.startup.project(plan, { ...f.binding, launchGeneration: "generation-two" })).rejects.toMatchObject({ code: "environment_execution_preserved" });
+  expect(sha256(f.files.get("/sandbox/openrig/work/CLAUDE.md")!)).toBe(before);
+  expect(f.platform.get("binding-one")?.generation).toBe("generation-one"); expect(f.activity).toHaveBeenCalledTimes(1);
+});
+
+it("transfers exact retained history onto explicitly recreated compute and requests the original native conversation", async () => {
+  const f = await fixture(); const first = await f.startup.launch(f.binding, {}, f.tmux);
+  expect(first.ok).toBe(true); if (!first.ok || !first.resumeToken) throw new Error("Missing native receipt");
+  const path = `native/projects/-sandbox-openrig-work/${first.resumeToken}.jsonl`;
+  const history = Buffer.from(JSON.stringify({ sessionId: first.resumeToken, type: "user", message: { content: "retained earlier context" } }) + "\n");
+  f.files.set(`/sandbox/openrig/${path}`, history);
+  Object.assign(f.platform.driver, { checkpointFiles: async () => [{ path, sha256: sha256(history), bytes: history.length }],
+    captureCleanup: undefined, cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }) });
+  const lifecycle = new EnvironmentLifecycle(f.platform, undefined, join(f.root, "retained"));
+  const checkpoint = await lifecycle.checkpoint("binding-one", { operationId: "checkpoint-one", generation: "generation-one" });
+  f.resource.id = "successor-resource"; f.resource.name = "worker-two"; f.files.clear();
+  const placement = { ...f.platform.get("binding-one")!.placement, name: "worker-two" };
+  const recreated = await lifecycle.recreate("binding-one", { operationId: "recreate-one", generation: "generation-one", checkpointId: checkpoint.checkpointId,
+    resumeType: "community:openshell-claude", resumeToken: first.resumeToken, placement });
+  expect(recreated).toMatchObject({ predecessorResourceId: "resource-one", successorResourceId: "successor-resource", nativeId: first.resumeToken });
+  const binding = { ...f.binding, launchGeneration: "generation-two" };
+  const plan = { runtime: "openshell-claude", cwd: f.root, entries: [], conflicts: [], noOps: [], diagnostics: [], startup: { files: [], actions: [] } } as ProjectionPlan;
+  await f.startup.project(plan, binding);
+  const result = await f.startup.launch(binding, { resumeToken: first.resumeToken, resumeType: "community:openshell-claude" }, f.tmux);
+  expect(result).toMatchObject({ ok: true, resumeToken: first.resumeToken, resumeType: "community:openshell-claude" });
+  expect(f.files.get(`/sandbox/openrig/${path}`)).toEqual(history);
+  const descriptor = JSON.parse(f.files.get("/sandbox/openrig/control/launch.pending.json")!.toString());
+  expect(descriptor.resumeToken).toBe(first.resumeToken); expect(descriptor.nativeId).toBe(first.resumeToken);
+  expect(descriptor.checkpoint.files[0]).toMatchObject({ path, sha256: sha256(history), bytes: history.length });
+  expect(f.activity).toHaveBeenCalledTimes(2); expect(f.tmux.sendShellCommand).toHaveBeenCalledTimes(2);
 });

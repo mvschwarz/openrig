@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { EnvironmentPlatform, EnvironmentError, type EnvironmentConfig } from "../domain/environment-platform.js";
+import { EnvironmentLifecycle } from "../domain/environment-lifecycle.js";
 import { EnvironmentArtifacts, type EnvironmentArtifactRequest } from "../domain/environment-artifacts.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedIdentity } from "./require-sender-identity.js";
@@ -30,8 +31,9 @@ environmentRoutes.get("/:bindingId", async c => {
     const service = platform(c);
     const binding = c.req.query("live") === "true" ? await service.current(c.req.param("bindingId")) : service.get(c.req.param("bindingId"));
     if (!binding) return c.json({ code: "environment_binding_missing", error: "No environment binding" }, 404);
-    return c.json({ ...binding, observation: c.req.query("live") === "true" ? "live-resource" : "stored-receipt",
-      lifecycle: { closeViewer: "unsupported", stopNative: "unsupported", stopCompute: "unsupported", deleteEnvironment: "unsupported", nativeRestore: "unsupported" } });
+    const operations = service.db.prepare("SELECT operation_id AS operationId,kind,state,receipt_json FROM environment_operations WHERE binding_id=? ORDER BY rowid").all(binding.bindingId) as Array<{ operationId: string; kind: string; state: string; receipt_json: string | null }>;
+    return c.json({ ...binding, operations: operations.map(({ receipt_json, ...operation }) => ({ ...operation, receipt: receipt_json ? JSON.parse(receipt_json) : null })), observation: c.req.query("live") === "true" ? "live-resource" : "stored-receipt",
+      lifecycle: { closeViewer: "explicit effect", stopNative: "owned exact-native effect", stopCompute: "owned exact-compute effect", deleteEnvironment: "owned effect with independent local engine inventory", nativeRestore: "verified checkpoint and explicitly recreated same-host compute" } });
   } catch (error) { return failure(c, error); }
 });
 environmentRoutes.post("/:bindingId/project", async c => {
@@ -55,6 +57,17 @@ environmentRoutes.post("/:bindingId/export", async c => {
   } catch (error) { return failure(c, error); }
 });
 environmentRoutes.post("/:bindingId/effect", async c => {
-  try { const body = await c.req.json<{ effect: string }>(); return platform(c).effect(c.req.param("bindingId"), body.effect); }
+  try { const body = await c.req.json<{ effect: string }>(); return c.json(await (c.get("environmentLifecycle" as never) as EnvironmentLifecycle).effect(c.req.param("bindingId"), body as never)); }
   catch (error) { return failure(c, error); }
+});
+
+for (const operation of ["checkpoint", "recreate", "completion"] as const) environmentRoutes.post(`/:bindingId/${operation}`, async c => {
+  const identity = requireSenderIdentity(c, { verb: `environment ${operation}` }); if (!identity.ok) return identity.response;
+  try {
+    const service = c.get("environmentLifecycle" as never) as EnvironmentLifecycle, input = await c.req.json();
+    const result = operation === "checkpoint" ? await service.checkpoint(c.req.param("bindingId"), input)
+      : operation === "recreate" ? await service.recreate(c.req.param("bindingId"), input) : service.selectCompletion(c.req.param("bindingId"), input);
+    if (operation === "completion") await service.checkCompletions();
+    return c.json(result);
+  } catch (error) { return failure(c, error); }
 });

@@ -8,6 +8,7 @@ import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 // The startup orchestrator (AS-T07) constructs NodeBinding from Binding + node.cwd.
 
 export interface NodeBinding extends Binding {
+  environmentRestore?: NonNullable<import("./types.js").SnapshotData["environmentBindingsByNode"]>[string];
   cwd: string;
   /** In-place Claude continuation only: executable observed before the old process exits. */
   claudeExecutable?: string;

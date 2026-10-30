@@ -319,6 +319,7 @@ export class RestoreOrchestrator {
    * Launch preparation and native existence checks remain on the execution path. */
   canAttemptRecordedResume(runtime: string | null, resumeType: string | null, resumeToken: string | null): boolean {
     if (typeof resumeToken !== "string" || !resumeToken.trim()) return false;
+    if (runtime === "openshell-claude") return resumeType === "community:openshell-claude";
     if (runtime === "codex") return resumeType === "codex_id" && this.codexResume.canResume(resumeType, resumeToken);
     if (runtime === "claude-code") return this.claudeResume.canResume(resumeType, resumeToken);
     return false;
@@ -1869,6 +1870,7 @@ export class RestoreOrchestrator {
 
           const binding = {
             ...launchResult.binding,
+            ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             cwd: node.cwd ?? ".",
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,

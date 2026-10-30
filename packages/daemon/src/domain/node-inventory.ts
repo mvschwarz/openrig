@@ -1,3 +1,4 @@
+import { sessionCommunityRunnerSelect } from "./session-registry.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -67,6 +68,7 @@ interface InventoryRow {
   session_created_at: string | null;
   session_status: string | null;
   session_community_harness?: string | null;
+  session_community_runner?: number | null;
   intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -669,6 +671,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.created_at as session_created_at,
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
+      ${sessionCommunityRunnerSelect(db)} as session_community_runner,
       s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
@@ -786,7 +789,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.

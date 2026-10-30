@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import signal
 import time
 import uuid
 
@@ -89,7 +91,24 @@ def descriptor(root, pending=False):
             raise Refused("environment_projection_changed")
     # P1-P3 never silently replace a requested native conversation with a fresh one.
     if value.get("resumeToken"):
-        raise Refused("environment_native_restore_unsupported")
+        if value.get("nativeType") != "community:openshell-claude" or value["resumeToken"] != value["nativeId"]:
+            raise Refused("environment_native_identity_invalid")
+        checkpoint = value.get("checkpoint", {})
+        if checkpoint.get("nativeId") != value["nativeId"] or checkpoint.get("nativeType") != value["nativeType"]:
+            raise Refused("environment_checkpoint_identity_mismatch")
+        for file in checkpoint.get("files", []):
+            data = regular(root, file["path"])
+            if digest(data) != file["sha256"] or len(data) != file["bytes"]:
+                raise Refused("environment_checkpoint_changed")
+            if not file["path"].startswith("native/projects/"):
+                continue
+            rows = [json.loads(line) for line in data.decode().splitlines()]
+            if not any(row.get("sessionId") == value["nativeId"] and row.get("type") in ("user", "assistant") for row in rows):
+                raise Refused("environment_checkpoint_identity_mismatch")
+            if any(row.get("sessionId", value["nativeId"]) != value["nativeId"] for row in rows):
+                raise Refused("environment_checkpoint_identity_mismatch")
+        if not checkpoint.get("files"):
+            raise Refused("environment_checkpoint_missing")
     if not re.fullmatch(r"[0-9a-f-]{36}", value["nativeId"]):
         raise Refused("environment_native_identity_invalid")
     return value
@@ -121,7 +140,7 @@ def launch(root):
     for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"):
         if name in os.environ:
             env[name] = os.environ[name]
-    argv = ["/usr/local/bin/claude", "--session-id", value["nativeId"], "--strict-mcp-config", "--mcp-config", str(safe(root, "control/coordination.json"))]
+    argv = ["/usr/local/bin/claude", "--resume" if value.get("resumeToken") else "--session-id", value["nativeId"], "--strict-mcp-config", "--mcp-config", str(safe(root, "control/coordination.json"))]
     for plugin in value.get("plugins", []):
         argv.extend(["--plugin-dir", str(safe(root, plugin))])
     if value.get("model"):
@@ -133,8 +152,37 @@ def launch(root):
     work = safe(root, "work")
     work.mkdir(exist_ok=True)
     os.chdir(work)
-    atomic(root, "control/native.json", json.dumps({"nativeId": value["nativeId"], "generation": value["generation"], "pid": os.getpid()}).encode())
-    os.execve(argv[0], argv, env)
+    child = subprocess.Popen(argv, env=env, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)
+    started = process_start(child.pid)
+    atomic(root, "control/native.json", json.dumps({"nativeId": value["nativeId"], "generation": value["generation"], "pid": child.pid, "started": started}).encode())
+    code = child.wait()
+    atomic(root, "control/native-exit.json", json.dumps({"nativeId": value["nativeId"], "generation": value["generation"], "pid": child.pid, "exitCode": code}).encode())
+    # Keep bounded file/control access after native exit, so checkpoint/export do not depend on a live model.
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        time.sleep(1)
+
+
+def process_start(pid):
+    raw = (Path("/proc") / str(pid) / "stat").read_text()
+    return raw[raw.rfind(")") + 2:].split()[19]
+
+
+def native_identity(root):
+    value = json.loads(regular(root, "control/native.json"))
+    try:
+        if process_start(value["pid"]) != value["started"]:
+            raise Refused("environment_native_changed")
+        fields = (Path("/proc") / str(value["pid"]) / "cmdline").read_bytes().split(b"\0")
+        if value["nativeId"].encode() not in fields or not any(b"claude" in field for field in fields):
+            raise Refused("environment_native_changed")
+        return {"ok": True, **value, "running": True}
+    except FileNotFoundError:
+        exit_record = json.loads(regular(root, "control/native-exit.json"))
+        if any(exit_record.get(key) != value.get(key) for key in ("nativeId", "generation", "pid")):
+            raise Refused("environment_native_unconfirmed")
+        return {"ok": True, **value, "running": False, "exitCode": exit_record["exitCode"]}
+
 
 
 def main():
@@ -147,6 +195,9 @@ def main():
     p.add_argument("--mode", choices=("0600", "0700"), default="0600")
     p.add_argument("--prepare", action="store_true")
     p.add_argument("--identity", action="store_true")
+    p.add_argument("--stop-native")
+    p.add_argument("--generation")
+    p.add_argument("--checkpoint-files", action="store_true")
     args = p.parse_args()
     root = Path(args.root)
     if not root.is_absolute() or any(part.is_symlink() for part in (root, *root.parents)):
@@ -191,11 +242,30 @@ def main():
         atomic(root, "control/launch.json", encoded)
         return {"ok": True, "generation": value["generation"], "nativeId": value["nativeId"]}
     if args.identity:
-        value = json.loads(regular(root, "control/native.json"))
-        fields = (Path("/proc") / str(value["pid"]) / "cmdline").read_bytes().split(b"\0")
-        if value["nativeId"].encode() not in fields or not any(b"claude" in field for field in fields):
-            raise Refused("environment_native_unconfirmed")
-        return {"ok": True, **value}
+        return native_identity(root)
+    if args.stop_native:
+        value = native_identity(root)
+        if value["nativeId"] != args.stop_native or value["generation"] != args.generation:
+            raise Refused("environment_native_changed")
+        if value["running"]:
+            os.kill(value["pid"], signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    if not native_identity(root)["running"]:
+                        break
+                except (Refused, OSError):
+                    pass
+                time.sleep(.1)
+        return {"ok": True, "signal": "TERM", "nativeId": value["nativeId"], "generation": value["generation"]}
+    if args.checkpoint_files:
+        value = native_identity(root)
+        relative = "native/projects/-sandbox-openrig-work/" + value["nativeId"] + ".jsonl"
+        data = regular(root, relative)
+        # A running writer's trailing partial record is not a checkpoint; retry after it settles.
+        if not data.endswith(b"\n"):
+            raise Refused("environment_checkpoint_incomplete")
+        return {"ok": True, "files": [{"path": relative, "bytes": len(data), "sha256": digest(data)}]}
     launch(root)
 
 

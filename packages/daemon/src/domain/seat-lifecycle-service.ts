@@ -226,7 +226,7 @@ export type SetEffortResult =
   | SeatRefusal;
 
 export type StopSeatResult =
-  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string }
+  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; paneOnly?: boolean }
   | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase });
 
 /** The narrow identity reviewed before an optional checked stop. */
@@ -1917,7 +1917,8 @@ export class SeatLifecycleService {
       if (!checked) throw error;
       return { ok: false, code: "stop_uncertain", message: `Session kill completed, but stop finalization failed: ${(error as Error).message}`, partialEffect: true, stopPhase: "kill_attempted" };
     }
-    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id };
+    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id,
+      ...(communityHarnessOf(session.community_harness, (this.db.prepare("SELECT runtime FROM nodes WHERE id=?").get(resolved.nodeId) as { runtime: string | null } | undefined)?.runtime) ? { paneOnly: true } : {}) };
   }
 
   private nonTerminalSessions(nodeId: string): LatestSessionRow[] {

@@ -1,3 +1,4 @@
+import { EnvironmentLifecycle } from "./domain/environment-lifecycle.js";
 import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
 import { environmentRoutes } from "./routes/environments.js";
@@ -151,6 +152,7 @@ import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/brows
 export interface AppDeps {
   environmentDriver?: EnvironmentDriver;
   environmentArtifactRoot?: string;
+  environmentStateRoot?: string;
   /** Boot-time DB context observations, not a live exclusion guarantee. */
   databaseWarnings?: string[];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -506,6 +508,28 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   const environmentPlatform = new EnvironmentPlatform(deps.rigRepo.db, deps.environmentDriver ?? new OpenShellDriver());
+  const environmentLifecycle = new EnvironmentLifecycle(environmentPlatform, deps.queueRepo,
+    deps.environmentStateRoot ?? nodePath.join(process.cwd(), ".openrig-environment-state"), async binding => {
+      const current = deps.sessionRegistry.getBindingForNode(binding.nodeId!);
+      if (!current?.tmuxSession || current.tmuxSession !== binding.seat) return { confirmed: false };
+      const result = await deps.tmuxAdapter.killSession(current.tmuxSession, () => {
+        const now = deps.sessionRegistry.getBindingForNode(binding.nodeId!);
+        if (now?.id !== current.id || now.tmuxSession !== current.tmuxSession) throw new Error("The selected viewer changed");
+      });
+      return { confirmed: result.ok || result.code === "session_not_found" };
+    });
+  let completionPending = false, completionDirty = false;
+  const requestCompletionCheck = () => {
+    completionDirty = true;
+    if (completionPending) return;
+    completionPending = true;
+    void (async () => {
+      while (completionDirty) { completionDirty = false; await environmentLifecycle.checkCompletions(); }
+    })().catch(() => {}).finally(() => { completionPending = false; });
+  };
+  deps.eventBus.subscribe(event => { if (event.type === "queue.updated") requestCompletionCheck(); });
+  // Reconcile durable selected completions after a daemon restart; construction itself invokes no provider.
+  queueMicrotask(requestCompletionCheck);
   const app = new Hono();
   if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
   // A malformed request body is a 400, not the default 500.
@@ -518,6 +542,7 @@ export function createApp(deps: AppDeps): Hono {
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo);
     c.set("environmentPlatform" as never, environmentPlatform);
+    c.set("environmentLifecycle" as never, environmentLifecycle);
     c.set("environmentArtifactRoot" as never, deps.environmentArtifactRoot ?? nodePath.join(process.cwd(), "artifacts", "environments"));
     c.set("sessionRegistry" as never, deps.sessionRegistry);
     c.set("eventBus" as never, deps.eventBus);
