@@ -6,7 +6,7 @@ import { createServer, type Server } from "node:http";
 import Database from "better-sqlite3";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, relative } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
@@ -91,7 +91,7 @@ describe("which Claude seats load the vendored plugin", () => {
     try {
       // The plugin is vendored for a seat that selects it to find, and no runtime-wide entry names it.
       expect(vendoredCorePluginDir()).toBe(join(root, "openrig", "plugins", "openrig-core"));
-      expect(vendoredCorePluginDir()).not.toContain(":");
+      expect(vendoredCorePluginDir()).not.toContain(delimiter);
       expect(deps.runtimeSessionEnv?.["claude-code"]).toBeUndefined();
       expect(deps.runtimeSessionEnv?.codex).toBeUndefined();
     } finally {
@@ -127,7 +127,7 @@ describe("which Claude seats load the vendored plugin", () => {
 
   it("does not count a relative entry as the plugin, since Claude skips relative entries: it stays as written and the absolute path is added", () => {
     const { vendored } = vendoredPlugins(root);
-    const rel = relative(process.cwd(), vendored); // resolves to the vendored folder from here, but Claude would skip it
+    const rel = relative(root, vendored); // relative to the fixture root; Claude skips relative entries
     expect(isAbsolute(rel)).toBe(false);
     expect(withCorePlugin({ [PLUGIN_ENV]: rel }, vendored)).toEqual({ [PLUGIN_ENV]: `${rel}${delimiter}${vendored}` });
     expect(withCorePlugin({ [PLUGIN_ENV]: `./x${delimiter}${rel}${delimiter}/a` }, vendored)).toEqual({ [PLUGIN_ENV]: `./x${delimiter}${rel}${delimiter}/a${delimiter}${vendored}` });
@@ -201,9 +201,10 @@ profiles:
       plugins: ${plugins}`;
 
   function mockFs(files: Record<string, string>): AgentResolverFsOps {
+    const entries = new Map(Object.entries(files).map(([file, contents]) => [resolve(file), contents]));
     return {
-      readFile: (p: string) => { if (p in files) return files[p]!; throw new Error(`Not found: ${p}`); },
-      exists: (p: string) => p in files,
+      readFile: (p: string) => { const contents = entries.get(resolve(p)); if (contents !== undefined) return contents; throw new Error(`Not found: ${p}`); },
+      exists: (p: string) => entries.has(resolve(p)),
     };
   }
   const mockAdapter = (runtime: string): RuntimeAdapter => ({
@@ -256,18 +257,18 @@ profiles:
       const envOf = (member: string) => created.find((c) => c.name === `dev-${member}@test-rig`)?.env;
       expect(created).toHaveLength(members.length);
       // OPR.0.7.0.13: every Claude seat also gets its own skill plugin, after the vendored one when it selected that.
-      const entries = (member: string) => (envOf(member)?.[PLUGIN_ENV] ?? "").split(":").filter(Boolean);
+      const entries = (member: string) => (envOf(member)?.[PLUGIN_ENV] ?? "").split(delimiter).filter(Boolean);
       const seatPlugin = (member: string) => new RegExp(`/state/seats/[^/]+/dev\\.${member}/claude-code/plugin$`);
       for (const member of ["qualified", "unqualified", "custom"]) {
         expect(entries(member)[0], member).toBe(vendored);
-        expect(entries(member)[1], member).toMatch(seatPlugin(member));
+        expect(entries(member)[1]?.replaceAll("\\", "/"), member).toMatch(seatPlugin(member));
         expect(entries(member), member).toHaveLength(2);
         expect(envOf(member)?.[SEAT_ENV_KEYS_VAR], member).toBe(PLUGIN_ENV);
       }
       for (const member of ["namesake", "other", "nothing"]) {
         expect(entries(member), member).not.toContain(vendored);
         expect(entries(member), member).toHaveLength(1);
-        expect(entries(member)[0], member).toMatch(seatPlugin(member));
+        expect(entries(member)[0]?.replaceAll("\\", "/"), member).toMatch(seatPlugin(member));
       }
       expect(envOf("codex"), "codex").not.toHaveProperty(PLUGIN_ENV);
       expect(envOf("codex"), "codex").not.toHaveProperty(SEAT_ENV_KEYS_VAR);
@@ -498,7 +499,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     // A fresh relaunch rolls up as partially_restored by design (no conversation resumed); the seat itself succeeded.
     expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
     expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
-    expect(JSON.stringify(result)).toContain(`kept ${target}`);
+    expect(JSON.stringify(result)).toContain(JSON.stringify(`kept ${target}`).slice(1, -1));
   }, 30_000);
 
   it("fresh restore, end to end: a file whose recorded source changed comes back as the copy the seat had, never today's bytes", async () => {
@@ -541,7 +542,7 @@ describe("a Claude seat's launch env, on the launch paths that don't re-resolve 
     expect(existsSync(target)).toBe(false);
     expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ logicalId: "test.c", status: "fresh-primed" }] } });
     expect(JSON.stringify((result as { result: { nodes: unknown[] } }).result.nodes)).not.toContain('"error"');
-    expect(JSON.stringify(result)).toContain(`${target} not installed again: its recorded source is gone or has changed`);
+    expect(JSON.stringify(result)).toContain(JSON.stringify(`${target} not installed again: its recorded source is gone or has changed`).slice(1, -1));
   }, 30_000);
 
   it("restore: a seat whose saved selection doesn't include the plugin doesn't get it, and keeps its own list", async () => {
@@ -1023,7 +1024,7 @@ describe("the plugin's seat effects stay inside the seat's project", () => {
       const end = text.indexOf("// --- end seat project boundary ---");
       expect(start, file).toBeGreaterThanOrEqual(0);
       expect(end, file).toBeGreaterThan(start);
-      return text.slice(start, end);
+      return text.slice(start, end).replaceAll("\r\n", "\n");
     };
     const first = block(files[0]!);
     for (const file of files.slice(1)) expect(block(file), file).toBe(first);
