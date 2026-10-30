@@ -523,6 +523,7 @@ export const MCP_OPERATIONS: ReadonlyArray<{ tool: string; routes: readonly stri
   { tool: "rig_queue_list", routes: ["GET /api/queue/list"], effect: "read", access: "work" },
   { tool: "rig_queue_claim", routes: ["POST /api/queue/:qitemId/claim"], effect: "destructive", access: "work" },
   { tool: "rig_queue_update", routes: ["POST /api/queue/:qitemId/update"], effect: "destructive", access: "work" },
+  { tool: "rig_environment_export", routes: ["GET /api/queue/:qitemId", "POST /api/environments/:bindingId/export"], effect: "additive", access: "work" },
   { tool: "rig_telemetry_events", routes: ["GET /api/telemetry/v1/events"], effect: "read", access: "owner" },
   { tool: "rig_whoami", routes: ["GET /api/whoami"], effect: "read", access: "work" },
   { tool: "rig_team", routes: ["GET /api/rigs/:rigId", "GET /api/rigs/:rigId/nodes", "GET /healthz"], effect: "read", access: "work" },
@@ -1381,6 +1382,28 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       } catch (err) {
         return caught(err);
       }
+    },
+  );
+
+  // Artifact publication uses this actual authenticated work caller, never a body actor or activity token.
+  if (offered("rig_environment_export")) server.registerTool(
+    "rig_environment_export",
+    {
+      description: "Transfer a bound worker's actual JSON artifact to the host, verify its bytes/schema/context and append a durable receipt to its existing work. Does not close work, stop compute or restore native history. Requires an authenticated HTTP work connection.",
+      inputSchema: z.object({
+        bindingId: z.string(), operationId: z.string(), taskId: z.string(), generation: z.string(), path: z.string(),
+        sha256: z.string(), bytes: z.number().int().positive().max(1048576),
+        schema: z.object({ format: z.literal("json-object/v1"), fields: z.record(z.string(), z.enum(["string", "number", "boolean"])), required: z.array(z.string()) }),
+        context: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
+      }),
+      annotations: ADDITIVE,
+    },
+    async ({ bindingId, ...input }) => {
+      if (!access) return { content: [{ type: "text" as const, text: "This export requires a validated HTTP work grant; a declared stdio/local identity is not authentication." }], isError: true };
+      try {
+        const denied = await itemOutOfScope(input.taskId, "owner"); if (denied) return denied;
+        return mapResult(await client.post(`/api/environments/${encodeURIComponent(bindingId)}/export`, input), undefined, { structured: true });
+      } catch (error) { return caught(error); }
     },
   );
 

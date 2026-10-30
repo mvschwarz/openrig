@@ -1,0 +1,60 @@
+import { Hono, type Context } from "hono";
+import { EnvironmentPlatform, EnvironmentError, type EnvironmentConfig } from "../domain/environment-platform.js";
+import { EnvironmentArtifacts, type EnvironmentArtifactRequest } from "../domain/environment-artifacts.js";
+import type { QueueRepository } from "../domain/queue-repository.js";
+import { requireSenderIdentity, resolveRecordedIdentity } from "./require-sender-identity.js";
+
+export const environmentRoutes = new Hono();
+function platform(c: Context): EnvironmentPlatform { return c.get("environmentPlatform" as never) as EnvironmentPlatform; }
+function failure(c: Context, error: unknown): Response {
+  if (error instanceof EnvironmentError) return c.json({ error: error.message, code: error.code }, error.status as 400);
+  return c.json({ code: "environment_unconfirmed", error: "The environment operation did not return a confirmed result; its intent is retained" }, 503);
+}
+environmentRoutes.post("/create", async c => {
+  const identity = requireSenderIdentity(c, { verb: "environment create" }); if (!identity.ok) return identity.response;
+  try {
+    const input = await c.req.json<EnvironmentConfig & { operationId: string }>();
+    const result = await platform(c).create(input);
+    return c.json({ ...result.binding, ...(result.code ? { code: result.code } : {}) }, result.status as 201);
+  } catch (error) { return failure(c, error); }
+});
+environmentRoutes.post("/attach", async c => {
+  const identity = requireSenderIdentity(c, { verb: "environment attach" }); if (!identity.ok) return identity.response;
+  try {
+    const result = await platform(c).attach(await c.req.json());
+    return c.json(result.binding, result.status as 201);
+  } catch (error) { return failure(c, error); }
+});
+environmentRoutes.get("/:bindingId", async c => {
+  try {
+    const service = platform(c);
+    const binding = c.req.query("live") === "true" ? await service.current(c.req.param("bindingId")) : service.get(c.req.param("bindingId"));
+    if (!binding) return c.json({ code: "environment_binding_missing", error: "No environment binding" }, 404);
+    return c.json({ ...binding, observation: c.req.query("live") === "true" ? "live-resource" : "stored-receipt",
+      lifecycle: { closeViewer: "unsupported", stopNative: "unsupported", stopCompute: "unsupported", deleteEnvironment: "unsupported", nativeRestore: "unsupported" } });
+  } catch (error) { return failure(c, error); }
+});
+environmentRoutes.post("/:bindingId/project", async c => {
+  const identity = requireSenderIdentity(c, { verb: "environment project" }); if (!identity.ok) return identity.response;
+  try { return c.json(await platform(c).project(c.req.param("bindingId"), await c.req.json())); }
+  catch (error) { return failure(c, error); }
+});
+environmentRoutes.post("/:bindingId/validate", async c => {
+  try {
+    const body = await c.req.json<{ generation: string }>();
+    await platform(c).validate(c.req.param("bindingId"), body.generation);
+    return c.json({ ok: true, generation: body.generation, effect: "destination-verified; native ingestion is not observed" });
+  } catch (error) { return failure(c, error); }
+});
+environmentRoutes.post("/:bindingId/export", async c => {
+  const identity = requireSenderIdentity(c, { verb: "environment export" }); if (!identity.ok) return identity.response;
+  try {
+    const service = new EnvironmentArtifacts(platform(c), c.get("queueRepo" as never) as QueueRepository, c.get("environmentArtifactRoot" as never) as string);
+    return c.json(await service.export(c.req.param("bindingId"), await c.req.json<EnvironmentArtifactRequest>(),
+      { actor: identity.session, ...resolveRecordedIdentity(c, identity) }));
+  } catch (error) { return failure(c, error); }
+});
+environmentRoutes.post("/:bindingId/effect", async c => {
+  try { const body = await c.req.json<{ effect: string }>(); return platform(c).effect(c.req.param("bindingId"), body.effect); }
+  catch (error) { return failure(c, error); }
+});

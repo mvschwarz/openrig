@@ -1,3 +1,6 @@
+import { EnvironmentPlatform, type EnvironmentDriver } from "./domain/environment-platform.js";
+import { OpenShellDriver } from "./adapters/openshell-driver.js";
+import { environmentRoutes } from "./routes/environments.js";
 import { healthDiagnosisRoutes } from "./routes/health-diagnosis.js";
 import type { HealthDiagnosisService } from "./domain/health-diagnosis.js";
 import type { HealthPolicyStore } from "./domain/health-policy.js";
@@ -146,6 +149,8 @@ import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
 import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
+  environmentDriver?: EnvironmentDriver;
+  environmentArtifactRoot?: string;
   /** Boot-time DB context observations, not a live exclusion guarantee. */
   databaseWarnings?: string[];
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -500,6 +505,7 @@ export function createApp(deps: AppDeps): Hono {
     throw new Error("createApp: podInstantiator must share the same db handle");
   }
 
+  const environmentPlatform = new EnvironmentPlatform(deps.rigRepo.db, deps.environmentDriver ?? new OpenShellDriver());
   const app = new Hono();
   if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
   // A malformed request body is a 400, not the default 500.
@@ -511,6 +517,8 @@ export function createApp(deps: AppDeps): Hono {
   // Inject dependencies into context for all routes
   app.use("*", async (c, next) => {
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("environmentPlatform" as never, environmentPlatform);
+    c.set("environmentArtifactRoot" as never, deps.environmentArtifactRoot ?? nodePath.join(process.cwd(), "artifacts", "environments"));
     c.set("sessionRegistry" as never, deps.sessionRegistry);
     c.set("eventBus" as never, deps.eventBus);
     c.set("nodeLauncher" as never, deps.nodeLauncher);
@@ -792,6 +800,7 @@ export function createApp(deps: AppDeps): Hono {
   // Slice-04 OPR.0.5.0.4: registered so the endpoints exist and 503 honestly; the providerService
   // is not set in context until the collection/service seam (C) wires it (until then -> 503).
   app.route("/api/provider", providerRoutes());
+  app.route("/api/environments", environmentRoutes);
   app.route("/api/seat", seatRoutes);
   app.route("/api/rigs/:rigId/chat", chatRoutes());
   app.route("/api/stream", streamRoutes());

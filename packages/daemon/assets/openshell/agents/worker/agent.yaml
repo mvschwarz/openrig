@@ -1,0 +1,20 @@
+name: openshell-worker
+version: "1.0"
+profiles:
+  default:
+    uses:
+      guidance: []
+      plugins: [openrig-core]
+resources:
+  plugins:
+    - id: openrig-core
+      source:
+        kind: local
+        path: openrig-home:plugins/openrig-core
+startup:
+  files:
+    - path: role.md
+      orientation: role
+      delivery_hint: send_text
+      required: true
+  actions: []

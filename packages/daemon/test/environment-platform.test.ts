@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EnvironmentError } from "../src/domain/environment-platform.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const cleanup: Array<() => void> = [];
@@ -31,7 +32,7 @@ function fixture() {
     },
     async inspect() { if (!resources.length) throw new Error("provider unavailable"); return { ...resources[0] }; },
     async upload(_binding: unknown, local: string, destination: string) { files.set(destination, readFileSync(local, "utf8")); },
-    async read(_binding: unknown, destination: string) { if (!files.has(destination)) throw new Error("missing destination"); return Buffer.from(files.get(destination)!); },
+    async read(_binding: unknown, destination: string) { if (!files.has(destination)) throw new EnvironmentError("environment_file_missing", "Guest file is missing"); return Buffer.from(files.get(destination)!); },
     async download(_binding: unknown, source: string, destination: string) { downloads++; if (!files.has(source)) throw new Error("guest unavailable"); writeFileSync(destination, files.get(source)!); },
   };
   const build = () => createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "exports") } as never });
@@ -50,7 +51,7 @@ function fixture() {
   writeFileSync(input.placement.policy, "version: 1\n"); mkdirSync(join(root, "exports"));
   const create = () => request("/create", input);
   const task = async () => {
-    const response = await f.app.request("/api/queue", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@environment-fixture" },
+    const response = await f.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@environment-fixture" },
       body: JSON.stringify({ qitemId: "task-one", destinationSession: "worker@environment-fixture", body: "Produce the selected artifact" }) });
     expect(response.status).toBeLessThan(300);
   };
@@ -173,11 +174,14 @@ describe("managed environment artifact return", () => {
   });
   it("reconciles host publication before receipt after restart without requiring the guest", async () => {
     const f = await prepared();
-    const first = await f.export(); expect(first.status).toBe(200);
-    f.db.prepare("UPDATE environment_operations SET state='requested', receipt_json=NULL WHERE operation_id='export-one'").run();
+    const canonical = (value: unknown) => JSON.stringify(value, (_key, v) => v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+    f.db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,state) VALUES ('export-one','binding-one','export',?,'requested')").run(canonical(f.exportInput));
+    mkdirSync(join(f.root, "exports", "binding-one"));
+    writeFileSync(join(f.root, "exports", "binding-one", "task-one-export-one.json"), f.body);
     f.files.clear(); f.restart();
     const result = await f.export(); expect(result.status).toBe(200);
-    expect(result.body.sha256).toBe(hash(f.body)); expect(f.counts().downloads).toBe(1);
+    expect(result.body.sha256).toBe(hash(f.body)); expect(f.counts().downloads).toBe(0);
     const notes = f.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = 'task-one'").all() as { transition_note: string }[];
     expect(notes.filter(n => n.transition_note.includes("export-one"))).toHaveLength(1);
   });

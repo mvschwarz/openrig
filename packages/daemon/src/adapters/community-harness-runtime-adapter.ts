@@ -1,3 +1,4 @@
+import type { EnvironmentStartup } from "../domain/environment-startup.js";
 import type {
   RuntimeAdapter,
   InstalledResource,
@@ -23,6 +24,7 @@ import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
 
 interface CommunityHarnessAdapterDeps {
+  environmentStartup?: EnvironmentStartup;
   tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command">;
   presetsDir?: () => string;
@@ -35,7 +37,8 @@ interface CommunityHarnessAdapterDeps {
 /**
  * A community harness, launched from its installed preset (`domain/community-harness-presets.ts`). It types the preset's
  * command into the seat's pane and is ready while the pane runs something other than a shell. That's readiness, not
- * identity: a process alone doesn't prove which session it is. It projects nothing and refuses fork. It resumes only a
+ * identity: a process alone doesn't prove which session it is. Ordinary presets project nothing and refuse fork.
+ * The maintained openshell-claude path delegates its optional environment operations to EnvironmentStartup. It resumes only a
  * preset that declares `resume`. With `launch_result`, its launcher is told the conversation to reopen and reports what it
  * did, and a conversation it says is gone is never replaced by a new one. With `names_conversation`, OpenRig names each new
  * conversation and passes the saved name back on a resume. Nothing reports back, so a named seat's readiness is
@@ -44,11 +47,27 @@ interface CommunityHarnessAdapterDeps {
 export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   constructor(readonly runtime: string, private readonly deps: CommunityHarnessAdapterDeps) {}
 
+  get environment() { return this.runtime === "openshell-claude" ? this.deps.environmentStartup?.platform : undefined; }
+
+  private contained(): EnvironmentStartup | undefined {
+    if (this.runtime !== "openshell-claude") return undefined;
+    if (!this.deps.environmentStartup) throw new Error("OpenShell environment operations are unavailable; no host fallback was attempted");
+    return this.deps.environmentStartup;
+  }
+
+  async prepareEnvironmentStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
+    const contained = this.contained();
+    if (!contained) return { delivered: 0, failed: files.map(file => ({ path: file.path, error: "Environment startup projection is unsupported" })) };
+    return contained.deliverStartup(files, binding);
+  }
+
   async listInstalled(_binding: NodeBinding): Promise<InstalledResource[]> {
     return [];
   }
 
   async project(plan: ProjectionPlan, _binding: NodeBinding): Promise<ProjectionResult> {
+    const contained = this.contained();
+    if (contained) return contained.project(plan, _binding);
     const skipped = plan.entries.map(entry => entry.effectiveId);
     return {
       projected: [], skipped, failed: [],
@@ -57,13 +76,17 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   }
 
   async deliverStartup(files: ResolvedStartupFile[], _binding: NodeBinding): Promise<StartupDeliveryResult> {
+    const contained = this.contained();
+    if (contained) return { delivered: files.length, failed: [] };
     return {
       delivered: 0, failed: [],
       ...(files.length ? { warnings: [`Community harness "${this.runtime}" takes no startup files; ${files.length} not delivered: ${files.map(file => file.path).join(", ")}`] } : {}),
     };
   }
 
-  async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; resumeType?: string; forkSource?: ForkSource; firstInputText?: string }): Promise<HarnessLaunchResult> {
+  async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; resumeType?: string; forkSource?: ForkSource; firstInputText?: string; beforeNativeDispatch?: () => boolean }): Promise<HarnessLaunchResult> {
+    const contained = this.contained();
+    if (contained) return contained.launch(binding, opts, this.deps.tmux);
     if (opts.forkSource) {
       return { ok: false, error: `Fork is unsupported: community harness "${this.runtime}" is launch-only. Remove session_source for this member.` };
     }
