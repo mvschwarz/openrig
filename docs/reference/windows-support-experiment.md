@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Restore-packet long directory names (2026-10-30)
+
+An owned 240-character packet directory name failed at `mkdtemp` because the
+writer appended its staging prefix and random suffix to the full target name.
+Long target names now use a short sibling staging stem; ordinary short names
+keep their prior form. The target's name, contents, validation and rename
+publication remain unchanged.
+
+The new native case now emits all four required packet files, validates the
+summary read back from disk and leaves only the target directory. The complete
+restore-packet test file and CLI TypeScript checking pass. No real transcript,
+retained recovery archive, fleet restore or provider session was read or changed.
+This covers component length rather than all filesystem/full-path limits.
+
 ### Long proof artifact replacement names (2026-10-30)
 
 The same staging-component failure was reproduced in proof artifact replacement
