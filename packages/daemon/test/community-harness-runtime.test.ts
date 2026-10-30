@@ -228,6 +228,14 @@ describe("the community harness adapter", () => {
     expect(await app.checkReady(binding)).toMatchObject({ ready: false, code: "harness_not_running" });
   });
 
+  it.each(["powershell", "PowerShell.EXE", "C:\\Windows\\System32\\cmd.exe", "pwsh.exe"])("does not infer community readiness from Windows shell host %s", async command => {
+    const { tmux } = adapter(presets({ "synth.yaml": GOOD }));
+    tmux.getPaneCommand.mockResolvedValue(command);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux: { ...tmux, isNativeWindows: true } });
+    expect(await app.checkReady(binding)).toMatchObject({ ready: false, code: "native_lineage_unverified" });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+  });
+
   it("places nothing and says so", async () => {
     const { app } = adapter(presets({ "synth.yaml": GOOD }));
     const plan = { entries: [{ effectiveId: "skill-a" }] } as never;

@@ -430,3 +430,11 @@ the same pane is refused as idle. This selected native test passes and its owned
 session is closed before removing the fixture. It does not perform a successor
 cutover or access the default server, an existing seat or provider credentials.
 
+Community harness readiness no longer reports a Windows PowerShell/pwsh/cmd
+host as a running harness solely because it is absent from the POSIX shell set.
+Those labels report native-lineage-unverified; non-shell process-only and POSIX
+shell behavior remain. Five selected readiness cases and daemon TypeScript pass.
+A positive harness-child witness behind a shell host still needs implementation
+and acceptance; this correction prevents a false ready result rather than claiming
+complete community-harness Windows readiness. No real harness was launched.
+

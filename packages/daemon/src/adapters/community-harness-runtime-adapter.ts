@@ -13,7 +13,7 @@ import type {
 import type { ProjectionPlan } from "../domain/projection-planner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
-import { isShellForeground } from "../domain/shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "../domain/shell-classifier.js";
 import { isCommunityHarnessRuntime, loadCommunityHarnessPreset, communityHarnessesDir } from "../domain/community-harness-presets.js";
 import { communityHarnessOf } from "../domain/built-in-runtimes.js";
 import { launchResultRoot, newLaunchAttempt, waitForLaunchResult, type LaunchAttempt } from "../domain/community-harness-launch-result.js";
@@ -25,7 +25,7 @@ import { shellQuote } from "./shell-quote.js";
 
 interface CommunityHarnessAdapterDeps {
   environmentStartup?: EnvironmentStartup;
-  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand">;
+  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "isNativeWindows">>;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command">;
   presetsDir?: () => string;
   /** Where launch-result records go (tests); defaults to $OPENRIG_HOME/state/launch-results. */
@@ -220,6 +220,9 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     const contained = this.contained();
     if (contained) return contained.checkReady(binding);
     const command = await this.deps.tmux.getPaneCommand(session);
+    if ((this.deps.tmux.isNativeWindows || process.platform === "win32") && command && isWindowsShellHost(command)) {
+      return { ready: false, reason: `Community harness "${this.runtime}" readiness is unverified: a Windows shell host is not evidence of a running harness.`, code: "native_lineage_unverified" };
+    }
     if (!command || isShellForeground(command)) {
       return { ready: false, reason: `Community harness "${this.runtime}" isn't running: the pane is at a shell.`, code: "harness_not_running" };
     }
