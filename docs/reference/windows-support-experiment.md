@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### File-editor long filenames (2026-10-30)
+
+An owned 234-character filename can be created directly on this Windows host,
+but FileWriteService's create and replacement paths both failed while opening
+their staging file: appending the target basename to the temporary name exceeded
+the filesystem component limit. Both staging names now retain only the existing
+PID/random prefix. Same-directory staging, replacement metadata handling,
+exclusive create and audit behavior are unchanged.
+
+The two actual create/replace cases failed before the repair and pass after it,
+with exact content/audit readback and no staging leftovers. Together with the
+native-home fixture, four checks pass; daemon TypeScript checking passes. This
+addresses component length, not every full-path limit or filesystem type, and
+does not establish file-symlink privilege on this host.
+
 ### Dotted native requirement commands (2026-10-30)
 
 The native requirements lookup treated every dot as a final executable

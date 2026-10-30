@@ -141,7 +141,7 @@ export class FileWriteService {
     // Write to temp file in the SAME directory (so atomic rename
     // works across the same filesystem). Suffix with PID + random
     // so concurrent writes don't collide.
-    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
+    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
     let tmpPath = path.join(path.dirname(target), tmpName);
     let stagingDirectory: string | undefined;
     let tmpFd: number | null = null;
@@ -241,7 +241,7 @@ export class FileWriteService {
       throw new FileWriteError("target_exists", `refusing to overwrite existing file '${target}'`, { target });
     }
 
-    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}-${path.basename(target)}`;
+    const tmpName = `.openrig-write-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
     const tmpPath = path.join(path.dirname(target), tmpName);
     let tmpFd: number | null = null;
     try {
