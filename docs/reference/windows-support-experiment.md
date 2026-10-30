@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Scoped terminal indexes deduplicate native directory aliases
+
+The same scope index supplied under mixed-case and junction spellings was read
+as distinct sources on Windows, causing a valid slice selector to return
+`scope_ambiguous`. Scoped terminal reads and resolver root comparisons now use
+native canonical paths on Windows, retaining POSIX resolution. An owned
+filesystem/in-memory database reproduction failed before the repair; afterward
+the complete scoped-terminal test file passes, including slice and mission
+selectors over the aliased index. No real queue, task owner or terminal changed.
+
 ### Selected project root identity uses native canonical paths
 
 The selected-project guard previously compared `realpathSync` strings and could
