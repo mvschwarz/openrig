@@ -15,6 +15,7 @@ node check-runner.mjs --runner 'my-runner --agent-command {agent}' --name my-har
   those cases are skipped, because OpenRig wouldn't pass that input.
 - **`--cases 2,4`** runs only some cases. `--json` prints a machine-readable report. `--keep` keeps each launch's
   folder: the agent's message log, the launch record and the scenario.
+- **`--wait-ms 20000`** waits longer for each step (default 8000), for a runner whose agent takes a while to start.
 - **`--pass-env NAME`** passes one more variable through. Otherwise the runner gets only `PATH`, `HOME`, `USER`,
   `SHELL`, `LANG` and `TMPDIR`, plus the OpenRig variables.
 - **The exit status** is 0 when nothing fails, 1 when a case fails, and 2 for a usage or setup problem.

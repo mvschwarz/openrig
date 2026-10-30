@@ -7,7 +7,7 @@
 //   - input arrives the way `rig send` delivers it: one bracketed paste with raw newlines, then Enter.
 //
 //   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input]
-//                         [--cases 1,2,4] [--pass-env NAME] [--json] [--keep]
+//                         [--cases 1,2,4] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]
 //
 // `{agent}` in the command is replaced with the fake agent's path, an executable that takes any arguments your runner
 // adds. For example: --runner 'my-runner --agent-command {agent}'. --resume and --first-input say your preset declares
@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--cases 1,2] [--pass-env NAME] [--json] [--keep]";
+const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
 
 function parseArgs(argv) {
   const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, json: false, keep: false, waitMs: 8000 };
