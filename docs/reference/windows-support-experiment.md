@@ -2,6 +2,25 @@
 
 ## Current review status (2026-10-30)
 
+### Native skill-loadout ownership manifest publication
+
+The loadout reconciler's explicit storage location accepts an ownership-manifest
+path, but publication appended a UUID to its full filename. An owned catalog and
+local Git fixture reproduced a failed projection with a valid 248-character
+manifest filename. Windows publication now uses a short sibling staging file and
+removes that owned staging file after publication or failure. POSIX staging names
+remain unchanged.
+
+The fixture passes first projection and refresh with exact file/manifest readback
+and no staging residue. A read-only manifest refuses the update, preserves its
+prior bytes, rolls the projected skill back, and leaves no staging file; restoring
+the owned attribute permits the refresh. Three selected existing loadout cases
+also pass for an explicit location, modified-target preservation and invalid
+owner/manifest refusal. Daemon TypeScript checking passes. No installed skills,
+real user project, runtime, seat, provider or daemon was accessed. This checks the
+native manifest writer and selected existing contracts; full catalog/module and
+live recovery acceptance remain open.
+
 ### Native seat-skill first creation filename limit
 
 The existing-file replacement path already used short staging, but first creation

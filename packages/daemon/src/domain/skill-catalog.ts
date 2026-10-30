@@ -1234,9 +1234,15 @@ export function reconcileSkillLoadout(input: {
       projectSelection,
       skills: nextOwned,
     };
-    const tmpManifest = `${manifestPath}.${randomUUID()}.tmp`;
-    writeFileSync(tmpManifest, `${JSON.stringify(nextManifest, null, 2)}\n`, "utf8");
-    renameSync(tmpManifest, manifestPath);
+    const tmpManifest = process.platform === "win32"
+      ? nodePath.join(nodePath.dirname(manifestPath), `.openrig-loadout-${randomUUID()}.tmp`)
+      : `${manifestPath}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmpManifest, `${JSON.stringify(nextManifest, null, 2)}\n`, "utf8");
+      renameSync(tmpManifest, manifestPath);
+    } finally {
+      rmSync(tmpManifest, { force: true });
+    }
     rmSync(stagingRoot, { recursive: true, force: true });
     return {
       ok: true,
