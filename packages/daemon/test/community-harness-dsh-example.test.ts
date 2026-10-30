@@ -62,7 +62,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "permitted" | "answer" | "pending" | "lost";
+type Permissions = "absent" | "deny" | "stale" | "broken" | "permitted" | "answer" | "saidno" | "pending" | "lost";
 interface Hook { auth: string | undefined; body: Record<string, unknown> }
 
 const cleanups: Array<() => void> = [];
@@ -85,6 +85,7 @@ async function fakeOpenRig(permissions: Permissions) {
         submits.push({ auth: req.headers.authorization, body });
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
+        if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
         return json(200, { ok: true, askId: "ask-1", created: true });
       }
@@ -92,6 +93,7 @@ async function fakeOpenRig(permissions: Permissions) {
       if (req.method === "POST" && withdraw) { withdraws.push({ askId: withdraw[1]!, body }); return json(200, { ok: true, state: "withdrawn" }); }
       if (req.method === "GET" && url.pathname === "/api/activity/permission-requests/ask-1") {
         if (permissions === "answer") return json(200, { ok: true, state: "answered", optionId: "allow" });
+        if (permissions === "saidno") return json(200, { ok: true, state: "refused", reason: "said_no" });
         if (permissions === "lost") return json(404, { ok: false, code: "not_found", error: "No permission request ask-1 for this seat." });
         setTimeout(() => json(200, { ok: true, state: "pending" }), 100);
         return;
@@ -232,7 +234,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
 
   it.each([
     ["OpenRig can't be reached", "absent", { OPENRIG_URL: "http://127.0.0.1:1" }],
-    ["the submit is refused for another reason", "stale", {}],
+    ["the submit is answered with a status the contract doesn't list", "broken", {}],
     ["reading the answer gets an unexpected reply", "lost", {}],
   ] as const)("permits with the agent's own allow when %s, since nobody can be asked", async (_case, permissions, env) => {
     const openrig = await fakeOpenRig(permissions);
@@ -241,6 +243,20 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     seat.type("PERMIT an edit");
     const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+  });
+
+  it.each([
+    ["the submit says the request isn't the current occupant's", "stale"],
+    ["the person said no and the agent has no reject option", "saidno"],
+  ] as const)("answers cancelled and holds no attention when %s", async (_case, permissions) => {
+    const openrig = await fakeOpenRig(permissions);
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("PERMIT an edit");
+    const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
+    expect(answer.result).toEqual({ outcome: { outcome: "cancelled" } });
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
   });
 
