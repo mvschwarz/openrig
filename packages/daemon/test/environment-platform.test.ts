@@ -122,7 +122,9 @@ describe("maintained environment binding and projection", () => {
     expect(result.status).toBe(201);
     expect(result.body).toMatchObject({ ownership: "attached", resource: { id: "external-id" } });
     expect(f.counts().creates).toBe(0);
-    expect((await f.request("/binding-one/effect", { effect: "delete_environment" })).status).toBe(404);
+    f.db.prepare("UPDATE environment_bindings SET generation='attached-generation' WHERE binding_id='binding-one'").run();
+    const denied = await f.request("/binding-one/effect", { operationId: "attached-delete", generation: "attached-generation", effect: "delete-owned" });
+    expect(denied.status).toBe(409); expect(denied.body.code).toBe("environment_attached_preserved");
     expect(f.resources[0].id).toBe("external-id");
   });
 

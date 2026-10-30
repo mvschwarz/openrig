@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close(); });
-async function fixture(attached = false) {
+async function fixture(attached = false, automatic = true) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-lifecycle-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const resource = { id: "compute-one", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" };
@@ -36,7 +36,7 @@ async function fixture(attached = false) {
     checkpointFiles: async () => [{ path: `native/projects/-sandbox-openrig-work/${native.nativeId}.jsonl`, bytes: history.length, sha256: (await import("../src/domain/environment-platform.js")).sha256(history) }],
   };
   const queueEvents = new EventBus(db), queue = new QueueRepository(db, queueEvents); queue.attachOutbox(new OutboxHandler(db));
-  const f = createTestApp(db, { appDeps: { eventBus: queueEvents, queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts"), environmentStateRoot: join(root, "retained") } as never });
+  const f = createTestApp(db, { appDeps: { eventBus: automatic ? queueEvents : new EventBus(db), queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts"), environmentStateRoot: join(root, "retained") } as never });
   const rig = f.rigRepo.createRig("lifecycle"), node = f.rigRepo.addNode(rig.id, "worker", { runtime: "openshell-claude", cwd: root });
   const request = async (path: string, body?: unknown) => { const res = await f.app.request(`/api/environments${path}`, { method: body ? "POST" : "GET", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@lifecycle" }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: res.status, body: await res.json() as Record<string, any> }; };
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
@@ -47,7 +47,7 @@ async function fixture(attached = false) {
   db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,state,receipt_json) VALUES ('launch-generation-one','binding-one','launch',?,'confirmed',?)").run(JSON.stringify(receipt), JSON.stringify(receipt));
   const effect = (name: string, operationId = "effect-one") => request("/binding-one/effect", { operationId, generation: "generation-one", effect: name });
   const lifecycle = new EnvironmentLifecycle(new EnvironmentPlatform(db, driver), queue, join(root, "retained"));
-  return { root, db, queue, lifecycle, request, effect, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
+  return { root, db, driver, queue, lifecycle, request, effect, resource, native, files, history, capture: () => f.snapshotCapture.captureSnapshot(rig.id, "manual"), disappear: () => { present = false; }, counts: () => ({ stopCalls, deleteCalls, creates }), loseStop: () => { loseStop = true; }, unavailable: () => { unavailable = true; }, dirtyCleanup: () => { dependents.volumes = true; } };
 }
 describe("owned and attached environment effects", () => {
   it("stops only the selected native and reconciles a lost acknowledgement without a second signal", async () => {
@@ -124,8 +124,8 @@ describe("exact contained checkpoint and restore", () => {
 });
 
 describe("finite completion is selected work plus a verified actual export", () => {
-  async function selected() {
-    const f = await fixture();
+  async function selected(automatic = true) {
+    const f = await fixture(false, automatic);
     await f.queue.create({ qitemId: "task-one", sourceSession: "coordinator@lifecycle", destinationSession: "worker@lifecycle", body: "Produce the report", nudge: false });
     f.lifecycle.selectCompletion("binding-one", { operationId: "completion-one", generation: "generation-one", taskId: "task-one", exportOperationId: "export-one", effect: "stop-native" });
     const publish = () => {
@@ -167,4 +167,37 @@ describe("finite completion is selected work plus a verified actual export", () 
     f.db.prepare("UPDATE environment_bindings SET generation='generation-two' WHERE binding_id='binding-one'").run();
     await f.lifecycle.checkCompletions(); expect(f.counts().stopCalls).toBe(0);
   });
+  it.each(["stop-native", "stop-compute"] as const)("rechecks selected completion %s after awaited provider observation", async effect => {
+    for (const change of ["task", "artifact", "generation"] as const) {
+      const f = await selected(false), artifact = f.publish();
+      f.db.prepare("UPDATE environment_operations SET request_json=json_set(request_json,'$.effect',?) WHERE operation_id='completion-one'").run(effect);
+      f.done();
+      let enter!: () => void, release!: () => void;
+      const entered = new Promise<void>(resolve => { enter = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+      const inspect = f.driver.inspect;
+      f.driver.inspect = async () => { enter(); await gate; return inspect(); };
+      const attempt = f.lifecycle.checkCompletions(); await entered;
+      if (change === "task") f.queue.update({ qitemId: "task-one", actorSession: "worker@lifecycle", state: "in-progress", reopen: true, transitionNote: "Reopen selected work" });
+      if (change === "artifact") writeFileSync(artifact, "changed while observing provider");
+      if (change === "generation") f.db.prepare("UPDATE environment_bindings SET generation='generation-two' WHERE binding_id='binding-one'").run();
+      release(); await attempt; expect(f.counts().stopCalls, change).toBe(0);
+      const op = f.db.prepare("SELECT state FROM environment_operations WHERE operation_id LIKE 'completion-stop-%'").get() as { state: string } | undefined;
+      expect(op?.state, change).not.toBe("requested");
+    }
+  });
+  it("bounds pending completion observations and retains an inspectable last attempt", async () => {
+    const f = await selected(false); f.publish(); f.done();
+    let clock = Date.now(); const now = vi.spyOn(Date, "now").mockImplementation(() => clock); cleanup.push(() => now.mockRestore());
+    let inspections = 0, signals = 0;
+    const inspect = f.driver.inspect;
+    f.driver.inspect = async () => { inspections++; return inspect(); };
+    f.driver.stopNative = async () => { signals++; }; // Native remains present after its one TERM.
+    await f.lifecycle.checkCompletions(); const first = inspections;
+    for (let event = 0; event < 5; event++) await f.lifecycle.checkCompletions();
+    expect(inspections).toBe(first); expect(signals).toBe(1);
+    const op = f.db.prepare("SELECT state,receipt_json FROM environment_operations WHERE operation_id='completion-one'").get() as { state: string; receipt_json: string };
+    expect(op.state).toBe("requested"); expect(JSON.parse(op.receipt_json)).toMatchObject({ state: "pending", lastAttemptAt: clock });
+    clock += 60_001; await f.lifecycle.checkCompletions(); expect(inspections).toBeGreaterThan(first); expect(signals).toBe(1);
+  });
+
 });
