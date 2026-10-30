@@ -11,6 +11,7 @@ import { identityPrincipalSchema } from "./migrations/140_identity_principal.js"
 import { sessionAgentRunnerSchema } from "./migrations/141_session_agent_runner.js";
 import { nodeClaudeMcpSchema } from "./migrations/142_node_claude_mcp.js";
 import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
+import { nodePermissionsToSchema } from "./migrations/145_node_permissions_to.js";
 import { nodeCodexPermissionsSchema } from "./migrations/137_node_codex_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
@@ -289,4 +290,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeAccountHomeSchema,
   nodeClaudeMcpSchema,
   activityGrantsSchema,
+  nodePermissionsToSchema,
 ];

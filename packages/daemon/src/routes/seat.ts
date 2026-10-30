@@ -348,6 +348,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
 // One service, one resolution path, one status mapping shared by all three verbs.
 export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleService {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
+  const queueRepo = c.get("queueRepo" as never) as import("../domain/queue-repository.js").QueueRepository | undefined;
   return new SeatLifecycleService({
     db: rigRepo.db,
     rigRepo,
@@ -361,17 +362,20 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
     transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
     piRecords: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
+    humanRegistry: queueRepo ? () => queueRepo.humanRegistry() : undefined,
   });
 }
 
 function seatLifecycleStatus(code: string): 400 | 404 | 409 | 500 | 502 {
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required"
     || code === "missing_effort" || code === "invalid_effort" || code === "invalid_policy"
-    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition") return 400;
+    || code === "missing_cwd" || code === "invalid_cwd" || code === "invalid_stop_precondition"
+    || code === "missing_permissions_to" || code === "permissions_to_not_a_person") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
   if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed"
-    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed") return 500;
+    || code === "effort_unavailable" || code === "cwd_check_failed" || code === "cwd_persistence_failed"
+    || code === "permissions_to_unavailable") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -470,6 +474,26 @@ const setEffortHandler = async (c: Context) => {
 };
 seatRoutes.post("/set-effort/:seatRef", setEffortHandler);
 seatRoutes.post("/set-effort/node/:nodeId", setEffortHandler);
+
+// Choose (or, with clear: true, remove) the registered person who answers this seat's runner permission requests.
+// Audited; like set-permissions, the actor is required.
+seatRoutes.post("/set-permissions-to/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const actor = transportSenderSession(c) ?? (typeof body["operator"] === "string" ? body["operator"].trim() : "");
+  if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
+  const clear = body["clear"] === true;
+  if (clear && body["to"] !== undefined) {
+    return c.json({ ok: false, code: "missing_permissions_to", message: "Pass a person or clear, not both." }, 400);
+  }
+  const result = seatLifecycleService(c).setPermissionsTo({
+    seatRef: c.req.param("seatRef"),
+    to: clear ? null : typeof body["to"] === "string" ? body["to"] : "",
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: actor,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
 
 // OPR.0.7.0.7 — read one seat's effort four ways: requested, saved, emitted at launch, observed natively.
 seatRoutes.get("/effort/:seatRef", async (c) => {

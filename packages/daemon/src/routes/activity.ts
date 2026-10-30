@@ -8,6 +8,9 @@ import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js"
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
+import { RunnerPermissions, parseRunnerPermissionRequest, type RunnerPermissionSeat } from "../domain/runner-permissions.js";
+import { RigRepository } from "../domain/rig-repository.js";
+import type { QueueRepository } from "../domain/queue-repository.js";
 import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
@@ -225,6 +228,29 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
   return c.json({ ok: true, ...result, rejected: charges.length - valid.length });
 });
 
+/** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
+ *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
+ *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
+function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined): { grant: ActivityGrant | null } | { refused: Response } {
+  const authHeader = c.req.header("authorization");
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
+  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  if (expectedToken && (bearerToken === expectedToken || headerToken === expectedToken)) return { grant: null };
+  const grants = new ActivityGrantStore(store.db);
+  const grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
+  if (!grant) {
+    return { refused: c.json({
+      ok: false,
+      code: "activity_hook_unauthorized",
+      error: "Agent activity hook ingestion requires the configured local hook token.",
+    }, 401) };
+  }
+  if (grant.revokedAt) {
+    return { refused: c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was recorded." }, 401) };
+  }
+  return { grant };
+}
+
 /** The hook ingress. The main routes accept the install-wide token or a seat activity grant; the guest router accepts a
  *  grant only (`installTokenAccepted` false), so a guest-only listener never takes the token that speaks for every seat. */
 async function postHook(c: Context, installTokenAccepted: boolean): Promise<Response> {
@@ -239,26 +265,9 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }, 503);
   }
 
-  const authHeader = c.req.header("authorization");
-  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
-  const headerToken = c.req.header("x-openrig-activity-token") ?? null;
-  // The principal comes first. The install-wide token speaks for every seat, as before. A seat activity grant speaks
-  // only for its own seat and launch generation, which bindToGrant checks before anything the post claims is accepted.
-  let grant: ActivityGrant | null = null;
-  if (!expectedToken || (bearerToken !== expectedToken && headerToken !== expectedToken)) {
-    const grants = new ActivityGrantStore(store.db);
-    grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
-    if (!grant) {
-      return c.json({
-        ok: false,
-        code: "activity_hook_unauthorized",
-        error: "Agent activity hook ingestion requires the configured local hook token.",
-      }, 401);
-    }
-    if (grant.revokedAt) {
-      return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was recorded." }, 401);
-    }
-  }
+  const principal = activityPrincipal(c, store, expectedToken);
+  if ("refused" in principal) return principal.refused;
+  const grant = principal.grant;
 
   let body: Record<string, unknown>;
   try {
@@ -560,6 +569,14 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     }
   }
 
+  const recorded = recordHookActivity(c, store, body);
+  return "refused" in recorded ? recorded.refused : c.json({ ok: true, activity: recorded.activity });
+}
+
+/** Record one hook event for its seat and feed it to the activity oracle: the tail of the hook ingress, also used when a
+ *  runner's permission request is submitted (its permission prompt). */
+function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<string, unknown>):
+  { activity: AgentActivity } | { refused: Response } {
   const result = store.recordHookEvent({
     runtime: stringOrNull(body.runtime),
     sessionName: stringOrNull(body.sessionName),
@@ -581,7 +598,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
 
   if (!result.ok) {
     const status = result.code === "missing_session_identity" ? 400 : 404;
-    return c.json({ ok: false, code: result.code, error: result.error }, status);
+    return { refused: c.json({ ok: false, code: result.code, error: result.error }, status) };
   }
 
   // S19 A4 — feed the ONE oracle through the adapter seam: the recorded (store-
@@ -610,7 +627,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     // with unresolved provenance and the archival response below.
     if (result.activity.generation != null
         && store.getLatestForNode({ nodeId: emitted.nodeId, sessionName: emitted.sessionName })?.reason === "generation_mismatch") {
-      return c.json({ ok: true, activity: result.activity });
+      return { activity: result.activity };
     }
     const runtime = emitted.runtime ?? stringOrNull(body.runtime);
     // Auto-declare on first hook evidence (and after a swap cleared the inventory):
@@ -634,7 +651,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
     if (evidence) oracle.reportEvidence(evidence);
   }
 
-  return c.json({ ok: true, activity: result.activity });
+  return { activity: result.activity };
 }
 
 activityRoutes.post("/hooks", (c) => postHook(c, true));
@@ -644,6 +661,119 @@ activityRoutes.post("/hooks", (c) => postHook(c, true));
  *  main listener, whose other routes trust any caller. */
 export const guestActivityRoutes = new Hono();
 guestActivityRoutes.post("/hooks", (c) => postHook(c, false));
+
+// A runner's permission requests (the harness runner contract §7, the answered path), on both routers: the main routes
+// take the install-wide token or a grant; the guest router takes a grant only.
+for (const [router, installTokenAccepted] of [[activityRoutes, true], [guestActivityRoutes, false]] as const) {
+  router.post("/permission-requests", (c) => submitPermission(c, installTokenAccepted));
+  router.get("/permission-requests/:askId", (c) => readPermission(c, installTokenAccepted));
+  router.post("/permission-requests/:askId/withdraw", (c) => withdrawPermission(c, installTokenAccepted));
+}
+
+type PermissionContext = { store: AgentActivityStore; grant: ActivityGrant | null; registry: SessionRegistry; permissions: RunnerPermissions };
+
+function permissionContext(c: Context, installTokenAccepted: boolean): PermissionContext | { refused: Response } {
+  const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
+  const queueRepo = c.get("queueRepo" as never) as QueueRepository | undefined;
+  const eventBus = c.get("eventBus" as never) as EventBus | undefined;
+  const expectedToken = installTokenAccepted ? c.get("activityHookToken" as never) as string | undefined : undefined;
+  if (!store || !queueRepo || !eventBus || (installTokenAccepted && !expectedToken)) {
+    return { refused: c.json({ ok: false, code: "permission_requests_unconfigured", error: "This daemon doesn't take runner permission requests." }, 503) };
+  }
+  const principal = activityPrincipal(c, store, expectedToken);
+  if ("refused" in principal) return principal;
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
+  const permissions = new RunnerPermissions({ db: store.db, queueRepo, eventBus, humanRegistry: () => queueRepo.humanRegistry(),
+    ownerOf: (nodeId) => rigRepo.getNodePermissionsTo(nodeId),
+    currentGeneration: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null });
+  return { store, grant: principal.grant, registry, permissions };
+}
+
+const PERMISSION_REFUSAL_STATUS: Record<string, 400 | 409 | 422> = {
+  route_unsupported: 409, duplicate_request: 409, options_unsupported: 422, invalid_permission_request: 400,
+};
+
+/** Submit one live agent request. The seat and generation are the grant's, or, for the install-wide token, the named
+ *  seat's current occupant only (`stale_generation` otherwise). A new ask records the seat's permission prompt. */
+async function submitPermission(c: Context, installTokenAccepted: boolean): Promise<Response> {
+  const ctx = permissionContext(c, installTokenAccepted);
+  if ("refused" in ctx) return ctx.refused;
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
+  }
+  if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(ctx.store.db, body.sessionName) };
+  let seat: RunnerPermissionSeat;
+  if (ctx.grant) {
+    const bound = bindToGrant(c, ctx.store, ctx.grant, body);
+    if ("refused" in bound) return bound.refused;
+    body = bound.body;
+    seat = { nodeId: ctx.grant.nodeId, sessionName: String(body.sessionName ?? ""), generation: ctx.grant.generation };
+  } else {
+    const resolved = ctx.store.resolveSession({ sessionName: stringOrNull(body.sessionName), nodeId: stringOrNull(body.nodeId) });
+    if (!resolved) return c.json({ ok: false, code: "session_not_found", error: "No seat matches this request's sessionName or nodeId." }, 404);
+    let current: string | null;
+    try {
+      current = ctx.registry.currentOccupantTenure(resolved.nodeId)?.generationUuid ?? null;
+    } catch {
+      return c.json({ ok: false, code: "generation_resolver_error", error: "Occupant generation is unavailable." }, 503);
+    }
+    const generation = stringOrNull(body.generation);
+    if (!generation || generation !== current) {
+      return c.json({ ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant; nothing was asked." }, 409);
+    }
+    seat = { nodeId: resolved.nodeId, sessionName: resolved.sessionName, generation };
+  }
+  const parsed = parseRunnerPermissionRequest(body);
+  if (!parsed.ok) return c.json({ ok: false, code: "invalid_permission_request", error: parsed.message }, 400);
+  const result = await ctx.permissions.submit(seat, parsed.request);
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, PERMISSION_REFUSAL_STATUS[result.code] ?? 409);
+  // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
+  if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body)))) {
+    recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
+      sessionName: seat.sessionName, nodeId: seat.nodeId, generation: seat.generation, hookEvent: "Notification",
+      subtype: "permission_prompt", turnId: parsed.request.turnId, occurredAt: stringOrNull(body.occurredAt) ?? new Date().toISOString() });
+  }
+  return c.json({ ok: true, askId: result.askId, created: result.created });
+}
+
+/** Read the one answer for this seat's own request, waiting up to 25 seconds for it to change. A grant reads only its
+ *  own seat's requests. */
+async function readPermission(c: Context, installTokenAccepted: boolean): Promise<Response> {
+  const ctx = permissionContext(c, installTokenAccepted);
+  if ("refused" in ctx) return ctx.refused;
+  const waitSeconds = Math.max(0, Math.min(25, Number.parseInt(c.req.query("waitSeconds") ?? "0", 10) || 0));
+  const result = await ctx.permissions.readWhenChanged(ctx.grant ? { nodeId: ctx.grant.nodeId } : null, c.req.param("askId") ?? "", waitSeconds * 1000);
+  if (ctx.grant && new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
+    return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked." }, 401);
+  }
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, 404);
+  return c.json(result);
+}
+
+/** Withdraw this seat's own request when its turn is cancelled or ends, or its agent exits: any later answer isn't sent. */
+async function withdrawPermission(c: Context, installTokenAccepted: boolean): Promise<Response> {
+  const ctx = permissionContext(c, installTokenAccepted);
+  if ("refused" in ctx) return ctx.refused;
+  let body: Record<string, unknown> = {};
+  try {
+    body = await c.req.json() as Record<string, unknown>;
+  } catch {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+  }
+  if (ctx.grant && new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
+    return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked." }, 401);
+  }
+  const result = ctx.permissions.withdraw(ctx.grant ? { nodeId: ctx.grant.nodeId } : null, c.req.param("askId") ?? "", String(body?.reason ?? ""));
+  if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : 400);
+  return c.json(result);
+}
 
 // ── S19 AM-R18 — the push substrate: GET /api/activity/events (SSE) ──
 // Desk-accepted shape (ruling row): CHANGE NOTIFICATIONS ONLY —

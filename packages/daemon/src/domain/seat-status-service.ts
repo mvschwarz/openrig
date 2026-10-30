@@ -24,6 +24,8 @@ export interface SeatStatus {
   runtime: string | null;
   /** Configured cwd for future launches; an existing process can still use its old cwd. */
   launch_cwd: string | null;
+  /** The registered person who answers this seat's runner permission requests; null when no one is chosen. */
+  permissions_to: string | null;
   current_occupant: string | null;
   session_status: string | null;
   session_reason: SeatIdentityVerdict["reason"];
@@ -151,6 +153,7 @@ export class SeatStatusService {
       pod_namespace: entry.podNamespace ?? null,
       runtime: entry.runtime,
       launch_cwd: entry.cwd,
+      permissions_to: this.rigRepo.getNodePermissionsTo(entry.nodeId),
       current_occupant: entry.canonicalSessionName,
       session_status: entry.sessionStatus,
       session_reason: entry.identityVerdict?.reason ?? null,

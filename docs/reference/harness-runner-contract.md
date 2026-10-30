@@ -166,7 +166,9 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
 
-## 7. Permissions: refuse every request (first version)
+## 7. Permissions: refuse, or ask the person the operator chose
+
+### Refuse every request (the first version, and still the fallback)
 
 - **Refuse at once:** answer every permission request immediately with a refusal (for ACP,
   `{"outcome": {"outcome": "cancelled"}}`).
@@ -181,8 +183,66 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
   - answers typed into the pane;
   - routing an approval to another seat.
   - So a job that needs an edit or a command approved can't finish under this version. Agents that can run without
-    asking are the best first case.
+    asking are the best first case. (The answered path below, added in 0.7.7, lets such a job finish when the seat's
+    operator has chosen a person to answer.)
 - **Unknown requests from the agent:** answer with JSON-RPC `-32601` and carry on.
+
+### The answered path (0.7.7)
+
+When the seat's operator has chosen a person to answer
+(`rig seat set-permissions-to <seat> --to <person> --reason "…"`), the runner asks that person instead of refusing.
+
+1. **Submit** the agent's live request to `POST <base>/api/activity/permission-requests`, with the same token or seat
+   grant as section 4:
+
+   ```json
+   {"sessionName": "dev-builder@my-rig", "nodeId": "<node id>", "generation": "<OPENRIG_OCCUPANT_GENERATION>",
+    "nativeRef": "<the conversation>", "turnId": "7", "requestId": "<the agent's JSON-RPC id>",
+    "toolCall": {"title": "Edit src/app.ts", "kind": "edit"},
+    "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "reject", "name": "Reject", "kind": "reject_once"}],
+    "occurredAt": "2026-10-30T12:00:00Z"}
+   ```
+
+   - **The reply** is `{"ok": true, "askId": "…", "created": true}`.
+   - **Resubmitting** the same generation, conversation and request id returns the same `askId`.
+   - **OpenRig records the seat's `permission_prompt`,** so it reads needs input. Don't post it yourself on this path.
+2. **Read** the answer with `GET <base>/api/activity/permission-requests/<askId>?waitSeconds=25` (25 at most), and read
+   again until the agent's turn ends. The `state` is `pending`, `answered` (with `optionId`), `withdrawn`, `stale` or
+   `refused`.
+3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
+   request is still its live one. For any other state, answer `cancelled` and hold attention, as in the first version.
+4. **Withdraw** when the turn is cancelled or ends, or the agent exits:
+   `POST <base>/api/activity/permission-requests/<askId>/withdraw` with
+   `{"reason": "turn_cancelled" | "turn_ended" | "exited"}`.
+   - A later answer isn't sent.
+   - A relaunch makes the earlier occupant's open requests stale on its own.
+
+**A refusal at submit means: refuse the request and hold attention.**
+
+| Code | Status | Meaning |
+|---|---|---|
+| `route_unsupported` | 409 | No one is chosen, or the chosen owner is no longer a registered person. |
+| `options_unsupported` | 422 | After `allow_always` is hidden, there aren't 2-4 options of kind `allow_once`, `reject_once` or `reject_always`, with distinct ids of letters, digits, `-` or `_`. |
+| `duplicate_request` | 409 | This request id was already submitted in another turn. |
+| `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. |
+| The seat grant's own refusals | 401, 403, 409 | As in section 4. |
+
+An OpenRig without this path answers 404, so refuse as before.
+
+**What the chosen person gets:** one ask in the Feed and on Slack. It names the seat, the conversation, the tool call as
+the agent described it, the offered options, and who chose this person and when. They pick one option.
+- **Only the chosen person's choice counts.** Another person's click, the primary user acting on their behalf, a typed
+  reply, or a close without an option never reaches the agent; it reads `refused`.
+- **`allow_always` is never offered** in this version, so one answer can't become standing policy.
+- **An unanswered request stays pending and visible.** It never times out into a grant.
+- **Ordinary `rig send` text is never an answer.** While the request is pending, the seat reads needs input, and sends
+  are refused.
+
+**Limits in 0.7.7:**
+- **The answer owner is a registered person only.** Choosing a seat (another agent) to answer is a later change.
+- **The owner is chosen with the command above, never in a rig spec.** A spec field is a possible later change.
+- **The seat's own permission posture** (for dsh, its permission mode) still decides which requests reach the runner.
 
 ## 8. Resume: exactly the same conversation, or say honestly that you couldn't
 
@@ -253,6 +313,7 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 2. **For the dsh maintainer:** can dsh's ACP profile run with tools off? A first journey that needs no permission
    answers is the simplest to check.
 3. **For OpenRig:** should a later version route permission requests to a chosen seat, as `rig acp run` already does
-   with queue tasks, instead of refusing them?
+   with queue tasks, instead of refusing them? 0.7.7 routes them to a chosen registered person (section 7). A chosen
+   seat is still open.
 4. **For OpenRig:** once a second ACP harness exists, should one shared ACP runner live in OpenRig rather than one per
    harness?

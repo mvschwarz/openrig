@@ -28,6 +28,8 @@ import { NativePermissionStore } from "./native-permission-store.js";
 import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
 import fs from "node:fs";
 import path from "node:path";
+import { resolvePermissionOwner } from "./runner-permissions.js";
+import type { LoadResult as HumanRegistryLoadResult } from "./gateway/human-registry.js";
 import { resolveConcreteHint, type NodeBinding } from "./runtime-adapter.js";
 import { ProjectionManifestStore } from "./projection-manifest-store.js";
 import { planCwdPreparation } from "./seat-cwd-preparation.js";
@@ -92,6 +94,8 @@ export interface SeatLifecycleDeps {
   transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
   /** The identity-verified current Pi runner and its own session file; without it a Pi seat's launch and native effort are unknown. */
   piRecords?: Pick<CurrentModelReader, "currentPiRecord">;
+  /** The registered people, read when a seat's permission answer owner is chosen; without it no owner can be chosen. */
+  humanRegistry?: () => HumanRegistryLoadResult;
 }
 
 interface ResolvedSeat {
@@ -147,7 +151,10 @@ export interface SeatRefusal {
     | "guard_unavailable"
     | "guard_target_changed"
     | "selection_changed"
-    | "stop_uncertain";
+    | "stop_uncertain"
+    | "missing_permissions_to"
+    | "permissions_to_not_a_person"
+    | "permissions_to_unavailable";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -165,6 +172,10 @@ export interface SeatDescriptor {
 
 export type SetModelResult =
   | { ok: true; seat: SeatDescriptor; from: string | null; to: string; changed: boolean }
+  | SeatRefusal;
+
+export type SetPermissionsToResult =
+  | { ok: true; seat: SeatDescriptor; from: string | null; to: string | null; changed: boolean }
   | SeatRefusal;
 
 export type SetCwdResult =
@@ -308,6 +319,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartDaemonStartedAt?: Date;
   private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
   private readonly piRecords: SeatLifecycleDeps["piRecords"] | null;
+  private readonly humanRegistry: SeatLifecycleDeps["humanRegistry"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -329,6 +341,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
     this.transcripts = deps.transcripts ?? null;
     this.piRecords = deps.piRecords ?? null;
+    this.humanRegistry = deps.humanRegistry ?? null;
   }
 
   private terminalPolicyCheck(nodeId: string, action: TerminalAction, operator?: string | null) {
@@ -412,6 +425,55 @@ export class SeatLifecycleService {
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, from, to: model, changed: true };
+  }
+
+  /**
+   * Choose (or clear, with null) the registered person who answers this seat's runner permission requests. Only a
+   * registered person can be chosen; the canonical address is stored. Being chosen grants nothing by itself: each answer
+   * is that person's own choice of an offered option. Audited as node.permissions_to_changed.
+   */
+  setPermissionsTo(input: SeatSettingTarget & { to: string | null; reason: string; operator?: string | null }): SetPermissionsToResult {
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    let to: string | null = null;
+    if (input.to !== null) {
+      if (!input.to?.trim()) {
+        return { ok: false, code: "missing_permissions_to", message: "A registered person is required (--to <person>), or --clear." };
+      }
+      if (!this.humanRegistry) {
+        return { ok: false, code: "permissions_to_unavailable", message: "This daemon can't read the registered people, so no permission answer owner can be chosen." };
+      }
+      const owner = resolvePermissionOwner(input.to.trim(), this.humanRegistry);
+      if (!owner.ok) return { ok: false, code: owner.code, message: owner.message, guidance: "List the registered people with: rig gateway human list" };
+      to = owner.address;
+    }
+    const resolved = this.resolveSettingTarget(input);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const from = this.rigRepo.getNodePermissionsTo(resolved.nodeId);
+    if (from === to) return { ok: true, seat, from, to, changed: false };
+
+    let persisted: PersistedEvent | null = null;
+    let written = false;
+    this.db.transaction(() => {
+      if (!this.rigRepo.setNodePermissionsTo(resolved.nodeId, to)) return;
+      written = true;
+      persisted = this.eventBus.persistWithinTransaction({
+        type: "node.permissions_to_changed",
+        rigId: seat.rigId,
+        nodeId: seat.nodeId,
+        logicalId: seat.logicalId,
+        from,
+        to,
+        reason: input.reason.trim(),
+        operator: input.operator ?? null,
+      });
+    })();
+    if (!written) {
+      return { ok: false, code: "permissions_to_unavailable", message: "This daemon's database has no place for a permission answer owner yet; nothing was saved." };
+    }
+    if (persisted) this.eventBus.notifySubscribers(persisted);
+    return { ok: true, seat, from, to, changed: true };
   }
 
   /**

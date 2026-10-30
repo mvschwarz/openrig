@@ -825,6 +825,21 @@ export class RigRepository {
     if (!this.hasNodeColumn("effort_choice")) return false;
     return this.db.prepare("UPDATE nodes SET effort_choice = ? WHERE id = ?")
       .run(choice, nodeId).changes > 0;
+  /** Write or clear (null) the registered person who answers this seat's runner permission requests. Returns false when
+   *  the column isn't available or no row matched, so a caller never reports a change from it. */
+  setNodePermissionsTo(nodeId: string, owner: string | null): boolean {
+    if (!this.hasNodeColumn("permissions_to")) return false;
+    return this.db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?")
+      .run(owner, nodeId).changes > 0;
+  }
+
+  /** The seat's selected permission answer owner, or null when none is selected or the column isn't available. */
+  getNodePermissionsTo(nodeId: string): string | null {
+    if (!this.hasNodeColumn("permissions_to")) return null;
+    const row = this.db.prepare("SELECT permissions_to FROM nodes WHERE id = ?").get(nodeId) as { permissions_to: string | null } | undefined;
+    return row?.permissions_to ?? null;
+  }
+
   }
 
   clearNodeEffort(nodeId: string): boolean {

@@ -63,6 +63,7 @@ interface SeatStatusResponse {
   };
   session_status: string | null;
   launch_cwd?: string | null;
+  permissions_to?: string | null;
   runtime_home?: {
     variable: string;
     home: string | null;
@@ -201,6 +202,9 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
+  if (status.permissions_to !== undefined) {
+    console.log(`Runner permission requests answered by: ${status.permissions_to ?? "no one (refused, attention held)"}`);
+  }
   if (status.runtime_home) {
     const h = status.runtime_home;
     const from = h.source === "member" || h.source === "rig" ? `the seat's own, from its ${h.source} env`
@@ -673,7 +677,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
+    path: "set-terminal-policy" | "set-model" | "set-cwd" | "set-effort" | "set-permissions" | "set-permissions-to" | "launch" | "launch-plan" | "continue" | "stop" | "clean" | "restart" | "restart-plan" | "restart-verify",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -853,6 +857,45 @@ Examples:
         const running = data["running"] === "yes" ? "running now" : data["running"] === "no" ? "not running now" : `running state unknown (${String(data["runningDetail"] ?? "probe failed")})`;
         console.log(`Seat ${running}. Emitted at launch: not yet. Native effort: not observed.`);
         if (data["warning"]) console.log(`Warning: ${String(data["warning"])}`);
+      });
+    });
+
+  cmd
+    .command("set-permissions-to")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--to <person>", "The registered person who answers this seat's runner permission requests, such as mike@external")
+    .option("--clear", "Choose no one: the seat's runner refuses permission requests and holds attention, as before")
+    .requiredOption("--reason <text>", "Audit reason recorded on the node.permissions_to_changed event")
+    .option("--operator <address>", "Operator recorded on the audit event (required outside a managed seat)")
+    .option("--json", "JSON output for agents")
+    .description("Choose the registered person who answers a runner seat's permission requests (audited)")
+    .addHelpText("after", `
+A runner seat's agent can ask permission for a tool call. With a person chosen, the
+runner sends the request to OpenRig, the person gets one ask with the agent's own
+options (allow_always is hidden), and their choice goes back to that one request.
+Being chosen grants nothing by itself: each answer is the person's own choice, and
+they should answer only when they hold the authority for the effect.
+
+Only a registered person can be chosen (rig gateway human list). A seat address is
+refused. Unset, or after --clear, the runner refuses every request and holds
+attention. See docs/reference/harness-runner-contract.md, section 7.
+Examples:
+  rig seat set-permissions-to dev-runner@my-rig --to mike@external --reason "Mike approves tool calls"
+  rig seat set-permissions-to dev-runner@my-rig --clear --reason "back to refusal only" --json`)
+    .action(async (seat: string, opts: { to?: string; clear?: boolean; reason: string; operator?: string; json?: boolean }) => {
+      if (Boolean(opts.clear) === (opts.to !== undefined)) {
+        console.error("Pass exactly one of --to <person> or --clear.");
+        process.exitCode = 1;
+        return;
+      }
+      const body = opts.clear ? { clear: true, reason: opts.reason, operator: opts.operator } : { to: opts.to, reason: opts.reason, operator: opts.operator };
+      await runLifecycleVerb("set-permissions-to", seat, body, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const name = `${s?.logicalId}@${s?.rigName}`;
+        const owner = (value: unknown) => typeof value === "string" ? value : "no one (requests are refused)";
+        console.log(data["changed"] === false
+          ? `${name}'s permission requests already go to ${owner(data["to"])}. No change recorded.`
+          : `${name}'s permission requests: ${owner(data["from"])} -> ${owner(data["to"])} (audited).`);
       });
     });
 

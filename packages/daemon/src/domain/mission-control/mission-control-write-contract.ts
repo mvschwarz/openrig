@@ -51,6 +51,7 @@ import {
 import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 import { resolveDefaultPerson } from "../gateway/participants.js";
+import { runnerPermissionOrigin } from "../runner-permissions.js";
 
 /** The primary user when several people are registered and none is the default, or when no one is registered and the
  *  claimed actor is a shared channel: the generic human seat the web UI also records. */
@@ -528,9 +529,11 @@ export class MissionControlWriteContract {
     if (!ask) {
       throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
     }
-    const primaryUser = input.authority === "primary-user";
+    // A runner's permission request is answered only by the person its seat's operator chose: being the primary user
+    // doesn't confer authority over another person's permission choice.
+    const primaryUser = input.authority === "primary-user" && !runnerPermissionOrigin(ask);
     input = this.asActor(input, ask.destinationSession).input;
-    // The asked person answers, or the primary user does on anyone's ask.
+    // The asked person answers, or the primary user does on anyone's ask (except a runner's permission request).
     if ((ask.destinationSession !== input.actorSession && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
       throw new MissionControlWriteContractError("answer_not_recorded",
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
@@ -600,8 +603,10 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
     const decision = chose || resume
-      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : humanAnswerText(returned.body);
+      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
+      : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
     if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })
       && this.queueRepo.getById(input.qitemId)?.state !== "done") {
       throw new MissionControlWriteContractError("answer_not_closed",

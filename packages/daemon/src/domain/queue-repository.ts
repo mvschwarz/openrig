@@ -18,6 +18,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { runnerPermissionOrigin } from "./runner-permissions.js";
 import { parseReplyToChoice, parseReplyToThreadMissing, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination, type DestinationClass } from "./gateway/destination-resolver.js";
 import { join } from "node:path";
@@ -1839,6 +1840,10 @@ export class QueueRepository {
    * on the person it asked belongs to that park's question (`episodeKey`): its ID includes it, and only that ID counts. */
   async createHumanAnswer(input: QueueCreateInput & { inboundReplyTo: string; episodeKey?: string }): Promise<QueueItem> {
     const { episodeKey, ...create } = input;
+    // A runner's permission request is answered in its ask, and the runner reads the answer back. No reply row: it
+    // would wake the runner's terminal, where typed text reads as a prompt to its agent.
+    const ask = this.getById(input.inboundReplyTo);
+    if (ask && runnerPermissionOrigin(ask)) return ask;
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
@@ -2137,6 +2142,26 @@ export class QueueRepository {
   }
 
   /** A person by address or by the registry: a registered person may be addressed as their seat or an alias. */
+  /** A runner's permission ask whose seat has since been relaunched can't be answered: its request died with the
+   *  occupant. Close it (canceled), so the person sees it isn't waiting, and return true. An unreadable ledger
+   *  closes nothing. */
+  private closeStaleRunnerPermission(qitemId: string): boolean {
+    const item = this.getById(qitemId);
+    const origin = item?.state === "pending" ? runnerPermissionOrigin(item) : null;
+    if (!item || !origin) return false;
+    let current: string | null;
+    try {
+      current = (this.db.prepare("SELECT generation_uuid FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1")
+        .get(origin.nodeId) as { generation_uuid: string } | undefined)?.generation_uuid ?? null;
+    } catch {
+      return false;
+    }
+    if (current === origin.generation) return false;
+    this.update({ qitemId, actorSession: item.sourceSession, state: "canceled", closureReason: "canceled",
+      transitionNote: "runner-permission-stale reason=relaunched: a later occupant holds this seat, so any answer here is not sent." });
+    return true;
+  }
+
   isPersonAddress(destination: string): boolean {
     if (isHumanSeatSessionRef(destination)) return true;
     const registry = this.loadHumanRegistryFn();
@@ -3816,6 +3841,7 @@ export class QueueRepository {
     /** The click's Slack action_ts: a decision parked on the person it asked takes the click only from after its current question posted. */
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
+    if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
     return this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
