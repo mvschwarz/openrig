@@ -94,7 +94,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   }, 90_000);
 
   // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
-  // so a runner that keeps the contract still passes. A factor of 3 outgrew case 1's handshake delay and case 2's holds.
+  // so a runner that keeps the contract still passes. With fixed fake timings, a factor of 3 outgrows case 1's handshake
+  // delay; case 2's holds would first be outgrown at about a factor of 5.
   it("still passes a runner that keeps the contract when --wait-ms triples every bound", async () => {
     const { code, report } = await check(["--cases", "1,2", "--wait-ms", "24000"]);
     expect(failing(report)).toEqual([]);
