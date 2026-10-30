@@ -31,7 +31,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
-    expect(report.summary).toEqual({ pass: 11, fail: 0, skip: 0, advisory: 1 });
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 0, advisory: 1 });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
@@ -48,7 +48,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 90_000);
 
-  it("skips resume and first input when the preset declares neither, and says why", async () => {
+  it("skips resume and first input when the runner's preset declares neither, and says why", async () => {
     const { code, report } = await check(["--cases", "6,9"]);
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["6", "skip"], ["9", "skip"]]);
     expect(report.results.every((r) => r.reason)).toBe(true);
@@ -65,9 +65,31 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["cancelled-always", "2", "cancelled is reported only on the agent's own stop reason"],
     ["no-token", "3", "every post uses the hook token"],
     ["no-sequence", "3", "every post carries the contract's fields"],
-    ["allow-permission", "4", "the answer is a refusal, never an allow option"],
-    ["stop-while-attention", "4", "no idle Stop or beat while holding that attention"],
-    ["silent-permission", "4", "what was asked is shown in the pane"],
+    ["refuse-on-404", "4", "404: the agent gets its allow_once option"],
+    ["prefer-always", "4", "404: the agent gets its allow_once option"],
+    ["refuse-on-unreachable", "4", "unreachable: the agent gets its allow_once option"],
+    ["permit-on-deny", "4", "denied_by_seat: the answer is a refusal, never an allow option"],
+    ["stop-while-attention", "4", "denied_by_seat: no idle Stop or beat while holding that attention"],
+    ["release-refusal-on-abort", "4", "denied_by_seat, then /abort: no idle Stop or beat while holding that attention"],
+    ["silent-permission", "4", "denied_by_seat: what was asked is shown in the pane"],
+    ["no-submit", "4b", "allow: the request is submitted to /api/activity/permission-requests"],
+    ["wrong-request-id", "4b", "requestId is the agent's JSON-RPC id"],
+    ["self-prompt", "4b", "OpenRig records the prompt; the runner doesn't post permission_prompt itself"],
+    ["deliver-twice", "4b", "allow: it's delivered once"],
+    ["refuse-on-refusal", "4b", "duplicate_request: the agent gets its allow_once option"],
+    ["cancel-on-read-error", "4b", "unreachable read: the agent gets its allow_once option"],
+    ["permit-on-not-current", "4b", "stale_generation: the agent gets cancelled"],
+    ["permit-on-not-current", "4b", "activity_grant_stale read: the agent gets cancelled"],
+    ["permit-on-refused-read", "4b", "refused read (said_no): the agent gets cancelled"],
+    ["hold-on-cancel", "4b", "stale ask: nothing is held"],
+    ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
+    ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
+    ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
+    ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
+    ["cancel-on-unlisted-state", "4b", "unlisted read state (deferred): the agent gets its allow_once option"],
+    ["no-withdraw", "4b", "pending: /abort withdraws the ask with turn_cancelled"],
+    ["late-deliver", "4b", "pending: an answer after the withdraw isn't delivered"],
+    ["paste-answers", "4b", "pending: a pasted message isn't an answer"],
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
@@ -85,7 +107,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   }, 90_000);
 
   // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
-  // so a runner that keeps the contract still passes. A factor of 3 outgrew case 1's handshake delay and case 2's holds.
+  // so a runner that keeps the contract still passes. With fixed fake timings, a factor of 3 outgrows case 1's handshake
+  // delay; case 2's holds would first be outgrown at about a factor of 5.
   it("still passes a runner that keeps the contract when --wait-ms triples every bound", async () => {
     const { code, report } = await check(["--cases", "1,2", "--wait-ms", "24000"]);
     expect(failing(report)).toEqual([]);
