@@ -2,6 +2,14 @@
 
 ## Current review status (2026-10-30)
 
+### Pi missing-command guidance matches the native shell
+
+Pi preflight's missing-executable warning now suggests `where.exe pi` on Windows,
+which is usable from PowerShell and cmd, instead of the POSIX `command -v pi`.
+The POSIX hint and advisory launch behavior are unchanged. This is a diagnostic
+text correction verified by source review, not a new provider-availability or
+installed-Pi acceptance result.
+
 ### Author bundle vendoring accepts contained native aliases
 
 An owned API fixture reproduced bundle creation rejecting an internal plugin
