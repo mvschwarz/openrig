@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Runtime profile probe timeout (2026-10-30)
+
+An owned native Node probe that started a descendant reproduced a timeout
+cleanup gap in `execRuntimeProbe`: `exec` ended its cmd.exe wrapper, but both
+recorded fixture PIDs remained alive. The fixture's finally block ended only
+those owned PIDs. The Windows path now reuses `boundedProbeExec` and its native
+Job process ownership, passing through the requested environment and cwd.
+The POSIX execution path is unchanged.
+
+After repair the timed-out probe and descendant both exit, and the failure
+carries `ETIMEDOUT`. Separate actual-child cases retain cwd, an explicit Unicode
+environment value, stdin EOF, exit code 7 and stderr. These fixtures and the
+adjacent profile-path binding file pass, as does daemon TypeScript checking.
+Only synthetic owned programs ran: this does not establish installed provider
+profile/authentication acceptance or change the running daemon.
+
 ### Spec launch command preview (2026-10-30)
 
 The TUI's displayed spec-launch command now uses PowerShell environment

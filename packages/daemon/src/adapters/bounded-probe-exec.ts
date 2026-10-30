@@ -99,7 +99,7 @@ export class ProbeStoppedError extends Error {
 export function boundedProbeExec(
   timeoutMs = RUNTIME_PROBE_TIMEOUT_MS,
   graceMs = PROBE_GRACE_MS,
-  deps: { stopGroup?: typeof stopGroup; cwd?: (cmd: string) => string | undefined } = {},
+  deps: { stopGroup?: typeof stopGroup; cwd?: (cmd: string) => string | undefined; env?: NodeJS.ProcessEnv } = {},
 ): ExecFn {
   const endGroup = deps.stopGroup ?? stopGroup;
   return (cmd: string) => new Promise<string>((resolveProbe, rejectProbe) => {
@@ -113,7 +113,7 @@ export function boundedProbeExec(
       return;
     }
     try {
-      const options = { stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd) };
+      const options = { stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd), env: deps.env };
       child = process.platform === "win32"
         ? spawnWindowsJobProcess(process.env.ComSpec ?? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"), ["/d", "/s", "/c", `"${cmd}"`], { ...options, windowsVerbatimArguments: true })
         : spawn(cmd, { ...options, shell: true });
