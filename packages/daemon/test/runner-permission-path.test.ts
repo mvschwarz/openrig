@@ -124,6 +124,13 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.submit({ turnId: "2" })).toMatchObject({ status: 409, body: { code: "duplicate_request" } });
   });
 
+  it("takes the agent's JSON-RPC id and the prompt number as numbers too, the same request as their strings", async () => {
+    const f = fixture();
+    const first = await f.submit({ requestId: 7, turnId: 1 });
+    expect(first).toMatchObject({ status: 200, body: { ok: true, created: true } });
+    expect(await f.submit()).toMatchObject({ status: 200, body: { askId: first.body.askId, created: false } });
+  });
+
   it.each([
     ["an option id a person's choice can't carry", [{ optionId: "allow:1", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]],
     ["only one option left once allow_always is hidden", [{ optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]],

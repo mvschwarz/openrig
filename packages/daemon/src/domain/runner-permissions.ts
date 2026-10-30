@@ -65,6 +65,8 @@ export type ReadResult =
 export type WithdrawResult = ReadResult | { ok: false; code: "invalid_permission_request"; message: string };
 
 const text = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+/** A JSON-RPC id or prompt number as the runner passed it: a number reads as its decimal string, so 7 and "7" match. */
+const idText = (value: unknown): string | null => typeof value === "number" && Number.isFinite(value) ? String(value) : text(value);
 const clip = (value: string, max: number): string => value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 const tagValue = (item: QueueItem, prefix: string): string | null => item.tags?.find((tag) => tag.startsWith(prefix))?.slice(prefix.length) ?? null;
 
@@ -78,7 +80,7 @@ export function runnerPermissionOrigin(item: Pick<QueueItem, "tags">): { nodeId:
 
 /** Validate a runner's submitted request into its parts, or say what's wrong with it. */
 export function parseRunnerPermissionRequest(body: Record<string, unknown>): { ok: true; request: RunnerPermissionRequest } | { ok: false; message: string } {
-  const nativeRef = text(body.nativeRef), turnId = text(body.turnId), requestId = text(body.requestId);
+  const nativeRef = text(body.nativeRef), turnId = idText(body.turnId), requestId = idText(body.requestId);
   if (!nativeRef || !turnId || !requestId) return { ok: false, message: "A permission request needs nativeRef, turnId and requestId." };
   if (!Array.isArray(body.options)) return { ok: false, message: "A permission request needs options[]." };
   const options: RunnerPermissionOption[] = [];

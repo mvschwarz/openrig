@@ -205,6 +205,8 @@ When the seat's operator has chosen a person to answer
    ```
 
    - **The reply** is `{"ok": true, "askId": "…", "created": true}`.
+   - **`requestId` and `turnId`** may be strings or numbers. Pass the agent's id unchanged: a number is read as its
+     decimal string, so `7` and `"7"` are the same request.
    - **Resubmitting** the same generation, conversation and request id returns the same `askId`.
    - **OpenRig records the seat's `permission_prompt`,** so it reads needs input. Don't post it yourself on this path.
 2. **Read** the answer with `GET <base>/api/activity/permission-requests/<askId>?waitSeconds=25` (25 at most), and read
