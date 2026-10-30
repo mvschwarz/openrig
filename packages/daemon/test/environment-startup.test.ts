@@ -110,6 +110,7 @@ it("transfers exact retained history onto explicitly recreated compute and reque
   expect(recreated).toMatchObject({ predecessorResourceId: "resource-one", successorResourceId: "successor-resource", nativeId: first.resumeToken });
   const binding = { ...f.binding, launchGeneration: "generation-two" };
   const plan = { runtime: "openshell-claude", cwd: f.root, entries: [], conflicts: [], noOps: [], diagnostics: [], startup: { files: [], actions: [] } } as ProjectionPlan;
+  await f.startup.preflight(binding, { resumeToken: first.resumeToken, resumeType: "community:openshell-claude" });
   await f.startup.project(plan, binding);
   const result = await f.startup.launch(binding, { resumeToken: first.resumeToken, resumeType: "community:openshell-claude" }, f.tmux);
   expect(result).toMatchObject({ ok: true, resumeToken: first.resumeToken, resumeType: "community:openshell-claude" });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenShellDriver } from "../src/adapters/openshell-driver.js";
 import { sha256, type Placement, type EnvironmentBinding } from "../src/domain/environment-platform.js";
+import { OpenShellPodmanObserver } from "../src/adapters/openshell-podman-observer.js";
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const close of cleanup.splice(0)) close(); });
 it("reads pinned top-level list labels and treats pagination as incomplete", async () => {
@@ -48,4 +49,13 @@ it("transfers one bounded file without extracting a vendor archive", async () =>
   await new OpenShellDriver(command).download(binding, "/sandbox/openrig/work/artifacts/report.json", join(root,"artifact.json"));
   expect(readFileSync(join(root,"artifact.json"),"utf8")).toBe('{"ok":true}');
   expect(command.mock.calls.some(([args]) => args.includes("download"))).toBe(false);
+});
+
+it("captures creator cleanup identities after compute is stopped", async () => {
+  const command = vi.fn(async () => JSON.stringify({id:"immutable",name:"worker-one",workspace:"workspace",phase:"Stopped"}));
+  const capture = vi.spyOn(OpenShellPodmanObserver.prototype,"capture").mockResolvedValue({version:1} as never);
+  cleanup.push(() => capture.mockRestore());
+  const binding = {guestRoot:"/sandbox/openrig",placement:{gateway:"gateway",workspace:"workspace",name:"worker-one"},resource:{id:"immutable",name:"worker-one",workspace:"workspace"}} as EnvironmentBinding;
+  expect(await new OpenShellDriver(command).captureCleanup(binding,"/owned/engine.sock")).toEqual({version:1});
+  expect(capture).toHaveBeenCalledWith(binding,"/owned/engine.sock");
 });

@@ -45,11 +45,11 @@ export class OpenShellDriver implements EnvironmentDriver {
   async inspect(binding: EnvironmentBinding): Promise<EnvironmentResource> {
     return this.resource(JSON.parse(await this.command([...this.prefix(binding.placement), "get", binding.placement.name, "--output", "json"])));
   }
-  private async checked(binding: EnvironmentBinding): Promise<void> {
+  private async checked(binding: EnvironmentBinding, ready = true): Promise<void> {
     const actual = await this.inspect(binding), saved = binding.resource;
     if (!saved || actual.id !== saved.id || actual.name !== saved.name || actual.workspace !== saved.workspace
       || saved.fingerprint && actual.fingerprint !== saved.fingerprint) throw new EnvironmentError("environment_identity_changed", "The live OpenShell resource does not match the saved binding");
-    if (actual.phase !== "Ready") throw new EnvironmentError("environment_not_ready", "The bound OpenShell resource is not Ready");
+    if (ready && actual.phase !== "Ready") throw new EnvironmentError("environment_not_ready", "The bound OpenShell resource is not Ready");
   }
   async guest(binding: EnvironmentBinding, args: string[]): Promise<Record<string, any>> {
     await this.checked(binding);
@@ -80,7 +80,7 @@ export class OpenShellDriver implements EnvironmentDriver {
     writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
   }
   async captureCleanup(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection> {
-    await this.checked(binding);
+    await this.checked(binding, false);
     return new OpenShellPodmanObserver().capture(binding, socket);
   }
   async cleanupState(binding: EnvironmentBinding, selection?: PodmanCleanupSelection) {
@@ -106,7 +106,8 @@ export class OpenShellDriver implements EnvironmentDriver {
   }
   async deleteEnvironment(binding: EnvironmentBinding, _operationId: string): Promise<void> {
     const actual = await this.inspect(binding);
-    if (!binding.resource || actual.id !== binding.resource.id || actual.name !== binding.resource.name || actual.workspace !== binding.resource.workspace)
+    if (!binding.resource || actual.id !== binding.resource.id || actual.name !== binding.resource.name || actual.workspace !== binding.resource.workspace
+      || binding.resource.fingerprint && actual.fingerprint !== binding.resource.fingerprint)
       throw new EnvironmentError("environment_identity_changed", "The selected compute changed before deletion");
     await this.command([...this.prefix(binding.placement), "delete", binding.placement.name]);
   }

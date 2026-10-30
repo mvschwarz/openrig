@@ -35,8 +35,8 @@ async function fixture(attached = false) {
     cleanupState: async () => ({ ...dependents }),
     checkpointFiles: async () => [{ path: `native/projects/-sandbox-openrig-work/${native.nativeId}.jsonl`, bytes: history.length, sha256: (await import("../src/domain/environment-platform.js")).sha256(history) }],
   };
-  const queue = new QueueRepository(db, new EventBus(db)); queue.attachOutbox(new OutboxHandler(db));
-  const f = createTestApp(db, { appDeps: { queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts"), environmentStateRoot: join(root, "retained") } as never });
+  const queueEvents = new EventBus(db), queue = new QueueRepository(db, queueEvents); queue.attachOutbox(new OutboxHandler(db));
+  const f = createTestApp(db, { appDeps: { eventBus: queueEvents, queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts"), environmentStateRoot: join(root, "retained") } as never });
   const rig = f.rigRepo.createRig("lifecycle"), node = f.rigRepo.addNode(rig.id, "worker", { runtime: "openshell-claude", cwd: root });
   const request = async (path: string, body?: unknown) => { const res = await f.app.request(`/api/environments${path}`, { method: body ? "POST" : "GET", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@lifecycle" }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: res.status, body: await res.json() as Record<string, any> }; };
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
@@ -142,6 +142,16 @@ describe("finite completion is selected work plus a verified actual export", () 
     f.done(); await f.lifecycle.checkCompletions(); expect(f.counts().stopCalls).toBe(0);
     f.publish(); await f.lifecycle.checkCompletions(); expect(f.counts().stopCalls).toBe(1);
     await f.lifecycle.checkCompletions(); expect(f.counts().stopCalls).toBe(1);
+  });
+  it("the actual queue event schedules selected completion without another manual check", async () => {
+    const f = await selected(); f.publish(); f.done();
+    for (let turn = 0; turn < 20 && !f.counts().stopCalls; turn++) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(f.counts().stopCalls).toBe(1);
+  });
+  it("another seat's same-state note does not undo a settled selected task", async () => {
+    const f = await selected(); f.done();
+    f.queue.update({ qitemId: "task-one", actorSession: "observer@lifecycle", transitionNote: "Result noted" });
+    f.publish(); await f.lifecycle.checkCompletions(); expect(f.counts().stopCalls).toBe(1);
   });
   it("keeps failed work and another task's export from triggering completion", async () => {
     const f = await selected(); f.publish();

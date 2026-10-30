@@ -140,6 +140,8 @@ export class EnvironmentLifecycle {
     const row = this.operation(id); return row?.kind === "checkpoint" && row.receipt_json ? JSON.parse(row.receipt_json) : null;
   }
   verifyCheckpoint(checkpoint: EnvironmentCheckpoint): void {
+    if ((checkpoint.artifacts?.length ?? 0) > 128 || (checkpoint.artifacts ?? []).reduce((sum, file) => sum + file.bytes, 0) > 32 * 1024 * 1024)
+      refuse("environment_checkpoint_invalid", "Retained artifacts exceed 128 files or 32 MiB");
     for (const artifact of checkpoint.artifacts ?? []) {
       relativeGuestPath(artifact.path);
       if (!artifact.path.startsWith("work/artifacts/")) refuse("environment_checkpoint_invalid", "A retained artifact must stay beneath the work artifact root");
@@ -172,7 +174,8 @@ export class EnvironmentLifecycle {
     if (!selection) {
       const files = await this.driver.checkpointFiles(binding, observed);
       if (files.length !== 1) refuse("environment_checkpoint_invalid", "One exact native history file is required");
-      const exports = this.platform.db.prepare("SELECT receipt_json FROM environment_operations WHERE binding_id=? AND kind='export' AND state='confirmed'").all(id) as Array<{ receipt_json: string }>;
+      const exports = this.platform.db.prepare("SELECT receipt_json FROM environment_operations WHERE binding_id=? AND kind='export' AND state='confirmed' AND json_extract(receipt_json,'$.generation')=? LIMIT 129").all(id, input.generation) as Array<{ receipt_json: string }>;
+      if (exports.length > 128) refuse("environment_checkpoint_invalid", "Retained artifacts exceed 128 files");
       const artifacts: EnvironmentCheckpoint["artifacts"] = [];
       for (const row of exports) {
         const receipt = JSON.parse(row.receipt_json);
@@ -277,10 +280,8 @@ export class EnvironmentLifecycle {
       const receipt = JSON.parse(exported.receipt_json);
       if (receipt.bindingId !== row.binding_id || receipt.generation !== input.generation || receipt.taskId !== input.taskId) continue;
       try {
-        const last = this.platform.db.prepare("SELECT actor_session, state FROM queue_transitions WHERE qitem_id=? ORDER BY transition_id DESC LIMIT 1").get(input.taskId) as { actor_session: string; state: string } | undefined;
-        if (last?.state !== "done" || last.actor_session !== binding.seat) continue;
         const bytes = regularBytes(receipt.path); if (bytes.length !== receipt.bytes || sha256(bytes) !== receipt.sha256) continue;
-        const effect = await this.effect(row.binding_id, { operationId: `${row.operation_id}-stop`, generation: input.generation, effect: input.effect });
+        const effect = await this.effect(row.binding_id, { operationId: `completion-stop-${sha256(row.operation_id).slice(0, 48)}`, generation: input.generation, effect: input.effect });
         if (effect.state === "confirmed") this.save(row.operation_id, { ...effect, taskId: input.taskId, exportOperationId: input.exportOperationId });
       } catch { /* retained selected completion remains inspectable; no unrelated task/queue emptiness fallback */ }
     }
