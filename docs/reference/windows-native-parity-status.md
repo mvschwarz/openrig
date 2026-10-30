@@ -228,3 +228,9 @@ Windows and mode 0600 on POSIX, rather than interpreting Windows mode bits as
 an access policy. These fixtures use an owned temporary registry and no account
 credentials; OS home fallback resolves a path without reading its contents.
 
+Kernel readiness deadline fixtures pass 6/6 with their exact owned loopback
+origins registered. Slow-header and slow-body cases also require a request to
+reach their server, preventing a fetch-guard refusal from looking like a working
+timeout. The original 150 ms deadline and under-350 ms bounds remain unchanged;
+the ready response is read through the real client. Servers are awaited on close.
+
