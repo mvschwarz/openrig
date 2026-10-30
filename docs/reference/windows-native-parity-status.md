@@ -737,3 +737,33 @@ and native probe suites pass 34/34, and nine selected bootstrap cases pass
 keys and post-install readiness. Daemon TypeScript passes. No real installation,
 agreement acceptance or host PATH change was performed; portable link creation
 and current-host installation acceptance remain unverified.
+
+The refreshed native package gate passes at exact source
+`799e54ff250576683a4727858ea72e32787bd09f`, with identical empty tracked diffs
+before and after (2026-10-30 20:24:08–20:25:42 UTC). It builds and packs, installs
+into an isolated npm prefix, verifies SQLite ABI and invokes the actual installed
+`rig.cmd` to load the daemon subpath and write an owned fixture fragment. Its
+temporary install prefix, home and tarball are removed by the gate. The package
+stamp remains `dirty=true` (built at 20:24:40 UTC); source stability is not a
+clean-release claim. The leak-guard term-rule limitation remains unchanged.
+
+Readback records five assembled artifact hashes. The packaged planner resolves
+all five reviewed tool mappings in memory, and the compiled restart witness and
+Codex host guard are present. Text presence is not execution of those guards;
+their runtime evidence remains the separate scoped tests above. No package is
+published and no running daemon or seat is upgraded.
+
+The experimental Windows CI workflow still pinned psmux 3.3.8 while current
+stock-native checks used 3.4.0. It now downloads the official 3.4.0 x64 archive
+with the [release asset digest](https://github.com/psmux/psmux/releases/tag/v3.4.0)
+`a66b6be7c13c6fa0dc3660a267b9e34eaa91a4eb7f07fbd55a0468018bd0f721`,
+and includes the reviewed dependency and unlaunched grant-service regression
+entries. Workflow YAML, asset URL/digest and referenced new test paths are
+validated locally; hosted CI has not run. The existing read-only workflow
+permissions and experimental/Draft posture remain.
+
+The validation host does not resolve `winget.exe` on its current PATH, so actual
+WinGet alias/Job execution cannot be tested here without changing that host.
+No WinGet installation was attempted. A refocus trace also reports unresolved
+topology/workspace roots; that trace does not establish a completed contextual
+restore or authorize any live-team action.

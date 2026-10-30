@@ -24,8 +24,8 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'psmux.zip'
-          Invoke-WebRequest 'https://github.com/psmux/psmux/releases/download/v3.3.8/psmux-v3.3.8-windows-x64.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1ad127ba937194a890b933a73d9b023e297bd73dc742abd841bf159984c2effe') { throw 'psmux archive checksum mismatch' }
+          Invoke-WebRequest 'https://github.com/psmux/psmux/releases/download/v3.4.0/psmux-v3.4.0-windows-x64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a66b6be7c13c6fa0dc3660a267b9e34eaa91a4eb7f07fbd55a0468018bd0f721') { throw 'psmux archive checksum mismatch' }
           $install = Join-Path $env:RUNNER_TEMP 'psmux'
           Expand-Archive $archive $install
           $binary = @(Get-ChildItem $install -Filter tmux.exe -Recurse)
@@ -37,6 +37,12 @@ jobs:
       - name: CLI lifecycle
         working-directory: packages/cli
         run: npx vitest run test/daemon-lifecycle.test.ts test/daemon-lifecycle-status.test.ts test/daemon-lifecycle-event-loop.test.ts test/browser-launch.test.ts test/log-tail.test.ts test/terminal-window-windows.test.ts
+      - name: Native dependency planning and literal execution
+        working-directory: packages/daemon
+        run: npx vitest run test/external-install-planner.test.ts test/external-install-executor.test.ts test/requirements-probe-native.test.ts --maxWorkers=2
+      - name: Unlaunched native grant-service boundary
+        working-directory: packages/cli
+        run: npx vitest run test/mcp-http-grant-service-unlaunched.integration.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly
