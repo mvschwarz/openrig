@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, copyFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,4 +61,15 @@ test('native command-line entry returns the polluter exit code with literal argu
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /FOUND POLLUTER: \.\/src\/a\.test\.ts/);
   assert.match(result.stdout, /owned pollution & file/);
+});
+test('native directory alias executes the entry while importing stays inert', { skip: process.platform !== 'win32' }, async t => {
+  const cwd = await fixture(t), home = join(cwd, 'helper home'), alias = join(cwd, 'helper alias');
+  await mkdir(home);
+  const source = new URL('../packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs', import.meta.url);
+  await copyFile(source, join(home, 'helper.mjs'));
+  await symlink(home, alias, 'junction');
+  const direct = spawnSync(process.execPath, [join(alias, 'helper.mjs')], { cwd, encoding: 'utf8', timeout: 10000, windowsHide: true });
+  assert.equal(direct.status, 2, direct.stderr); assert.match(direct.stdout, /Usage:/);
+  const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(source.href)})`], { cwd, encoding: 'utf8', timeout: 10000, windowsHide: true });
+  assert.equal(imported.status, 0, imported.stderr); assert.equal(imported.stdout, '');
 });

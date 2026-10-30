@@ -170,6 +170,10 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     assert.ok(existsSync(process.platform === "win32" ? join(prefix, "rig.cmd") : join(prefix, "bin", "rig")), "npm must materialize the installed rig shim");
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENRIG|RIGGED)_/i.test(key)));
     Object.assign(env, { OPENRIG_HOME: home, HOME: home, USERPROFILE: home });
+    const nativeHelper = join(installed, "daemon/context-packs/skills/process/systematic-debugging/find-polluter.mjs");
+    assert.deepEqual(readFileSync(nativeHelper), readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs")), "installed native helper must match its authored source");
+    assert.throws(() => execFileSync(process.execPath, [nativeHelper], { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true }),
+      error => error.status === 2 && String(error.stdout).includes("Usage: node find-polluter.mjs"), "installed helper must execute and report invalid invocation honestly");
     // Explicitly exercise the installed in-memory SQLite check even when the
     // operator's npm configuration happens to suppress lifecycle scripts.
     execFileSync(process.execPath, [join(installed, "scripts/check-abi.mjs")], { cwd: home, env, stdio: "pipe" });

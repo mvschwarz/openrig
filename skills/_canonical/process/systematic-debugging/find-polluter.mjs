@@ -1,4 +1,5 @@
 import { lstat, readdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +63,10 @@ export async function findPolluter(args, { cwd = process.cwd(), env = process.en
   } catch (error) { log(`No result: ${error.message}`); return 2; }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let invokedDirectly = false;
+try {
+  invokedDirectly = Boolean(process.argv[1]) && realpathSync.native(process.argv[1]) === realpathSync.native(fileURLToPath(import.meta.url));
+} catch { /* An import with no existing entry path remains inert. */ }
+if (invokedDirectly) {
   process.exitCode = await findPolluter(process.argv.slice(2));
 }
