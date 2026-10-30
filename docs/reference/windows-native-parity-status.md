@@ -331,3 +331,10 @@ production-source hashes and report digest are recorded in the local audit ledge
 no new implementation gap was found in these checked paths. Actual seat launches
 and OS session-bus behavior were not exercised.
 
+Package-manifest, built-in policy-reference and agent-starter resolver suites
+pass 50/50 on native Windows at the current audited sources. Their source hashes
+and report digest are recorded separately from the historical source-only ledger.
+No new implementation failure was reproduced by these suites. This is selected
+resource validation/resolution/materialization coverage, not installed delivery
+of every resource or provider startup acceptance.
+
