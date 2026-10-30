@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import path from "node:path";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
@@ -42,11 +43,12 @@ describe("runDoctorChecks", () => {
     expect(probe.every(cmd => cmd.includes(platform === "win32" ? "-f NUL " : "-f /dev/null "))).toBe(true);
   });
   it("monorepo command-dir base resolves via the same daemon root seam as daemon start", () => {
+    const root = path.resolve("/Users/example/code/openrig");
     const deps = makeDeps({
-      baseDir: "/Users/example/code/openrig/packages/cli/src/commands",
+      baseDir: path.join(root, "packages/cli/src/commands"),
       exists: (p) =>
-        p === "/Users/example/code/openrig/packages/daemon/dist/index.js"
-        || p === "/Users/example/code/openrig/packages/ui/dist/index.html",
+        p === path.join(root, "packages/daemon/dist/index.js")
+        || p === path.join(root, "packages/ui/dist/index.html"),
     });
 
     const { checks } = runDoctorChecks(deps);
@@ -55,7 +57,7 @@ describe("runDoctorChecks", () => {
   });
 
   it("daemon dist found -> pass", () => {
-    const deps = makeDeps({ exists: (p) => p.endsWith("dist/index.js") || p.endsWith("index.html") });
+    const deps = makeDeps({ exists: (p) => p.endsWith(path.join("dist", "index.js")) || p.endsWith("index.html") });
     const { checks } = runDoctorChecks(deps);
     const daemonCheck = checks.find((c) => c.name === "daemon_dist");
     expect(daemonCheck?.status).toBe("pass");

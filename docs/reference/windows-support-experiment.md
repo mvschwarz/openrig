@@ -39,6 +39,13 @@ implements -L as a namespace and scopes kill-server to it. This source review
 is not new native multiplexer startup/capture acceptance; no real server was
 started, queried or stopped for these consumer checks.
 
+The subsequent complete setup/doctor run initially passed 121/123. Two doctor
+daemon-root fixtures compared POSIX path strings with native resolved paths;
+they now build expected paths with the native path module. Both complete files
+then pass 123/123, including prior behavior beyond the four selected capture
+cases. This supersedes the filtered-only scope for those files, while keeping
+their injected command/probe and no-real-server limits.
+
 ## Native bin-wrapper selection checks (2026-10-30)
 
 The bin-wrapper file originally reported three file-symlink creation failures
