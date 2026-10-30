@@ -57,6 +57,43 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32")("preserves fork call-entry arguments across capability discovery in the native child", async () => {
+    const f = fixture();
+    const node = path.join(f.home, "node.exe"), pkg = path.join(f.home, "node_modules", "@anthropic-ai", "claude-code");
+    fs.copyFileSync(process.execPath, node); fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
+    fs.writeFileSync(path.join(pkg, "cli.js"), "console.log(JSON.stringify(process.argv.slice(2)))");
+    fs.writeFileSync(path.join(f.home, "claude.cmd"), '@echo off\r\n"%_prog%" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+    f.env.PATHEXT = ".CMD;.EXE";
+    const commands: string[] = [], reads: string[] = [];
+    const adapter = new ClaudeCodeAdapter({
+      tmux: { sendShellCommand: async (_session: string, command: string) => { commands.push(command); return { ok: true }; } } as never,
+      claudeManagedLaunch: f.managed, sessionIdFactory: () => "fork-id",
+      fsOps: { readFile: p => { reads.push(p); return "{}"; }, writeFile: vi.fn(), exists: () => false, mkdirp: vi.fn(), copyFile: vi.fn() },
+    });
+    vi.spyOn(adapter as never, "verifyResumeLaunch" as never).mockResolvedValue({ ok: true } as never);
+    const binding = { nodeId: "node", cwd: f.cwd, tmuxSession: "seat", tmuxPane: "%1", model: "original-model", permissionMode: "auto" };
+    const options = { name: "original 用户", forkSource: { kind: "native_id" as const, value: "parent & %literal%" } };
+    vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], _opts: unknown, done: (error: null, help: string) => void) => {
+      binding.tmuxSession = "other-seat"; binding.model = "other-model"; binding.permissionMode = "bypassPermissions";
+      options.name = "changed"; options.forkSource.value = "other-history";
+      done(null, '--permission-mode <mode> (choices: "auto", "default")');
+    }) as never);
+    expect(await adapter.launchHarness(binding as never, options)).toMatchObject({ ok: true, resumeToken: "fork-id" });
+    expect(reads).toEqual([]); expect(commands).toHaveLength(1);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => native.execFile(
+      path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(commands[0]!, "utf16le").toString("base64")],
+      { env: { SystemRoot: process.env.SystemRoot, HOME: f.home, USERPROFILE: f.home, TEMP: f.home, TMP: f.home }, encoding: "utf8", windowsHide: true, timeout: 10000 },
+      (error, stdout) => error ? reject(error) : resolve(stdout)));
+    const args = JSON.parse(output.trim()) as string[];
+    for (const [flag, value] of [["--resume", "parent & %literal%"], ["--session-id", "fork-id"], ["--name", "original 用户"], ["--model", "original-model"], ["--permission-mode", "auto"]]) {
+      expect(args[args.indexOf(flag!) + 1]).toBe(value);
+    }
+    expect(args).toContain("--fork-session"); expect(args).not.toContain("other-history"); expect(args).not.toContain("other-model");
+  });
+
   it.runIf(process.platform === "win32").each(["supported", "timeout", "malformed", "missing", "generation-change", "later-generation"])(
     "keeps native permission selection and audit effects bound for %s capability discovery", async kind => {
       const f = fixture(), db = createFullTestDb(); cleanups.push(() => db.close());
