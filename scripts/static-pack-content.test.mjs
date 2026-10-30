@@ -59,3 +59,11 @@ test("an unmerged index never becomes a cached plain-file fallback", () => fixtu
   assert.throws(() => resolve(file), /Unmerged/);
   assert.throws(() => resolve(file), /Unmerged/);
 }));
+
+test("native mixed root spellings still resolve indexed placeholders to reference bytes", { skip: process.platform !== "win32" }, () => fixture(({ root, source, reference, placeholder }) => {
+  const target = path.join(reference, "owned.md"); fs.writeFileSync(target, "owned reference content\n");
+  const file = placeholder("owned.md", "../docs/reference/owned.md");
+  const resolve = createStaticContentResolver({ repoRoot: root, sourceRoot: fs.realpathSync.native(source),
+    referenceRoot: fs.realpathSync.native(reference), platform: "win32" });
+  assert.equal(fs.readFileSync(resolve(fs.realpathSync.native(file)), "utf8"), "owned reference content\n");
+}));

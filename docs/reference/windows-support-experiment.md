@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Static pack Git placeholders across native root aliases
+
+The static-content resolver now canonicalizes Windows roots and indexed file keys
+with native real paths. An owned Git fixture reproduced a placeholder silently
+being packed as its relative target text when repository/source/reference paths
+mixed native long and DOS-short spellings. The resolver now returns the actual
+reference document bytes. Ordinary path-looking files remain ordinary content.
+
+All five focused Node checks pass, covering SHA1/SHA256 indexes, edited and unmerged
+placeholder rejection, outside-reference/junction escape/directory/missing-target
+refusals, and the native alias regression. Syntax checking passes. Only owned Git
+fixtures were used; the full package was not rebuilt after this source change.
+
 ### Compaction restore bridge transcript aliases
 
 The shipped restore bridge now recognizes different Windows spellings of the same
