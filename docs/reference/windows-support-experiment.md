@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Community npm launchers use their declared Node entries
+
+Owned native fixtures reproduced standard global and project-local npm community
+launchers failing to run through their `.cmd` entry. Native community launch now
+recognizes a standard Node invocation whose script agrees with the package's bin
+declaration, then launches that script directly with the selected Node. PATH and
+PATHEXT precedence are retained; an earlier relative PATH entry is left unresolved
+rather than selecting a different installation. Unknown batch launchers are not
+evaluated through a shell fallback.
+
+Eleven selected native cases pass: global and local npm entry launches, an earlier
+native executable winning over a shim, unknown-shim refusal before typing, the
+five community metadata cases, and the existing two npm Codex cases. They use
+owned packages/scripts, synthetic inputs and actual PowerShell/Node subprocesses.
+Daemon TypeScript checking passes. This does not prove arbitrary batch-script,
+installed community-provider or live pane acceptance; no such provider was run.
+
 ### Community launch metadata reaches native children
 
 Five owned community-adapter fixtures reproduced native launches that returned

@@ -9,6 +9,7 @@ import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
 import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { readPlatformEnv } from "./platform-env.js";
 import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+import { windowsCommunityCommand } from "./windows-community-command.js";
 
 // Only the literal /usr/bin/env prefixes emitted by the community adapter.
 // Interpret their data as child environment fields, never as a Windows program.
@@ -233,7 +234,8 @@ export class SeatLaunchEnvironment {
         if (!searchPath) throw new Error("Launch PATH unavailable");
         env.PATH = `${binDir}${path.delimiter}${searchPath}`;
         const community = isCommunityHarnessRuntime(target.runtime) ? nativeCommunityCommand(command, env) : undefined;
-        if (community) command = community.command;
+        if (community) command = windowsCommunityCommand(parseLiteralLaunchWords(community.command), env.PATH,
+          readPlatformEnv(this.sessionEnv, "PATHEXT", "win32")).map(shellQuote).join(" ");
         // Classic Claude emits only these command-scoped assignments. Decode
         // their literal words, without exporting the resume marker to the pane.
         if (target.runtime === "claude-code") {
