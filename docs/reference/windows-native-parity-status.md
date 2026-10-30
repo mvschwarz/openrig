@@ -651,3 +651,26 @@ unmatched historical cases. The separate native Windows window suite passes
 14/14, including expected-plan refusal; CLI TypeScript passes. Native plan tests
 do not substitute for visible desktop acceptance or for running the POSIX
 integration cases on a supported host.
+
+The previously unverified materialized-caller grant-service integration now
+passes on native Windows. Its fixture supplies native system paths and private
+home/temp/registry roots, compiles an owned no-launch terminal stub, and registers
+only its owned HTTP origins. A real isolated daemon and the built CLI complete
+MCP initialize/list-tools and queue create/show, with the expected grant principal
+read back from SQLite. The two materialized nodes retain zero sessions, a missing
+seat is refused, and the terminal invocation log contains no pane creation,
+respawn or input commands.
+
+The first setup attempt refused the stub because it did not answer the mandatory
+version check; the final stub explicitly identifies itself as an owned no-launch
+fixture and reports no server, while rejecting other operations. No actual tmux
+or psmux is reachable in that test. Cleanup now awaits the owned MCP process and
+proves the owned daemon PID exited before removing its scratch tree; cleanup
+failures fail the test instead of being swallowed. The final integration case and
+CLI TypeScript pass. This establishes the unlaunched HTTP/grant path, not terminal
+or provider acceptance. Exact-name failure reconciliation advances to 55 later
+passes and 39 unmatched historical cases, still including 13 POSIX fixture skips.
+
+The current workspace build also completes across daemon, UI, CLI and TUI. It is
+an ordinary source build with absent CLI build-identity fields, not a stamped
+package/release or deployment; the earlier package gate is separate evidence.
