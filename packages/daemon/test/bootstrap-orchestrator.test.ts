@@ -159,7 +159,8 @@ describe("BootstrapOrchestrator", () => {
     };
   }
 
-  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown; bundleSourceResolver?: unknown }) {
+  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown; bundleSourceResolver?: unknown;
+    platform?: string; probeRegistry?: RequirementsProbeRegistry; execArgv?: (file: string, args: string[]) => Promise<string> }) {
     const exec = opts?.exec ?? createMockExec({
       "tmux -V": "tmux 3.4",
       "claude --version": "claude 1.0.0",
@@ -172,9 +173,9 @@ describe("BootstrapOrchestrator", () => {
 
     const bootstrapRepo = new BootstrapRepository(db);
     const runtimeVerifier = new RuntimeVerifier({ exec, db });
-    const probeRegistry = new RequirementsProbeRegistry(exec, { platform: "darwin" });
-    const installPlanner = new ExternalInstallPlanner({ platform: "darwin" });
-    const installExecutor = new ExternalInstallExecutor({ exec, db });
+    const probeRegistry = opts?.probeRegistry ?? new RequirementsProbeRegistry(exec, { platform: opts?.platform ?? "darwin" });
+    const installPlanner = new ExternalInstallPlanner({ platform: opts?.platform ?? "darwin" });
+    const installExecutor = new ExternalInstallExecutor({ exec, db, execArgv: opts?.execArgv });
     const packageRepo = new PackageRepository(db);
     const installRepo = new InstallRepository(db);
     const installEngine = new InstallEngine(installRepo, realEngineFsOps());
@@ -199,6 +200,31 @@ describe("BootstrapOrchestrator", () => {
       podInstantiator: opts?.podInstantiator as any,
     });
   }
+
+  it("carries a reviewed Windows dependency plan through bootstrap to native argv and the action journal", async () => {
+    writePkg(path.join(tmpDir, "test-pkg"), VALID_MANIFEST_YAML + "\nrequirements:\n  cli_tools:\n    - name: git\n",
+      { "skills/helper/SKILL.md": "# Owned helper" });
+    const sourceRef = writeSpec(SPEC_WITH_PACKAGES_YAML);
+    const probeRegistry = new RequirementsProbeRegistry(async () => { throw Error("Unexpected probe shell"); }, { platform: "win32" });
+    vi.spyOn(probeRegistry, "probeAll").mockResolvedValue([{ name: "git", kind: "cli_tool", status: "missing", version: null,
+      detectedPath: null, provider: null, command: null, installHints: null, error: null }]);
+    const execArgv = vi.fn(async () => "owned install result");
+    const orch = buildOrchestrator({ platform: "win32", probeRegistry, execArgv });
+    const plan = await orch.bootstrap({ mode: "plan", sourceRef });
+    expect(plan.status).toBe("planned");
+    expect(plan.actionKeys).toContain("external_install:cli_tool:git");
+    expect(JSON.stringify(plan.stages)).toContain("Git.Git");
+    expect(execArgv).not.toHaveBeenCalled();
+    const blocked = await orch.bootstrap({ mode: "apply", sourceRef, autoApprove: true });
+    expect(blocked.status).toBe("failed");
+    expect(execArgv).not.toHaveBeenCalled();
+    const applied = await orch.bootstrap({ mode: "apply", sourceRef, approvedActionKeys: ["external_install:cli_tool:git"] });
+    expect(applied.status, JSON.stringify(applied.errors)).toBe("completed");
+    expect(execArgv).toHaveBeenCalledExactlyOnceWith("winget.exe", ["install", "--id", "Git.Git", "--exact", "--source", "winget",
+      "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]);
+    expect(db.prepare("SELECT provider, status FROM bootstrap_actions WHERE bootstrap_id = ? AND action_kind = 'external_install'").get(applied.runId))
+      .toEqual({ provider: "winget", status: "completed" });
+  });
 
   it.each([
     ["false", undefined, false], ["true", undefined, true],

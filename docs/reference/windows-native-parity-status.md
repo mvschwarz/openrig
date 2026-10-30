@@ -350,3 +350,11 @@ all 38 related tests and daemon TypeScript pass. Nothing was installed on the ho
 The [WinGet install contract](https://learn.microsoft.com/en-us/windows/package-manager/winget/install)
 documents these options and IDs; this implementation is not complete package-manager parity.
 
+The bootstrap call chain now has a focused WinGet integration receipt: the real
+orchestrator resolves an owned package requirement, returns its plan/action key,
+refuses automatic approval of the reviewed Windows action, and passes the
+explicitly approved action to injected native argv execution. The resulting
+bootstrap journal records provider `winget` and completion. This single case
+passes; other bootstrap cases were filtered. Package files and database are owned
+fixtures, runtime instantiation is mocked, and no software is actually installed.
+
