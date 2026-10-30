@@ -12,6 +12,8 @@
 import nodePath from "node:path";
 import { sameSessionFile } from "./same-session-file.js";
 import { randomUUID } from "node:crypto";
+import { shellQuote } from "./shell-quote.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
 import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -320,14 +322,16 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
     });
 
+    const bareCommand = this.platform === "win32"
+      ? renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}) : cmd;
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
-      : cmd;
+      : bareCommand;
     // Stage long commands without leaving a shell above the live runner.
     let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
-      textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {
+      textResult = await this.tmux.sendShellCommand(sessionName, bareCommand, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };

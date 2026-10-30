@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### Bare Pi/OMP native launch and resume dispatch
+
+Pi/OMP fresh and resume paths now render bare Windows runner commands with the
+current Node executable instead of sending POSIX quotes to PowerShell. This
+covers OMP, Pi without a seat-environment wrapper, and Pi's pre-input
+`launch_path_too_long` fallback. The fallback now remains a native command.
+The POSIX command path and the selected seat-environment wrapper remain intact.
+
+Three owned PowerShell/Node fixture cases pass, exercising fresh and resume for
+Pi/OMP plus Pi route-refusal fallback, with exact cwd/model/session/launch-id
+arguments. The runner entry/cwd include Unicode, apostrophes and metacharacters;
+the synthetic session file respects the existing resume-token validation. No
+installed provider, conversation, credentials, queue, or psmux server is used.
+Daemon type checking passes. The broader three-file run has 44 passes and 15
+failures in legacy adapter fixtures, including POSIX command-string assertions
+and launch-id extraction incompatible with the native renderer. These failures
+remain open; owned dispatch evidence is not live provider/readiness acceptance.
+
 ### Native stub runner launch dispatch
 
 The stub adapter's production launch now renders a native Windows child launch
