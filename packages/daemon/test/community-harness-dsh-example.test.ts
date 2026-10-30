@@ -51,6 +51,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" },
             { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
       }
+      if (text.includes("ASKEND")) {
+        send({ id: "perm-2", method: "session/request_permission", params: { sessionId: session, toolCall: { toolCallId: "t3", title: "Edit b.txt", kind: "edit" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
+        return setTimeout(() => end("end_turn"), 300);
+      }
       if (text.includes("UNKNOWN")) { waiting.set("u1", () => end("end_turn")); return send({ id: "u1", method: "fs/unknown_method", params: {} }); }
       if (text.includes("HOLD")) { held = () => end("cancelled"); return; }
       say("ok");
@@ -62,7 +67,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "saidno" | "unknown" | "pending" | "lost";
+type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "saidno" | "unknown" | "readfail" | "pending" | "lost";
 interface Hook { auth: string | undefined; body: Record<string, unknown> }
 
 const cleanups: Array<() => void> = [];
@@ -96,6 +101,7 @@ async function fakeOpenRig(permissions: Permissions) {
         if (permissions === "answer") return json(200, { ok: true, state: "answered", optionId: "allow" });
         if (permissions === "saidno") return json(200, { ok: true, state: "refused", reason: "said_no" });
         if (permissions === "unknown") return json(200, { ok: true, state: "deferred" });
+        if (permissions === "readfail") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "lost") return json(404, { ok: false, code: "not_found", error: "No permission request ask-1 for this seat." });
         setTimeout(() => json(200, { ok: true, state: "pending" }), 100);
         return;
@@ -262,6 +268,26 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(answer.result).toEqual({ outcome: { outcome: "cancelled" } });
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+  });
+
+  it("releases the hold when the turn ends with a person's ask still pending, and withdraws the ask", async () => {
+    const openrig = await fakeOpenRig("pending");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("ASKEND now");
+    await waitFor(() => openrig.withdraws.find((entry) => entry.askId === "ask-1" && entry.body.reason === "turn_ended"), "the ask withdrawn at the turn's end");
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
+  });
+
+  it("keeps a permitted ask's cleanup after a failed read, answers the agent once, and withdraws the ask at the turn's end", async () => {
+    const openrig = await fakeOpenRig("readfail");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("PERMIT an edit");
+    const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
+    expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    await waitFor(() => openrig.withdraws.find((entry) => entry.askId === "ask-1" && entry.body.reason === "turn_ended"), "the ask withdrawn at the turn's end");
+    expect(seat.log().filter((entry) => entry.id === "perm-1" && entry.method === undefined)).toHaveLength(1);
   });
 
   it("uses the seat's preset name for the launch record, the activity runtime and the exit", async () => {
