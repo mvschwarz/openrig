@@ -71,6 +71,10 @@ function normalizePathForPrefix(path: string): string {
 }
 
 export function isWithinPath(candidate: string, root: string): boolean {
+  if (process.platform === "win32") {
+    const relative = path.win32.relative(root, candidate);
+    return relative === "" || (relative !== ".." && !relative.startsWith("..\\") && !path.win32.isAbsolute(relative));
+  }
   if (candidate === root) return true;
   return candidate.startsWith(normalizePathForPrefix(root));
 }

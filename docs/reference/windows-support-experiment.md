@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Native destroy-plan target classification
+
+The destroy planner now compares Windows paths with native relative-path
+semantics instead of a POSIX slash prefix. Previously, backslash paths and
+case/slash aliases of children under the state root were wrongly listed as
+separate external deletion or backup targets. A pure planning fixture reproduces
+that classification error and verifies that state children are covered once,
+while sibling prefixes, parent escapes, and other drives stay external. POSIX
+classification is unchanged. CLI type checking and both destroy test files pass.
+The new fixture only builds plans with injected existence checks; existing
+destroy tests use their owned scratch resources and injected lifecycle calls.
+No user state, live daemon, terminal session, or real listener was destroyed or
+stopped. Physical junction containment is not established by lexical path checks.
+
 ### Workflow guidance manifest aliases
 
 Workflow guidance now recognizes Windows case aliases of `project.yaml`,
