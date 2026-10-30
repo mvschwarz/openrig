@@ -18,6 +18,7 @@ import {
   type DestroyScope,
 } from "../destroy-helpers.js";
 import { stopDaemon } from "../daemon-lifecycle.js";
+import { readRecordedTmuxServerArgs } from "../tmux-attachment.js";
 
 export interface DestroyCommandDeps {
   configStore: Pick<ConfigStore, "resolve">;
@@ -116,6 +117,7 @@ function realDestroyDeps(): DestroyDeps {
     removePath: (targetPath: string) => rmSync(targetPath, { recursive: true, force: true }),
     mkdirp: (targetPath: string) => mkdirSync(targetPath, { recursive: true }),
     listManagedTmuxSessions: listManagedTmuxSessionsFromDb,
+    resolveTmuxServerArgs: readRecordedTmuxServerArgs,
     killTmuxSession: killTmuxSessionWithCli,
     sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => new Date(),

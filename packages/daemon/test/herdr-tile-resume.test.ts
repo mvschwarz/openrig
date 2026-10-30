@@ -198,6 +198,6 @@ describe("the composer gives a local tile the same attach as an argv", () => {
       expect(v.opened[index]!.paneCommand).toBe(argv.map(shellQuote).join(" "));
     }
     expect(v.opened[2]!.attachArgv).toBeUndefined();
-    expect(v.opened[2]!.paneCommand).toContain("ssh 'admin@vm1.local'");
+    expect(v.opened[2]!.paneCommand).toContain("ssh -t 'admin@vm1.local'");
   });
 });

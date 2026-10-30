@@ -59,7 +59,8 @@ export interface DestroyDeps {
   removePath: (path: string) => void;
   mkdirp: (path: string) => void;
   listManagedTmuxSessions: (dbPath: string) => string[];
-  killTmuxSession: (sessionName: string) => boolean;
+  resolveTmuxServerArgs?: (stateRoot: string) => string[];
+  killTmuxSession: (sessionName: string, serverArgs?: readonly string[]) => boolean;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
 }
@@ -179,6 +180,9 @@ function isLocalHost(host: string): boolean {
 }
 
 export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Promise<DestroyResult> {
+  // Resolve before stopping the daemon or moving its state. An unreadable record
+  // must not turn a managed-session cleanup into a kill on the caller's server.
+  const serverArgs = plan.scope === "all" ? deps.resolveTmuxServerArgs?.(plan.stateRoot) : undefined;
   const warnings = [...plan.warnings];
   const backupPaths: string[] = [];
   let stateRecreated = false;
@@ -239,7 +243,7 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
   let tmuxMissing = 0;
   if (plan.scope === "all") {
     for (const sessionName of plan.managedTmuxSessions) {
-      if (deps.killTmuxSession(sessionName)) tmuxKilled += 1;
+      if (deps.killTmuxSession(sessionName, serverArgs)) tmuxKilled += 1;
       else tmuxMissing += 1;
     }
   }
@@ -284,9 +288,9 @@ export function findListeningPidWithLsof(port: number): number | null {
   }
 }
 
-export function killTmuxSessionWithCli(sessionName: string): boolean {
+export function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): boolean {
   try {
-    execFileSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
+    execFileSync("tmux", [...serverArgs, "kill-session", "-t", `=${sessionName}`], { stdio: "ignore" });
     return true;
   } catch {
     return false;

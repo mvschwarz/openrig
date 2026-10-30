@@ -417,3 +417,54 @@ retain `follow_view_required` in a 200 `ok:false` body, as before. A changed
 preview remains `preview_changed` (409). During automatic refresh a missing or
 ambiguous scope retains the existing tiles and names the source problem in the
 explanation strip; refresh or reopen it under the current unambiguous key.
+
+
+## Reading or sending to an expected native conversation
+
+An application that selects an original Claude Code or Codex conversation can opt
+into an expected-identity check. The identity is the exact tuple `nodeId`, canonical
+`sessionName`, `runtime` (`claude-code` or `codex`) and native `nativeId`. A registry
+resume token by itself is not a current-process identity observation.
+
+Read `GET /api/sessions/:sessionName/generation-record-expected` with query fields
+`expectedNodeId`, `expectedRuntime`, `expectedNativeId` and optional `sinceBytes`.
+It resolves the verified current occupant and native process, opens that native
+record, checks its identity, and returns identity and bounded suffix bytes from
+the same opened file. Its existing byte cursor and `generationId` semantics match
+`generation-record`. Success adds `identityContract:1` and `checkedIdentity`, the
+exact expected tuple. Check both before displaying the suffix as that conversation.
+
+Send `POST /api/transport/send-expected` with the ordinary send body and a required
+`expectedIdentity` object containing those four fields. The check runs again after
+buffer preparation immediately before paste, and before Enter after any wait.
+A retained input stores the constraint in its outbox receipt; committed dispatch
+and reuse of its delivery ID cannot select a different original conversation or
+omit the stored constraint. Delivery IDs still do not deduplicate explicit input.
+Success adds `identityContract:1` and `checkedIdentity`. Retained is not sent;
+`checkedIdentity` is an observation at an input boundary, not model consumption.
+If replacement is observed after paste, the result reports `inputPhase:"written"`
+and `sent:true`, with Enter refused. Inspect that input before deciding what to do.
+
+Malformed expectations return 400 (`invalid_expected_identity`). A different
+observed identity returns 409 (`expected_identity_mismatch`); a missing or
+unverified identity returns 409 (`expected_identity_unavailable`). Conflicting
+reuse of a delivery ID returns 409 (`delivery_identity_conflict`). No conditional
+operation falls back to the replacement. Use these dedicated paths when detecting
+support: older daemons return 404 instead of silently ignoring an unknown field.
+Ordinary reads and sends without an expectation or an ID bound by an earlier
+conditional send keep their existing behavior. Reusing a bound ID also carries
+its stored constraint when the caller omits the expectation.
+
+While a runtime switch is preparing or confirmed, a conditional send returns
+409 `expected_identity_unavailable` with `sent:false` and `inputPhase:"not_reached"`.
+It retains neither the input nor the expectation. Retry the conditional endpoint
+with the original `expectedIdentity`; an ordinary send is not an identity-bound
+retry unless its ID already has a stored constraint. Ordinary sends during the
+switch keep their existing retained response.
+
+This is a finite process/record observation followed by a terminal write; tmux has
+no atomic native-conversation compare-and-write operation. A native conversation
+change after the final observation remains a race. The check does not turn a
+terminal attachment into a conversation pin: existing terminal viewers follow
+managed pane/session bindings and may display their replacement. Applications
+must keep that attachment limit separate from checked record reads and sends.

@@ -181,6 +181,13 @@ describe("Attach CLI", () => {
     });
   });
 
+  it("includes the actual socket without trimming literal path whitespace", () => {
+    const result = withTmuxPane("%42", () => resolveAttachContext(fakeTmux({
+      pane: "%42", window: "@1", session: "team_1 rig_b @7 %9", socket: "/private/socket name ",
+    })));
+    expect(result).toMatchObject({ attachmentType: "tmux", tmuxSocketPath: "/private/socket name ", tmuxSession: "team_1 rig_b @7 %9" });
+  });
+
   // Real tmux rewrote the newlines of a combined format as "_" ("unrelated-shell_@2_%2"), and the session fell back to
   // external_cli, so replies to the self-attached member had no transport.
   it.each([
@@ -216,18 +223,18 @@ describe.runIf(tmuxAvailable)("resolveAttachContext against a real tmux server (
     const window = read("#{window_id}");
     const onSocket = (cmd: string) => execSync(cmd.replace(/^tmux /, `tmux -L ${TMUX_SOCKET} `), { encoding: "utf8" }).trim();
     expect(withTmuxPane(pane, () => resolveAttachContext(onSocket)))
-      .toEqual({ attachmentType: "tmux", tmuxSession: session, tmuxWindow: window, tmuxPane: pane });
+      .toEqual({ attachmentType: "tmux", tmuxSession: session, tmuxWindow: window, tmuxPane: pane, tmuxSocketPath: read("#{socket_path}") });
   });
 });
 
 /** A `tmux display-message -p` double that renders the requested format as real tmux does, control characters
  *  included: tmux writes each one as "_". */
-function fakeTmux(values: { session: string; window: string; pane: string }) {
+function fakeTmux(values: { session: string; window: string; pane: string; socket?: string }) {
   return vi.fn((cmd: string) => {
     const format = /'([^']*)'\s*$/.exec(cmd)?.[1] ?? /"([^"]*)"\s*$/.exec(cmd)?.[1];
     if (format === undefined) throw new Error(`unexpected tmux command: ${cmd}`);
     return format.replace(/#\{session_name\}/g, values.session).replace(/#\{window_id\}/g, values.window)
-      .replace(/#\{pane_id\}/g, values.pane).replace(/[\u0000-\u001f]/g, "_");
+      .replace(/#\{pane_id\}/g, values.pane).replace(/#\{socket_path\}/g, values.socket ?? "").replace(/[\u0000-\u001f]/g, "_");
   });
 }
 

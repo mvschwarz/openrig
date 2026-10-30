@@ -1,3 +1,6 @@
+import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
+import type { Context } from "hono";
+import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
 import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
@@ -731,11 +734,17 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 // impossible, never receive an empty success.
 // Round-2 (r2 HIGH-2): raw conversation bytes with no transcript redaction — a TERMINAL-CLASS
 // surface behind the same bearer gate as its neighbors (401/401/200; null-token loopback passes).
-sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), async (c) => {
+const generationRecord = async (c: Context) => {
   const sessionName = c.req.param("sessionName")!;
+  let expected: ExpectedConversation | undefined;
+  if (c.req.path.endsWith("/generation-record-expected")) {
+    try { expected = expectedConversation({ nodeId: c.req.query("expectedNodeId"), sessionName,
+      runtime: c.req.query("expectedRuntime"), nativeId: c.req.query("expectedNativeId") }); }
+    catch (error) { return c.json({ error: "invalid_expected_identity", message: (error as Error).message }, 400); }
+  }
   const store = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   if (!store) {
-    return c.json({ error: "unsupported_runtime", message: "No context-usage store on this daemon; the seat's generation record cannot be resolved." }, 409);
+    return c.json({ error: expected ? "expected_identity_unavailable" : "unsupported_runtime", message: "No context-usage store on this daemon; the seat's generation record cannot be resolved." }, 409);
   }
   const { sessionRegistry: registry, tmuxAdapter } = getDeps(c);
   const context = registry?.findResumeContextByName(sessionName);
@@ -743,7 +752,12 @@ sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), a
   const runtime = context?.runtime ?? "claude-code";
   let transcriptPath: string | null;
   let sessionId: string | null;
-  if (runtime === "codex") {
+  let original: Awaited<ReturnType<typeof resolveExpectedConversation>> | undefined;
+  if (expected) {
+    try { original = await resolveExpectedConversation(expected, registry, tmuxAdapter, store);
+      sessionId = original.identity.nativeId; transcriptPath = original.path;
+    } catch (error) { return c.json({ error: error instanceof DeliveryGuardError ? error.code : "expected_identity_unavailable", message: (error as Error).message }, 409); }
+  } else if (runtime === "codex") {
     const binding = registry.getBindingForNode(context!.nodeId);
     const identity = new SeatIdentityStore(registry.db).getForNode(context!.nodeId);
     if (!occupant || !binding?.tmuxPane || binding.tmuxSession !== sessionName
@@ -802,39 +816,54 @@ sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), a
   // Cap the served suffix — the caller polls; a runaway record must not become a runaway response.
   const MAX_SUFFIX_BYTES = 8 * 1024 * 1024;
   try {
-    const fd = fs.openSync(transcriptPath, "r");
+    if (expected) { original = await resolveExpectedConversation(expected, registry, tmuxAdapter, store); transcriptPath = original.path; }
+    const fd = fs.openSync(original?.path ?? transcriptPath, "r");
     try {
       const stat = fs.fstatSync(fd);
       if (!stat.isFile()) throw new Error("record is not a regular file");
       const totalBytes = stat.size;
       // Identity and bytes come from the same open file. Appends preserve this identity;
       // replacing a rollout at the same path changes it, even if its native id is unchanged.
-      const generationId = JSON.stringify([occupant?.generationUuid ?? null, sessionId, transcriptPath, stat.dev, stat.ino, stat.birthtimeMs]);
-      if (runtime === "codex") {
-        let header = "";
-        for (let offset = 0; offset < Math.min(totalBytes, MAX_SUFFIX_BYTES) && !header.includes("\n");) {
+      const generationId = JSON.stringify([original?.generation ?? occupant?.generationUuid ?? null, sessionId, transcriptPath, stat.dev, stat.ino, stat.birthtimeMs]);
+      if (runtime === "codex" || expected) {
+        // Native records are append-only. Identify the opened file at its first identity-bearing line,
+        // rather than parsing megabytes of old conversation again on every suffix poll.
+        let pending = "", nativeId: string | undefined;
+        for (let offset = 0; offset < Math.min(totalBytes, MAX_SUFFIX_BYTES) && nativeId === undefined;) {
           const chunk = Buffer.alloc(Math.min(64 * 1024, totalBytes - offset, MAX_SUFFIX_BYTES - offset));
           const n = fs.readSync(fd, chunk, 0, chunk.length, offset);
           if (!n) break;
-          header += chunk.subarray(0, n).toString("utf8");
-          offset += n;
+          pending += chunk.subarray(0, n).toString("utf8"); offset += n;
+          for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n")) {
+            const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+            let row;
+            try { row = JSON.parse(line); } catch { /* explicit no-answer below */ }
+            if (runtime === "codex") {
+              nativeId = row?.type === "session_meta" && typeof row.payload?.id === "string" ? row.payload.id : "";
+              break;
+            }
+            if (typeof row?.sessionId === "string") { nativeId = row.sessionId; break; }
+          }
         }
-        let meta;
-        try { meta = JSON.parse(header.slice(0, header.indexOf("\n"))); } catch { /* explicit no-answer below */ }
-        if (meta?.type !== "session_meta" || meta.payload?.id !== sessionId) {
-          return c.json({ error: "record_identity_mismatch", message: `The rollout header does not identify current thread '${sessionId}'.` }, 409);
+        if (nativeId !== sessionId) {
+          return c.json({ error: expected ? "expected_identity_mismatch" : "record_identity_mismatch",
+            message: "The opened record does not identify the selected native conversation." }, 409);
         }
       }
-      if (sinceRaw === undefined) return c.json({ generationId, sessionId, runtime, totalBytes });
+      original?.assertCurrent();
+      const receipt = expected ? { checkedIdentity: expected, identityContract: 1 as const } : {};
+      if (sinceRaw === undefined) return c.json({ generationId, sessionId, runtime, totalBytes, ...receipt });
       if (since > totalBytes) return c.json({ error: "record_truncated", message: "Generation record shrank below the requested byte boundary." }, 409);
       const length = Math.min(totalBytes - since, MAX_SUFFIX_BYTES);
       const buf = Buffer.alloc(length);
       const read = fs.readSync(fd, buf, 0, length, since);
-      return c.json({ generationId, sessionId, runtime, totalBytes, suffix: buf.subarray(0, read).toString("utf8"), truncated: totalBytes - since > read });
+      return c.json({ generationId, sessionId, runtime, totalBytes, ...receipt, suffix: buf.subarray(0, read).toString("utf8"), truncated: totalBytes - since > read });
     } finally {
       fs.closeSync(fd);
     }
   } catch (err) {
-    return c.json({ error: "record_unreadable", message: `Generation record for '${sessionName}' is unreadable: ${(err as Error).message}` }, 409);
+    return c.json({ error: expected ? err instanceof DeliveryGuardError ? err.code : "expected_identity_unavailable" : "record_unreadable", message: `Generation record for '${sessionName}' is unreadable: ${(err as Error).message}` }, 409);
   }
-});
+};
+sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), generationRecord);
+sessionAdminRoutes.get("/:sessionName/generation-record-expected", terminalAuthGuard(), generationRecord);

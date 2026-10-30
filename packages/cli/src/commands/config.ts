@@ -11,7 +11,7 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
 }
 
 // These settings remain boot-only; capture interval/line settings reload live.
-const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path"];
+const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "daemon.db_conflict", "db.path", "terminal.tmux_server"];
 const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
@@ -106,6 +106,7 @@ Keys:
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
                          If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
   terminal.status_bar    show the inner tmux status bar on launch (default off)
+  terminal.tmux_server   inherit the launching server, or isolated per OpenRig home (restart required)
   terminal.history_limit rows of tmux scrollback per pane in the ~/.tmux.conf block rig setup writes (2000-1000000; default 10000).
                          To keep more: rig config set terminal.history_limit 50000, then rig setup. A running tmux server keeps
                          its old limit until it restarts or you run tmux source-file ~/.tmux.conf; before tmux 3.7 that changes new panes only
@@ -193,6 +194,7 @@ Precedence: CLI flag > environment variable > config file > default`)
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
+          if (key === "terminal.tmux_server") console.error("note: surviving sessions keep their previous server until deliberately stopped; rig terminal status shows the effective selection and any pending migration.");
         }
       } catch (err) {
         console.error((err as Error).message);

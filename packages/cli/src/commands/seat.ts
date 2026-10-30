@@ -1323,6 +1323,8 @@ session is refused (use rig unclaim). Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
 own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.
+A community harness stop closes its managed pane; its native processes or compute
+may outlive it. Inspect their own lifecycle receipts.
 An intentionally stopped seat does not degrade an otherwise running rig.
 Running counts still exclude the stopped seat; stopping every seat leaves the
 rig stopped. Examples:
@@ -1333,6 +1335,7 @@ rig stopped. Examples:
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);
         console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
+        if (data["paneOnly"]) console.log("Only the community seat viewer was closed. Native execution, storage and compute may remain; inspect the selected environment or harness lifecycle.");
       });
     });
 

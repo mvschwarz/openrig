@@ -55,7 +55,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     return this.deps.environmentStartup;
   }
 
-  async preflightEnvironmentStartup(binding: NodeBinding, opts: { resumeToken?: string; forkSource?: unknown }): Promise<void> {
+  async preflightEnvironmentStartup(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void> {
     await this.contained()?.preflight(binding, opts);
   }
 

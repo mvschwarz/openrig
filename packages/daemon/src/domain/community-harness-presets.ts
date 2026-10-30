@@ -4,7 +4,8 @@
 // conversation id for each launch (see `community-harness-launch-result.ts`); OpenRig records it as reported, not observed.
 // With `names_conversation: true`, OpenRig names the conversation itself and passes the name to the command; it records it
 // as named by OpenRig, not observed. OpenRig hasn't tested these harnesses: it shows them as community harnesses,
-// never confirms their identity, and reads their activity only from what the screen shows. Built-in runtime names are
+// labels launcher identity separately from observation. A declared managed runner can report activity through hooks;
+// other presets use the screen. Built-in runtime names are
 // reserved, so a preset can't replace one.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -191,13 +192,13 @@ export interface CommunityHarnessLabel {
   reportedConversation?: string;
   /** The conversation name OpenRig passed to the harness for this launch. */
   namedConversation?: string;
-  needsInput: "from the screen only: no harness prompt pattern";
+  needsInput: "from the screen only: no harness prompt pattern" | "from structured activity and screen observations";
   /** Set when the preset is missing or can't be used. */
   presetError?: string;
 }
 
 export function communityHarnessLabel(runtime: string, dir: string = communityHarnessesDir(),
-  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null }): CommunityHarnessLabel {
+  session?: { resumeType: string | null; resumeToken: string | null; resumeProvenance: string | null; runner?: boolean }): CommunityHarnessLabel {
   // A conversation is labelled reported only when the launcher reported it, and named only when OpenRig named it and passed
   // it: a resume that needed attention keeps the conversation it attempted, with neither provenance.
   const own = session?.resumeType === `community:${runtime}` && session.resumeToken ? session.resumeToken : undefined;
@@ -211,7 +212,7 @@ export function communityHarnessLabel(runtime: string, dir: string = communityHa
     identity: reported ? "reported by its launcher, not observed" : named ? "named by OpenRig, not observed" : "not confirmed",
     ...(reported ? { reportedConversation: reported } : {}),
     ...(named ? { namedConversation: named } : {}),
-    needsInput: "from the screen only: no harness prompt pattern",
+    needsInput: session?.runner === true ? "from structured activity and screen observations" : "from the screen only: no harness prompt pattern",
     ...(found.ok ? {} : { presetError: found.message }),
   };
 }

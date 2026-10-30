@@ -67,6 +67,8 @@ export interface ViewDescriptor { kind: "following" | "fixed"; name: string }
 
 export interface ComposedView {
   id: string;
+  /** Explicit daemon server for local viewer creation as well as its attached seats. */
+  localTmuxServer?: readonly string[];
   task?: TaskMembership;
   viewDescriptor?: ViewDescriptor;
   /** Service-provided preview fingerprint, attached after composition for provider labels. */

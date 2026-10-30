@@ -51,3 +51,10 @@ except g.Refused as error: print(str(error))
   const result=await run("python3",["-c",script,helper,root,file],{timeout:5000});
   expect(result.stdout.trim()).toBe("environment_file_invalid");
 });
+
+it("the shipped resume latch refuses missing exact history before provider preparation", async () => {
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"openshell-resume-"))); roots.push(root); mkdirSync(join(root,"control"));
+  const id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  writeFileSync(join(root,"control","launch.pending.json"),JSON.stringify({version:1,bindingId:"binding-one",generation:"generation-two",nativeId:id,resumeToken:id,nativeType:"community:openshell-claude",files:[],checkpoint:{nativeId:id,nativeType:"community:openshell-claude",files:[]}}));
+  expect(await command(root,"--prepare")).toMatchObject({ok:false,code:"environment_checkpoint_invalid"});
+});

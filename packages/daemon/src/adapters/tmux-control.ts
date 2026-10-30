@@ -23,7 +23,8 @@ import type { ArgvExecFn } from "./tmux.js";
  * blocks tmux's hooks print on their own (an `after-list-panes` in a user's tmux.conf) are not taken for a command's
  * reply, where a spawned client prints a hook's output after its command's. Anything else (a launch,
  * which takes the spawning process's environment; `load-buffer`, see ROUTED; a command line that cannot be written on
- * one line; a global flag; no server yet, or one before 3.2) goes to the spawned client, as before.
+ * one line; a global flag other than this client's server selection; no server yet, or one before 3.2) goes to the
+ * spawned client, as before.
  */
 
 /** The session option that marks a control session: its value is the owner id of the daemon whose client made it. */
@@ -277,6 +278,9 @@ export type SpawnControlClient = (args: string[]) => ChildProcessWithoutNullStre
 
 export interface TmuxControlOptions {
   spawnClient?: SpawnControlClient;
+  /** The adapter's fixed server selection (`-S <socket>` or `-L <name>`). Empty keeps tmux's inherited server.
+   *  Only commands carrying this exact selection may use this client's connection. */
+  serverArgs?: readonly string[];
   /** Once the command at the head of the line has had no reply for this long, the client is ended: the reads it owed
    *  are asked again of a spawned client, the writes it owed fail, and the next command starts a new client. Also the
    *  time a client has to attach. */
@@ -320,6 +324,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
   const replyTimeoutMs = options.replyTimeoutMs ?? 10_000;
   const maxBuffer = options.maxBuffer ?? TMUX_MAX_BUFFER;
   const now = options.now ?? (() => Date.now());
+  const serverArgs = [...(options.serverArgs ?? [])];
   let client: ControlClient | null = null;
   let starting: Promise<ControlClient | null> | null = null;
   let failures = 0;
@@ -390,7 +395,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
   /** The control client's arguments: a session of its own, made as it attaches and never one that exists, marked with
    *  this daemon's id, destroyed by tmux once no client is in it, and never moving its client elsewhere when it goes. */
   const clientArgs = (): string[] => [
-    "-C", "new-session", "-s", controlSessionName(owner), "-x", "80", "-y", "24", "-f", "no-output,ignore-size",
+    ...serverArgs, "-C", "new-session", "-s", controlSessionName(owner), "-x", "80", "-y", "24", "-f", "no-output,ignore-size",
     "--", ...KEEP_ALIVE,
     ";", "set-option", CONTROL_OPTION, owner,
     ";", "set-option", "destroy-unattached", "on",
@@ -402,7 +407,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
    *  started: it never starts a server, nor keeps one up that would exit without it (`checkAlone`). */
   const serverReady = async (): Promise<boolean> => {
     try {
-      const rows = (await fallback(["tmux", "list-sessions", "-F", `#{version}|#{${CONTROL_OPTION}}`])).split("\n").filter(Boolean);
+      const rows = (await fallback(["tmux", ...serverArgs, "list-sessions", "-F", `#{version}|#{${CONTROL_OPTION}}`])).split("\n").filter(Boolean);
       return supportsControlMode(rows[0] ?? "") && rows.some((row) => row.endsWith("|"));
     } catch {
       return false;
@@ -513,7 +518,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     const t = command.indexOf("-t");
     if (err.message.includes("no reply within") || t < 0 || t + 1 >= command.length) return err;
     try {
-      await fallback(["tmux", "display-message", "-p", "-t", command[t + 1]!, ""]);
+      await fallback(["tmux", ...serverArgs, "display-message", "-p", "-t", command[t + 1]!, ""]);
       return err;
     } catch (probe) {
       const stderr = (probe as { execStderr?: unknown }).execStderr;
@@ -524,8 +529,13 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
 
   const exec = async (argvIn: string[]): Promise<string> => {
     const [bin, ...argsIn] = argvIn;
-    const commandsIn = commandsOf(argsIn);
-    const routable = bin === "tmux" && argsIn.length > 0 && !argsIn[0]!.startsWith("-") && commandsIn.length > 0
+    // Only the leading global server pair is a selection: capture-pane's own -S is a scrollback bound.
+    // A different server (or any other global flags) belongs to a spawned client, unchanged.
+    const prefix = argsIn.length >= 2 && (argsIn[0] === "-S" || argsIn[0] === "-L") ? argsIn.slice(0, 2) : [];
+    const args = argsIn.slice(prefix.length);
+    const sameServer = prefix.length === serverArgs.length && prefix.every((arg, i) => arg === serverArgs[i]);
+    const commandsIn = sameServer && !args[0]?.startsWith("-") ? commandsOf(args) : [];
+    const routable = bin === "tmux" && commandsIn.length > 0
       && commandsIn.every((c) => ROUTED.has(c[0]!) && namesItsTarget(c))
       && argsIn.every((a) => !/[\n\r\0]/.test(a));
     // Every listing leaves this daemon's own rows out, from the first one on: its session may be made by the very call
@@ -533,13 +543,14 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     // exists the output is unchanged.
     const marked = bin === "tmux" && commandsIn.some((c) => LISTINGS.has(c[0]!));
     const tag = marked ? ownRowTag() : "";
-    const argv = marked ? [bin, ...markOwnRows(argsIn, owner, tag)] : argvIn;
+    const commandArgs = marked ? markOwnRows(args, owner, tag) : args;
+    const argv = marked ? [bin, ...prefix, ...commandArgs] : argvIn;
     const own = (text: string): string => marked ? withoutOwnRows(text, tag) : text;
     const target = routable ? await connected() : null;
     if (!target) return own(await fallback(argv));
     target.users++;
     try {
-      const commands = commandsOf(argv.slice(1));
+      const commands = commandsOf(commandArgs);
       let stdout = "";
       let bytes = 0;
       for (const [index, command] of commands.entries()) {

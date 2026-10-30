@@ -7,6 +7,8 @@ import type { PersistedEvent } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 
 export type SelfAttachSuccess = {
   ok: true;
@@ -35,6 +37,7 @@ export type SelfAttachFailureCode =
   | "invalid_member_name"
   | "runtime_required"
   | "runtime_mismatch"
+  | "tmux_server_mismatch"
   | "address_conflict";
 
 export type SelfAttachResult =
@@ -48,6 +51,7 @@ interface SelfAttachServiceDeps {
   sessionRegistry: SessionRegistry;
   eventBus: EventBus;
   tmuxAdapter?: TmuxAdapter;
+  tmuxServer?: { socketPath?: string; mode: "inherit" | "isolated" };
   transcriptStore?: TranscriptStore;
   claudeContextProvisioner?: {
     ensureContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void;
@@ -88,6 +92,7 @@ interface TmuxAttachContext {
   tmuxSession: string;
   tmuxWindow?: string;
   tmuxPane?: string;
+  tmuxSocketPath?: string;
 }
 
 export type SelfAttachContext = ExternalCliAttachContext | TmuxAttachContext;
@@ -102,6 +107,7 @@ export class SelfAttachService {
   private transcriptStore: TranscriptStore | null;
   private claudeContextProvisioner: SelfAttachServiceDeps["claudeContextProvisioner"] | null;
   private activityEnv: { url?: string; token?: string };
+  private tmuxServer: SelfAttachServiceDeps["tmuxServer"];
 
   constructor(deps: SelfAttachServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SelfAttachService: rigRepo must share the same db handle");
@@ -114,12 +120,15 @@ export class SelfAttachService {
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
+    this.tmuxServer = deps.tmuxServer;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.activityEnv = deps.activityEnv ?? {};
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
   }
 
   async attachToNode(opts: AttachToNodeOptions): Promise<SelfAttachResult> {
+    const serverFailure = this.checkTmuxServer(opts.context);
+    if (serverFailure) return serverFailure;
     const rig = this.rigRepo.getRig(opts.rigId);
     if (!rig) {
       return { ok: false, code: "rig_not_found", error: "Target rig not found" };
@@ -156,6 +165,8 @@ export class SelfAttachService {
   }
 
   async attachToPod(opts: AttachToPodOptions): Promise<SelfAttachResult> {
+    const serverFailure = this.checkTmuxServer(opts.context);
+    if (serverFailure) return serverFailure;
     const rig = this.rigRepo.getRig(opts.rigId);
     if (!rig) {
       return { ok: false, code: "rig_not_found", error: "Target rig not found" };
@@ -207,6 +218,16 @@ export class SelfAttachService {
       if (error instanceof SessionAddressConflict) return { ok: false, code: "address_conflict", error: error.message };
       return { ok: false, code: "duplicate_logical_id", error: (error as Error).message };
     }
+  }
+
+  private checkTmuxServer(context?: SelfAttachContext): SelfAttachResult | undefined {
+    const expected = this.tmuxServer?.socketPath;
+    if (this.tmuxServer?.mode !== "isolated" || !expected || context?.attachmentType !== "tmux") return;
+    const canonical = (file: string) => { try { return realpathSync(file); } catch { return resolve(file); } };
+    if (context.tmuxSocketPath && canonical(context.tmuxSocketPath) === canonical(expected)) return;
+    return { ok: false, code: "tmux_server_mismatch", error: context.tmuxSocketPath
+      ? "This shell uses a different tmux server. Open a shell on the server reported by rig terminal status before attaching it."
+      : "This instance uses an isolated tmux server. Update the CLI so attach --self can report this shell's socket." };
   }
 
   private async attachExistingNode(args: {

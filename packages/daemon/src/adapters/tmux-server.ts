@@ -1,12 +1,12 @@
 // Which tmux server the daemon's sessions live on, as the flags a person's attach command needs.
 //
-// The daemon runs every tmux command without -L or -S, so tmux uses the server named by the
-// daemon's inherited $TMUX when it was started from inside tmux, and otherwise the default
-// server. A person attaching from a new terminal reaches the default server, so an attach
-// command printed for a daemon on another server must name that server.
+// Startup selects either the inherited server or this OpenRig home's dedicated socket.
+// Inherited commands keep tmux's normal environment-based selection; attachment metadata
+// names that server for a new terminal. Isolation fixes both paths to the recorded socket.
 
 import fs from "node:fs";
 import path from "node:path";
+import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
 
 function realpath(p: string): string {
   try {
@@ -25,7 +25,7 @@ function realpath(p: string): string {
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
   // tmux puts the socket path first, as is: keep any whitespace in it.
-  const socket = env["TMUX"]?.split(",")[0];
+  const socket = env["TMUX"]?.replace(/,\d+,\d+$/, "");
   if (!socket?.trim()) return [];
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
@@ -41,13 +41,20 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
 }
 
 let daemonServerArgs: string[] = [];
+let daemonServerSelection: TmuxServerSelection | undefined;
 
-/** Recorded once at daemon startup, from the daemon's own environment. */
-export function setDaemonTmuxServer(args: readonly string[]): void {
+/** Recorded once at daemon startup, before reconciliation or launch. */
+export function setDaemonTmuxServer(args: readonly string[], selection?: TmuxServerSelection): void {
   daemonServerArgs = [...args];
+  daemonServerSelection = selection;
 }
 
-/** The daemon's tmux server flags; empty for the default server. */
+/** Effective startup choice, including a deferred change while old seats survive. */
+export function daemonTmuxServerInfo(): TmuxServerSelection | undefined {
+  return daemonServerSelection;
+}
+
+/** The daemon's effective server flags; empty for legacy/injected compositions. */
 export function daemonTmuxServerArgs(): readonly string[] {
   return daemonServerArgs;
 }

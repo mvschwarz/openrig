@@ -4,7 +4,7 @@
 // localhost, the TUI and CLI daemon clients, and the window opener's plain-tmux fallback on an isolated tmux server.
 // Stubbed: the provider adapters' status and liveness, the Herdr binary probe, and the macOS desktop launcher
 // (osascript), which records its command instead of opening a window.
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -19,6 +19,8 @@ import { terminalRoutes } from "../../daemon/src/routes/terminal.js";
 import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
 import { HERDR_PANES_PER_PAGE } from "../../daemon/src/domain/terminal/herdr-adapter.js";
 import type { TerminalProvider } from "../../daemon/src/domain/terminal/terminal-provider.js";
+
+vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "window-fixture" }));
 
 const env = { ...process.env }; delete env["TMUX"];
 const sockets: string[] = [];
@@ -64,6 +66,7 @@ async function fixture(herdrAvailable: boolean) {
     resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => wrapper,
   } as ConstructorParameters<typeof TerminalService>[0]);
   const app = new Hono();
+  app.get("/healthz", c => c.json({ selfHostId: "window-fixture" }));
   app.use("*", async (c, next) => { (c.set.bind(c) as (k: string, v: unknown) => void)("terminalService", service); await next(); });
   app.route("/api/terminal", terminalRoutes());
   const port = await new Promise<number>(resolve => {

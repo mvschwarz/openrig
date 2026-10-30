@@ -87,6 +87,41 @@ describe.skipIf(!supportsControlMode(version))("tmux control mode against a real
     expect(spawned.slice(connecting)).toEqual([]);
   });
 
+  it("keeps two control clients and namesake seats on their selected servers", async () => {
+    const socket = join(dir, "isolated.sock");
+    const serverArgs = ["-S", socket];
+    tmux(...serverArgs, "new-session", "-d", "-s", "seat@rig", "-x", "120", "-y", "30", "printf 'isolated seat\\n'; exec cat");
+    const isolatedSpawned: string[][] = [];
+    const isolated = tmuxControlExec((argv) => { isolatedSpawned.push(argv); return execArgvCommand(argv); }, { serverArgs });
+    try {
+      const defaultSocket = tmux("display-message", "-p", "-t", "=seat@rig:", "#{socket_path}").trim();
+      expect(await control(["tmux", "display-message", "-p", "-t", "=seat@rig:", "#{socket_path}"])).toBe(`${defaultSocket}\n`);
+      expect(await isolated(["tmux", ...serverArgs, "display-message", "-p", "-t", "=seat@rig:", "#{socket_path}"])).toBe(`${socket}\n`);
+      expect(sessions()).toEqual([controlSessionName(control.owner), "seat@rig"].sort());
+      expect(tmux(...serverArgs, "list-sessions", "-F", "#{session_name}").trim().split("\n").sort())
+        .toEqual([controlSessionName(isolated.owner), "seat@rig"].sort());
+
+      const connected = isolatedSpawned.length;
+      const adapter = new TmuxAdapter(async () => "", undefined, isolated, serverArgs);
+      expect((await adapter.listSessions()).map((session) => session.name)).toEqual(["seat@rig"]);
+      await vi.waitFor(async () => {
+        expect(await isolated(["tmux", ...serverArgs, "capture-pane", "-p", "-t", "=seat@rig:", "-S", "-20"])).toContain("isolated seat");
+      });
+      expect(isolatedSpawned.slice(connected)).toEqual([]);
+
+      // An explicit request for the other server never uses the already-connected isolated client.
+      const other = ["tmux", "-S", defaultSocket, "display-message", "-p", "-t", "=seat@rig:", "#{socket_path}"];
+      expect(await isolated(other)).toBe(`${defaultSocket}\n`);
+      expect(isolatedSpawned.slice(connected)).toEqual([other]);
+      await isolated.close();
+      await vi.waitFor(() => expect(tmux(...serverArgs, "list-sessions", "-F", "#{session_name}")).toBe("seat@rig\n"));
+      expect(sessions()).toEqual([controlSessionName(control.owner), "seat@rig"].sort());
+    } finally {
+      await isolated.close();
+      try { tmux(...serverArgs, "kill-server"); } catch { /* already gone */ }
+    }
+  });
+
   it("answers each command with its own output while a user's after-hook prints blocks between them", async () => {
     tmux("set-hook", "-g", "after-list-panes", "list-sessions -F hook-output");
     await control(["tmux", "has-session", "-t", "=seat@rig"]);

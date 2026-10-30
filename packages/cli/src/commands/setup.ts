@@ -928,8 +928,24 @@ tmux scrollback:
       // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
       // the primary surface for the new-operator sequence (status/doctor only
       // HINT back to it; the durable reference is docs/reference/getting-started.md).
+      // A failed doctor check also leaves setup not ready, so it's named below. So is the port check's warning, though setup
+      // stays ready: the configured port's daemon isn't confirmed as this user's, such as another user's daemon. Provider
+      // checks are the setup steps themselves, reused, so they aren't listed twice.
+      const stepIds = new Set(result.steps.map(step => step.id));
+      const doctorAttention = result.verification?.checks.filter(check => !stepIds.has(check.name)
+        && (check.status === "fail" || (check.name === "port" && check.status === "warn"))) ?? [];
+      const listChecks = () => {
+        for (const check of doctorAttention) {
+          console.log(`  ${check.name}: ${check.message}`);
+          if (check.fix) console.log(`    Fix: ${check.fix}`);
+        }
+      };
       if (result.ready) {
         console.log("\nSetup complete.\n");
+        if (doctorAttention.length) {
+          console.log("Some steps need attention:");
+          listChecks();
+        }
       } else {
         console.log("\nSome steps need attention:");
         if (opts.dryRun) console.log("Plan only: no setup changes were made; readiness was not checked.");
@@ -937,6 +953,7 @@ tmux scrollback:
           console.log(`  ${step.id}: ${step.message}`);
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
+        listChecks();
         console.log("Only the harnesses selected for your project need a login; an unused harness does not (rerun with --providers to leave it out).");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }

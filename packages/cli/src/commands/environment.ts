@@ -149,6 +149,21 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
         report(result.structuredContent ?? result.content);
       } finally { await mcp.close(); }
     }));
-  cmd.addHelpText("after", "\nStart with rig environment setup --help. Create/attach are explicit effects; a 202 is unconfirmed. The first native start remains rig up with the installed openshell-claude preset. One native run per binding in v1; shutdown and exact restore are not implemented here.\n");
+  cmd.command("checkpoint").argument("<binding>").requiredOption("--generation <id>", "Selected current execution generation")
+    .requiredOption("--operation <id>", "Stable private checkpoint identity").option("--json")
+    .description("Capture exact private native history and verified prior artifact references while the provider remains accessible")
+    .action(action(async (id: string, opts: { generation: string; operation: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/checkpoint`, { operationId: opts.operation, generation: opts.generation }, { timeoutMs: 120_000 })))));
+  cmd.command("recreate").argument("<binding>").requiredOption("--request <path>", "JSON with operationId, predecessor generation, checkpointId, exact resumeType/resumeToken and same-host placement")
+    .option("--json").description("Explicitly create successor compute only after exact predecessor cleanup and retained state verification; native launch remains normal rig restore")
+    .action(action(async (id: string, opts: { request: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/recreate`, JSON.parse(readFileSync(opts.request, "utf8")), { timeoutMs: 120_000 })))));
+  cmd.command("completion").argument("<binding>").requiredOption("--request <path>", "JSON selecting operationId, taskId, generation, exportOperationId and stop-native or stop-compute")
+    .option("--json").description("Select finite completion for one task, generation and required verified export; persistent defaults stay unchanged")
+    .action(action(async (id: string, opts: { request: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/completion`, JSON.parse(readFileSync(opts.request, "utf8")))))));
+  cmd.command("effect").argument("<binding>").requiredOption("--effect <name>", "close-viewer, stop-native, stop-compute or delete-owned")
+    .requiredOption("--generation <id>", "Selected execution generation").requiredOption("--operation <id>", "Stable effect identity; retries reconcile without another provider mutation")
+    .option("--engine-socket <path>", "Owned local rootless Podman socket, required to capture dependent identities before delete-owned").option("--json")
+    .description("Execute one selected effect and return its separate observed outcome; attached native/storage/compute are preserved")
+    .action(action(async (id: string, opts: { effect: string; generation: string; operation: string; engineSocket?: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/effect`, { effect: opts.effect, generation: opts.generation, operationId: opts.operation, engineSocket: opts.engineSocket }, { timeoutMs: 120_000 })))));
+  cmd.addHelpText("after", "\nStart with rig environment setup --help. Create/attach are explicit effects; a 202 is unconfirmed. The first native start remains rig up with the installed openshell-claude preset. Checkpoint before stop, select effects explicitly, and recreate compute before exact normal rig restore. No unknown effect permits fresh-native fallback.\n");
   return cmd;
 }

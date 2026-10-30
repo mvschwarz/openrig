@@ -44,7 +44,7 @@ function clearEnv(): () => void {
     // its custom home into default-path resolution; UNSETTING it would fall through
     // to the REAL ~/.openrig (foreign on-box state) — so tests set a fresh tmp home.
     "OPENRIG_HOME", "RIGGED_HOME",
-    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_DAEMON_DB_CONFLICT",
+    "OPENRIG_PORT", "OPENRIG_HOST", "OPENRIG_DB", "OPENRIG_TMUX_SERVER", "OPENRIG_DAEMON_DB_CONFLICT",
     "OPENRIG_TRANSCRIPTS_ENABLED", "OPENRIG_TRANSCRIPTS_PATH",
     "OPENRIG_TRANSCRIPTS_LINES", "OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
@@ -107,6 +107,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
     restoreEnv();
+  });
+
+  it("resolves tmux isolation from the shared config and environment with a strict mode", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolve().terminal.tmuxServer).toBe("inherit");
+    store.set("terminal.tmux_server", "isolated");
+    expect(store.resolve().terminal.tmuxServer).toBe("isolated");
+    process.env.OPENRIG_TMUX_SERVER = "inherit";
+    expect(store.resolve().terminal.tmuxServer).toBe("inherit");
+    expect(() => store.set("terminal.tmux_server", "isolate")).toThrow('must be "inherit" or "isolated"');
   });
 
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
@@ -174,6 +184,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "snapshots.periodic.retention_keep",
       // OPR.0.4.6.02 S1 — inner-tmux status-bar launch default (static bool).
       "terminal.status_bar",
+      "terminal.tmux_server",
       "terminal.history_limit",
       "terminal.inherit_tmux_environment",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.

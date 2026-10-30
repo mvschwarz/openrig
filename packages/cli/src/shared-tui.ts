@@ -1,13 +1,14 @@
-import { spawn } from "node:child_process";
 import { DaemonClient } from "./client.js";
+import { assertLocalTmux, attachTmux, readTmuxServerArgs, type TmuxAttachment } from "./tmux-attachment.js";
 
 interface SharedTuiClient {
   readonly baseUrl?: string;
+  isLocalInstance(): Promise<boolean>;
   get<T>(path: string): Promise<{ status: number; data: T }>;
 }
 
 /** Resolve the terminal on the selected instance, not a remembered tmux name. */
-export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient()): Promise<string> {
+export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient()): Promise<TmuxAttachment> {
   if (client.baseUrl && !["localhost", "127.0.0.1", "[::1]"].includes(new URL(client.baseUrl).hostname)) {
     throw new Error("Shared attachment uses local tmux. Run rig tui --shared on the selected daemon's machine; standalone rig tui can use this remote connection.");
   }
@@ -20,23 +21,18 @@ export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient
   const nodes = await client.get<Array<{
     logicalId: string; runtime: string | null;
     canonicalSessionName: string | null; tmuxAttachCommand: string | null;
+    tmuxServerArgs?: string[];
+    tmuxServerMode?: "inherit" | "isolated";
   }>>(`/api/rigs/${encodeURIComponent(kernel.rigId)}/nodes`);
   if (nodes.status >= 400) throw new Error(`Cannot read kernel terminals (HTTP ${nodes.status}); run rig status.`);
   const terminal = nodes.data.find((n) => n.logicalId === "operator.human" && n.runtime === "terminal");
   if (!terminal?.canonicalSessionName || !terminal.tmuxAttachCommand) {
     throw new Error("The kernel has no bound shared terminal. Inspect rig ps --nodes --rig kernel; restore the existing terminal rather than launching another kernel. Standalone: rig tui.");
   }
-  return terminal.canonicalSessionName;
+  await assertLocalTmux(client, terminal.tmuxServerMode, "Shared attachment uses local tmux. The selected daemon's instance identity could not be confirmed locally; run rig tui --shared on that daemon's machine. Standalone rig tui can use this remote connection.");
+  return { session: terminal.canonicalSessionName, serverArgs: readTmuxServerArgs(terminal.tmuxServerArgs) };
 }
 
-export async function attachSharedTui(target: string): Promise<number> {
-  // Attach a new client even inside tmux. switch-client would retarget somebody
-  // else's client when invoked from an agent's child shell.
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.TMUX;
-    const child = spawn("tmux", ["attach-session", "-t", `=${target}`], { stdio: "inherit", env });
-    child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 1));
-  });
+export async function attachSharedTui(target: TmuxAttachment): Promise<number> {
+  return attachTmux(target);
 }

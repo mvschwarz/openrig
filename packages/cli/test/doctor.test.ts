@@ -504,17 +504,99 @@ describe("runDoctorChecks", () => {
     }
   });
 
-  it("port in use by OpenRig daemon -> pass", async () => {
-    const origFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async () => ({ ok: true })) as unknown as typeof fetch;
+  // The listener's OS user is what /healthz reports (pid and euid): its own report, compared with the caller's.
+  const healthz = (body?: Record<string, unknown>) => async () => ({ ok: true, ...(body ? { json: async () => body } : {}) });
+
+  it("port in use by your own OpenRig daemon -> pass, naming the endpoint, the home and its pid", async () => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_HOME: "/home/me/.openrig" },
+      fetch: healthz({ ok: true, pid: 4242, euid: 1002 }) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("pass");
+    expect(result.message).toContain("your OpenRig daemon");
+    expect(result.message).toContain("the endpoint reports euid 1002, pid 4242");
+    expect(result.message).toContain("http://127.0.0.1:7433");
+    expect(result.message).toContain("/home/me/.openrig");
+  });
+
+  // A warning, not a failure: a share set up through config alone can't be told from the first-user accident, and it must
+  // keep working. The person still reads whose daemon it is and both ways on.
+  it("port served by another OS user's OpenRig daemon -> warn, naming both users as reported and how to run your own", async () => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_HOME: "/home/video075/.openrig" },
+      fetch: healthz({ ok: true, pid: 1116629, euid: 1001 }) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("warn");
+    expect(result.message).toContain("another OS user");
+    expect(result.message).toContain("the endpoint reports euid 1001, pid 1116629; your euid is 1002");
+    expect(result.message).toContain("/home/video075/.openrig");
+    expect(result.reason).toContain("self-report");
+    expect(result.fix).toContain("rig config set daemon.port");
+    expect(result.fix).toContain("rig daemon start");
+    expect(result.fix).toContain("OPENRIG_URL");
+  });
+
+  it.each([
+    ["reports no OS user", { ok: true, pid: 77 }, 1002],
+    ["answers without a JSON body", undefined, 1002],
+    ["is checked where this platform has no effective user id", { ok: true, pid: 77, euid: 1001 }, null],
+  ])("an OpenRig daemon that %s -> warn, owner unknown", async (_label, body, callerUid) => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: callerUid as number | null, fetch: healthz(body) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("warn");
+    expect(result.message).toContain("OS user is unknown");
+    expect(result.fix).toContain("rig config set daemon.port");
+  });
+
+  it("keeps passing when OPENRIG_URL selects that endpoint on purpose, and says whose daemon it is", async () => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_URL: "http://127.0.0.1:7433/" },
+      fetch: healthz({ ok: true, pid: 1116629, euid: 1001 }) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("pass");
+    expect(result.message).toContain("OPENRIG_URL");
+    expect(result.message).toContain("the endpoint reports euid 1001, pid 1116629; your euid is 1002");
+  });
+
+  it("takes OPENRIG_URL's localhost as the configured 127.0.0.1 endpoint", async () => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_URL: "http://localhost:7433" },
+      fetch: healthz({ ok: true, pid: 1116629, euid: 1001 }) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("pass");
+    expect(result.message).toContain("OPENRIG_URL");
+  });
+
+  // A listener that sends an OK header and never finishes its body must not hold doctor, or setup, before anything prints.
+  it("settles a /healthz body that never finishes as owner unknown within its bound, and releases the request", async () => {
+    // The port check's request carries a signal; doctor's other /healthz reads (the cmux check) don't.
+    const signals: AbortSignal[] = [];
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 50,
+      fetch: async (_url: string, init?: { signal?: AbortSignal }) => {
+        if (init?.signal) signals.push(init.signal);
+        return { ok: true, json: () => new Promise<unknown>(() => {}) };
+      } });
+    const started = Date.now();
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(result.status).toBe("warn");
+    expect(result.message).toContain("OS user is unknown");
+    expect(result.reason).toContain("didn't finish");
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it("settles a real listener's held /healthz body the same way, through the real fetch", async () => {
+    const { createServer } = await import("node:http");
+    const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
     try {
-      const deps = makeDeps({ checkPort: async () => false });
-      const { portCheck } = runDoctorChecks(deps);
-      const result = await portCheck;
-      expect(result.status).toBe("pass");
-      expect(result.message).toContain("OpenRig daemon");
+      const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 100,
+        configStore: { resolve: () => ({ ...defaultConfig, daemon: { port, host: "127.0.0.1" } }) } as DoctorDeps["configStore"] });
+      delete deps.fetch;
+      const result = await runDoctorChecks(deps).portCheck;
+      expect(result.status).toBe("warn");
+      expect(result.reason).toContain("didn't finish");
     } finally {
-      globalThis.fetch = origFetch;
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
     }
   });
 });
