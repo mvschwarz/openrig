@@ -132,7 +132,7 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
  *  exactly these (one producer, one parser: see parseQuestionAction). */
 export const QUESTION_BLOCK_PREFIX = "or-q:";
 export const OPTION_ACTION_PREFIX = "or-opt:";
-const TYPED_REPLY_HINT = "Or reply in this thread with your own answer.";
+const TYPED_REPLY_HINT = "Or reply in this thread with your own answer. A typed reply submits your answer without waiting for every question to be answered.";
 const CHANNEL_REPLY_HINT = "Reply in this thread with your answer.";
 
 /** Parse a clicked button back into its question and option ids; null if it is not ours. */
