@@ -51,7 +51,7 @@ jobs:
         run: npx vitest run test/windows-resource-projection.test.ts --maxWorkers=1
       - name: Paired hook CLI and native role refocus
         working-directory: packages/daemon
-        run: npx vitest run test/hook-paired-seat-rig.test.ts test/hook-command-native-env.test.ts test/refocus-rig-windows.test.ts test/refocus-role.test.ts --maxWorkers=1
+        run: npx vitest run test/hook-paired-seat-rig.test.ts test/hook-command-native-env.test.ts test/refocus-rig-windows.test.ts test/refocus-role.test.ts test/refocus-managed-result.test.ts --maxWorkers=1
       - name: Public world native verifier
         working-directory: packages/daemon
         run: npx vitest run test/public-world-pack.test.ts --maxWorkers=1
