@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Packaged plugin snapshot output names
+
+The plugin-version snapshot CLI now stages through a short UUID sibling. An owned
+minimal package archive reproduced ENOENT during publication to a valid 250-character
+output filename because the previous UUID suffix exceeded the filename limit.
+Snapshot creation, replacement and failure preservation now pass, with no temporary
+residue. The documented ordinary snapshot-refresh case also passes (two selected
+Node checks); the remaining symlink-oriented cases were not run in this selection.
+Node syntax checking passes. The fixtures archive only owned synthetic manifests;
+no published archive, release baseline or installed plugin was changed.
+
 ### Activation lens long destination filenames
 
 ActiveLensStore now stages through a short UUID sibling instead of extending the

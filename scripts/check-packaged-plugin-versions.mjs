@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -84,7 +84,7 @@ if (invokedDirectly) {
     const bytes = JSON.stringify(result, null, 2) + '\n';
     if (destination) {
       assert.ok(result.release && result.archiveSha256 && Object.keys(result.plugins).length, 'snapshot must include release, archive digest and plugins');
-      const temporary = resolve(destination) + '.' + randomUUID() + '.tmp';
+      const temporary = join(dirname(resolve(destination)), '.openrig-plugin-snapshot-' + randomUUID() + '.tmp');
       try {
         writeFileSync(temporary, bytes, { flag: 'wx' });
         renameSync(temporary, resolve(destination));
