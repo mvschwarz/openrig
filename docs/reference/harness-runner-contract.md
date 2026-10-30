@@ -215,7 +215,8 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | clicks an option: the asked person, any other registered person, or the primary user in the TUI | that option |
 | replies with just a yes ("yes", "ok", "allow", "go ahead" …) | the agent's allow (`allow_once`, else `allow_always`) |
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
-| routes or hands it to a colleague | the ask waits for the colleague, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
+| routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
+| routes or hands it to an agent seat | that seat gets no options. The request waits until the seat closes it, which is no answer, so it's permitted, or until the agent's turn ends |
 | closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
 
@@ -273,7 +274,7 @@ answer. Only the seat's opt-in refuses and holds attention.
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
 | `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
 | `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
-| `activity_grant_revoked` | 401 | The grant was revoked: a relaunch reissues it. | answers `cancelled` |
+| `activity_grant_revoked` | 401 | The grant was revoked. A grant is reissued after a lost response, so this can still be the live occupant. | permits |
 | `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
 | `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |
 
@@ -287,6 +288,8 @@ permission nobody chose. That covers:
 
 **Limits in 0.7.7:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
+- **A colleague's answer is followed on this host.** If the ask is handed to another host, the request waits, shown as
+  needs input, until the agent's turn ends.
 - **An override or `--deny` is set with the command above, never in a rig spec.** A spec field is a possible later
   change.
 - **Permits and answers aren't recorded beyond the runner's pane and the ask itself.** A permit with no one to ask
