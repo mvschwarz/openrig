@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createProgram } from "../src/index.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 // OPR.0.5.5.19 A7 — `rig parked [seat]` verb wiring. RED at base: no command answers
 // "are we parked?" at all. The diagnosis itself is pinned daemon-side; these pins cover
@@ -17,7 +18,9 @@ function stubParkedDaemon(payload: unknown): Promise<{ server: Server; url: stri
       res.end(JSON.stringify(payload));
     });
     server.listen(0, "127.0.0.1", () => {
-      resolve({ server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, urls });
+      const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      allowFetchTarget(url);
+      resolve({ server, url, urls });
     });
   });
 }
@@ -81,7 +84,7 @@ describe("rig parked (S19 A7)", () => {
       expect(out).toMatch(/watchdog id|timer|live blocker/i);
       expect(out).not.toContain("busy@rig:"); // not-parked seats stay quiet
     } finally {
-      server.close();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 
@@ -96,7 +99,7 @@ describe("rig parked (S19 A7)", () => {
       expect(out.seat.confidence).toEqual({ activity: "high", obligations: "complete" });
       expect(out.seat.obligations.scope).toContain("destination=");
     } finally {
-      server.close();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 
@@ -118,7 +121,7 @@ describe("rig parked (S19 A7)", () => {
       expect(out).toContain("scope: rig other-rig (from query-param)"); // AM-3 scope rendered
     } finally {
       if (prevSession === undefined) delete process.env.OPENRIG_SESSION_NAME; else process.env.OPENRIG_SESSION_NAME = prevSession;
-      server.close();
+      await new Promise<void>(resolve => server.close(() => resolve()));
     }
   });
 

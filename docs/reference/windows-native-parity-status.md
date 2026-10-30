@@ -57,6 +57,14 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+The remaining parked and activity-filter CLI fixtures also needed exact owned
+HTTP origin registration on Windows. Their source reproductions failed before
+registration; [parked](../../packages/cli/test/parked-verb.test.ts) and
+[activity filtering](../../packages/cli/test/ps-pl019-active.test.ts) pass all 11
+cases afterward. Both fixture listeners are loopback-only and awaited on close.
+Rig/seat diagnosis, rig-coordinate precedence and activity-filter assertions remain;
+the fetch guard, production diagnosis and actual fleet are unchanged.
+
 Current [host selection](../../packages/cli/test/host-select.test.ts) and
 [home/move dispatch](../../packages/cli/test/move-commands-host.test.ts) reproduction
 found three fixture failures: an unregistered owned HTTP origin and a POSIX-mode
