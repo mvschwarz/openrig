@@ -495,6 +495,9 @@ const cases = {
       r.check(`${label}: the turn's end is reported as usual`, h.hooks("Stop", "end_turn").length > 0, "no Stop/end_turn after the permit");
       if (label === "permitted at submit") r.check(`${label}: there's no ask to read`, h.permissionCalls("GET").length === 0,
         `${h.permissionCalls("GET").length} reads`);
+      // A read that got no answer leaves OpenRig's ask open, so it must not stay in the person's Feed after the turn.
+      if (label === "unreachable read" || label.startsWith("unlisted read")) r.check(`${label}: the ask is still withdrawn at the turn's end`,
+        await waitFor(() => withdraws(h).some((w) => w.body?.reason === "turn_ended"), scale(3000)), `withdraws: ${JSON.stringify(withdraws(h).map((w) => w.body))}`);
     }));
 
     // No answer: the request stays pending and visible, a pasted message isn't an answer, and /abort withdraws it, after
@@ -514,6 +517,10 @@ const cases = {
         r.check("pending: /abort withdraws the ask with turn_cancelled", withdrawn?.body?.reason === "turn_cancelled", `withdraw: ${JSON.stringify(withdrawn?.body)}`);
         r.check("pending: the agent's request is answered cancelled", (await waitFor(() => outcome(h), scale(3000)))?.outcome === "cancelled",
           `got ${JSON.stringify(outcome(h))}`);
+        // Once the ask is withdrawn no person is still waiting, so the cancelled turn's own end is reported as usual (the
+        // pasted message above runs as the next turn, so only that turn's Stop/cancelled counts).
+        r.check("pending: after /abort, the turn's end is reported, holding nothing",
+          await waitFor(() => h.hooks("Stop", "cancelled").some((p) => p.at >= (withdrawn?.at ?? 0)), scale(3000)), "no Stop/cancelled after the withdraw");
         await sleep(scale(1200));
         r.check("pending: an answer after the withdraw isn't delivered", answers(h).every((a) => a.msg.result?.outcome?.outcome !== "selected"),
           `answers: ${JSON.stringify(answers(h).map((a) => a.msg.result))}`);
@@ -525,6 +532,8 @@ const cases = {
       if (!h) continue;
       const withdrawn = await waitFor(() => withdraws(h)[0], scale(4000));
       r.check(`${label}: the ask is withdrawn with ${reason}`, withdrawn?.body?.reason === reason, `withdraw: ${JSON.stringify(withdrawn?.body)}`);
+      if (reason === "turn_ended") r.check(`${label}: nothing is held once the ask is withdrawn`,
+        await waitFor(() => nonExitStops(h, withdrawn?.at ?? 0).length > 0, scale(3000)), "no Stop after the withdraw");
     }
     return r;
   },
