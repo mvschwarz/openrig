@@ -53,7 +53,7 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { validatePreRestore } from "./restore-preconditions.js";
@@ -244,6 +244,7 @@ interface RestoreOrchestratorDeps {
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
+  nativeIdleShell?: (pane: string) => Promise<boolean>;
   /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
   freshLaunch?: (rigId: string, nodeId: string) => Promise<{
     status: "launched" | "failed" | "attention_required";
@@ -278,6 +279,7 @@ export class RestoreOrchestrator {
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
+  private nativeIdleShell: (pane: string) => Promise<boolean>;
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
@@ -322,6 +324,7 @@ export class RestoreOrchestrator {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
+    this.nativeIdleShell = deps.nativeIdleShell ?? (target => verifyPaneIdleShell({ target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }));
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
     this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
@@ -725,10 +728,11 @@ export class RestoreOrchestrator {
             // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
             // bound pane still in this session (a recycled pane id could name another session's shell).
             if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
-              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
+              && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))
               && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
-              && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
-              && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")) {
+              && (this.tmuxAdapter.isNativeWindows ? await this.nativeIdleShell(pane)
+                : (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell")
+              && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))) {
               idleSession = session.sessionName;
               isLive = false;
               continue;

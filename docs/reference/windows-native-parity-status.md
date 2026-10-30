@@ -500,3 +500,12 @@ same-user and permits exactly its owned business read. Together with direct
 consumer and owner regressions, 32 tests pass. Unknown and explicit-routing
 behavior retain the existing policy; no deployed daemon or foreign account is used.
 
+Subset restore now admits native Windows shell labels to the existing stable
+idle observation path instead of always treating their session as a running
+agent. Positive native idle evidence reports attention-required with the pane
+and history preserved; unavailable/unverified evidence leaves the existing
+session untouched. Three injected native cases plus legacy shell-label restore
+regressions pass, with no create/kill action in the native cases; daemon TypeScript
+passes. An initial test expected the wrong result collection and was corrected
+to the existing attention-required contract. No actual seat restore was run.
+
