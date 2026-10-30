@@ -972,3 +972,16 @@ unchanged. The test now requires elapsed time between 4.5 and 6.5 seconds, so an
 unrelated immediate error cannot count as deadline evidence. A default-delay
 native Claude fixture still passes after extending the test helper. No product
 code changed in this follow-up; daemon TypeScript passes.
+
+Agent resolution, package resolution and install planning pass 51/51 together
+on native Windows. Seventeen earlier resolver failures were fixture-only native
+path lookup/absolute-path expectations; their mock keys now resolve paths before
+lookup without changing production ref handling. The install planner was already
+passing in the initial run and required no change.
+
+An additional owned real-filesystem case resolves a local ref, a drive-qualified
+ref and its forward-slash spelling under a temporary root containing spaces,
+brackets and an apostrophe. All three load the same base and exact absolute
+imported spec through JSON-encoded YAML. Import versions/collisions and refusal
+cases remain covered by the other resolver cases. This does not access a network
+share, install a package or start a runtime. Daemon TypeScript passes.
