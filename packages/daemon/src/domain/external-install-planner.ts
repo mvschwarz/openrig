@@ -10,6 +10,8 @@ export interface ExternalInstallAction {
   kind: "cli_tool" | "system_package";
   provider: string | null;
   commandPreview: string | null;
+  /** Literal native execution; previews and manifest hints are never parsed into argv. */
+  commandArgv?: { file: string; args: string[] };
   classification: ApprovalClassification;
   installHints: Record<string, string> | null;
   reason: string;
@@ -30,7 +32,7 @@ interface PlannerOptions {
 
 /**
  * Maps missing requirements to trusted provider install actions.
- * Phase 5 ships Homebrew (darwin) only. All other platforms produce manual_only.
+ * Homebrew on macOS and a bounded WinGet mapping on Windows.
  * install_hints from manifests are display-only — never executed.
  */
 export class ExternalInstallPlanner {
@@ -94,6 +96,17 @@ export class ExternalInstallPlanner {
     }
 
     // status === "missing" — try to map to a trusted provider
+    if (this.platform === "win32" && probe.kind === "cli_tool") {
+      // Explicit catalog identities; never treat arbitrary tool names or hints as package IDs.
+      const id = ({ git: "Git.Git", pwsh: "Microsoft.PowerShell" } as Record<string, string>)[probe.name];
+      if (id) {
+        const args = ["install", "--id", id, "--exact", "--source", "winget", "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"];
+        return { requirementName: probe.name, kind: probe.kind, provider: "winget",
+          commandPreview: ["winget.exe", ...args].join(" "), commandArgv: { file: "winget.exe", args },
+          classification: "review_required", installHints: probe.installHints,
+          reason: "mapped WinGet user-scope install; source/package agreements must already be accepted" };
+      }
+    }
     if (this.platform === "darwin") {
       return {
         requirementName: probe.name,

@@ -2,6 +2,11 @@ import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { ExecFn } from "../adapters/tmux.js";
 import type { ExternalInstallAction } from "./external-install-planner.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+type ArgvExec = (file: string, args: string[]) => Promise<string>;
 
 /** A tagged action with its approval decision */
 export interface TaggedAction {
@@ -37,10 +42,14 @@ export interface ExecutionSummary {
 export class ExternalInstallExecutor {
   private exec: ExecFn;
   readonly db: Database.Database;
+  private execArgv: ArgvExec;
 
-  constructor(deps: { exec: ExecFn; db: Database.Database }) {
+  constructor(deps: { exec: ExecFn; db: Database.Database; execArgv?: ArgvExec }) {
     this.exec = deps.exec;
     this.db = deps.db;
+    this.execArgv = deps.execArgv ?? (async (file, args) => (await execFileAsync(file, args, {
+      encoding: "utf8", windowsHide: true, timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024,
+    })).stdout);
   }
 
   /**
@@ -75,7 +84,9 @@ export class ExternalInstallExecutor {
       // Execute
       const start = Date.now();
       try {
-        const stdout = await this.exec(action.commandPreview);
+        const stdout = action.commandArgv
+          ? await this.execArgv(action.commandArgv.file, action.commandArgv.args)
+          : await this.exec(action.commandPreview);
         const durationMs = Date.now() - start;
         const result: ExecutionResult = {
           actionId,

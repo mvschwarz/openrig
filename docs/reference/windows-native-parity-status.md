@@ -47,7 +47,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Local recap handoff | [Recap write](../../packages/cli/test/context-recap-write.test.ts) passes nine cases. Actual Windows write denial on an owned directory triggers delegation to the fixture server; timeout remains unknown and a connection failure retains its cause. The fixture restores its temporary ACL rule in finally. A directory junction checks refusal through a linked namespace. | Actual daemon/seat permissions; file-symlink behavior is not established by the junction case. |
 | Bundle login-file diagnostics | [CLI](../../packages/cli/test/bundle-login-files.test.ts) and [daemon](../../packages/daemon/test/bundle-login-files.test.ts) pass 45 combined cases using synthetic login fixtures and real owned archives. Native local-path and archive-path diagnostics are both checked, including JSON escaping, explicit opt-in notices and absence of fixture content in diagnostics. | Actual operator credentials are never used; this is not authorization to publish login files or a full bundle-suite result. |
 | Local auth-file assessment | [Auth ops](../../packages/cli/test/codex-auth-ops.test.ts) passes six cases with owned synthetic files: private-file creation and assessment, refusal after a real extra read ACE, malformed JSON and result redaction. The fixture import was corrected and its unsafe-file setup now changes only the DACL through native icacls instead of requiring Set-Acl security privileges. | Login state is injected; actual provider sign-in, existing user credentials and profile switching are not exercised. |
-| External dependency installation | [Native tool probes](../../packages/daemon/test/requirements-probe-native.test.ts) pass three cases; planner/executor/probe suites pass 34 cases with injected execution. Windows uses PATH/PATHEXT lookup without executing manifest hints. | Actual feature difference: the automatic install planner supports Homebrew on macOS only. Windows missing dependencies remain manual-only; no native automatic install backend is implemented or claimed. |
+| External dependency installation | Windows missing CLI requirements `git` and `pwsh` map to explicit WinGet catalog IDs and literal argv, through the existing reviewed-action workflow. Planner/executor/native probe suites pass 38 cases. Manifest hints remain display-only. | Actual WinGet installation, agreement state and package availability are unverified. Unmapped tools and system packages remain manual-only; no elevation, agreement auto-acceptance or reboot is requested. |
 
 ## Completion boundary
 
@@ -338,4 +338,15 @@ and report digest are recorded separately from the historical source-only ledger
 No new implementation failure was reproduced by these suites. This is selected
 resource validation/resolution/materialization coverage, not installed delivery
 of every resource or provider startup acceptance.
+
+The native dependency installation gap now has a bounded implementation for
+`Git.Git` and `Microsoft.PowerShell`. WinGet runs with exact ID/source selection,
+user scope, silent/noninteractive operation and no upgrade. Native argv bypasses
+shell parsing, while the existing executor journal and approval classifications
+remain. Unaccepted agreements fail rather than being automatically accepted.
+The plan-to-executor test verifies unapproved skipping, literal arguments,
+failure journaling, continuation and unmapped-tool refusal with injected execution;
+all 38 related tests and daemon TypeScript pass. Nothing was installed on the host.
+The [WinGet install contract](https://learn.microsoft.com/en-us/windows/package-manager/winget/install)
+documents these options and IDs; this implementation is not complete package-manager parity.
 

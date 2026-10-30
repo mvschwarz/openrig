@@ -6,6 +6,7 @@ import { ExternalInstallExecutor, type TaggedAction } from "../src/domain/extern
 import type { ExternalInstallAction } from "../src/domain/external-install-planner.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { ExternalInstallPlanner } from "../src/domain/external-install-planner.js";
 
 
 function makeAction(overrides: Partial<ExternalInstallAction> & { requirementName: string }): ExternalInstallAction {
@@ -25,6 +26,32 @@ function seedBootstrapRun(db: Database.Database, id: string): void {
 }
 
 describe("ExternalInstallExecutor", () => {
+  it("runs approved Windows plans as literal argv, journals failure and continues without executing hints", async () => {
+    const localDb = createDb(); migrate(localDb, ALL_MIGRATIONS);
+    try {
+      seedBootstrapRun(localDb, "native-plan");
+      const probes = ["git", "pwsh", "unmapped;tool"].map(name => ({ name, kind: "cli_tool" as const,
+        status: "missing" as const, version: null, detectedPath: null, provider: null, command: null,
+        installHints: { win32: "echo NEVER_EXECUTE" }, error: null }));
+      const plan = new ExternalInstallPlanner({ platform: "win32" }).planInstalls(probes);
+      expect(plan.reviewRequired.map(a => a.requirementName)).toEqual(["git", "pwsh"]);
+      expect(plan.manualOnly.map(a => a.requirementName)).toEqual(["unmapped;tool"]);
+      const exec = vi.fn(async () => { throw Error("Shell execution forbidden"); });
+      const execArgv = vi.fn().mockRejectedValueOnce(Error("agreement required")).mockResolvedValueOnce("installed");
+      const executor = new ExternalInstallExecutor({ db: localDb, exec, execArgv });
+      const unapproved = await executor.execute("native-plan", [{ action: plan.actions[0]!, approved: false }]);
+      expect(unapproved.skipped).toHaveLength(1);
+      expect(execArgv).not.toHaveBeenCalled();
+      const result = await executor.execute("native-plan", plan.actions.map(action => ({ action, approved: true })), 2);
+      expect(result.failed).toHaveLength(1); expect(result.completed).toHaveLength(1); expect(result.skipped).toHaveLength(1);
+      expect(exec).not.toHaveBeenCalled();
+      expect(execArgv.mock.calls).toEqual(["Git.Git", "Microsoft.PowerShell"].map(id => ["winget.exe",
+        ["install", "--id", id, "--exact", "--source", "winget", "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]]));
+      const rows = localDb.prepare("SELECT status, detail_json FROM bootstrap_actions WHERE bootstrap_id = ? ORDER BY seq").all("native-plan") as Array<{ status: string; detail_json: string }>;
+      expect(rows.map(row => row.status)).toEqual(["skipped", "failed", "completed", "skipped"]);
+      expect(JSON.parse(rows[1]!.detail_json).errorMessage).toBe("agreement required");
+    } finally { localDb.close(); }
+  });
   let db: Database.Database;
 
   beforeEach(() => {
