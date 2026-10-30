@@ -1,5 +1,5 @@
 import { ConfigStore } from "./config-store.js";
-import { shellQuote } from "./cross-host-executor.js";
+import { queueRecoveryCommand } from "./queue-recovery-command.js";
 
 /**
  * Slice 15 (OPR.0.7.0.15) P1 — the short receipt a queue WRITE prints when the
@@ -67,8 +67,7 @@ const str = (v: unknown): string | null => (typeof v === "string" && v !== "" ? 
 const isRow = (v: unknown): v is Row => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function showCommand(id: string, remoteHost?: string): string {
-  const show = `rig queue show ${shellQuote(id)} --full --json`;
-  return remoteHost ? `OPENRIG_URL='<daemon-url of host ${remoteHost}>' ${show}` : show;
+  return queueRecoveryCommand(id, remoteHost ? `<daemon-url of host ${remoteHost}>` : undefined);
 }
 
 interface WakeEvidence {

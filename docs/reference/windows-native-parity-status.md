@@ -57,6 +57,14 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+The compact queue receipt had a second POSIX-only recovery command even after
+ordinary queue error guidance was repaired. It now uses the same native command
+renderer. Two real PowerShell receipt-command cases failed before that change;
+the receipt and native-command modules pass 91 cases afterward, including literal
+ID/host quoting and endpoint restoration after both success and failure. CLI
+TypeScript passes. The executor substitutes a fixture function for rig and touches
+no actual queue or endpoint.
+
 At `696fcc5`, reconciliation with the earlier `9bbed2287` finite ledger found
 two changed sources already in that inventory and seven changed production sources
 outside its regex candidate set. All nine now have a supplemental source hash and
