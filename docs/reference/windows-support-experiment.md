@@ -2,6 +2,25 @@
 
 ## Current review status (2026-10-30)
 
+### Bundle source preparation with native checkout aliases
+
+The complete bundle-source module was reviewed. An owned injected-Git fixture
+reproduced a valid in-checkout junction being refused as an outside repository
+folder when a short-root checkout and its native long path were compared.
+Windows now consistently uses native realpath for checkout roots, selected
+folders, linked directories, referenced agents/packages and preset staging.
+POSIX canonicalization is unchanged.
+
+Three final owned native cases pass: selected-folder junction, contained agent
+reference through the alias, and outside-checkout junction refusal with its target
+unchanged and the failed import removed. CLI TypeScript checking passes.
+The earlier combined run passed 36/42 (the initial native case plus 35 existing
+cases); all six failures were fixture symlink EPERM errors. Those six remain
+unverified, and junction coverage does not substitute for file-symlink permission.
+No GitHub fetch, real Git remote, daemon request, bundle build/install, credential
+or host workspace was used by the new fixtures. Full native import and preset
+integration remain open.
+
 ### CLI and daemon legacy workspace defaults through native aliases
 
 Both settings readers recognized old workspace defaults only by exact text or
