@@ -15,7 +15,7 @@ not activate the running daemon or seats.
 | Configuration, profiles and file replacement | Native private-file helpers, DACL preservation and selected actual writer fixtures | File-symlink cases denied by this host remain unverified; this is not an exhaustive writer audit |
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
-| MCP and local IPC | Actual IPv6 tool call, stdio EOF and separately asserted native forced termination | These checks do not establish whole-runtime acceptance |
+| MCP and local IPC | Actual IPv6 tool call, stdio EOF, separately asserted native forced termination and owned named-pipe drain checks | These checks do not establish whole-runtime acceptance |
 | CLI/TUI regression | Isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`: 7,202 tests, 7,031 passed, 94 failed, 77 pending; source stable | TUI: 1,183 passed, zero failed, 21 pending. CLI: 5,848 passed, 94 failed, 56 pending. This older frozen source does not validate subsequent changes |
 | Native platform acceptance | Windows Terminal paths and selected native OS fixtures have individual receipts | Full visual focus, suspend/reboot, all-provider and installed-package acceptance remain incomplete |
 | Runtime-specific upstream limits | Existing Rex refusal and Linux-qualified Herdr behavior are retained | Do not erase those limits or describe an optional patched psmux protocol as stock 3.4.0 support |
@@ -272,6 +272,25 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Active IPC, bounded shutdown and private observer review (2026-10-30)
+
+At source 3d002eaaaa8f3b1d867a75e43800b3a13bd28d63, complete Windows daemon
+control, bounded shutdown and occupant-shadow integration files pass 36/36
+with no pending cases. This review required no additional production change.
+The native pipe cases refuse inherited-access control directories, reject a
+stale instance identity, accept the current identity and preserve a successor's
+capability when closing its predecessor. An owned child crosses the production
+startServer drain with fixture services and persists its clean outcome receipt.
+Other cases retain timeout/failed outcomes, repeat-signal behavior, private
+exclusive sink creation and shared-parent refusal using synthetic observations.
+
+The gateway Unix-socket transport/spawn modules are explicitly retired in place;
+they were not made production callers or revived for Windows. Herdr's existing
+Linux qualification remains. Private observer canonical-parent restrictions were
+retained rather than relaxed as a supposed portability repair. These checks do
+not restart the deployed daemon, enable a real observer, read real captures or
+establish reboot/suspend/complete provider lifecycle acceptance.
 
 ## Native browser launcher system path (2026-10-30)
 
