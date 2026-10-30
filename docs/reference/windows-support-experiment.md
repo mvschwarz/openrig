@@ -2,6 +2,27 @@
 
 ## Current review status (2026-10-30)
 
+### Current cumulative package build and transport review
+
+The full actual Windows package build completed at source head
+`1ba7a188babcd87579ba45c478cefa8c8f0a2a08`, from 02:54:18 to 02:55:04 UTC
+on 2026-10-30 (exit 0). Tracked source was unchanged before and after the build.
+This covers the cumulative recent implementation changes through the managed
+runner alias correction, including daemon, UI, TUI, CLI and package assembly.
+The artifact reports dirty because the protected untracked diagnostic remains;
+that file was not read or published. This was not a new install or activation.
+
+The cross-host executor's full focused fixture file passes 35 checks using
+injected SSH subprocesses. Its local launch is argv-based; `sh -lc` belongs to
+the remote POSIX login-shell contract, so it was not rewritten as local PowerShell.
+This does not verify a real remote host or a Windows OpenSSH server's shell.
+Herdr following remains explicitly qualified on Linux 0.9.5/protocol 22; its
+remote tail command is not evidence of a missing local Windows tail executable.
+
+The finite source-candidate ledger still has 106 unreconciled entries. That is
+an audit accounting count, not a count of confirmed feature gaps. Source-only
+reviews and this successful build do not establish full native acceptance.
+
 ### Pi, OMP and stub runner witness path aliases
 
 Native managed-runner readiness now joins different entry, cwd and state-root
