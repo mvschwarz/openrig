@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
@@ -61,6 +63,35 @@ describe("SpecLibraryService", () => {
       specReviewService,
     });
   }
+
+  it.runIf(process.platform === "win32")("rolls back the new spec when a native reader refuses deletion of the old file", async () => {
+    const original = join(tmpDir, "original.yaml");
+    writeFileSync(original, VALID_AGENT_YAML);
+    const lib = createLibrary(); lib.scan();
+    const id = lib.list()[0]!.id;
+    const script = "$ErrorActionPreference='Stop'; $s=[IO.File]::Open($env:OPENRIG_OWNED_LOCK_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{[Console]::Out.WriteLine('held');[Console]::In.ReadLine()|Out-Null}finally{$s.Dispose()}";
+    const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+    const child = spawn(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { SystemRoot: process.env.SystemRoot, OPENRIG_OWNED_LOCK_FILE: original },
+    });
+    const closed = once(child, "close");
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const ready = await Promise.race([once(child.stdout, "data").then(([bytes]) => String(bytes)),
+        new Promise<string>((_, reject) => { readyTimer = setTimeout(() => reject(new Error("owned lock did not start")), 5000); })]);
+      clearTimeout(readyTimer);
+      expect(ready.trim()).toBe("held");
+      expect(() => lib.rename(id, "renamed")).toThrow();
+      expect(readFileSync(original, "utf8")).toBe(VALID_AGENT_YAML);
+      expect(readdirSync(tmpDir)).toEqual(["original.yaml"]);
+    } finally {
+      clearTimeout(readyTimer);
+      child.stdin.end("\n");
+      const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+      await closed.finally(() => clearTimeout(timer));
+    }
+    expect(lib.rename(id, "renamed")).toMatchObject({ ok: true, entry: { name: "renamed" } });
+  }, 15000);
 
   it.runIf(process.platform === "win32")("discovers native YAML extension and builtin entrypoint case spellings", () => {
     const builtin = join(tmpDir, "builtin"), user = join(tmpDir, "user");

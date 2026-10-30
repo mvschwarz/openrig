@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Failed spec rename cleans its newly created output
+
+A real owned Windows read handle that denies deletion reproduced spec rename
+throwing after writing its new filename, leaving both old and new specs behind.
+Rename now exclusively creates the new file, closes it after writing, and removes
+that owned output if writing or deleting the old file fails. The original error
+is retained; a refused cleanup retains the owned output rather than reporting
+success. The native lock fixture confirms unchanged old bytes, no duplicate after
+failure, and successful retry after releasing the handle. Service/route tests
+pass 22/22 and daemon TypeScript checking passes. No real spec or process was used.
+
 ### Stock psmux native input fixtures are isolated and passing
 
 The existing native terminal fixtures now select a separate home, registry and

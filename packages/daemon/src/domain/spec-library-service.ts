@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative, dirname, extname } from "node:path";
 import { createHash } from "node:crypto";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -271,8 +271,17 @@ export class SpecLibraryService {
     if (nextPath === entry.sourcePath) {
       writeFileSync(entry.sourcePath, nextYaml, "utf-8");
     } else {
-      writeFileSync(nextPath, nextYaml, "utf-8");
-      unlinkSync(entry.sourcePath);
+      const fd = openSync(nextPath, "wx");
+      let completed = false;
+      try {
+        try { writeFileSync(fd, nextYaml, "utf-8"); } finally { closeSync(fd); }
+        unlinkSync(entry.sourcePath);
+        completed = true;
+      } finally {
+        // A Windows reader may allow the read above but deny deleting the old
+        // file. Keep its bytes and retire only the new file this call created.
+        if (!completed) try { unlinkSync(nextPath); } catch { /* Retain owned output if cleanup is refused. */ }
+      }
     }
 
     this.scan();
