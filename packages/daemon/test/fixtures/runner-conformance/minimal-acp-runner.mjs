@@ -232,6 +232,7 @@ function abort() {
   if (!busy) return;
   cancelSent = true;
   notify("session/cancel", { sessionId });
+  if (breaks.has("release-refusal-on-abort")) attention = false;
   void withdrawLive("turn_cancelled");
 }
 

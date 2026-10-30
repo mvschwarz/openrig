@@ -70,6 +70,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["refuse-on-unreachable", "4", "unreachable: the agent gets its allow_once option"],
     ["permit-on-deny", "4", "denied_by_seat: the answer is a refusal, never an allow option"],
     ["stop-while-attention", "4", "denied_by_seat: no idle Stop or beat while holding that attention"],
+    ["release-refusal-on-abort", "4", "denied_by_seat, then /abort: no idle Stop or beat while holding that attention"],
     ["silent-permission", "4", "denied_by_seat: what was asked is shown in the pane"],
     ["no-submit", "4b", "allow: the request is submitted to /api/activity/permission-requests"],
     ["wrong-request-id", "4b", "requestId is the agent's JSON-RPC id"],
