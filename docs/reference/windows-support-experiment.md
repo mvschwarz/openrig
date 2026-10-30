@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Current Pi occupant record through native path aliases
+
+The current-generation Pi record resolver still compared the managed runner entry
+and state-root paths as case-insensitive text only. Two owned junction fixtures
+reproduced a false unknown result when the process arguments and configured paths
+named the same existing file or directory through different native aliases.
+Windows now also accepts matching nonzero file identities with the expected
+file/directory type. Existing exact-path behavior and POSIX matching are retained.
+
+Both fixtures pass after the repair and retain refusal for a distinct entry/state
+root and a mismatched launch id. The complete current-generation and Pi occupant
+test files plus these fixtures pass (51/51); daemon TypeScript checking passes.
+Process rows were injected and all
+files were owned temporary fixtures: no live seat, conversation, process census,
+model request or restore was accessed. This is a scoped record-selection repair,
+not full native restore or live model-monitor acceptance.
+
 ### Native Slack state replacement filename limit
 
 The durable dead-letter rewrite and channel/thread coverage checkpoints appended

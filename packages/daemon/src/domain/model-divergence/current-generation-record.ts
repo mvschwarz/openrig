@@ -4,6 +4,7 @@
 // identity tie-breaker: a deliberately retained predecessor may keep writing forever.
 
 import { basename, dirname, join, relative, isAbsolute, sep } from "node:path";
+import { statSync } from "node:fs";
 import { parseSqliteUtcMs } from "../sqlite-time.js";
 import { piPinReadings, piSeatPinReadings, readPiEffectiveModel } from "./effective-model-readers.js";
 import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
@@ -89,6 +90,16 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
 
 function sameWindowsPath(a: string, b: string): boolean {
   return a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
+}
+
+function sameWindowsObject(a: string, b: string, kind: "file" | "directory"): boolean {
+  if (sameWindowsPath(a, b)) return true;
+  if (process.platform !== "win32") return false;
+  try {
+    const first = statSync(a, { bigint: true }), second = statSync(b, { bigint: true });
+    const correctType = kind === "file" ? first.isFile() && second.isFile() : first.isDirectory() && second.isDirectory();
+    return correctType && first.ino !== 0n && first.dev === second.dev && first.ino === second.ino;
+  } catch { return false; }
 }
 
 function nativeExecutableIs(row: ProcessRow, name: string): boolean {
@@ -383,9 +394,9 @@ export async function resolveIdentityVerifiedPiRecord(
   const head = `node ${input.runner.entryPath} --session-name ${input.sessionName} --state-root ${input.runner.stateRoot} --cwd `;
   const words = native ? parseWindowsCommandLine(command) : command.split(/\s+/);
   const matchesHead = native ? runner.platform === "win32" && nativeExecutableIs(runner, "node")
-    && sameWindowsPath(words[1] ?? "", input.runner.entryPath)
+    && sameWindowsObject(words[1] ?? "", input.runner.entryPath, "file")
     && words[2] === "--session-name" && words[3] === input.sessionName
-    && words[4] === "--state-root" && sameWindowsPath(words[5] ?? "", input.runner.stateRoot)
+    && words[4] === "--state-root" && sameWindowsObject(words[5] ?? "", input.runner.stateRoot, "directory")
     && words[6] === "--cwd" && !!words[7] : command.startsWith(head);
   if (!matchesHead) {
     return { ok: false, reason: `the Pi runner under ${binding.tmuxPane} does not start with the managed runner arguments` };
