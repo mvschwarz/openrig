@@ -455,3 +455,13 @@ readiness/receiver cases and daemon TypeScript pass, including refusal before
 PID observation when the pane is unbound. This adds binding checks to the new
 native branch without changing the process-only readiness claim.
 
+At `12204b3`, the original finite 223-row ledger has five changed production
+sources, 217 unchanged hashes and one withheld private row that was not read.
+Unchanged hashes do not refresh acceptance. A separate seven-source index now
+records current hashes and scoped receipt digests for native installation,
+bootstrap, successor and receiver changes, including files absent from the old
+candidate inventory. These receipts were not all executed at this head and do
+not contain production-source hashes themselves; overlapping counts are not a
+new cumulative test total. Historical tmux/startup evidence still needs its own
+reconciliation rather than inheriting a current whole-runtime claim.
+
