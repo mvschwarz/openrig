@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Read backwards in bounded chunks so a large daemon log need not fit in memory. */
 export function lastLogLines(file: string, count = 10): { text: string; position: number } {
@@ -72,7 +72,17 @@ export function followLog(file: string, write: (text: string) => void, interval 
   return close;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return process.platform === "win32"
+      ? fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(entry).href;
+  } catch { return false; }
+})();
+
+if (isDirectRun) {
   const file = process.argv[2];
   try {
     if (!file) throw new Error("Missing daemon log path");

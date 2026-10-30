@@ -1,7 +1,8 @@
 import { makeKernelHookReviewReader } from "./domain/kernel-hook-review.js";
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import fs from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
@@ -459,12 +460,16 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
-// pathToFileURL normalizes argv[1] (backslash paths on Windows) into the same
-// shape as import.meta.url — a plain `file://${argv[1]}` never matches on win32,
-// which made the daemon exit silently with code 0.
-const isDirectRun =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+// Node resolves junctions before loading ESM; argv retains the launch spelling.
+const isDirectRun = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return process.platform === "win32"
+      ? fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(entry).href;
+  } catch { return false; }
+})();
 
 if (isDirectRun) {
   // Before anything spawns: the tmux server this daemon starts passes its

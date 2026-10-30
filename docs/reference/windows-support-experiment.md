@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Direct daemon and log entry aliases
+
+The active daemon and CLI log-tail entry guards now compare physical paths on
+Windows, matching the runner correction. Node resolves an ESM module through a
+junction while argv retains its launch spelling; URL-string equality can therefore
+skip a directly executed entry. POSIX URL comparison and import-only behavior are
+retained. The retired gateway-process entry is not activated by this change.
+
+An owned log fixture exercises the actual TypeScript entry through a directory
+junction and checks that importing the module does not read the log. The focused
+log tests and CLI/daemon TypeScript checks pass. The daemon entry has source/type
+verification only: this check does not start a daemon, change the deployed runtime,
+or establish live fleet acceptance. Broader parity work remains open.
+
 ### Runner direct-entry identity through Windows junctions
 
 Pi and stub runner self-invocation guards now compare native Windows physical
