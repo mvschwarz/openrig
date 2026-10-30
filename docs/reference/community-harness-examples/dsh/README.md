@@ -7,7 +7,7 @@ section:
 - **one prompt per block:** each submitted block becomes one `session/prompt`, using bracketed paste in a TTY;
 - **turn boundaries:** reported as activity hooks;
 - **cancel:** `/abort` or Ctrl-C sends `session/cancel`, and a turn reads cancelled only when dsh says so;
-- **permissions:** each request goes to the person chosen for the seat;
+- **permissions:** each request goes to a person through OpenRig;
 - **resume:** it reopens the exact conversation, or says honestly that it couldn't.
 
 It has no dependencies, and it isn't installed by OpenRig. Copy it with [`dsh.yaml`](dsh.yaml) and maintain both as your
@@ -31,10 +31,14 @@ The runner's own defaults for dsh:
 
 ## Permissions
 
-With a person chosen for the seat (`rig seat set-permissions-to <seat> --to <person> --reason "…"`), the runner submits
-each request to OpenRig. That person answers one of the options dsh offered, and the runner gives that answer to the same
-live request, once. Without a chosen person, or on an OpenRig without this path, the runner refuses the request at once,
-shows it in the pane, and holds the seat at needs input until the next prompt.
+The runner submits each request to OpenRig, which asks one person:
+- the default person;
+- or the person chosen for the seat with `rig seat set-permissions-to <seat> --to <person> --reason "…"`.
+
+That person answers one of the options dsh offered, and the runner gives that answer to the same live request, once.
+
+When no one can be asked, or on an OpenRig without this path, the runner refuses the request at once and shows it in the
+pane. The seat then reads needs input until the next prompt.
 
 ## Before you declare resume
 
