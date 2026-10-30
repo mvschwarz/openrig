@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { resourceDirectoryName } from "./resource-directory-name.js";
 import nodePath from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
@@ -2556,10 +2557,10 @@ export class PodRigInstantiator {
       // outside the project tree (OMP's seat agent dir) names its own skill target.
       resolveTargetPath: (category, effectiveId, cwd, sourcePath) =>
         input.member.runtime === "codex" && category === "skill"
-          ? nodePath.join(codexSkillTargetRoot ?? nodePath.join(cwd, ".agents", "skills"), effectiveId, "SKILL.md")
+          ? nodePath.join(codexSkillTargetRoot ?? nodePath.join(cwd, ".agents", "skills"), resourceDirectoryName(effectiveId), "SKILL.md")
           // OPR.0.7.0.13: a Claude seat's skills are written to its own storage, so an edit there is what to protect.
           : input.member.runtime === "claude-code" && category === "skill" && claudeSkillTargetRoot
-            ? nodePath.join(claudeSkillTargetRoot, effectiveId, "SKILL.md")
+            ? nodePath.join(claudeSkillTargetRoot, resourceDirectoryName(effectiveId), "SKILL.md")
           : category === "skill" && adapter.skillTargetPath
             ? adapter.skillTargetPath(launchResult.binding.tmuxSession, effectiveId)
             : claudeConflictTargetPath(

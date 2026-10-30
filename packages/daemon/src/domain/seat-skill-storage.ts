@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resourceDirectoryName } from "./resource-directory-name.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
@@ -410,7 +411,7 @@ export function seatSkillsToKeep(
   const warnings: string[] = [];
   for (const entry of entries) {
     if (entry.category !== "skill") continue;
-    const target = nodePath.join(paths.skillsRoot, entry.effectiveId);
+    const target = nodePath.join(paths.skillsRoot, resourceDirectoryName(entry.effectiveId));
     if (!fs.existsSync(target)) continue;
     if (seatSkillDiffers(entry.absolutePath, target)) {
       warnings.push(`Restore: kept ${target}: it differs from its source ${entry.absolutePath} (an edit is never overwritten)`);
@@ -441,7 +442,7 @@ export function seatSkillReplay(input: {
   const warnings = [...kept.warnings];
   for (const entry of input.entries) {
     if (entry.category !== "skill" || skipEntryIds.has(entry.effectiveId)) continue;
-    const target = nodePath.resolve(paths.skillsRoot, entry.effectiveId);
+    const target = nodePath.resolve(paths.skillsRoot, resourceDirectoryName(entry.effectiveId));
     if (blocked(target)) {
       skipEntryIds.add(entry.effectiveId);
       warnings.push(`Restore: ${target} not projected again: its recorded source is gone or has changed`);

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { resourceDirectoryName } from "./resource-directory-name.js";
 import path from "node:path";
 import { classifyResourceProjection, hashContent } from "./conflict-detector.js";
 import type { ProjectionClassification, ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
@@ -72,9 +73,9 @@ function skillDirectory(runtime: string, binding: NodeBinding, adapter: RuntimeA
     const representative = adapter.skillTargetPath(binding.tmuxSession, id);
     return representative ? path.dirname(representative) : null;
   }
-  if (runtime === "claude-code") return path.join(binding.cwd, ".claude", "skills", id);
-  if (runtime === "codex") return path.join(binding.cwd, ".agents", "skills", id);
-  if (runtime === "stub") return path.join(binding.cwd, ".openrig", "stub", "skills", id);
+  if (runtime === "claude-code") return path.join(binding.cwd, ".claude", "skills", resourceDirectoryName(id));
+  if (runtime === "codex") return path.join(binding.cwd, ".agents", "skills", resourceDirectoryName(id));
+  if (runtime === "stub") return path.join(binding.cwd, ".openrig", "stub", "skills", resourceDirectoryName(id));
   return null;
 }
 
@@ -88,13 +89,13 @@ function projectionCopyDirectory(entry: ProjectionEntry, runtime: string, bindin
     if (entry.pluginType && entry.pluginType !== "auto" && entry.pluginType !== pluginRuntime) return null;
     if ((!entry.pluginType || entry.pluginType === "auto")
       && !fs.existsSync(path.join(entry.absolutePath, `.${pluginRuntime}-plugin`, "plugin.json"))) return null;
-    return path.join(binding.cwd, runtime === "claude-code" ? ".claude" : ".codex", "plugins", entry.effectiveId);
+    return path.join(binding.cwd, runtime === "claude-code" ? ".claude" : ".codex", "plugins", resourceDirectoryName(entry.effectiveId));
   }
   if (entry.category === "runtime_resource") {
     const merged = runtime === "claude-code"
       ? ["claude_settings_fragment", "claude_mcp_fragment", "claude_activity_hooks"] : ["codex_config_fragment"];
     if (merged.includes(entry.resourceType ?? "")) return null;
-    return path.join(binding.cwd, runtime === "claude-code" ? ".claude" : ".agents", "extensions", entry.effectiveId);
+    return path.join(binding.cwd, runtime === "claude-code" ? ".claude" : ".agents", "extensions", resourceDirectoryName(entry.effectiveId));
   }
   return null;
 }

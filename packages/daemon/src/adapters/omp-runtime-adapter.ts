@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { resourceDirectoryName } from "../domain/resource-directory-name.js";
 import { PiRuntimeAdapter } from "./pi-runtime-adapter.js";
 import { piSeatPaths } from "./pi-runner-protocol.js";
 
@@ -11,7 +12,7 @@ export class OmpRuntimeAdapter extends PiRuntimeAdapter {
    *  OMP's PI_CODING_AGENT_DIR; a Claude copy in a shared cwd is not this seat's. */
   skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
     if (!tmuxSession) return null;
-    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
+    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", resourceDirectoryName(effectiveId), "SKILL.md");
   }
 
   /** #875: OMP keeps its guidance in the repository AGENTS.md. Pi's agent-folder loading was shown natively; OMP's wasn't. */

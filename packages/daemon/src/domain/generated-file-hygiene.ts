@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { resourceDirectoryName } from "./resource-directory-name.js";
 
 const within = (root: string, file: string): boolean => {
   const rel = path.relative(root, file);
@@ -12,7 +13,7 @@ const foldCase = (value: string) => value.replace(/[A-Z]/g, c => c.toLowerCase()
 // Native Windows resolution expands DOS short names consistently with Git.
 const realpath = (file: string) => fs.realpathSync.native(file);
 // The bundled plugin is imported as shared:openrig-core; keep the unqualified projection too.
-const corePluginDirectories = [".codex/plugins/openrig-core", ".codex/plugins/shared:openrig-core"];
+const corePluginDirectories = ["openrig-core", "shared:openrig-core"].map(id => `.codex/plugins/${resourceDirectoryName(id)}`);
 
 /** Only pass files this projection created. Existing names/bytes are not ownership. */
 export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): string[] {

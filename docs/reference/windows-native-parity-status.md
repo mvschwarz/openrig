@@ -924,3 +924,29 @@ directory components in those fixtures and in projection target construction;
 native namespaced projection needs a dedicated reproduction and reconciliation
 of target paths and generated-file exclusion before any parity claim. The
 successful role/scope checks do not close that separate projection requirement.
+
+Dedicated owned-file reproductions confirmed that qualified plugin IDs failed
+in both Claude and Codex because `:` was passed directly to NTFS mkdir. Native
+resource directory construction now escapes Windows-invalid components while
+retaining logical IDs in specifications and projection records. Percent spelling
+is escaped too; newly encoded names preserve case/Unicode distinctions even on
+case-insensitive volumes, and reserved device names/trailing dots are encoded.
+Ordinary valid names and all POSIX directory names retain their existing layout.
+No existing directories are migrated or removed by this change.
+
+The shared mapping is used by Claude/Codex/Pi/OMP (and stub skill) projection,
+conflict-target resolution, cwd preparation, seat-skill replay and runtime-switch
+material preparation. Codex's generated-file exclusion recognizes the mapped
+core-plugin directories. Installed-skill reads decode logical IDs and group
+recursive filesystem entries by resource directory instead of reporting helper
+filenames as separate resources.
+
+Thirteen scoped native regressions pass: directory encoding/collision checks,
+real Claude/Codex plugin projection and Codex Git exclusion, four runtime skill
+projections with ID readback/cwd conflict detection/operator-edit preservation/
+missing-source replay refusal, plus six existing native filename/path cases.
+A separate existing Codex installed-resource case also passes. Daemon TypeScript
+passes. All files/Git repositories are owned temporary fixtures; no provider,
+live seat or runtime switch is executed. The new regression file is in Windows
+CI, which has not run. The broader generated-file hygiene file still has its
+separate invalid-fixture/symlink/wrapper limitations and is not claimed green.
