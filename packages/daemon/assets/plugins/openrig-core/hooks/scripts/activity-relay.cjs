@@ -245,7 +245,10 @@ function settingsRelayPath(command) {
   const executable = decode(m[1]);
   const relay = decode(m[2]);
   if (m.slice(1).some(token => token.startsWith("'") && quote(decode(token)) !== token)) return null;
-  if (!path.isAbsolute(relay) || !path.normalize(relay).endsWith(path.sep + SETTINGS_RELAY_TAIL.split("/").join(path.sep))) return null;
+  const relayPath = path.normalize(relay);
+  const tail = path.sep + SETTINGS_RELAY_TAIL.split("/").join(path.sep);
+  if (!path.isAbsolute(relay) || !(process.platform === "win32"
+    ? relayPath.toLowerCase().endsWith(tail.toLowerCase()) : relayPath.endsWith(tail))) return null;
   if (executable !== "node" && (!path.isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(path.basename(executable)))) return null;
   return { executable, relay };
 }

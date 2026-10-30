@@ -2,6 +2,29 @@
 
 ## Current review status (2026-10-30)
 
+### Native settings-relay path casing and plugin duplicate suppression
+
+The activity relay's settings-command check used a case-sensitive path suffix on
+Windows. An owned identical relay referenced through upper-case native path
+spelling was not recognized, so the plugin could report the event in addition to
+the managed settings copy. The suffix check now follows native Windows casing;
+the finite command grammar, available interpreter check and exact script-byte
+comparison remain required. POSIX matching is unchanged.
+
+The pre-repair native case failed; 28/28 tests pass afterward across native relay
+paths and the complete managed hook-delivery test file. Missing event registration
+and different script bytes still do not suppress the plugin. The hook syntax and
+source packaged-plugin version check pass. Both source plugin manifests are now
+0.1.31 (source hash
+`93fa63894ca2799955e397b26a43e5595c61d0221ab17895792066bc4e105b6a`).
+This does not refresh the previously assembled 0.1.29 CLI plugin or installed
+plugins. No live hook event, HTTP delivery, provider, seat or daemon was used.
+
+The complete activity-relay script and pure Pi runner protocol module were also
+reviewed. The latter retains explicit native environment handling and shared
+state/argv builders; its native pane dispatch remains the adapter's responsibility.
+Source review does not establish full live runner or hook integration acceptance.
+
 ### Bounded native Codex login-state probe
 
 The default synchronous `login status` probe had no timeout. An owned npm-layout
