@@ -43,6 +43,9 @@ jobs:
       - name: Unlaunched native grant-service boundary
         working-directory: packages/cli
         run: npx vitest run test/mcp-http-grant-service-unlaunched.integration.test.ts --maxWorkers=1
+      - name: Pinned classic Claude restore launch
+        working-directory: packages/daemon
+        run: npx vitest run test/windows-claude-restore-launch.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly

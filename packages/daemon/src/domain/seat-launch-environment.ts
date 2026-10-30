@@ -245,6 +245,11 @@ export class SeatLaunchEnvironment {
             const equals = assignment.indexOf("=");
             env[assignment.slice(0, equals)] = assignment.slice(equals + 1);
           }
+          // The classic builders pin an executable with POSIX `exec`. Native
+          // ProcessStartInfo already starts that executable directly; `exec`
+          // is not a Windows executable and must not become FileName.
+          if (words[0] === "exec") words.shift();
+          if (!words[0]) throw new Error("Pinned Claude launch executable unavailable");
           command = words.map(shellQuote).join(" ");
         }
         if (clearing && homeVar && configuredHome !== undefined) env[homeVar] = configuredHome;

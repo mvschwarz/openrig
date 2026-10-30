@@ -837,3 +837,24 @@ two SQLite-tool cases explicitly skip and 14 link-related cases are filtered.
 That selection validates the corrected planning and native attribute checks
 together with the migration regressions, without converting missing-link or
 missing-tool coverage into passes.
+
+Pinned classic Claude launches exposed another production gap: the adapter emits
+POSIX `exec <selected executable>`, but the Windows seat environment left `exec`
+as `ProcessStartInfo.FileName`. An owned native fresh-launch regression failed
+at Windows process creation before the selected executable ran. The Windows
+Claude conversion now removes that one leading POSIX builtin after decoding
+the allowed command-scoped assignments, then launches the selected executable
+directly. Literal parsing still refuses shell operators; POSIX launch behavior
+is unchanged.
+
+Six native regressions execute the generated command through real PowerShell
+and owned fake Claude entries: fresh/fork/resume, legacy resume, and Node-script
+fresh/resume. Child argv readback verifies one intact settings value, exact
+marker/map/configured-extra grants (including escaped bracket paths), preserved
+member deny rules, and the intended resume/fork identity. Together with the nine
+existing Windows launch tests, 15/15 pass; daemon TypeScript passes. The native
+fixture children exit before their temporary roots are removed. Provider
+readiness is mocked, so this proves OS command/argv transport, not a real Claude
+conversation, authentication or restore continuity. The six-case file is added
+to Windows CI; hosted execution is still pending. The older POSIX-shell-based
+restore-read file remains separate evidence and is not claimed native-green.
