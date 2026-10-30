@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Native local terminal recovery commands (2026-10-30)
+
+The composed Windows tile already carried native argv, but its human-facing
+recovery command still used POSIX quoting. An owned PowerShell process reproduced
+a parser error on that old command. Native local recovery text now uses the
+PowerShell invocation operator and literal quoting for the executable, selected
+server arguments, attach mode and session. POSIX local and SSH-remote command
+rendering are unchanged.
+
+The initial fixture omitted the local host marker and failed before composition;
+that was corrected before reproducing the actual old-renderer parser error.
+Both read-only and writable recovery forms now read back the exact argv through
+an owned PowerShell function, including apostrophes, Unicode and metacharacters.
+These cases plus the complete terminal-service file pass 85 checks; daemon
+TypeScript checking passes. No real tmux/psmux attach, terminal window or seat
+was started, so native executable/provider acceptance remains separate.
+
 ### Terminal-view store long filenames (2026-10-30)
 
 An owned valid 245-character view filename could be saved initially, but native

@@ -21,6 +21,7 @@
 
 import { tileAttachArgv } from "./tile-attach.js";
 import { windowsTileAttachArgv } from "./windows-tile-attach.js";
+import { powershellQuote } from "../../adapters/windows-launch.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -218,7 +219,10 @@ export function composeView(
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
       paneCommand: attachArgv.map(shellQuote).join(" "),
-      recoveryCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      recoveryCommand: ctx.localPlatform === "win32"
+        ? "& " + [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
+          ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession].map(powershellQuote).join(" ")
+        : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
       attachArgv,
       readOnly: m.readOnly,
     });
