@@ -271,7 +271,10 @@ describe("refresh-managed-plugin helper", () => {
     write(live, "hooks/run.cjs", "same bytes");
     fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
     fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o644);
-    fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o600);
+    // Windows chmod exposes the read-only attribute, not POSIX owner bits.
+    fs.chmodSync(path.join(live, "hooks/run.cjs"), process.platform === "win32" ? 0o444 : 0o600);
+    const changedMode = fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777;
+    expect(changedMode).not.toBe(fs.statSync(path.join(ancestor, "hooks/run.cjs")).mode & 0o777);
 
     const planned = runJson("refresh-managed-plugin.mjs", [
       "--ancestor", ancestor,
@@ -289,7 +292,7 @@ describe("refresh-managed-plugin helper", () => {
       "--apply-safe",
     ]);
     expect(applied.written).not.toContain("hooks/run.cjs");
-    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(changedMode);
   });
 
   it("still refreshes when the live file matches the ancestor in bytes AND mode", () => {
@@ -306,7 +309,8 @@ describe("refresh-managed-plugin helper", () => {
     write(live, "hooks/run.cjs", "old");
     fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
     fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o644);
-    fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o755);
+    fs.chmodSync(path.join(target, "hooks/run.cjs"), process.platform === "win32" ? 0o444 : 0o755);
+    const targetMode = fs.statSync(path.join(target, "hooks/run.cjs")).mode & 0o777;
 
     const applied = runJson("refresh-managed-plugin.mjs", [
       "--ancestor", ancestor,
@@ -316,7 +320,7 @@ describe("refresh-managed-plugin helper", () => {
     ]);
     expect(applied.written).toContain("hooks/run.cjs");
     expect(fs.readFileSync(path.join(live, "hooks/run.cjs"), "utf8")).toBe("new");
-    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(targetMode);
   });
 
   it("preserves target descendants beneath unsupported live parents", () => {
@@ -386,10 +390,10 @@ describe("refresh-managed-plugin helper", () => {
 });
 
 describe("backup-sqlite helper", () => {
-  it("creates a verified backup without changing the source database", () => {
+  it("creates a verified backup without changing the source database", (context) => {
     const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
     const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
-    if (!hasSqlite && !DatabaseSync) return;
+    if (!hasSqlite && !DatabaseSync) { context.skip(); return; }
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
@@ -455,10 +459,10 @@ describe("backup-sqlite helper", () => {
     expect(row).toBe("kept");
   });
 
-  it("refuses to overwrite an existing destination", () => {
+  it("refuses to overwrite an existing destination", (context) => {
     const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
     const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
-    if (!hasSqlite && !DatabaseSync) return;
+    if (!hasSqlite && !DatabaseSync) { context.skip(); return; }
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
@@ -729,8 +733,8 @@ exit 7
       complete: true,
     }));
     expect(planned.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "context", path: expect.stringContaining("/context/") }),
-      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "provider", path: expect.stringContaining("/provider-usage/") }),
+      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "context", path: path.join(fixture.home, "context", `${fixture.sessionName}.json`) }),
+      expect.objectContaining({ decision: "preserve-legacy-fallback", kind: "provider", path: path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`) }),
       expect.objectContaining({ decision: "pin-library-during-activation", to: path.join(fixture.home, "context-packs") }),
     ]));
     expect(fs.existsSync(path.join(fixture.home, "state"))).toBe(false);
@@ -746,7 +750,7 @@ exit 7
       expect.objectContaining({
         originalPath: path.join(fixture.home, "context", `${fixture.sessionName}.json`),
         sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-        storedAs: expect.stringMatching(/^files\/\d{4}-[a-f0-9]{64}$/),
+        storedAs: expect.stringMatching(/^files[\\/]\d{4}-[a-f0-9]{64}$/),
       }),
     ]));
     expect(manifest.libraryPlan).toMatchObject({
@@ -1180,7 +1184,7 @@ exit 7
     const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
     expect(manifest.systemWorld).toMatchObject({
       existed: false,
-      mode: 0o644,
+      mode: process.platform === "win32" ? 0o666 : 0o644,
       sha256: sha256(DEFAULT_SYSTEM_WORLD_MANIFEST),
     });
 

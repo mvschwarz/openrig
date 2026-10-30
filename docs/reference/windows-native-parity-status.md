@@ -804,3 +804,20 @@ fake CLI executables, not the running daemon or installed telemetry. Daemon
 TypeScript passes. The earlier wider exploratory selection still contains
 file-symlink privilege failures and an unresolved planning expectation; neither
 is counted as passed by the narrower regression result.
+
+The unresolved planning expectation was a test-only slash assumption: native
+paths are now compared to the exact owned fixture paths, including the stored
+preimage reference. The complete planning/real collector sampling/verification/
+rollback case passes. Plugin refresh checks now exercise Windows read-only
+attribute changes rather than unobservable POSIX owner/execute-bit changes:
+an operator's read-only local modification is preserved, while an unchanged
+ancestor can receive the target's new bytes and read-only attribute. These
+three cases pass together; daemon TypeScript also passes.
+
+The exploratory full upgrade-file result was 34 passed and 16 failed before
+these test corrections. Two of those passes were early returns because the
+host has no `sqlite3` executable (`ENOENT`); they did not verify backup behavior.
+Both now report explicit skips. The final selected run has three passes and
+47 skips, including those two missing-tool skips and 45 filtered cases. File
+symlink creation and the full corrected file remain unverified; native mode
+coverage is not POSIX permission coverage or a DACL-preservation claim.
