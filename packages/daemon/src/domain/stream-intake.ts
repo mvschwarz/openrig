@@ -4,6 +4,7 @@ import type { EventBus } from "./event-bus.js";
 import type { PersistedEvent } from "./types.js";
 import type { StreamItem, StreamStore } from "./stream-store.js";
 import type { QueueRepository } from "./queue-repository.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 export const STREAM_INTAKE_TAG = "stream-subscription";
 
@@ -20,7 +21,7 @@ export interface StreamIntakeCoordinatorDeps {
   eventBus: EventBus;
   streamStore: StreamStore;
   queueRepo: QueueRepository;
-  destination?: string; // e.g. "queue.worker" (default) or "off"
+  destination?: string | (() => string); // e.g. "queue.worker" (default) or "off"
 }
 
 export class StreamIntakeCoordinator {
@@ -28,9 +29,9 @@ export class StreamIntakeCoordinator {
   private readonly eventBus: EventBus;
   private readonly streamStore: StreamStore;
   private readonly queueRepo: QueueRepository;
-  private readonly destination: string;
+  private readonly rawDestination?: string | (() => string);
   private unsubscribeBus?: () => void;
-  private pendingSortKeys: string[] = [];
+  private pendingStreamItemIds: string[] = [];
   private processing = false;
 
   constructor(deps: StreamIntakeCoordinatorDeps) {
@@ -38,20 +39,56 @@ export class StreamIntakeCoordinator {
     this.eventBus = deps.eventBus;
     this.streamStore = deps.streamStore;
     this.queueRepo = deps.queueRepo;
-    this.destination = (deps.destination ?? "queue.worker").trim();
+    this.rawDestination = deps.destination;
+    this.ensureCursorTable();
+  }
+
+  private ensureCursorTable(): void {
+    try {
+      this.db.exec(
+        `CREATE TABLE IF NOT EXISTS stream_intake_cursor (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          last_sort_key TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );`
+      );
+    } catch (err) {
+      console.error("[stream-intake] failed to ensure cursor table:", err);
+    }
+  }
+
+  private getDestinationConfig(): string {
+    if (typeof this.rawDestination === "function") {
+      return this.rawDestination().trim();
+    }
+    if (typeof this.rawDestination === "string") {
+      return this.rawDestination.trim();
+    }
+    try {
+      return String(new SettingsStore().resolveOne("stream.intake").value ?? "queue.worker").trim();
+    } catch {
+      return "queue.worker";
+    }
   }
 
   start(): void {
-    if (this.destination === "off") return;
+    if (this.getDestinationConfig() === "off") return;
 
     this.unsubscribeBus = this.eventBus.subscribe((event: PersistedEvent) => {
       if (event.type === "stream.emitted") {
-        this.enqueue(event.streamItemId);
+        try {
+          this.enqueue(event.streamItemId);
+        } catch (err) {
+          console.error("[stream-intake] error handling stream.emitted event:", err);
+        }
       }
     });
 
-    // Startup catch-up: process any stream items that haven't been associated with an intake qitem
-    this.catchUp();
+    try {
+      this.catchUp();
+    } catch (err) {
+      console.error("[stream-intake] error during startup catch-up:", err);
+    }
   }
 
   stop(): void {
@@ -62,89 +99,135 @@ export class StreamIntakeCoordinator {
   }
 
   private enqueue(streamItemId: string): void {
-    const item = this.streamStore.getById(streamItemId);
-    if (!item) return;
-    this.pendingSortKeys.push(item.streamSortKey);
+    if (!this.pendingStreamItemIds.includes(streamItemId)) {
+      this.pendingStreamItemIds.push(streamItemId);
+    }
     void this.drain();
+  }
+
+  private getCursor(): string | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1`)
+        .get() as { last_sort_key: string } | undefined;
+      return row ? row.last_sort_key : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private updateCursor(sortKey: string): void {
+    try {
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO stream_intake_cursor (id, last_sort_key, updated_at)
+           VALUES (1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET last_sort_key = excluded.last_sort_key, updated_at = excluded.updated_at`
+        )
+        .run(sortKey, now);
+    } catch (err) {
+      console.error("[stream-intake] failed to update cursor:", err);
+    }
   }
 
   private catchUp(): void {
-    // Find all stream items emitted that are not yet covered by an intake qitem or note
-    const unhandled = this.findUnhandledStreamItems();
-    for (const item of unhandled) {
-      this.pendingSortKeys.push(item.streamSortKey);
+    const existingCursor = this.getCursor();
+    if (existingCursor === null) {
+      // First start after upgrade or fresh install:
+      // Record a cursor at the newest stream item and do not replay older history.
+      const newest = this.db
+        .prepare(`SELECT stream_sort_key FROM stream_items ORDER BY stream_sort_key DESC LIMIT 1`)
+        .get() as { stream_sort_key: string } | undefined;
+      const initialSortKey = newest?.stream_sort_key ?? "";
+      this.updateCursor(initialSortKey);
+      return;
     }
+
+    // Existing cursor: page through stream items emitted since cursor in bounded pages
+    let currentCursor = existingCursor;
+    const PAGE_SIZE = 100;
+    while (true) {
+      const items = this.db
+        .prepare(
+          `SELECT stream_item_id, stream_sort_key FROM stream_items
+           WHERE stream_sort_key > ? AND archived_at IS NULL
+           ORDER BY stream_sort_key ASC LIMIT ?`
+        )
+        .all(currentCursor, PAGE_SIZE) as Array<{ stream_item_id: string; stream_sort_key: string }>;
+
+      if (items.length === 0) break;
+
+      for (const item of items) {
+        if (!this.pendingStreamItemIds.includes(item.stream_item_id)) {
+          this.pendingStreamItemIds.push(item.stream_item_id);
+        }
+      }
+
+      currentCursor = items[items.length - 1]!.stream_sort_key;
+      if (items.length < PAGE_SIZE) break;
+    }
+
     void this.drain();
   }
 
-  private findUnhandledStreamItems(): StreamItem[] {
-    // A stream item is handled if its ID is in an intake qitem body or a transition note
-    const handledRows = this.db
-      .prepare(
-        `SELECT qitem_id, body FROM queue_items
-         WHERE json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`
-      )
-      .all(STREAM_INTAKE_TAG) as Array<{ qitem_id: string; body: string }>;
-
-    const handledIds = new Set<string>();
-    for (const r of handledRows) {
-      const matches = r.body.match(/stream_item_id:\s*([^\s\n]+)/g);
-      if (matches) {
-        for (const m of matches) {
-          const id = m.replace(/stream_item_id:\s*/, "").trim();
-          if (id) handledIds.add(id);
-        }
-      }
-    }
-
-    const noteRows = this.db
-      .prepare(
-        `SELECT transition_note FROM queue_transitions
-         WHERE transition_note LIKE 'Stream observation added: %'`
-      )
-      .all() as Array<{ transition_note: string }>;
-
-    for (const n of noteRows) {
-      const match = n.transition_note.match(/Stream observation added:\s*([^\s(]+)/);
-      if (match?.[1]) handledIds.add(match[1]);
-    }
-
-    const allItems = this.streamStore.list({ limit: 500, direction: "chronological" });
-    return allItems.filter((i) => !handledIds.has(i.streamItemId));
-  }
-
   private async drain(): Promise<void> {
-    if (this.processing || this.pendingSortKeys.length === 0 || this.destination === "off") return;
+    if (this.processing || this.pendingStreamItemIds.length === 0 || this.getDestinationConfig() === "off") return;
     this.processing = true;
 
     try {
-      while (this.pendingSortKeys.length > 0) {
-        const sortKey = this.pendingSortKeys.shift()!;
-        const items = this.streamStore.list({ limit: 10, since: undefined, includeArchived: false });
-        const item = items.find((i) => i.streamSortKey === sortKey);
-        if (!item) continue;
+      while (this.pendingStreamItemIds.length > 0) {
+        const streamItemId = this.pendingStreamItemIds[0]!;
+        const item = this.streamStore.getById(streamItemId);
+        if (!item) {
+          this.pendingStreamItemIds.shift();
+          continue;
+        }
 
-        await this.handleStreamItem(item);
+        const destination = this.resolveDestination();
+        if (!destination) {
+          // Destination is not ready or does not resolve (e.g. no kernel queue worker yet).
+          // Do not throw; leave items pending for a later attempt.
+          break;
+        }
+
+        try {
+          await this.handleStreamItem(item, destination);
+          this.pendingStreamItemIds.shift();
+          this.updateCursor(item.streamSortKey);
+        } catch (err) {
+          console.error("[stream-intake] failed to handle stream item:", err);
+          // Leave the item pending and stop drain loop to retry later
+          break;
+        }
       }
+    } catch (err) {
+      console.error("[stream-intake] unexpected drain error:", err);
     } finally {
       this.processing = false;
     }
   }
 
-  private async handleStreamItem(item: StreamItem): Promise<void> {
-    const destination = this.resolveDestination();
-    if (destination === "off") return;
+  private async handleStreamItem(item: StreamItem, destination: string): Promise<void> {
+    const isUrgent = item.hintUrgency === "critical" || Boolean(item.interrupt);
 
     // Check if there is an existing unclaimed intake queue row for this destination
-    const existing = this.queueRepo.list({
+    const existingRows = this.queueRepo.list({
       destinationSession: destination,
       state: "pending",
-      limit: 10,
-    }).find((row) => (row.tags ?? []).includes(STREAM_INTAKE_TAG));
+      tag: STREAM_INTAKE_TAG,
+      limit: 1,
+    });
+    const existing = existingRows[0];
 
     if (existing) {
-      // Add a note to the existing unclaimed intake row
-      const note = `Stream observation added: ${item.streamItemId} (${item.sourceSession}) - ${firstLine(item.body)}`;
+      // Promote priority if incoming item is critical or interrupt
+      if (isUrgent && existing.priority !== "urgent" && existing.priority !== "critical") {
+        this.db.prepare("UPDATE queue_items SET priority = 'urgent' WHERE qitem_id = ?").run(existing.qitemId);
+      }
+
+      // Add note to the existing unclaimed intake row
+      const note = `Stream observation added: ${item.streamItemId} (${item.sourceSession})${isUrgent ? " [promoted to urgent]" : ""} - hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}`;
       this.queueRepo.update({
         qitemId: existing.qitemId,
         actorSession: "daemon@kernel",
@@ -155,7 +238,6 @@ export class StreamIntakeCoordinator {
 
     // Open a new intake row
     const qitemId = streamIntakeQitemId(item.streamSortKey);
-    const isUrgent = item.hintUrgency === "critical" || item.interrupt;
     const body = formatIntakeBody(item);
 
     try {
@@ -169,7 +251,7 @@ export class StreamIntakeCoordinator {
         priority: isUrgent ? "urgent" : "routine",
       });
     } catch (err) {
-      // If already exists with same ID (e.g. race or restart), that's fine/idempotent
+      // If already exists with same ID (e.g. race or restart), treat as handled
       if (err instanceof Error && err.message.includes("already exists")) {
         return;
       }
@@ -177,41 +259,46 @@ export class StreamIntakeCoordinator {
     }
   }
 
-  private resolveDestination(): string {
-    if (this.destination === "off") return "off";
-    if (this.destination !== "queue.worker") return this.destination;
-    // When "queue.worker", resolve canonical session name if kernel rig is running
-    try {
-      const row = this.db.prepare(
-        `SELECT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
-         WHERE r.name = 'kernel' AND n.logical_id = 'queue.worker'
-         ORDER BY s.id DESC LIMIT 1`
-      ).get() as { session_name: string } | undefined;
-      if (row?.session_name) return row.session_name;
-    } catch {
-      // Fallback
-    }
-    return this.destination;
-  }
-}
+  private resolveDestination(): string | undefined {
+    const configured = this.getDestinationConfig();
+    if (configured === "off") return undefined;
 
-function firstLine(text: string): string {
-  const line = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
-  return line.length > 80 ? `${line.slice(0, 77)}...` : line;
+    if (configured === "queue.worker") {
+      try {
+        const row = this.db
+          .prepare(
+            `SELECT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id JOIN rigs r ON r.id = n.rig_id
+             WHERE r.name = 'kernel' AND n.logical_id = 'queue.worker'
+             ORDER BY s.id DESC LIMIT 1`
+          )
+          .get() as { session_name: string } | undefined;
+        if (row?.session_name && this.queueRepo.acceptsDestination(row.session_name)) {
+          return row.session_name;
+        }
+      } catch {
+        // Fallback or database error
+      }
+      if (this.queueRepo.acceptsDestination("queue.worker")) {
+        return "queue.worker";
+      }
+      return undefined;
+    }
+
+    if (this.queueRepo.acceptsDestination(configured)) {
+      return configured;
+    }
+    return undefined;
+  }
 }
 
 function formatIntakeBody(item: StreamItem): string {
   return [
     `# Stream observation intake: ${item.streamItemId}`,
     "",
-    `- **stream_item_id:** ${item.streamItemId}`,
-    `- **source:** ${item.sourceSession}`,
-    `- **emitted:** ${item.tsEmitted}`,
-    `- **hints:** type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}, destination=${item.hintDestination ?? "none"}, tags=${(item.hintTags ?? []).join(",") || "none"}`,
-    `- **cursor:** rig stream list --after ${item.streamSortKey}`,
-    "",
-    "## Body",
-    "",
-    item.body,
+    `- stream_item_id: ${item.streamItemId}`,
+    `- source: ${item.sourceSession}`,
+    `- emitted: ${item.tsEmitted}`,
+    `- hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}, destination=${item.hintDestination ?? "none"}, tags=${(item.hintTags ?? []).join(",") || "none"}`,
+    `- cursor: rig stream list --after ${item.streamSortKey}`,
   ].join("\n");
 }

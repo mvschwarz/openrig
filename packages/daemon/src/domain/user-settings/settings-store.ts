@@ -979,8 +979,8 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   },
   "stream.intake": (raw) => {
     const val = (raw ?? "").trim();
-    if (val !== "off" && !/^[a-zA-Z0-9\-_.@]+$/.test(val)) {
-      throw new Error(`Invalid value for stream.intake: must be a valid session/seat name or "off", got "${raw}"`);
+    if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
+      throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {

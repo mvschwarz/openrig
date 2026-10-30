@@ -1590,7 +1590,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       eventBus,
       streamStore,
       queueRepo: queueRepoInstance,
-      destination: String(new ContextPackSettingsStore().resolveOne("stream.intake").value),
+      destination: () => String(new ContextPackSettingsStore().resolveOne("stream.intake").value),
     }),
     slowOpRecorder,
     queueRepo: queueRepoInstance,

@@ -388,6 +388,10 @@ const DEFAULTS = {
     consumers: "",
     templateDir: "",
   },
+  // Issue #1856 — stream intake default queue.worker; read live by the stream intake coordinator.
+  stream: {
+    intake: "queue.worker",
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -1118,8 +1122,8 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   },
   "stream.intake": (raw) => {
     const val = (raw ?? "").trim();
-    if (val !== "off" && !/^[a-zA-Z0-9\-_.@]+$/.test(val)) {
-      throw new Error(`Invalid value for stream.intake: must be a valid session/seat name or "off", got "${raw}"`);
+    if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
+      throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {

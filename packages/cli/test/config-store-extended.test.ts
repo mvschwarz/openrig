@@ -235,6 +235,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(() => store.set("daemon.db_conflict", "always")).toThrow(/warn or stop/);
   });
 
+  it("defaults stream.intake to queue.worker and validates destinations", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("stream.intake")).toBe("queue.worker");
+    store.set("stream.intake", "off");
+    expect(store.get("stream.intake")).toBe("off");
+    store.set("stream.intake", "lead@kernel");
+    expect(store.get("stream.intake")).toBe("lead@kernel");
+    expect(() => store.set("stream.intake", "invalid-bare-seat")).toThrow(/Invalid value for stream.intake/);
+  });
+
   it("resolves context.root from the canonical default and OPENRIG_CONTEXT_ROOT", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("context.root")).toMatchObject({
