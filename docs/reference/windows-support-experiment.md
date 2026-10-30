@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Native probe lifecycle review
+
+Five current owned native probe cases pass: cmd builtin execution, cleanup of a
+pipe-holding descendant after its parent exits, deadline cleanup of a child tree,
+runtime cwd/environment/stdin EOF, and preservation of exit status and stderr.
+The bounded probe implementation was read through its timeout, drain and stop
+tracking paths. These checks do not exercise daemon shutdown or installed provider
+probes. A full source review of `rig start` found no additional Windows-specific
+gap; interactive selection and real restore remain unverified.
+
 ### Stock psmux chatroom watcher direct argv
 
 Windows chatroom creation now supplies the psmux `--` command separator. Stock
