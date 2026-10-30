@@ -60,6 +60,8 @@ const socket = `openrig-runner-check-${process.pid}`;
 const tmux = (...args) => spawnSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
 const sh = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Settling times and per-step bounds grow with --wait-ms on a slow machine; they never shrink below these values.
+const scale = (ms) => Math.round(ms * Math.max(1, opts.waitMs / 8000));
 async function waitFor(read, ms = opts.waitMs) {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -153,8 +155,8 @@ const message = (h, body) => `From: checker@runner-check\nTo: ${h.session}\n---\
 const nonExitStops = (h, after = 0) => h.hooks("Stop").filter((p) => p.at >= after && !String(p.body?.subtype ?? "").endsWith("_exited"));
 const ready = (h, ms) => waitFor(() => h.record()?.nativeRef && h.record(), ms);
 
-function result(id, title) {
-  const r = { id, title, status: "pass", checks: [] };
+function result(id, title, { proposed = false } = {}) {
+  const r = { id, title, status: "pass", checks: [], ...(proposed ? { proposed: true } : {}) };
   r.check = (name, ok, detail) => { r.checks.push({ name, ok: Boolean(ok), ...(ok ? {} : { detail }) }); if (!ok) r.status = "fail"; return ok; };
   r.skip = (reason) => { r.status = "skip"; r.reason = reason; return r; };
   return r;
@@ -166,7 +168,7 @@ const cases = {
     const h = await launch("1", { scenario: { newDelayMs: 2000, sessionId: "fake-session-1" } });
     const asked = await waitFor(() => h.received("session/new")[0]);
     if (!r.check("the runner opens a conversation with session/new", asked, "no session/new arrived")) return r;
-    await sleep(800);
+    await sleep(scale(800));
     r.check("no launch record while session/new is still unanswered", !h.record(), `a record was written early: ${JSON.stringify(h.record())}`);
     const record = await ready(h);
     r.check("a launch record arrives after session/new is answered", record, `no record with a nativeRef at ${h.recordPath}`);
@@ -186,7 +188,7 @@ const cases = {
       ["session/new error", { newSession: "error" }], ["session/new exit", { newSession: "exit" }]]) {
       const h = await launch(`1b-${label.replace(/[^a-z]+/g, "-")}`, { scenario });
       await waitFor(() => h.events("exit")[0] || h.log().some((e) => e.dir === "out" && e.msg.error), opts.waitMs);
-      await sleep(1500);
+      await sleep(scale(1500));
       const record = h.record();
       r.check(`${label}: no conversation in a launch record`, !record?.nativeRef, `record: ${JSON.stringify(record)}`);
       r.check(`${label}: no accepted prompt or idle report`, h.hooks("UserPromptSubmit").length === 0 && nonExitStops(h).length === 0,
@@ -202,8 +204,8 @@ const cases = {
     const block = message(h, "first line\n/abort\nthird line");
     h.paste(block);
     await waitFor(() => h.prompts().length >= 1);
-    await waitFor(() => nonExitStops(h).length >= 1, 3000);
-    await sleep(500);
+    await waitFor(() => nonExitStops(h).length >= 1, scale(3000));
+    await sleep(scale(500));
     r.check("one pasted block is exactly one session/prompt", h.prompts().length === 1, `got ${h.prompts().length} prompts`);
     r.check("the prompt holds the whole block, byte for byte", h.prompts()[0] === block, `got ${JSON.stringify(h.prompts()[0])}`);
 
@@ -212,25 +214,25 @@ const cases = {
     // A block that arrives while the agent works, with a line reading /abort, is still one message for later.
     const queued = message(h, "sent while the agent works\n/abort\nstill part of the message");
     h.paste(queued);
-    await sleep(1200);
+    await sleep(scale(1200));
     r.check("a block sent mid-turn waits for the next turn", h.prompts().length === 2, `got ${h.prompts().length} prompts during the turn`);
     r.check("a line reading /abort inside a block isn't control", h.received("session/cancel").length === 0, "the runner sent session/cancel");
 
     const before = Date.now();
     h.paste("/abort");
-    const cancel = await waitFor(() => h.received("session/cancel")[0], 3000);
+    const cancel = await waitFor(() => h.received("session/cancel")[0], scale(3000));
     r.check("a block that is exactly /abort sends session/cancel", cancel, "no session/cancel");
-    const stopped = await waitFor(() => nonExitStops(h, before)[0], 3000);
+    const stopped = await waitFor(() => nonExitStops(h, before)[0], scale(3000));
     r.check("the cancelled turn reports Stop/cancelled", stopped?.body?.subtype === "cancelled", `got ${stopped ? `Stop/${stopped.body.subtype}` : "no Stop"}`);
-    await sleep(300);
+    await sleep(scale(300));
     r.check("one /abort sends one session/cancel", h.received("session/cancel").length === 1, `got ${h.received("session/cancel").length}`);
-    r.check("the waiting block becomes the next prompt", await waitFor(() => h.prompts()[2] === queued, 4000), `prompts: ${JSON.stringify(h.prompts().slice(2))}`);
+    r.check("the waiting block becomes the next prompt", await waitFor(() => h.prompts()[2] === queued, scale(4000)), `prompts: ${JSON.stringify(h.prompts().slice(2))}`);
 
     const interrupted = Date.now();
-    await sleep(200);
+    await sleep(scale(200));
     h.keys("C-c");
-    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2, 3000), "no second session/cancel");
-    const ended = await waitFor(() => nonExitStops(h, interrupted)[0], 6000);
+    r.check("Ctrl-C outside a paste sends session/cancel", await waitFor(() => h.received("session/cancel").length >= 2, scale(3000)), "no second session/cancel");
+    const ended = await waitFor(() => nonExitStops(h, interrupted)[0], scale(6000));
     r.check("cancelled is reported only on the agent's own stop reason", ended?.body?.subtype === "end_turn",
       `the agent ended the turn end_turn; the runner reported ${ended ? `Stop/${ended.body.subtype}` : "no Stop"}`);
     return r;
@@ -271,15 +273,17 @@ const cases = {
     h.paste(message(h, "edit the notes"));
     const asked = await waitFor(() => h.sent("session/request_permission")[0]);
     if (!r.check("the agent's permission request is sent", asked, "the turn never reached the request")) return r;
-    const answer = await waitFor(() => h.answerTo("session/request_permission"), 3000);
+    const answer = await waitFor(() => h.answerTo("session/request_permission"), scale(3000));
     r.check("the request is answered, not left pending", answer, "no answer");
     r.check("it's answered at once (within 2 s)", answer && answer.at - asked.at <= 2000, answer ? `${answer.at - asked.at} ms` : "no answer");
     r.check("the answer is a refusal, never an allow option", answer?.msg.result?.outcome?.outcome === "cancelled",
       `answer: ${JSON.stringify(answer?.msg.result ?? answer?.msg.error)}`);
-    const shown = await waitFor(() => h.hooks("Notification", "permission_prompt")[0], 3000);
+    const shown = await waitFor(() => h.hooks("Notification", "permission_prompt")[0], scale(3000));
     r.check("Notification/permission_prompt is posted", shown, "no permission_prompt post");
-    await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), 4000);
-    await sleep(800);
+    r.check("what was asked is shown in the pane", await waitFor(() => h.screen().includes("Edit notes.txt"), scale(3000)),
+      "the pane never showed the tool call's title, Edit notes.txt");
+    await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(4000));
+    await sleep(scale(800));
     r.check("no idle Stop or beat while holding that attention", shown && nonExitStops(h, shown.at).length === 0,
       `posted ${nonExitStops(h, shown?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", ")}`);
     const next = Date.now();
@@ -322,13 +326,13 @@ const cases = {
       const record = await waitFor(() => h.record());
       r.check("missing: the agent's own not-found is reported as error: missing", record?.error === "missing" && !record.nativeRef,
         `record: ${JSON.stringify(record)}`);
-      await sleep(800);
+      await sleep(scale(800));
       r.check("missing: no new conversation starts", h.received("session/new").length === 0, "session/new was sent");
     }
     {
       const h = await launch("6-other", { scenario: { reopenError: "error" }, env: { OPENRIG_RESUME_REF: "fake-elsewhere" } });
       await waitFor(() => reopenCalls(h)[0] && h.log().some((e) => e.dir === "out" && e.msg.error));
-      await sleep(2500);
+      await sleep(scale(2500));
       const record = h.record();
       r.check("other failure: not reported missing or resumed", !record || (record.error && record.error !== "missing" && !record.nativeRef),
         `record: ${JSON.stringify(record)}`);
@@ -344,34 +348,35 @@ const cases = {
     h.paste(message(h, "this turn kills the agent"));
     const died = await waitFor(() => h.events("exit")[0]);
     if (!r.check("the agent exits mid-turn", died, "the agent didn't exit")) return r;
-    const exited = await waitFor(() => h.hooks("Stop", `${opts.name}_exited`)[0], 4000);
+    const exited = await waitFor(() => h.hooks("Stop", `${opts.name}_exited`)[0], scale(4000));
     r.check(`Stop/${opts.name}_exited is posted`, exited, `posts: ${h.posts().map((p) => `${p.body?.hookEvent}/${p.body?.subtype}`).join(", ")}`);
     r.check("no idle Stop after the exit", nonExitStops(h, died.at).length === 0, nonExitStops(h, died.at).map((p) => p.body.subtype).join(", "));
     return r;
   },
 
   async "7b"() {
-    const r = result("7b", "Errors and shutdown");
-    {
-      const h = await launch("7b-error", { scenario: { turns: [{ error: true }, {}] } });
-      if (r.check("error: the runner opens its conversation", await ready(h), "no launch record")) {
-        h.paste(message(h, "this prompt fails"));
-        const posted = await waitFor(() => h.hooks("Notification", "runtime_error")[0]);
-        r.check("error: a failed session/prompt posts Notification/runtime_error", posted,
-          `posts: ${h.posts().map((p) => `${p.body?.hookEvent}/${p.body?.subtype}`).join(", ")}`);
-        r.check("error: it isn't reported as a permission request", h.hooks("Notification", "permission_prompt").length === 0, "permission_prompt posted");
-      }
-    }
-    {
-      const h = await launch("7b-shutdown", { scenario: { stubborn: true } });
-      if (r.check("shutdown: the runner opens its conversation", await ready(h), "no launch record")) {
-        const pid = h.events("started")[0]?.pid;
-        h.stop();
-        const gone = await waitFor(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, 5000);
-        r.check("shutdown (proposed, section 9): closing the pane ends the agent process", gone, `agent pid ${pid} still running 5 s later`);
-        if (!gone) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
-      }
-    }
+    const r = result("7b", "Errors: a failed prompt is a runtime error, not a permission request");
+    const h = await launch("7b", { scenario: { turns: [{ error: true }, {}] } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    h.paste(message(h, "this prompt fails"));
+    const posted = await waitFor(() => h.hooks("Notification", "runtime_error")[0]);
+    r.check("a failed session/prompt posts Notification/runtime_error", posted,
+      `posts: ${h.posts().map((p) => `${p.body?.hookEvent}/${p.body?.subtype}`).join(", ")}`);
+    r.check("it isn't reported as a permission request", h.hooks("Notification", "permission_prompt").length === 0, "permission_prompt posted");
+    return r;
+  },
+
+  // Section 9 marks this duty "(Proposed)", and a runner may list in `limits` what keeps running, so the result is reported
+  // on its own: never a pass or a fail, and never the exit status.
+  async "7c"() {
+    const r = result("7c", "Shutdown: closing the pane ends the agent (proposed in section 9; advisory)", { proposed: true });
+    const h = await launch("7c", { scenario: { stubborn: true } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    const pid = h.events("started")[0]?.pid;
+    h.stop();
+    const gone = await waitFor(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, scale(5000));
+    r.check("closing the pane ends the agent process", gone, `agent pid ${pid} still running ${scale(5000) / 1000} s later; list it in limits if that's expected`);
+    if (!gone) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
     return r;
   },
 
@@ -401,7 +406,7 @@ const cases = {
   },
 };
 
-const order = ["1", "1b", "2", "3", "4", "5", "6", "7", "7b", "8", "9"];
+const order = ["1", "1b", "2", "3", "4", "5", "6", "7", "7b", "7c", "8", "9"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }
@@ -414,19 +419,23 @@ try {
   tmux("kill-server");
   server.close();
   // A runner or agent can still be writing its last lines as its pane closes, so cleanup waits a moment and never fails the report.
-  await sleep(300);
+  await sleep(scale(300));
   if (!opts.keep) for (const h of launches) try { rmSync(h.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* left in the temp folder */ }
 }
 
-const summary = Object.fromEntries(["pass", "fail", "skip"].map((s) => [s, results.filter((r) => r.status === s).length]));
+// A proposed duty's result is advisory: it says whether the runner met it, outside pass, fail and the exit status.
+for (const r of results) if (r.proposed && r.status !== "skip") { r.met = r.status === "pass"; r.status = "advisory"; }
+const summary = Object.fromEntries(["pass", "fail", "skip", "advisory"].map((s) => [s, results.filter((r) => r.status === s).length]));
 if (opts.json) {
   console.log(JSON.stringify({ check: "openrig-runner-conformance", format: 1, runner: opts.runner, name: opts.name, results, summary }, null, 2));
 } else {
   console.log(`OpenRig runner conformance check (docs/reference/harness-runner-contract.md)\nrunner: ${opts.runner}\npreset: ${opts.name}\n`);
   for (const r of results) {
-    console.log(`${r.status.toUpperCase().padEnd(5)} ${r.id.padEnd(3)} ${r.title}${r.reason ? `: ${r.reason}` : ""}`);
+    const label = r.status === "advisory" ? "NOTE" : r.status.toUpperCase();
+    const outcome = r.status === "advisory" ? (r.met ? ": met" : ": not met") : r.reason ? `: ${r.reason}` : "";
+    console.log(`${label.padEnd(5)} ${r.id.padEnd(3)} ${r.title}${outcome}`);
     for (const c of r.checks.filter((c) => !c.ok)) console.log(`      x ${c.name}: ${c.detail}`);
   }
-  console.log(`\n${summary.pass} pass, ${summary.fail} fail, ${summary.skip} skipped${opts.keep ? `; launch folders kept under ${tmpdir()}` : ""}`);
+  console.log(`\n${summary.pass} pass, ${summary.fail} fail, ${summary.skip} skipped, ${summary.advisory} advisory (not counted)${opts.keep ? `; launch folders kept under ${tmpdir()}` : ""}`);
 }
 process.exit(summary.fail ? 1 : 0);

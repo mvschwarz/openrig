@@ -15,10 +15,10 @@ node check-runner.mjs --runner 'my-runner --agent-command {agent}' --name my-har
   those cases are skipped, because OpenRig wouldn't pass that input.
 - **`--cases 2,4`** runs only some cases. `--json` prints a machine-readable report. `--keep` keeps each launch's
   folder: the agent's message log, the launch record and the scenario.
-- **`--wait-ms 20000`** waits longer for each step (default 8000), for a runner whose agent takes a while to start.
+- **`--wait-ms 20000`** waits longer for each step (default 8000), for a runner whose agent takes a while to start. The check's shorter settling times grow in proportion.
 - **`--pass-env NAME`** passes one more variable through. Otherwise the runner gets only `PATH`, `HOME`, `USER`,
   `SHELL`, `LANG` and `TMPDIR`, plus the OpenRig variables.
-- **The exit status** is 0 when nothing fails, 1 when a case fails, and 2 for a usage or setup problem.
+- **The exit status** is 0 when nothing fails, 1 when a case fails, and 2 for a usage or setup problem. An advisory result (7c) never changes it.
 
 In an installed OpenRig, the check is at `$(npm root -g)/@openrig/cli/daemon/docs/reference/runner-conformance/`.
 
@@ -43,11 +43,12 @@ In an installed OpenRig, the check is at `$(npm root -g)/@openrig/cli/daemon/doc
 | 1b | 3, 4 | A handshake that fails at `initialize` or `session/new` (an error or an exit) writes no conversation in a launch record, and posts no accepted prompt or idle report |
 | 2 | 5, 6 | One pasted block becomes exactly one `session/prompt`, byte for byte. A line reading `/abort` inside a block isn't control. A block sent mid-turn waits for the next turn. A block that is exactly `/abort`, or Ctrl-C outside a paste, sends one `session/cancel`. `Stop/cancelled` is posted only when the agent itself returns `cancelled` |
 | 3 | 4 | `UserPromptSubmit/accepted` with a `turnId`, then `Stop/end_turn`. Every post carries the contract's fields, the hook token, this seat's identity and a rising `sequence`. `livenessSeconds`, when given, is from 1 to 3600 |
-| 4 | 7 | A permission request is answered at once, with a refusal and never an allow option. `Notification/permission_prompt` is posted. No idle `Stop` or beat is posted while that attention is held. The next prompt is accepted as usual |
+| 4 | 7 | A permission request is answered at once, with a refusal and never an allow option. `Notification/permission_prompt` is posted, and the pane shows what was asked. No idle `Stop` or beat is posted while that attention is held. The next prompt is accepted as usual |
 | 5 | 4 | Every post carries `OPENRIG_OCCUPANT_GENERATION` |
 | 6 | 8 | A resume asks the agent to reopen `OPENRIG_RESUME_REF` in the launch's working folder, and records that conversation. The agent's own not-found becomes `error: "missing"`. Any other failure is neither missing nor resumed. No case starts a new conversation |
 | 7 | 4 | An agent that dies mid-turn gets `Stop/<preset>_exited`, and no idle report after it |
-| 7b | 4, 9 | A failed `session/prompt` posts `Notification/runtime_error`, not a permission request. Closing the pane ends the agent process, which is the proposed shutdown duty in section 9. The fake agent outlives a hangup there, so the runner has to end it |
+| 7b | 4 | A failed `session/prompt` posts `Notification/runtime_error`, not a permission request |
+| 7c | 9 | **Advisory.** Closing the pane ends the agent process. Section 9 marks this duty as proposed, and lets a runner list in `limits` what may keep running, so this result is shown as met or not met and never counts as a pass or a fail, or toward the exit status. The fake agent outlives a hangup here, so the runner has to end it |
 | 8 | 7 | An unknown request from the agent gets JSON-RPC `-32601`, and the next prompt still goes through |
 | 9 | 9 | `OPENRIG_FIRST_INPUT`'s exact bytes, newlines and spaces included, are the first prompt |
 
