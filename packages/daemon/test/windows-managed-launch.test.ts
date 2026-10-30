@@ -8,6 +8,11 @@ import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { renderWindowsManagedLaunch } from "../src/adapters/windows-launch.js";
 import { parseWindowsCommandLine, windowsArguments } from "../src/adapters/windows-argv.js";
 import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(), execFile: vi.fn() }));
 const cleanups: (() => void)[] = [];
@@ -51,6 +56,43 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32").each(["supported", "timeout", "malformed", "missing", "generation-change"])(
+    "keeps native permission selection and audit effects bound for %s capability discovery", async kind => {
+      const f = fixture(), db = createFullTestDb(); cleanups.push(() => db.close());
+      const rigRepo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
+      const rig = rigRepo.createRig("native-choice");
+      const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd: f.cwd });
+      registry.registerSession(node.id, "worker@native-choice");
+      registry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "worker@native-choice", tmuxPane: "%1" });
+      const managed = new ClaudeManagedLaunch(db, f.env, {}, undefined, undefined, "win32");
+      const sendText = vi.fn(), sendKeys = vi.fn(), sendShellCommand = vi.fn();
+      const service = new SeatLifecycleService({ db, rigRepo, sessionRegistry: registry, eventBus,
+        tmuxAdapter: { sendText, sendKeys, sendShellCommand } as never,
+        runtimeAdapters: { "claude-code": { claudeManagedLaunch: managed } as never } });
+      if (kind === "missing") f.env.PATH = path.join(f.home, "missing-bin");
+      vi.mocked(execFile).mockImplementation(((file: string, args: string[], options: { env: Record<string, string> }, done: (error: Error | null, help: string) => void) => {
+        expect(queriedCommand(file, args, options).file).toBe(f.executable);
+        expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
+        if (kind === "generation-change") registry.registerSession(node.id, "replacement@native-choice", "handover");
+        done(kind === "timeout" ? new Error("owned capability timeout") : null,
+          kind === "malformed" ? "no permission vocabulary" : '--permission-mode <mode> (choices: "auto", "default")');
+      }) as never);
+      const result = await service.setPermissions({ nodeId: node.id, mode: "auto", actor: "operator", reason: "native fixture choice" });
+      const selections = db.prepare("SELECT mode,actor FROM node_permission_selections WHERE node_id=?").all(node.id);
+      const events = db.prepare("SELECT payload FROM events WHERE type='node.permissions_changed'").all();
+      if (kind === "supported") {
+        expect(result).toMatchObject({ ok: true, changed: true });
+        expect(selections).toEqual([{ mode: "auto", actor: "operator" }]);
+        expect(events).toHaveLength(1);
+      } else {
+        expect(result).toMatchObject({ ok: false, code: "permission_selection_refused" });
+        expect(selections).toEqual([]); expect(events).toEqual([]);
+      }
+      expect(JSON.stringify({ selections, events })).not.toContain(f.env.ANTHROPIC_API_KEY);
+      expect(execFile).toHaveBeenCalledTimes(kind === "missing" ? 0 : 1);
+      expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled(); expect(sendShellCommand).not.toHaveBeenCalled();
+    });
+
   it.runIf(process.platform === "win32")("queries and launches a recognized owned npm Claude entry with a frozen interpreter and script", async () => {
     const f = fixture();
     const node = path.join(f.home, "node.exe"), pkg = path.join(f.home, "node_modules", "@anthropic-ai", "claude-code");
