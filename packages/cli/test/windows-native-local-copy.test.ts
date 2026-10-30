@@ -56,4 +56,20 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     const src = path.join(root, "source"); await mkdir(src);
     expect(await copy(src, path.join(src, "nested"))).toMatchObject({ ok: false, stderr: "Source and destination overlap" });
   }));
+
+  it("refuses overlap through an owned junction parent before dry-run or copy", () => fixture(async root => {
+    const src = path.join(root, "source"), alias = path.join(root, "alias");
+    await mkdir(src); await writeFile(path.join(src, "file.txt"), "owned original\n");
+    await symlink(src, alias, "junction");
+    // Check the preview first: before the correction this fails without ever
+    // attempting a recursive write through the alias.
+    expect(await copy(src, path.join(alias, "nested"), true)).toMatchObject({ ok: false, stderr: "Source and destination overlap" });
+    expect(await copy(src, path.join(alias, "nested"))).toMatchObject({ ok: false, stderr: "Source and destination overlap" });
+    expect(await readdir(src)).toEqual(["file.txt"]);
+    expect(await readFile(path.join(src, "file.txt"), "utf8")).toBe("owned original\n");
+    const separate = path.join(root, "separate"), separateAlias = path.join(root, "separate-alias");
+    await mkdir(separate); await symlink(separate, separateAlias, "junction");
+    expect(await copy(src, path.join(separateAlias, "copy"))).toMatchObject({ ok: true, filesTransferred: 1 });
+    expect(await readFile(path.join(separate, "copy", "file.txt"), "utf8")).toBe("owned original\n");
+  }));
 });

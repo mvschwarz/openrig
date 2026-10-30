@@ -1,6 +1,16 @@
-import { cp, lstat, mkdir, readdir, readlink, utimes } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readlink, realpath, utimes } from "node:fs/promises";
 import path from "node:path";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
+
+/** Resolve existing parents too: a destination need not exist yet, but its
+ * junction/short-name parent can already name a child of the source. */
+async function physicalDestination(file: string): Promise<string> {
+  try { return await realpath(file); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(file) === file) throw error;
+    return path.join(await physicalDestination(path.dirname(file)), path.basename(file));
+  }
+}
 
 /** Archive-style local copies without a shell or rsync. Extra destination files are retained. */
 export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult> {
@@ -45,8 +55,10 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     const destination = await stat(dst);
     const contentsOnly = plan.src.path.endsWith(path.sep) || plan.src.path.endsWith("/");
     const target = destination?.isDirectory() && !(source.isDirectory() && contentsOnly) ? path.join(dst, path.basename(src)) : dst;
-    const relative = path.relative(src, target);
-    if (src.toLowerCase() === target.toLowerCase() || (source.isDirectory() && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))) {
+    const sourceIdentity = source.isDirectory() ? await realpath(src) : src;
+    const targetIdentity = source.isDirectory() ? await physicalDestination(target) : target;
+    const relative = path.relative(sourceIdentity, targetIdentity);
+    if (sourceIdentity.toLowerCase() === targetIdentity.toLowerCase() || (source.isDirectory() && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))) {
       throw new Error("Source and destination overlap");
     }
     await copy(src, target);

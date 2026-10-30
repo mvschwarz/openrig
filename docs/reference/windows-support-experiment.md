@@ -26,6 +26,20 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native local-copy physical overlap (2026-10-30)
+
+An owned junction-parent dry-run reproduced a missing overlap refusal: lexical
+source/target comparison admitted a destination physically below the source.
+The fixture stops on that preview assertion before attempting any recursive
+write with the old implementation. Native directory copies now resolve the
+source and existing destination ancestors before checking overlap, including
+destinations not created yet. Both preview and actual execution refuse the
+overlapping target with source bytes/tree unchanged. A separate owned junction
+parent outside the source still permits a real successful copy. Complete native
+local-copy/path files pass 10/10, and CLI typecheck passes. This is a pre-operation
+filesystem identity check, not an atomic namespace/race guarantee; no user
+source tree, shared checkout or external link target was copied or changed.
+
 ## Native SFTP consumer and replacement refusal (2026-10-30)
 
 The complete native SFTP protocol/copy files pass 5/5 against the installed
