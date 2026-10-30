@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### History fallback, recap continuity, and workspace preparation checks
+
+The current history-query and recap durability implementations pass 31/31 checks
+across the native history fixture, rig/session/seat history files, and recap
+publication fault cases. The owned Windows fixture reads Unicode/CRLF logs and
+JSONL after unavailable external search backends, preserves a final line without
+a newline, and reports an unreadable session path. Recap checks retain the
+readable current recap and predecessor chain after injected write, archive,
+link, and replacement failures. No live transcripts or seat recaps were read.
+This pass found no additional implementation gap in those checked cases.
+
+An owned direct-entry check also confirms that workspace preparation still runs
+when its Windows filename uses a different case, fails for a missing compiled
+entry, succeeds once that entry exists, and remains import-only when a different
+file has the same basename. The existing direct-entry implementation already
+passes; no guard repair was needed. This does not establish complete package,
+POSIX file-symlink, or live deployment acceptance.
+
 ### Selected core-plugin identity on Windows
 
 Core-plugin selection now uses native Windows realpath expansion before comparing
