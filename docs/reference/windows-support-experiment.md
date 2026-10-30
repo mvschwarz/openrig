@@ -48,6 +48,14 @@ shared-TUI file pass 7/7 afterward. CLI typecheck passes. This is environment
 consumer evidence, not a real psmux attachment or visible-terminal acceptance;
 the installed cc5971d53 artifact predates this subsequent source change.
 
+The desktop terminal launcher had a separate exact-key deletion. It and shared
+TUI now use one detached-terminal environment helper. An actual child launched
+through defaultWindowDeps.exec verifies mixed-case old context is absent and an
+unrelated synthetic value is retained. The complete native Windows terminal,
+preview, shared-TUI and child-environment files pass 25/25; CLI typecheck passes.
+Desktop window opening and eligibility remain injected in the window fixtures;
+no real window or multiplexer session was opened by these checks.
+
 ## Native activity self-report verification (2026-10-30)
 
 Four current activity-rung checks returned null because the injected reader

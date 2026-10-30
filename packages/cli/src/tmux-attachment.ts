@@ -84,8 +84,9 @@ export function attachTmux(target: TmuxAttachment): Promise<number> {
   const server = readTmuxServerArgs(target.serverArgs);
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
-    delete env.TMUX;
-    delete env.TMUX_PANE;
+    for (const key of Object.keys(env)) {
+      if (["TMUX", "TMUX_PANE"].includes(process.platform === "win32" ? key.toUpperCase() : key)) delete env[key];
+    }
     const child = spawn("tmux", [...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`],
       { stdio: "inherit", env, windowsHide: true });
     child.once("error", reject);
