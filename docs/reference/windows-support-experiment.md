@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Runner direct-entry identity through Windows junctions
+
+Pi and stub runner self-invocation guards now compare native Windows physical
+file paths. Their URL-string comparisons previously returned false through a
+directory junction, causing direct execution to exit silently without running
+the argument parser or runner. Actual compiled-entry subprocess fixtures
+reproduce that silent exit and now get the expected missing-argument error
+through both ordinary case aliases and owned directory junctions. Import-only
+subprocesses still do not run main. Both fixture cases and the daemon workspace
+build pass. The subprocesses have isolated homes and no required launch flags,
+so they stop before state creation, provider lookup, credentials, or hooks.
+No installed runner, fleet process, or real provider was started or restarted;
+this does not establish full native runner lifecycle acceptance.
+
 ### Bare Pi/OMP native launch and resume dispatch
 
 Pi/OMP fresh and resume paths now render bare Windows runner commands with the

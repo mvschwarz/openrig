@@ -13,7 +13,7 @@
 
 import nodeFs from "node:fs";
 import nodePath from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { resolveRunnerHome } from "./runner-home.js";
 import {
@@ -427,9 +427,15 @@ export async function runStubRunner(args: StubRunnerArgs): Promise<void> {
 }
 
 // ── Self-invocation guard (Pi precedent) — run ONLY as the process entry. ──
-const invokedDirectly =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(process.argv[1]).href;
+const invokedDirectly = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return process.platform === "win32"
+      ? nodeFs.realpathSync.native(fileURLToPath(import.meta.url)) === nodeFs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(entry).href;
+  } catch { return false; }
+})();
 
 if (invokedDirectly) {
   runStubRunner(parseStubRunnerArgs(process.argv.slice(2))).catch((err) => {

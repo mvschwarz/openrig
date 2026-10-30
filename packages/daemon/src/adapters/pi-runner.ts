@@ -25,7 +25,7 @@ import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { resolveRunnerHome } from "./runner-home.js";
@@ -1546,7 +1546,9 @@ const invokedDirectly = (() => {
     if (!entry) return false;
     // pathToFileURL handles percent-encoding (spaces etc.) the way
     // import.meta.url does — a hand-built `file://${path}` string does not.
-    return import.meta.url === pathToFileURL(nodePath.resolve(entry)).href;
+    return process.platform === "win32"
+      ? fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(nodePath.resolve(entry)).href;
   } catch {
     return false;
   }
