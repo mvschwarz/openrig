@@ -8,7 +8,8 @@
 //     the collision; absence of `--version` as a per-command option is
 //     the contract this test enforces)
 
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import { Command } from "commander";
 import { agentImageCommand } from "../src/commands/agent-image.js";
@@ -81,7 +82,7 @@ function createMockDaemon(captured: CapturedCall[]) {
     server,
     close: () => new Promise<void>((r) => server.close(() => r())),
     listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+      server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
       });
@@ -99,6 +100,7 @@ describe("rig agent-image create — --image-version flag", () => {
     port = await srv.listen();
   });
   afterAll(async () => { await srv.close(); });
+  beforeEach(() => { allowFetchTarget(`http://127.0.0.1:${port}`); });
 
   it("--image-version <v> propagates as body.version on the snapshot POST", async () => {
     captured.length = 0;

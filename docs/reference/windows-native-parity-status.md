@@ -75,6 +75,14 @@ The subsequent complete TUI run at unchanged `24f301a` records 1190 passes, one
 different test failure and 21 skips. That remaining failure is unclassified here;
 there is no complete-TUI or complete-workspace green claim.
 
+The delayed CLI receipt at `aabbe24` records 4534 passes, 1355 failures and 57
+skips. Later historical receipt `b40ecd7` records 5803 passes, 117 failures and
+57 skips, so the earlier count is not the current failure inventory. Current
+targeted reproduction still found missing owned-loopback registrations in
+agent-image and browser-boundary CLI fixtures. Registering their exact bound
+origins per test (and explicitly binding agent-image to loopback) makes those
+five cases pass without changing the fetch guard. This is not CLI-wide acceptance.
+
 ## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured

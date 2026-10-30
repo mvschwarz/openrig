@@ -1,7 +1,8 @@
 // The real `rig ps` / `rig send` code paths, real DaemonClient and real HTTP, rendering the exact
 // refusal body produced by the daemon's browser boundary. (A real CLI request cannot present an
 // unlisted target name without DNS: Node fetch sends the URL's host, not an explicit Host header.)
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { Command } from "commander";
@@ -28,6 +29,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 afterEach(() => { process.exitCode = undefined; });
+beforeEach(() => { allowFetchTarget(`http://127.0.0.1:${port}`); });
 
 function deps() {
   const lifecycleDeps: LifecycleDeps = {
