@@ -357,21 +357,24 @@ const cases = {
 
   // Section 7's default is permit: when no one can be asked, the agent gets its own allow option at once, allow_once before
   // allow_always. Only the seat's opt-in refusal (denied_by_seat), or a request with no allow option, is refused at once,
-  // shown, and held as needs input until the next prompt.
+  // shown, and held as needs input until the next prompt, even when the turn is cancelled.
   async "4"() {
     const r = result("4", "Permissions: permitted when no one can be asked; refused and held only on denied_by_seat or no allow option");
     const option = (optionId, kind) => ({ optionId, name: optionId, kind });
     const withAlways = [option("allow-once", "allow_once"), option("allow-always", "allow_always"), option("reject-once", "reject_once")];
     const rejectOnly = [option("reject-once", "reject_once"), option("reject-always", "reject_always")];
     const cells = [
-      // label, the stand-in's answered path (none: an OpenRig without it, which answers 404), the options, permitted
+      // label, the stand-in's answered path (none: an OpenRig without it, which answers 404), the options, permitted, and
+      // whether /abort cancels the turn after the refusal
       ["404", undefined, withAlways, true],
       ["unreachable", { submit: { drop: true } }, withAlways, true],
       ["denied_by_seat", { submit: { status: 409, code: "denied_by_seat" } }, withAlways, false],
+      ["denied_by_seat, then /abort", { submit: { status: 409, code: "denied_by_seat" } }, withAlways, false, true],
       ["no allow option", undefined, rejectOnly, false],
     ];
-    await Promise.all(cells.map(async ([label, asks, options, permitted]) => {
-      const h = await launch(`4-${label.replace(/[^a-z0-9]+/g, "-")}`, { scenario: { turns: [{ permission: { options }, holdMs: scale(1500) }, {}] }, asks });
+    await Promise.all(cells.map(async ([label, asks, options, permitted, abort]) => {
+      const turns = [{ permission: { options }, holdMs: scale(abort ? 4000 : 1500) }, {}];
+      const h = await launch(`4-${label.replace(/[^a-z0-9]+/g, "-")}`, { scenario: { turns }, asks });
       if (!r.check(`${label}: the runner opens its conversation`, await ready(h), "no launch record")) return;
       h.paste(message(h, "edit the notes"));
       const asked = await waitFor(() => h.sent("session/request_permission")[0]);
@@ -395,7 +398,12 @@ const cases = {
       r.check(`${label}: Notification/permission_prompt is posted`, shown, "no permission_prompt post");
       if (label === "denied_by_seat") r.check(`${label}: what was asked is shown in the pane`, await waitFor(() => h.screen().includes("Edit notes.txt"), scale(3000)),
         "the pane never showed the tool call's title, Edit notes.txt");
-      await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(4000));
+      // A cancelled turn is still a turn's end: the refusal stays held until the next accepted prompt.
+      if (abort) {
+        h.paste("/abort");
+        r.check(`${label}: /abort sends session/cancel`, await waitFor(() => h.received("session/cancel")[0], scale(3000)), "no session/cancel");
+      }
+      await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(abort ? 6000 : 4000));
       await sleep(scale(800));
       r.check(`${label}: no idle Stop or beat while holding that attention`, shown && nonExitStops(h, shown.at).length === 0,
         `posted ${nonExitStops(h, shown?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", ")}`);
@@ -461,16 +469,19 @@ const cases = {
 
     // OpenRig's permit, at submit or at a read, is delivered like an answer. So is the runner's own permit when OpenRig
     // can't give an answer: a refusal section 7's table marks "permits" (two of them 409s, like stale_generation, so the
-    // code decides, never the status), a read that gets no answer, or a status or code the section doesn't list. A
-    // refusal saying the request isn't the current occupant's, and a refused, stale or withdrawn read, can't take an
-    // answer: the agent gets cancelled, and nothing is held.
+    // code decides, never the status; a revoked grant can still be the live occupant's, since one is reissued after a lost
+    // response), a read that gets no answer, or a status, code or read state the section doesn't list. A refusal saying
+    // the request isn't the current occupant's, and a refused, stale or withdrawn read, can't take an answer: the agent
+    // gets cancelled, and nothing is held.
     const outcomes = [
       ["permitted at submit", { submit: { permitted: true } }, "allow-once"],
       ["permitted at read", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once" } }, "allow-once"],
       ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, "allow-once"],
       ["activity_grant_pending", { submit: { status: 409, code: "activity_grant_pending" } }, "allow-once"],
+      ["activity_grant_revoked", { submit: { status: 401, code: "activity_grant_revoked" } }, "allow-once"],
       ["unreachable read", { read: { drop: true } }, "allow-once"],
       ["unlisted read status (500)", { read: { status: 500, code: "internal_error" } }, "allow-once"],
+      ["unlisted read state (deferred)", { answer: { afterMs: 300, state: "deferred" } }, "allow-once"],
       ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, null],
       ["activity_grant_stale read", { read: { status: 409, code: "activity_grant_stale" } }, null],
       ["refused read (said_no)", { answer: { afterMs: 300, state: "refused", reason: "said_no" } }, null],
