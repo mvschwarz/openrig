@@ -26,6 +26,20 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native ABI script entry identity (2026-10-30)
+
+Invoking the installed ABI script through the Windows-equivalent basename
+CHECK-ABI.mjs (retaining Node's lowercase .mjs extension) silently skipped the
+addon check and exited zero. Its entry guard mixed a naive file URL with a
+case-sensitive filename suffix. It now compares real file identities. An owned
+fake-addon failure is observed through that entry, and an independent file named
+check-abi.mjs can import the module without accidentally running the install
+check. Both actual Node-process checks pass 2/2. The existing Vitest ABI unit
+file fails to load with Invalid or unexpected token on both baseline and changed
+source, so no unit-case passes are claimed from it. The installed cc5971d53
+receipt above predates this guard change; subsequent package acceptance remains
+separate. No installed user package or global CLI was modified.
+
 ## Native ACP command and process checks (2026-10-30)
 
 The current stdio peer, native npm command selection and native process-identity
