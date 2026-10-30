@@ -16,6 +16,7 @@ import { MissionControlActionLog } from "../src/domain/mission-control/mission-c
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 import { activityRoutes, guestActivityRoutes } from "../src/routes/activity.js";
 import { ActivityGrantStore } from "../src/domain/activity-grants.js";
+import { createGuestActivityApp, type AppDeps } from "../src/server.js";
 
 const PERSON = "mike@external", OTHER_PERSON = "dana@external", SEAT = "dev-runner@perm-rig", INSTALL = "install-token";
 const person = (id: string) => ({ entityId: id, class: "human" as const, displayName: id, address: `${id}@external`,
@@ -31,7 +32,7 @@ const OPTIONS = [
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function fixture(options: { owner?: string | null; guest?: boolean } = {}) {
+function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean } = {}) {
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   cleanups.push(() => db.close());
@@ -73,19 +74,23 @@ function fixture(options: { owner?: string | null; guest?: boolean } = {}) {
   });
   app.route("/api/activity", options.guest ? guestActivityRoutes : activityRoutes);
   app.route("/api/mission-control", missionControlRoutes());
+  // The guest listener's own app, as the daemon builds it; a person still answers on the main app.
+  const activityApp = options.realGuest
+    ? createGuestActivityApp({ rigRepo: rigs, sessionRegistry: sessions, eventBus: bus, agentActivityStore: store, queueRepo, activityHookToken: INSTALL } as AppDeps)
+    : app;
 
   const generation = () => sessions.currentOccupantTenure(runner.id)!.generationUuid;
   const json = async (response: Response) => ({ status: response.status, body: await response.json() as Record<string, unknown> });
   const auth = (token: string) => ({ authorization: `Bearer ${token}`, "Content-Type": "application/json" });
   /** The runner submits its agent's live request. */
-  const submit = async (overrides: Record<string, unknown> = {}, token = INSTALL) => json(await app.request("/api/activity/permission-requests", {
+  const submit = async (overrides: Record<string, unknown> = {}, token = INSTALL) => json(await activityApp.request("/api/activity/permission-requests", {
     method: "POST", headers: auth(token), body: JSON.stringify({ sessionName: SEAT, nodeId: runner.id, generation: generation(),
       nativeRef: "conversation-1", turnId: "1", requestId: "7", toolCall: { title: "Edit src/app.ts", kind: "edit" }, options: OPTIONS,
       occurredAt: "2026-10-30T05:00:00.000Z", ...overrides }) }));
   const read = async (askId: string, waitSeconds = 0, token = INSTALL) =>
-    json(await app.request(`/api/activity/permission-requests/${askId}?waitSeconds=${waitSeconds}`, { headers: auth(token) }));
+    json(await activityApp.request(`/api/activity/permission-requests/${askId}?waitSeconds=${waitSeconds}`, { headers: auth(token) }));
   const withdraw = async (askId: string, reason: string, token = INSTALL) =>
-    json(await app.request(`/api/activity/permission-requests/${askId}/withdraw`, { method: "POST", headers: auth(token), body: JSON.stringify({ reason }) }));
+    json(await activityApp.request(`/api/activity/permission-requests/${askId}/withdraw`, { method: "POST", headers: auth(token), body: JSON.stringify({ reason }) }));
   /** A person answers in Steering: one offered option, or typed words. */
   const answer = async (askId: string, choice: { optionId?: string; decision?: string }, actor = PERSON) =>
     json(await app.request("/api/mission-control/action", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": actor },
@@ -218,5 +223,54 @@ describe("a runner seat's answered permission path", () => {
       expect(await f.submit({ requestId: "9" }, otherGrant.token)).toMatchObject({ status: 403, body: { code: "activity_grant_wrong_seat" } });
       if (guest) expect(await f.submit({ requestId: "10" })).toMatchObject({ status: 401 });
     }
+  });
+
+  it("serves the real guest listener's app for a seat grant, and never for the install token", async () => {
+    const f = fixture({ realGuest: true });
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    const submitted = await f.submit({ nodeId: undefined, generation: undefined }, grant.token);
+    expect(submitted).toMatchObject({ status: 200, body: { created: true } });
+    const askId = String(submitted.body.askId);
+    expect(await f.read(askId, 0, grant.token)).toMatchObject({ status: 200, body: { state: "pending" } });
+    expect(await f.submit({ requestId: "9" })).toMatchObject({ status: 401 });
+    expect(await f.read(askId)).toMatchObject({ status: 401 });
+    expect(await f.answer(askId, { optionId: "allow" })).toMatchObject({ status: 200 });
+    expect(await f.read(askId, 0, grant.token)).toMatchObject({ status: 200, body: { state: "answered", optionId: "allow" } });
+    expect(await f.withdraw(askId, "turn_ended", grant.token)).toMatchObject({ status: 200, body: { state: "answered" } });
+  });
+
+  it("refuses an earlier occupant's unrevoked grant on the current occupant's ask, to read or to withdraw", async () => {
+    const f = fixture();
+    const earlier = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    f.relaunch(); // no new grant is issued, so the earlier one isn't revoked
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.read(askId, 0, earlier.token)).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+    expect(await f.withdraw(askId, "turn_cancelled", earlier.token)).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+    expect(await f.read(askId)).toMatchObject({ status: 200, body: { state: "pending" } });
+    expect(f.queueRepo.getById(askId)).toMatchObject({ state: "pending" });
+  });
+
+  it("refuses a waiting read whose grant's occupant is replaced during the wait", async () => {
+    const f = fixture();
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    const askId = String((await f.submit({ nodeId: undefined, generation: undefined }, grant.token)).body.askId);
+    const waiting = f.read(askId, 1, grant.token);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    f.relaunch();
+    expect(await waiting).toMatchObject({ status: 409, body: { code: "activity_grant_stale" } });
+  });
+
+  it("reads an earlier occupant's answered ask as stale to the next occupant, never as its option", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.answer(askId, { optionId: "allow" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    f.relaunch();
+    const later = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    const byGrant = await f.read(askId, 0, later.token);
+    expect(byGrant).toMatchObject({ status: 200, body: { state: "stale" } });
+    expect(byGrant.body.optionId).toBeUndefined();
+    expect(await f.read(askId)).toMatchObject({ status: 200, body: { state: "stale" } });
   });
 });
