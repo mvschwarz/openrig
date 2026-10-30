@@ -578,3 +578,13 @@ Windows and `command -v pi` elsewhere. Readiness/capability suites pass 41/41,
 including both platform variants of the version notice; daemon TypeScript also
 passes. This repairs actionable guidance only, without changing launch admission,
 probing an actual provider or claiming the selected executable is compatible.
+
+Native seat-storage follow-up passes six cases: valid long filenames, exclusive
+first publication in a competing-write fixture, same-seat casing, refusal through
+directory junctions, projection restoration and preservation of user edits. An
+additional owned `con` runtime path writes and reads successfully with the current
+Node filesystem API, so the suspected device-name storage failure was not
+reproduced and no directory-name remapping was added. The initial diagnostic
+failed only an unjustified expectation that such remapping already existed;
+that assertion was removed. This does not establish arbitrary Windows tool
+compatibility with those paths, file-symlink support or actual seat restoration.

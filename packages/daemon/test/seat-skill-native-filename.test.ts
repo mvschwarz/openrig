@@ -4,6 +4,19 @@ import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { seatSkillPaths, writeInsideSeatStorage } from "../src/domain/seat-skill-storage.js";
 
+it.runIf(process.platform === "win32")("stores seat skills for a runtime whose name is a Windows device name", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "seat-runtime-device-"));
+  try {
+    const key = { rigId: "owned-rig", logicalId: "owned-seat", runtime: "con" };
+    const paths = seatSkillPaths(key, home);
+    const file = path.join(paths.skillsRoot, "owned", "SKILL.md");
+    writeInsideSeatStorage(paths.root, file, "owned runtime skill\n");
+    expect(fs.readFileSync(file, "utf8")).toBe("owned runtime skill\n");
+    expect(seatSkillPaths(key, home)).toEqual(paths);
+    expect(seatSkillPaths({ ...key, runtime: "claude-code" }, home).root).toBe(path.join(home, "state", "seats", "owned-rig", "owned-seat", "claude-code"));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
 it.runIf(process.platform === "win32")("creates and replaces an owned skill file with a valid 248-character native filename", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "seat-skill-name-"));
   try {
