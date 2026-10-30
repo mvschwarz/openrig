@@ -26,6 +26,18 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native Git context update consumer (2026-10-30)
+
+The current complete Git-context file passes 8/8 on native Windows using owned
+local Git repositories and filesystem selections. It covers canonical checkout
+root selection, a real two-parent merge preserving local/upstream content,
+conflict retention with both parent identities and unchanged served bytes,
+dirty/edited selection refusal, unavailable remote/checkout handling, explicit
+pack discovery, junction refusal and detached-update refusal. No new product
+correction was needed for these checked paths. This does not establish remote
+authentication, HTTP shallow transport or actual agent context consumption;
+no existing user checkout or remote repository was changed.
+
 ## Native installed package and shared TUI environment (2026-10-30)
 
 The actual package build at cc5971d5307d689954af6780ac6a3d7c8e5a2aed
