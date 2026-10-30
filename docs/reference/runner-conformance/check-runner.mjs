@@ -60,7 +60,8 @@ const socket = `openrig-runner-check-${process.pid}`;
 const tmux = (...args) => spawnSync("tmux", ["-L", socket, ...args], { encoding: "utf8" });
 const sh = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// Settling times and per-step bounds grow with --wait-ms on a slow machine; they never shrink below these values.
+// Settling times and per-step bounds grow with --wait-ms on a slow machine; they never shrink below these values. The
+// fake agent's own delays and holds grow by the same factor, so each settle keeps its place against what it measures.
 const scale = (ms) => Math.round(ms * Math.max(1, opts.waitMs / 8000));
 async function waitFor(read, ms = opts.waitMs) {
   const deadline = Date.now() + ms;
@@ -165,7 +166,7 @@ function result(id, title, { proposed = false } = {}) {
 const cases = {
   async "1"() {
     const r = result("1", "Handshake: the launch record comes only after the conversation is open");
-    const h = await launch("1", { scenario: { newDelayMs: 2000, sessionId: "fake-session-1" } });
+    const h = await launch("1", { scenario: { newDelayMs: scale(2000), sessionId: "fake-session-1" } });
     const asked = await waitFor(() => h.received("session/new")[0]);
     if (!r.check("the runner opens a conversation with session/new", asked, "no session/new arrived")) return r;
     await sleep(scale(800));
@@ -199,7 +200,7 @@ const cases = {
 
   async "2"() {
     const r = result("2", "Input framing, queued messages and cancel");
-    const h = await launch("2", { scenario: { turns: [{}, { holdMs: 15000 }, { holdMs: 2500, ignoreCancel: true }, {}] } });
+    const h = await launch("2", { scenario: { turns: [{}, { holdMs: scale(15000) }, { holdMs: scale(2500), ignoreCancel: true }, {}] } });
     if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
     const block = message(h, "first line\n/abort\nthird line");
     h.paste(block);
@@ -268,7 +269,7 @@ const cases = {
 
   async "4"() {
     const r = result("4", "Permissions: refused at once, shown, and held as needs input");
-    const h = await launch("4", { scenario: { turns: [{ permission: true, holdMs: 1500 }, {}] } });
+    const h = await launch("4", { scenario: { turns: [{ permission: true, holdMs: scale(1500) }, {}] } });
     if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
     h.paste(message(h, "edit the notes"));
     const asked = await waitFor(() => h.sent("session/request_permission")[0]);
