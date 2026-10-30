@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 
 // The shared vitest setup makes a fixture home, a sibling user home and a TMPDIR of its own per worker. It
 // removes them when the worker exits; before, a full run left them behind and filled the (RAM-backed) /tmp.
@@ -14,11 +15,12 @@ function runSetup(env: Record<string, string | undefined> = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixture-home-run-"));
   roots.push(tmp);
   const child = spawnSync(process.execPath, [
-    "--import", createRequire(import.meta.url).resolve("tsx"),
+    "--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
     path.join(import.meta.dirname, "fixtures/fixture-home-child.ts"),
   ], {
     encoding: "utf-8", timeout: 60_000,
-    env: { PATH: process.env.PATH, TMPDIR: tmp, ...env },
+    env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TMPDIR: env.TMPDIR ?? tmp,
+      ...(process.platform === "win32" ? { TEMP: env.TMPDIR ?? tmp, TMP: env.TMPDIR ?? tmp } : {}), ...env },
   });
   expect(child.status, child.stderr).toBe(0);
   const homes = JSON.parse(child.stdout.trim().split("\n").pop()!) as {
@@ -82,13 +84,15 @@ describe("fixture homes are removed when the worker exits", () => {
     expect(fixtureEntries(tmp)).toEqual([]);
   });
 
-  it.each(["SIGTERM", "SIGINT", "SIGHUP"] as const)("removes both homes and its TMPDIR when the worker is ended by %s, and still dies of it", async (signal) => {
+  it.for(["SIGTERM", "SIGINT", "SIGHUP", "ipc"] as const)("removes both homes and its TMPDIR when the worker is ended by %s", async (signal, context) => {
+    if (process.platform === "win32" && signal !== "ipc") context.skip();
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "fixture-home-signal-"));
     roots.push(tmp);
     const child = spawn(process.execPath, [
-      "--import", createRequire(import.meta.url).resolve("tsx"),
+      "--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
       path.join(import.meta.dirname, "fixtures/fixture-home-child.ts"), "wait",
-    ], { stdio: ["ignore", "pipe", "inherit"], env: { PATH: process.env.PATH, TMPDIR: tmp } });
+    ], { stdio: ["ignore", "pipe", "inherit", "ipc"], env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TMPDIR: tmp,
+      ...(process.platform === "win32" ? { TEMP: tmp, TMP: tmp } : {}) } });
     const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
       child.once("close", (code, sig) => resolve({ code, signal: sig })));
     try {
@@ -106,9 +110,10 @@ describe("fixture homes are removed when the worker exits", () => {
       expect(fs.existsSync(homes.home)).toBe(true);
       expect(fs.existsSync(homes.scratch)).toBe(true);
 
-      child.kill(signal);
+      if (signal === "ipc") child.send("exit");
+      else child.kill(signal);
 
-      expect(await closed).toEqual({ code: null, signal });
+      expect(await closed).toEqual(signal === "ipc" ? { code: 0, signal: null } : { code: null, signal });
       expect(fs.existsSync(homes.openrigHome)).toBe(false);
       expect(fs.existsSync(homes.home)).toBe(false);
       expect(fs.existsSync(homes.scratch)).toBe(false);

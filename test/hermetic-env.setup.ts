@@ -35,6 +35,10 @@ export function fixtureUserHomeEnv(userHome: string, platform: NodeJS.Platform =
   return { HOME: userHome, ...(platform === "win32" ? { USERPROFILE: userHome } : {}) };
 }
 
+export function fixtureTempEnv(tmp: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  return { TMPDIR: tmp, ...(platform === "win32" ? { TEMP: tmp, TMP: tmp } : {}) };
+}
+
 // Scrub inherited instance selectors before product modules capture their defaults.
 // Tests can still set explicit overrides after setup; test/provider opt-in flags
 // are not instance selectors and remain untouched.
@@ -88,7 +92,7 @@ const fixtureHome =
         // test.env OPENRIG_TEST_KEEP_TMPDIR=1 in its vitest config and keeps the TMPDIR it was given.
         if (process.env["OPENRIG_TEST_KEEP_TMPDIR"] !== "1") {
           createdTmp = fs.mkdtempSync(path.join(os.tmpdir(), "o-"));
-          process.env["TMPDIR"] = createdTmp;
+          Object.assign(process.env, fixtureTempEnv(createdTmp));
         }
         return h;
       })();
