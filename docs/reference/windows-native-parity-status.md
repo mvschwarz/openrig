@@ -767,3 +767,21 @@ WinGet alias/Job execution cannot be tested here without changing that host.
 No WinGet installation was attempted. A refocus trace also reports unresolved
 topology/workspace roots; that trace does not establish a completed contextual
 restore or authorize any live-team action.
+
+At `bd39336`, the complete pod RigSpec instantiator file passes 73/73 on native
+Windows, including materialization, persisted spec identity, startup failure
+cleanup and retained ambiguous terminal ownership. Its terminal and runtime
+adapters are mocks; this is not live-team launch or restore acceptance. The
+complete pod bundle assembler file passes 76/79. The other three cases fail
+while creating file symlinks with host `EPERM`, before the containment assertions;
+they remain unverified and are not waived or replaced by junction coverage.
+The existing native path normalization already resolves the historical mock
+filesystem failures in these paths; no additional production change was needed.
+
+A finite reconciliation of the earlier source-stable daemon run's 1,638 failed
+cases found 465 exact filename/title matches in subsequent fully passing scoped
+reports before these two checks. The remaining 1,173 were unmatched evidence,
+not reproduced current failures. Reports cover different revisions and the
+filename selection is bounded, so these counts establish neither current full
+suite status nor comprehensive Windows feature parity. The two checks above
+add current scoped evidence without changing those historical snapshot counts.
