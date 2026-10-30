@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Ask-wake native timeout review (2026-10-30)
+
+The suspected descendant-cleanup gap in `defaultWakeRunner` was not reproduced.
+Actual owned Node fixtures cover both a hanging root with a descendant and an
+already-exited root whose descendant holds stdout/stderr. With a bounded wake
+timeout, both calls return and the recorded owned descendants exit. This differs
+from the separately reproduced shell-wrapper profile-probe gap; no wake runner
+implementation change was justified by these observations.
+
+The new native cases, existing owned npm-provider argument fixture and wake
+behavior tests pass, together with CLI TypeScript checking. The fixtures do not
+wake installed providers, read real session files, or establish all possible
+provider process lifecycles. Failed observations would clean up only their own
+recorded PIDs; no fleet process was touched.
+
 ### Runtime profile probe timeout (2026-10-30)
 
 An owned native Node probe that started a descendant reproduced a timeout
