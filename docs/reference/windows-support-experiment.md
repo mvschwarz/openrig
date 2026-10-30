@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Agent-image reference discovery handles native filenames
+
+The image reference reader skipped uppercase/mixed-case YAML extensions on
+Windows and labelled ordinary backslash-separated `agent.yaml` paths as rig
+references. It now recognizes native extension spellings and derives the source
+kind from the platform basename. The owned before-run reproduced four failures;
+all 12 tests pass after repair, including pinned images, name-based references
+across versions and transitive lineage. Daemon TypeScript checking passes. These
+checks evaluate synthetic records and files only; no image prune or real
+resource deletion was executed.
+
 ### Native community preset listing matches direct loading
 
 On Windows, `synth.YAML` was directly loadable as the `synth` preset but absent
