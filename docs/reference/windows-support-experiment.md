@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Provider switch platform guidance (2026-10-30)
+
+The provider-switch help no longer says the Codex in-place path is Linux-only:
+the current restart implementation also reads Windows process facts, argv and
+the selected home. Help now names experimental Windows, the evidence-based
+refusals and the absence of a default observer on other platforms. The missing
+process-facts diagnostic names both implemented observers. This corrects stale
+guidance only; no login switch, seat restart, credential read or live-provider
+acceptance was performed for this edit.
+
 ### Ask-wake native timeout review (2026-10-30)
 
 The suspected descendant-cleanup gap in `defaultWakeRunner` was not reproduced.

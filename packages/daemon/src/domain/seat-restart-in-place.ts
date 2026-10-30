@@ -421,7 +421,7 @@ export class CodexInPlaceRestart {
     if (!runningArgv) return { ok: false, code: "settings_unverified", message: "The running Codex's exact arguments could not be read, so its launch settings are unverified. Nothing was stopped." };
     const startedAt = process.startedAt ?? null;
     const facts = await this.io.readProcess(process.pid);
-    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (this observer reads /proc on Linux). Nothing was stopped." };
+    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (the default observers use /proc on Linux or native process metadata on Windows). Nothing was stopped." };
     const codexHome = facts.env.CODEX_HOME || (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
     if (!codexHome) return { ok: false, code: "settings_unverified", message: "The running Codex's home could not be determined (no CODEX_HOME or HOME). Nothing was stopped." };
 
