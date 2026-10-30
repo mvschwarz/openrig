@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Terminal, reconciliation and protocol review continuation
+
+The current tmux executor, session reconciler, proof routes, SFTP protocol,
+Claude seat switch, TUI workflow model and gate-lane entry were read in full.
+This pass did not establish another native implementation defect in those files.
+It does not establish acceptance of their dependencies or live integrations.
+The existing real-server tmux transport and unseen-seat tests deliberately skip
+Windows and cannot serve as native psmux evidence.
+
+The existing TUI workflow command tests were run for native PowerShell literal
+wrapping and retained POSIX quoting: two selected cases pass, 35 other cases were
+filtered. The native case checks widths 24/40/80/160 with an owned receiver;
+the POSIX case uses Git Bash. No workflow action, live TUI, daemon, seat,
+provider, SSH subsystem, process census or gate-lane run was started. The retained
+native source-path navigation and PowerShell rendering implementations remain in
+this Draft; this pass adds bounded review evidence, not a new implementation claim.
+
 ### Native human-registry archive and sidecar names
 
 A valid 240-character human entity id could be added, read and edited on Windows,
