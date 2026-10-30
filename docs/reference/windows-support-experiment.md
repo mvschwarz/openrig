@@ -2,6 +2,25 @@
 
 ## Current review status (2026-10-30)
 
+### Reconciled entry and file-transfer evidence
+
+The finite candidate ledger now reconciles nine previously recorded implementation
+areas against their retained raw reports: bin wrapper, ABI, setup, doctor, shared
+TUI environment, desktop terminal environment, local Git context, native SFTP and
+ACP connector. This is evidence reconciliation, not nine newly implemented features.
+The full setup/doctor report is 123 passed; its later platform subset is 4 passed
+with 119 filtered. The bin-wrapper report remains 4 passed and one actual file
+symlink EPERM failure. The desktop-environment file has 8 passed; it must not be
+presented as the larger aggregate. ACP's dotted-command report is 9 passed with
+16 filtered, with the separately recorded companion-cleanup failure still open.
+
+Current chatroom watcher checks pass 14 cases, including actual owned Windows
+Node argv, with 17 real-tmux cases skipped because the version probe did not find
+an available tmux executable in this invocation. No real watch, SSE connection or
+psmux session was started. This does not prove native terminal transport.
+The ledger has 97 unreconciled source candidates after this reconciliation;
+these counts are neither confirmed-gap counts nor full feature acceptance.
+
 ### Current cumulative package build and transport review
 
 The full actual Windows package build completed at source head
