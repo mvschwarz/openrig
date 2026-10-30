@@ -1,8 +1,9 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import fs from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createPrivateTextFile } from "../src/lib/private-text-file.js";
 import { writeTextAtomically } from "../src/atomic-text-write.js";
 import { ConfigStore } from "../src/config-store.js";
@@ -227,6 +228,41 @@ it.runIf(process.platform === "win32")("preserves protected artifact access duri
   expect(readFileSync(file, "utf8")).toBe("replacement synthetic evidence");
   expect(accessPolicy(file)).toBe(before);
   expect(readdirSync(root)).toEqual(["proof.md"]);
+});
+it.runIf(process.platform === "win32")("keeps native proof staging private before writing replacement bytes", () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-proof-staging-acl-"));
+  const file = join(root, "proof.md");
+  createPrivateTextFile(file, "original synthetic evidence");
+  const before = accessPolicy(file);
+  const permitted = new Set(JSON.parse(before).rules.map((rule: { identity: string }) => rule.identity));
+  const staged = new Map<number, string>();
+  const originalOpen = fs.openSync, originalWrite = fs.writeFileSync;
+  const open = vi.spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+    const fd = originalOpen(...args);
+    if (args[1] === "wx" && String(args[0]).endsWith(".replace-tmp")) staged.set(fd, String(args[0]));
+    return fd;
+  }) as typeof fs.openSync);
+  let witnessed = 0;
+  const write = vi.spyOn(fs, "writeFileSync").mockImplementation(((...args: Parameters<typeof fs.writeFileSync>) => {
+    const staging = typeof args[0] === "number" ? staged.get(args[0]) : undefined;
+    if (staging) {
+      const policy = JSON.parse(accessPolicy(staging));
+      const directoryPolicy = JSON.parse(accessPolicy(dirname(staging)));
+      expect(directoryPolicy.protected).toBe(true);
+      expect(directoryPolicy.rules.every((rule: { identity: string; type: number }) => permitted.has(rule.identity) && rule.type === 0)).toBe(true);
+      expect(policy.rules.length).toBeGreaterThan(0);
+      expect(policy.rules.every((rule: { identity: string; type: number }) => permitted.has(rule.identity) && rule.type === 0)).toBe(true);
+      witnessed++;
+    }
+    return originalWrite(...args);
+  }) as typeof fs.writeFileSync);
+  try {
+    replaceArtifactFile(file, "replacement synthetic evidence");
+    expect(witnessed).toBe(1);
+    expect(readFileSync(file, "utf8")).toBe("replacement synthetic evidence");
+    expect(accessPolicy(file)).toBe(before);
+    expect(readdirSync(root)).toEqual(["proof.md"]);
+  } finally { write.mockRestore(); open.mockRestore(); }
 });
 it.runIf(process.platform === "win32")("replaces a readonly proof while retaining readonly aliases and their original bytes", () => {
   root = mkdtempSync(join(tmpdir(), "openrig-proof-readonly-"));

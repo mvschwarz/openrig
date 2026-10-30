@@ -693,3 +693,25 @@ checks, ten cases and CLI TypeScript pass. The three original test names now hav
 current passing receipts: exact-name reconciliation is 58 later passes and 36
 unmatched cases. These counts do not clear renamed permission tests, link
 privilege limitations, ACP cleanup or the 13 POSIX fixture skips.
+
+Source-level triage of the remaining 23 non-POSIX-fixture historical cases finds
+20 involving file symlinks (including one mixed permission/link case), one POSIX
+staging-mode assertion, one renamed auth-seat privacy case and the ACP cleanup
+case. This is a classification of the old failure snapshot, not a claim that all
+20 link cases have been re-executed or that no other feature gaps exist.
+
+Four selected native proof checks now pass, with 19 unrelated cases filtered.
+The new check observes real DACLs immediately before staged replacement bytes
+are written: the staging directory has protected access rules, and both directory
+and staged-file rules allow only identities already permitted by the original
+private artifact. The staged file may safely inherit those rules from its private
+parent; requiring the file itself to disable inheritance was an incorrect initial
+test assumption, corrected after observation. A separate fixture-only ESM spy
+setup failure was corrected by spying on the mutable fs object.
+
+The other selected checks retain the artifact's DACL after replacement, preserve
+readonly hard-link aliases and original bytes, and restore readonly state when a
+real delete-sharing lock refuses replacement. No new production defect was
+reproduced in this scope. Native access-policy evidence does not turn POSIX mode
+bits or unavailable file-symlink checks into passes; exact-name reconciliation
+remains 58 later passes and 36 unmatched historical cases.
