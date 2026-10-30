@@ -256,6 +256,38 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
   });
 
+  it("follows only the colleague's own row: a later row citing the ask is neither read nor withdrawn", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
+    const colleague = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === OTHER_PERSON && row.chainOfRecord?.includes(askId))!;
+    const unrelated = await f.queueRepo.create({ sourceSession: PERSON, destinationSession: OTHER_PERSON, body: "a follow-up about that edit",
+      chainOfRecord: [askId], nudge: false });
+    f.queueRepo.update({ qitemId: unrelated.qitemId, actorSession: OTHER_PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "read it" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.withdraw(askId, "turn_ended")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(f.queueRepo.getById(colleague.qitemId)!.state).toBe("canceled");
+    expect(f.queueRepo.getById(unrelated.qitemId)!.state).toBe("done");
+  });
+
+  it("never permits a handoff it can't follow: with no local successor the request stays pending, and withdrawing leaves the row", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    f.db.prepare("UPDATE queue_items SET state = 'handed-off', closure_reason = 'handed_off_to', handed_off_to = 'dana@external@other-host' WHERE qitem_id = ?").run(askId);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    expect(await f.withdraw(askId, "turn_ended")).toMatchObject({ body: { state: "withdrawn" } });
+    expect(f.queueRepo.getById(askId)!.state).toBe("handed-off");
+  });
+
+  it("follows a handoff that completes the ask to the colleague's row", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    const { created } = await f.queueRepo.handoffAndComplete({ qitemId: askId, fromSession: PERSON, toSession: OTHER_PERSON, nudge: false });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
+    await f.contract.act({ verb: "deny", qitemId: created.qitemId, actorSession: OTHER_PERSON, reason: "not this one" } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
   it("takes the primary user's ordinary answer from the terminal, as on any ask", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
