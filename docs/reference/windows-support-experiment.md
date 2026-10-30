@@ -26,6 +26,20 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native bundle integrity path keys (2026-10-30)
+
+The current owned bootstrap fixture reproduced seven failures when a bundle
+assembled using native Windows `walkFiles` paths was unpacked using archive
+paths: identical nested members were reported as extra. Integrity production
+and comparison now use slash-separated archive keys, retaining native file
+access paths. Existing route walkers already emit archive paths; this also
+admits native filesystem walkers at the shared integrity boundary.
+The integrity/bootstrap pair passes 86/86 after the correction. A subsequent
+explicit native-to-archive and archive-to-native check, including tampered
+content refusal, passes with the complete integrity file (10/10). Daemon
+typecheck passes. Bootstrap uses owned bundles, SQLite and scripted launch
+adapters; it does not launch installed providers or deployed seats.
+
 ## Native seat skill storage replacement (2026-10-30)
 
 An actual `writeInsideSeatStorage` update replaced an owned protected skill's
@@ -40,6 +54,15 @@ Five broader storage/ownership files report 82 tests: 67 passed and 15 failed.
 Thirteen failures occur while creating privilege-dependent symlinks and two
 assert POSIX executable mode bits on Windows. Those failures are retained;
 this run does not establish complete native ownership/symlink acceptance.
+
+Directory-link fixtures now explicitly use native Windows junctions (POSIX
+directory symlinks elsewhere), while file-link cases still require actual file
+symlinks. Permission assertions compare actual source/before modes rather than
+requiring POSIX executable bits on Windows. The first ownership rerun passes
+39/44, with three file-link privilege failures and two further mode assertions.
+After correcting those two assertions, the selected Claude/Codex junction
+projection checks pass 2/2 (42 other checks filtered). These prove owned
+directory-reparse-point refusal; they do not replace file-symlink evidence.
 
 ## Packed native TUI and delayed terminal input (2026-10-30)
 
