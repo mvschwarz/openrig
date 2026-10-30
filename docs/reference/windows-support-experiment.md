@@ -273,6 +273,25 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Linked native build and guard entrypoints (2026-10-30)
+
+Three script entries compared module and argv URL strings: package build,
+workspace build preparation and first-run reference checking. Actual directory
+junction invocations reproduced successful exit without executing their work.
+They now compare real file paths, matching the existing guard entry convention;
+imports without an entry remain inert. Build selection, asset rules, help
+generation and reference validation logic are unchanged.
+
+Owned linked-root fixtures exercise ordinary and preserve-symlinks-main Node
+invocations. The package-build fixture uses an owned Node executable standing
+in for Git Bash and a recorder instead of builds/npm/install. Workspace
+preparation actually copies fixture assets and derives help from its fixture
+command factory. The reference checker reports missing fixture surfaces rather
+than passing silently. Six related script files report 26 passed, zero failed
+and one existing file-symlink privilege skip. No real package build, installation,
+publication, daemon or seat change is claimed by these tests. Clean-head full
+package/install acceptance remains separate.
+
 ## Active IPC, bounded shutdown and private observer review (2026-10-30)
 
 At source 3d002eaaaa8f3b1d867a75e43800b3a13bd28d63, complete Windows daemon

@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -30,7 +30,10 @@ export function prepareWorkspaceBuild(root, workspace, platform = process.platfo
   for (const name of ["LICENSE", "README.md"]) copyFileSync(path.join(root, name), path.join(dir, name));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   prepareWorkspaceBuild(root, process.argv[2]);
   if (process.argv[2] === "cli") {

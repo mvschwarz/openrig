@@ -2,7 +2,7 @@
 // Check concrete references, not prose quality. Run with node --import tsx.
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { parse as parseYaml } from "yaml";
 
@@ -280,6 +280,9 @@ export async function main(root = ROOT) {
   return report;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(process.argv[1]); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
   main().catch((error) => { console.error(`First-run references: ${error.message}`); process.exitCode = 1; });
 }
