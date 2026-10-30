@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Pi/OMP protocol fixture failures reconciled
+
+The current two protocol files reproduced the previously recorded 15 failures
+(41 passed, 15 failed). Some POSIX runtime fixtures omitted their platform seam;
+resume fakes also extracted launch ids and asserted arguments using POSIX quote
+spelling even when the adapter emitted a native PowerShell envelope. Runtime
+fixtures now explicitly model POSIX where intended, while resume assertions read
+the command's actual argv from either literal words or the native argument field.
+Session-file, trust, effort, usage and launch-attempt checks remain in place.
+
+Both complete protocol files and the existing owned native dispatch file now pass
+together (59/59). Three cases execute actual PowerShell/Node fresh/resume commands
+with synthetic runners, including routing refusal fallback; other cases use fake
+terminal/filesystem state. No production code changed in this reconciliation.
+These results clear the fixture failures, not live Pi/OMP conversation or process
+identity acceptance. No installed provider, daemon or seat was used.
+
 ### Native prepublish entry and fresh-prefix installation
 
 The CLI's `prepublishOnly` lifecycle previously invoked bare `bash`, bypassing
