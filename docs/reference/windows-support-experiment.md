@@ -5,6 +5,22 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Cumulative native build and isolated CLI installation refreshed
+
+At `c778b2a52d4337dc6b2d4dcd1a49e3f00f07b9b7`, the target-native gate passes
+in 83 seconds: full package build, pack, fresh owned-prefix installation,
+installed in-memory SQLite ABI check and the real npm `rig.cmd` through
+PowerShell. The CLI command writes only a synthetic gateway-human fragment under
+an owned home; no connector delivery or daemon/provider launch occurs. The gate
+cleans its prefix, home and tarball, preserving shared caches.
+
+Build readback records version 0.7.1, `dirty=true` and build time
+`2026-10-30T06:01:56Z`. Source and assembled openrig-core 0.1.31 hashes agree;
+ten recent compiled CLI/daemon/TUI modules are present and the assembled TUI
+resolver selects its paired CLI. This refreshes cumulative packaging/CLI
+evidence; it does not establish a clean release, all Node versions, an installed
+interactive TUI, real provider continuity or deployment acceptance.
+
 ### Rig export copies culture through valid native directory aliases
 
 An owned CLI export reproduced a contained culture directory junction being
