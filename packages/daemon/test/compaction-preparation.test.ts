@@ -298,7 +298,7 @@ it('automatic preparation gives the post-delivery ceiling without a fabricated p
  expect(prompt).toContain(f.e.getPreparationState(seat)!.marker);
 });
 
-for(const expiry of ['missing map','idle after completed map'])it(`route reports incomplete preparation on ${expiry} expiry`,async()=>{
+for(const expiry of ['missing map','idle after completed map'])it(`route distinguishes ${expiry} expiry`,async()=>{
  const f=fixture();
  if(expiry==='idle after completed map')f.onSleep(async()=>{stageMap(f);f.activity('busy');});
  vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
@@ -317,9 +317,8 @@ for(const expiry of ['missing map','idle after completed map'])it(`route reports
  });
  const body=await response.json();
  expect(response.status).toBe(409);
- expect(body.reason).toBe('preparation_incomplete');
- expect(body.error).toContain('Preparation (restore map and idle wait) did not finish in time');
- expect(body.error).not.toContain('restore map was not completed');
+ expect(body.reason).toBe(expiry==='missing map'?'preparation_incomplete':'map_complete_seat_never_idle');
+ expect(body.error).toContain(expiry==='missing map'?'restore map was not completed':'map complete, seat never idle');
  expect(body.error).toContain('managed compaction is disarmed');
  expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
  expect(compacts(f)).toHaveLength(0);
@@ -343,7 +342,7 @@ function routeFixture(f:ReturnType<typeof fixture>, cwd?:string){
 it('preparation receipt: unresolved permission at deadline discloses the delivered prep and exact attempt',async()=>{
  const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
  const res=await routeFixture(f)();const body=await res.json();
- expect(res.status).toBe(409);expect(body.reason).toBe('preparation_incomplete');
+ expect(res.status).toBe(409);expect(body.reason).toBe('map_complete_seat_never_idle');
  expect(body.preparation).toMatchObject({attemptId:f.e.getPreparationState(seat)!.attemptId,delivery:'delivered'});
  expect(body.error).toContain('Preparation was sent');expect(body.error).not.toContain('could not be sent');
  expect(body.error).toContain('disarmed');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
@@ -498,7 +497,7 @@ for(const end of ['expiry','cancel','disable','replacement'])it(`manual ${end} d
   if(end==='replacement')f.generation('generation-two');
   return {ok:true,activity:{state:'idle',reason:'fixture',evidenceSource:'fixture'},waitedMs:0,attempts:1} as any;
  });
- expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:{expiry:'preparation_incomplete',cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:{expiry:'map_complete_seat_never_idle',cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
  expect(idle).toHaveBeenCalledTimes(1);
  expect(compacts(f)).toHaveLength(0);expect(existsSync(f.e.getPreparationState(seat)!.mapPath)).toBe(false);
 });
@@ -699,7 +698,7 @@ it('manual attention clears within the same attempt with one preparation and one
 });
 it('manual unresolved attention consumes the deadline and never revives',async()=>{
  const f=fixture();const start=f.clock();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
- expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_incomplete'});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
  expect(f.clock()).toBe(start+1000);expect(compacts(f)).toHaveLength(0);
  f.activity('idle');stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(0);
 });
@@ -735,4 +734,42 @@ it('manual uncertain compact receipt never retries input',async()=>{
  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(false);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(1);expect(f.e.getPreparationState(seat)?.compact).toBe('uncertain');
+});
+
+
+for (const end of ['cancel', 'disable', 'replacement'] as const) it(`automatic: completed map still stops on ${end} during idle grace`, async () => {
+ const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.e.reconcilePreparations();
+ expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
+ if(end==='cancel')f.e.cancelPreparation(seat);
+ if(end==='disable')f.policy.enabled=false;
+ if(end==='replacement')f.generation('generation-two');
+ f.e.reconcilePreparations();
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:
+  {cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
+ expect(compacts(f)).toHaveLength(0);
+});
+
+
+for(const fresh of [false,null,"below","high"] as const)it(`an armed completed map reaches the next idle boundary with usage freshness ${fresh}`,async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.activity('running');
+ const row={node_id:'node-one',session_id:1,session_name:seat,runtime:'claude-code',cwd:null,startup_status:'ready'};
+ const db={prepare:()=>({all:()=>[row]})};
+ const store={readAndNormalize:()=>fresh===null?null:{availability:'known',fresh:typeof fresh==='string',usedPercentage:fresh==='below'?20:90},persist:()=>{}};
+ const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
+ await monitor.pollOnce();expect(compacts(f)).toHaveLength(0);
+ f.activity('idle');await monitor.pollOnce();
+ expect(compacts(f)).toHaveLength(fresh==='below'?0:1);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);
+ if(fresh==='below')expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
+});
+
+
+it('a manual map completed in the last sleep reports a completed-map idle expiry',async()=>{
+ const f=fixture(250);let a:ReturnType<typeof f.e.getPreparationState>;
+ const keys=f.tmux.sendKeys.getMockImplementation()!;
+ f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{a=f.e.getPreparationState(seat);return keys(...args);});
+ f.onSleep(async()=>{mkdirSync(dirname(a!.mapPath),{recursive:true});writeFileSync(a!.mapPath+'.tmp',`# Complete map\n${a!.marker}\n`);});
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'map_complete_seat_never_idle'});
+ expect(compacts(f)).toHaveLength(0);
 });
