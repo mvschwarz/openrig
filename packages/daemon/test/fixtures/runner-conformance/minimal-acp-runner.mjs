@@ -105,11 +105,14 @@ let cancelSent = false;
 const queue = [];
 
 // Permissions. Every request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
-// person's, or OpenRig's permit. When no one can be asked (OpenRig answers 404, can't be reached, refuses for any reason
-// other than denied_by_seat, or reads with a status the contract doesn't list), the runner permits with the agent's
-// allow_once, else allow_always. Only denied_by_seat, or no allow option to permit, means refuse at once and hold
-// attention. An answer is delivered once, while that request is still live, and the ask is withdrawn when the turn is
-// cancelled or ends, or the agent exits.
+// person's, or OpenRig's permit. A refusal, at submit or while reading, is read by its code: the seat's opt-in refuses and
+// holds attention; one that says the request isn't the current occupant's answers cancelled and holds nothing, as a
+// refused, stale or withdrawn read does; anything else (404, unreachable, a "permits" code or one the contract doesn't
+// list) permits with the agent's allow_once, else allow_always, or refuses and holds when there's no allow option. An
+// answer is delivered once, while that request is still live, and the ask is withdrawn when the turn is cancelled or ends,
+// or the agent exits.
+const HOLDS = new Set(["denied_by_seat", "options_unsupported"]);
+const NOT_CURRENT = new Set(["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale", "activity_grant_revoked"]);
 let live = null;
 const refuse = (id) => answer(id, { result: { outcome: { outcome: "cancelled" } } });
 const select = (id, optionId) => answer(id, { result: { outcome: { outcome: "selected", optionId } } });
@@ -131,8 +134,9 @@ async function onPermission(msg) {
     toolCall: { title: toolCall?.title, kind: toolCall?.kind }, options, occurredAt: new Date().toISOString() });
   if (submitted.status === 200 && submitted.body?.state === "permitted") { select(msg.id, submitted.body.optionId); return; }
   if (submitted.status !== 200 || !submitted.body?.askId) {
-    const status = submitted.status;
-    if (submitted.body?.code === "denied_by_seat") { if (breaks.has("permit-on-deny")) permit(); else refuseAndHold(); }
+    const status = submitted.status, code = submitted.body?.code;
+    if (HOLDS.has(code)) { if (breaks.has("permit-on-deny")) permit(); else refuseAndHold(); }
+    else if (NOT_CURRENT.has(code) && !breaks.has("permit-on-not-current")) { if (breaks.has("hold-on-cancel")) refuseAndHold(); else refuse(msg.id); }
     else if ((status === 404 && breaks.has("refuse-on-404")) || (status === 0 && breaks.has("refuse-on-unreachable"))
       || (status !== 404 && status !== 0 && breaks.has("refuse-on-refusal"))) refuseAndHold();
     else permit();
@@ -156,9 +160,14 @@ async function onPermission(msg) {
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
       attention = false;
     } else if (!ask.done) {
-      // Withdrawn, stale or a refused read: the request can't take an answer. Anything else means no one can answer it.
-      const cannotTake = state === "withdrawn" || state === "stale" || [401, 403, 409].includes(read.status);
-      if (cannotTake ? !breaks.has("permit-on-read-refusal") : breaks.has("cancel-on-read-error")) refuse(ask.id);
+      // A refused, withdrawn or stale read, or a refusal saying the request isn't the current occupant's: it can't take an
+      // answer, and no person is still waiting, so it's cancelled and nothing is held. The seat's opt-in refuses and holds.
+      // Anything else means no one can answer it, so it's permitted.
+      const code = read.status === 200 ? undefined : read.body?.code;
+      const cancelled = (state === "refused" && !breaks.has("permit-on-refused-read")) || state === "withdrawn" || state === "stale"
+        || (NOT_CURRENT.has(code) && !breaks.has("permit-on-not-current"));
+      if (HOLDS.has(code)) { refuse(ask.id); attention = true; }
+      else if (cancelled || (!state && breaks.has("cancel-on-read-error"))) { refuse(ask.id); attention = breaks.has("hold-on-cancel"); }
       else { permit(); attention = !allowOf(options); }
     }
     ask.done = true;
