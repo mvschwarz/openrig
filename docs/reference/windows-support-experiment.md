@@ -273,6 +273,21 @@ This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
 
+## Native browser launcher system path (2026-10-30)
+
+The browser launcher still depended on bare powershell.exe being on PATH.
+Windows UI opening now resolves the fixed system PowerShell path from the
+selected SystemRoot with native environment-name lookup. URL literal encoding,
+hidden bootstrap and POSIX launcher selection are unchanged.
+
+An owned PATH without system tools reproduces bare PowerShell startup failure.
+The generated absolute launcher starts real PowerShell with the same environment
+and passes an injection-shaped Unicode URL intact to an in-script Start-Process
+witness. That witness records the URL instead of opening an application. Complete
+browser/UI checks pass 16/16 and CLI typecheck passes. No browser, real UI page,
+daemon or terminal window was opened; default-browser association acceptance is
+still separate.
+
 ## Native chatroom watcher entry (2026-10-30)
 
 `chatroom watch --tmux` handed the new session a bare rig program. Windows
