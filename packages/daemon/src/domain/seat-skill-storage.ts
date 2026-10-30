@@ -5,6 +5,8 @@ import { getOpenRigHome } from "../openrig-compat.js";
 import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillLoadoutLocation, SkillRuntime } from "./skill-catalog.js";
 import { parseSkillFrontmatter } from "./skill-discovery.js";
 import { MANAGED_BLOCK_APPEND_SEPARATOR, hasEditedManagedBlock, managedBlockText } from "./managed-blocks.js";
+import { createWindowsPrivateDirectory } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 
 // OPR.0.7.0.13 — where a team seat's skills live: storage OpenRig owns, outside the person's project and their own
 // skill folders, so a person's own agent opened in the project sees none of the team's skills.
@@ -168,6 +170,19 @@ export function writeInsideSeatStorage(root: string, file: string, bytes: string
     current = nodePath.join(current, part);
     try { fs.mkdirSync(current); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err; }
     if (!fs.lstatSync(current).isDirectory()) throw new Error(`${current} is not a folder inside this seat's storage`);
+  }
+  if (process.platform === "win32" && lexists(file)) {
+    const stagingDirectory = createWindowsPrivateDirectory(nodePath.dirname(file));
+    const temp = nodePath.join(stagingDirectory, "skill.tmp");
+    try {
+      fs.writeFileSync(temp, bytes, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });
+      if (mode !== undefined) fs.chmodSync(temp, mode);
+      replaceWindowsFilePreservingMetadata(file, temp);
+    } finally {
+      try { fs.unlinkSync(temp); } catch {}
+      try { fs.rmdirSync(stagingDirectory); } catch { /* Retain owned staging if cleanup is unavailable. */ }
+    }
+    return;
   }
   const temp = `${file}.openrig-${process.pid}-${Date.now()}`;
   fs.writeFileSync(temp, bytes, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });

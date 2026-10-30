@@ -20,6 +20,7 @@ import { listRecapChain, writeSeatRecap } from "../../daemon/src/domain/context-
 import { ChannelCoverageStore, DeadLetterStore, ThreadCoverageStore } from "../../daemon/src/domain/gateway/slack/state-store.js";
 import { PluginDiscoveryService } from "../../daemon/src/domain/plugin-discovery-service.js";
 import { reconcileSkillLoadout, resolveSkillLoadout } from "../../daemon/src/domain/skill-catalog.js";
+import { seatSkillPaths, writeInsideSeatStorage } from "../../daemon/src/domain/seat-skill-storage.js";
 
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
@@ -29,6 +30,25 @@ function accessPolicy(file: string): string {
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: { ...process.env, OPENRIG_TEST_ACL_FILE: file }, encoding: "utf8", windowsHide: true }).trim();
 }
+it.runIf(process.platform === "win32")("preserves protected seat skill access during actual storage replacement", () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), "openrig-seat-storage-acl-")));
+  const paths = seatSkillPaths({ rigId: "owned", logicalId: "worker", runtime: "claude-code" }, root);
+  const file = join(paths.skillsRoot, "fixture", "SKILL.md");
+  mkdirSync(join(paths.skillsRoot, "fixture"), { recursive: true });
+  createPrivateTextFile(file, "owned original\n");
+  const before = accessPolicy(file);
+  writeInsideSeatStorage(paths.root, file, "owned replacement\n");
+  expect(readFileSync(file, "utf8")).toBe("owned replacement\n");
+  expect(accessPolicy(file)).toBe(before);
+  expect(readdirSync(join(paths.skillsRoot, "fixture"))).toEqual(["SKILL.md"]);
+  chmodSync(file, 0o444);
+  try {
+    expect(() => writeInsideSeatStorage(paths.root, file, "must not replace\n")).toThrow();
+    expect(readFileSync(file, "utf8")).toBe("owned replacement\n");
+    expect(accessPolicy(file)).toBe(before);
+    expect(readdirSync(join(paths.skillsRoot, "fixture"))).toEqual(["SKILL.md"]);
+  } finally { chmodSync(file, 0o666); }
+});
 it.runIf(process.platform === "win32")("preserves protected plugin migration files while retiring obsolete registrations", () => {
   root = mkdtempSync(join(tmpdir(), "openrig-plugin-migration-acl-"));
   const plugins = join(root, "plugins"), lab = join(plugins, "openrig-lab");

@@ -26,6 +26,21 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native seat skill storage replacement (2026-10-30)
+
+An actual `writeInsideSeatStorage` update replaced an owned protected skill's
+DACL with inherited parent access. Existing native files now stage privately and
+use the metadata-preserving Windows replacement helper. The storage containment
+checks, POSIX path and exclusive hard-link publication of new files remain intact.
+The owned native fixture fails before the correction and passes afterward,
+including readonly refusal with original bytes/access retained and no staging
+files left behind. One selected check passes (21 unrelated checks filtered out),
+and daemon typecheck passes. No real seat storage was changed.
+Five broader storage/ownership files report 82 tests: 67 passed and 15 failed.
+Thirteen failures occur while creating privilege-dependent symlinks and two
+assert POSIX executable mode bits on Windows. Those failures are retained;
+this run does not establish complete native ownership/symlink acceptance.
+
 ## Packed native TUI and delayed terminal input (2026-10-30)
 
 The real package-entry check previously required POSIX execute bits on a JavaScript
@@ -44,6 +59,10 @@ all delayed arrow/page/mouse split checks then pass on native Windows. The build
 was based on 109809850 with these working changes and correctly reports dirty=true;
 it is not a clean-head artifact, installed npm shim or visible-terminal acceptance.
 No real daemon, seat, multiplexer session or system clipboard was used.
+The subsequent complete TUI regression reports 1,205 tests: 1,184 passed, zero
+failed and 21 pending. It ran against these unchanged TUI source files while the
+receipt/commit metadata was updated, so it is scoped regression evidence rather
+than a source-stable whole-checkout acceptance run.
 
 ## Provider selected PATHEXT (2026-10-30)
 
