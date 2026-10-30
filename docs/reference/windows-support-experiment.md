@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Shared private-file replacement staging names
+
+Both synchronous and asynchronous Windows private-text replacement now use a
+short UUID sibling staging filename. Appending the UUID to a valid 245-character
+destination basename previously made private staging creation fail; the new
+owned regression reproduces that failure before the change. The existing deep
+Unicode directory fixture already passed and was not treated as a missing feature.
+
+The focused private-file tests pass five checks: repeated sync/async replacement,
+readback, no staging residue, opened-handle current-owner/private-DACL assessment,
+deep Unicode paths and exclusive-create collision preservation. Daemon TypeScript
+checking passes. Private creation still establishes and verifies its DACL before
+writing content; publication still uses same-directory rename. Only synthetic
+content in owned temporary paths was used, with no live configuration or credentials.
+
 ### Provider selection agrees with native OS executable paths
 
 The Windows provider command resolver now returns native real paths for selected

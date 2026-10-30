@@ -55,7 +55,7 @@ export function createPrivateTextFile(file: string, content: string): void {
  * publish the staging inode. A failed publish leaves the prior destination.
  * Callers retain their existing POSIX persistence and failure contracts. */
 export function replaceWindowsPrivateTextFile(file: string, content: string): void {
-  const staging = `${file}.tmp-${randomUUID()}`;
+  const staging = join(dirname(file), `.openrig-private-${randomUUID()}.tmp`);
   let created = false;
   try {
     createPrivateTextFile(staging, content);
@@ -72,7 +72,7 @@ export function replaceWindowsPrivateTextFile(file: string, content: string): vo
  * Private creation precedes bytes; rename preserves the prior destination on
  * failure without blocking the daemon while PowerShell establishes the DACL. */
 export async function replaceWindowsPrivateTextFileAsync(file: string, content: string): Promise<void> {
-  const staging = `${file}.tmp-${randomUUID()}`;
+  const staging = join(dirname(file), `.openrig-private-${randomUUID()}.tmp`);
   let created = false;
   try {
     await createPrivateTextFileAsync(staging, content);
