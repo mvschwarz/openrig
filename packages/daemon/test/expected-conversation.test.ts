@@ -1,3 +1,4 @@
+import { syncBuiltinESMExports } from "node:module";
 import fs from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { Hono } from "hono";
@@ -22,7 +23,7 @@ import { transportRoutes } from "../src/routes/transport.js";
 
 const A = "11111111-1111-4111-8111-111111111111", B = "22222222-2222-4222-8222-222222222222";
 const cleanup: Array<() => unknown> = [];
-afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) close(); });
+afterEach(() => { vi.restoreAllMocks(); syncBuiltinESMExports(); for (const close of cleanup.splice(0).reverse()) close(); });
 function fixture(runtime: "claude-code" | "codex" = "claude-code", guarded = false) {
   const root = mkdtempSync(join(tmpdir(), "expected-conversation-")); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
@@ -70,6 +71,23 @@ function fixture(runtime: "claude-code" | "codex" = "claude-code", guarded = fal
   const readUrl = () => `/api/sessions/${sessionName}/generation-record-expected?` + new URLSearchParams({ expectedNodeId: node.id, expectedRuntime: runtime, expectedNativeId: A, sinceBytes: "0" });
   return { root, db, registry, node, tmux, guard, transport, app, expected, commands, store, records, readUrl, processes: rows,
     replace: () => { current = B; }, onLoad: (fn: () => void) => { afterLoad = fn; }, beforeKeys: (fn: () => void) => { beforeKeys = fn; } };
+}
+
+// Observe only the record fd, without counting unrelated module-loader reads.
+function recordReads(file: string, fail = false) {
+  const target = fs.statSync(file), original = fs.readSync;
+  let calls = 0, bytes = 0;
+  vi.spyOn(fs, "readSync").mockImplementation(((...args: unknown[]) => {
+    const stat = fs.fstatSync(args[0] as number);
+    if (stat.dev === target.dev && stat.ino === target.ino) {
+      calls++; bytes += typeof args[3] === "number" ? args[3] : 0;
+      if (fail) throw Object.assign(new Error("record disappeared"), { code: "ENOENT" });
+    }
+    return Reflect.apply(original, fs, args);
+  }) as typeof fs.readSync);
+  // The handler dynamically imports node:fs's named exports, which are distinct from its default object.
+  syncBuiltinESMExports();
+  return { get calls() { return calls; }, get bytes() { return bytes; }, reset() { calls = 0; bytes = 0; } };
 }
 
 it.each(["claude-code", "codex"] as const)("conditional record reads return the original %s identity and bytes together", async runtime => {
@@ -186,17 +204,18 @@ it("conditional Claude polling stops reading at the first native identity in a l
   const record = JSON.stringify({ type: "user", sessionId: A, message: { content: "original" } }) + "\n" + " ".repeat(2 * 1024 * 1024);
   writeFileSync(f.records.get(A)!, record);
   const url = f.readUrl().replace("sinceBytes=0", `sinceBytes=${Buffer.byteLength(record)}`);
-  const reads = vi.spyOn(fs, "readSync");
+  const reads = recordReads(f.records.get(A)!);
   expect((await f.app.request(url)).status).toBe(200);
-  reads.mockClear();
+  reads.reset();
   expect((await f.app.request(url)).status).toBe(200);
-  const requested = (reads.mock.calls as unknown as unknown[][]).reduce<number>((sum, call) => sum + (typeof call[3] === "number" ? call[3] : 0), 0);
-  expect(requested).toBeLessThanOrEqual(128 * 1024);
+  expect(reads.calls).toBeGreaterThan(0);
+  expect(reads.bytes).toBeLessThanOrEqual(128 * 1024);
 });
 
 it("conditional read maps a filesystem errno to documented unavailable", async () => {
-  const f = fixture(); vi.spyOn(fs, "readSync").mockImplementationOnce(() => { throw Object.assign(new Error("record disappeared"), { code: "ENOENT" }); });
+  const f = fixture(), reads = recordReads(f.records.get(A)!, true);
   const response = await f.app.request(f.readUrl());
+  expect(reads.calls).toBeGreaterThan(0);
   expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ error: "expected_identity_unavailable" });
 });
 
