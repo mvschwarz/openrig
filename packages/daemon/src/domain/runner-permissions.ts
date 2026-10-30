@@ -225,7 +225,7 @@ export class RunnerPermissions {
   }
 
   private close(item: QueueItem, note: string, reason: string): void {
-    this.deps.queueRepo.update({ qitemId: item.qitemId, actorSession: item.sourceSession, state: "canceled", closureReason: "canceled",
+    this.deps.queueRepo.update({ qitemId: item.qitemId, actorSession: item.sourceSession, state: "canceled",
       transitionNote: `${note} reason=${reason}: the runner's request ended, so any answer here is not sent.` });
   }
 

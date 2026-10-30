@@ -2157,7 +2157,7 @@ export class QueueRepository {
       return false;
     }
     if (current === origin.generation) return false;
-    this.update({ qitemId, actorSession: item.sourceSession, state: "canceled", closureReason: "canceled",
+    this.update({ qitemId, actorSession: item.sourceSession, state: "canceled",
       transitionNote: "runner-permission-stale reason=relaunched: a later occupant holds this seat, so any answer here is not sent." });
     return true;
   }
