@@ -86,6 +86,9 @@ five cases pass without changing the fetch guard. This is not CLI-wide acceptanc
 The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
 512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
 records 21824 passes, 1210 failures and 528 skips; neither is current acceptance.
+That later run changed HEAD from `06cb5bf` to `ebc3bcf` while executing
+(`sourceStable=false`), so its totals cannot be attributed to either single
+commit. Only its individual failures can serve as leads for fresh reproduction.
 Current scoped reproduction found six plugin-projection failures caused by a
 slash-only in-memory filesystem. Translating native paths at that fixture boundary
 restores its assertions. An additional owned native-filesystem case verifies both
