@@ -1035,3 +1035,17 @@ files exercise read/write conflict metadata, full-file hashes with truncated
 reads, exact bytes/ranges and render opt-in responses through in-process Hono
 requests. No live daemon, browser or network listener is used. No production
 code changed in this follow-up; daemon TypeScript passes.
+
+The public-world verifier audit identifies an outstanding native implementation
+gap. `world-public` currently ships only `verify-world.sh`, with POSIX shell,
+grep/awk/sed and shell-based CLI fixtures. The native full-file reproduction
+reports five passes and 17 failures; one is a CRLF census assertion, while most
+remaining cases cannot launch their POSIX entry. Correcting that census split
+makes its selected case pass, without treating verifier execution as covered.
+
+The port inventory retains all 29 named checks and the existing mutation/refusal
+tests. Native completion must preserve missing-rig skip versus broken-command
+failure, identity/topology, exact retrieval/profile bytes, typed context-root
+precedence, install/list/remove effects and partial-sync cleanup. The native
+entry and its packaging/claim-census updates remain unfinished. No verifier was
+run against a live rig or real user context store.
