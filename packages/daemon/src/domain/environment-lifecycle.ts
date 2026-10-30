@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { EnvironmentPlatform, EnvironmentError, identifier, regularBytes, relativeGuestPath, sha256, type EnvironmentBinding, type EnvironmentDriver, type Placement, type ProjectionReceipt } from "./environment-platform.js";
+import { EnvironmentPlatform, EnvironmentError, identifier, regularBytes, relativeGuestPath, sha256, type EnvironmentBinding, type EnvironmentDriver, type Placement } from "./environment-platform.js";
 import type { PodmanCleanupSelection } from "../adapters/openshell-podman-observer.js";
 import type { QueueRepository } from "./queue-repository.js";
 
@@ -20,7 +20,6 @@ export type EnvironmentLifecycleDriver = EnvironmentDriver & {
 export type EnvironmentCheckpoint = {
   version: 1; checkpointId: string; bindingId: string; nodeId: string; seat: string; generation: string;
   nativeType: "community:openshell-claude"; nativeId: string; predecessorResourceId: string;
-  context?: ProjectionReceipt[];
   destinationCwd: string; nativeState: string; artifacts: Array<{ path: string; source: string; sha256: string; bytes: number; taskId: string }>; files: Array<{ path: string; source: string; sha256: string; bytes: number }>;
 };
 export type EffectReceipt = { version: 1; operationId: string; bindingId: string; generation: string; resourceId: string;
@@ -156,12 +155,6 @@ export class EnvironmentLifecycle {
     const row = this.operation(id); return row?.kind === "checkpoint" && row.receipt_json ? JSON.parse(row.receipt_json) : null;
   }
   verifyCheckpoint(checkpoint: EnvironmentCheckpoint): void {
-    if ((checkpoint.context?.length ?? 0) > 4096 || (checkpoint.context ?? []).reduce((bytes, file) => bytes + file.bytes, 0) > 32 * 1024 * 1024) refuse("environment_checkpoint_invalid", "Retained destination context exceeds its file cap");
-    for (const file of checkpoint.context ?? []) {
-      relativeGuestPath(file.path);
-      if (!file.sourceFile || !file.sourceSha256 || sha256(regularBytes(file.sourceFile)) !== file.sourceSha256)
-        refuse("environment_checkpoint_changed", "A retained context source is missing or changed; no substitute was staged");
-    }
     if ((checkpoint.artifacts?.length ?? 0) > 128 || (checkpoint.artifacts ?? []).reduce((sum, file) => sum + file.bytes, 0) > 32 * 1024 * 1024)
       refuse("environment_checkpoint_invalid", "Retained artifacts exceed 128 files or 32 MiB");
     for (const artifact of checkpoint.artifacts ?? []) {
@@ -209,12 +202,10 @@ export class EnvironmentLifecycle {
       selection = this.platform.db.transaction(() => {
         const op = this.intent(binding, selectionId, "checkpoint-selection", { checkpointId: input.operationId, generation: input.generation, resourceId: binding.resource!.id, nativeId: native.nativeId });
         if (op.receipt_json) return op.receipt_json;
-        const projection = this.platform.db.prepare("SELECT projection_json FROM environment_bindings WHERE binding_id=?").get(id) as { projection_json: string | null };
-        const context = (projection.projection_json ? JSON.parse(projection.projection_json).files : []).filter((file: ProjectionReceipt) => file.sourceFile);
-        const selected = { files, artifacts, context }; this.save(selectionId, selected); return JSON.stringify(selected);
+        const selected = { files, artifacts }; this.save(selectionId, selected); return JSON.stringify(selected);
       })();
     }
-    const selected = JSON.parse(selection) as { files: Array<{ path: string; sha256: string; bytes: number }>; artifacts: EnvironmentCheckpoint["artifacts"]; context?: ProjectionReceipt[] };
+    const selected = JSON.parse(selection) as { files: Array<{ path: string; sha256: string; bytes: number }>; artifacts: EnvironmentCheckpoint["artifacts"] };
     const directory = join(resolve(this.stateRoot), id, input.operationId); privateDirectory(directory);
     const stage = mkdtempSync(join(directory, ".capture-"));
     try {
@@ -232,7 +223,7 @@ export class EnvironmentLifecycle {
       }
       const checkpoint: EnvironmentCheckpoint = { version: 1, checkpointId: input.operationId, bindingId: id, nodeId: binding.nodeId!, seat: binding.seat,
         generation: input.generation, nativeType: native.nativeType, nativeId: native.nativeId, predecessorResourceId: binding.resource!.id,
-        destinationCwd: posix.join(binding.guestRoot, "work"), nativeState: posix.join(binding.guestRoot, "native"), artifacts: selected.artifacts, context: selected.context ?? [], files };
+        destinationCwd: posix.join(binding.guestRoot, "work"), nativeState: posix.join(binding.guestRoot, "native"), artifacts: selected.artifacts, files };
       this.verifyCheckpoint(checkpoint); this.selected(id, input.generation); syncFile(directory); this.save(input.operationId, checkpoint); return checkpoint;
     } finally { rmSync(stage, { recursive: true }); }
   }

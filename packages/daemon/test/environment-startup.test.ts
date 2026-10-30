@@ -136,13 +136,14 @@ it("refuses startup input replacement before touching a saved execution", async 
   expect([...f.files].map(([key,value]) => [key,value.toString("base64")])).toEqual(before);
 });
 
-it.each(["unchanged", "missing", "changed"])("normal exact restore on recreated compute verifies destination context (%s) without conversation replay", async mode => {
+it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-destination", "missing-destination", "missing-history", "changed-history"])("normal exact restore on recreated compute verifies current destination context (%s) without conversation replay", async mode => {
   const f = await fixture();
   const role = join(f.root, "role.md"), skill = join(f.root, "skill"), plugin = join(f.root, "plugin"), startupFile = join(f.root, "startup.md");
   mkdirSync(skill); mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
   writeFileSync(role, "Required restored role"); writeFileSync(join(skill, "SKILL.md"), "Required restored skill");
   writeFileSync(join(plugin, ".claude-plugin/plugin.json"), '{"name":"restored-plugin","version":"1.0.0"}');
   writeFileSync(startupFile, "Required filesystem startup, never conversation input");
+  writeFileSync(join(skill, "old-reference.md"), "Old declared skill reference");
   const entries = [["guidance", "role", role], ["skill", "skill", skill], ["plugin", "plugin", plugin]].map(([category, effectiveId, absolutePath]) =>
     ({ category, effectiveId, absolutePath, resourcePath: absolutePath, sourcePath: absolutePath, sourceSpec: "fixture", classification: "safe_projection", mergeStrategy: "managed_block" }));
   const files = [{ path: "startup.md", absolutePath: startupFile, ownerRoot: f.root, required: true, deliveryHint: "send_text", appliesOn: ["fresh_start"] }];
@@ -172,15 +173,31 @@ it.each(["unchanged", "missing", "changed"])("normal exact restore on recreated 
     resumeType: "community:openshell-claude", resumeToken: first.resumeToken!, placement: { ...f.platform.get("binding-one")!.placement, name: "worker-successor" } });
   f.files.clear();
   f.app.sessionRegistry.updateStatus(session.id, "exited"); f.app.sessionRegistry.clearBinding(f.node.id);
-  if (mode === "missing") rmSync(startupFile);
-  if (mode === "changed") writeFileSync(role, "Unexpected replacement role");
+  if (mode === "missing-source") rmSync(startupFile);
+  if (mode === "changed") writeFileSync(join(skill, "SKILL.md"), "Current skill revision for report 2");
+  if (mode === "added") writeFileSync(join(skill, "new-reference.md"), "Current added skill reference");
+  if (mode === "removed") rmSync(join(skill, "old-reference.md"));
+  if (mode === "missing-history") rmSync(checkpoint.files[0].source);
+  if (mode === "changed-history") writeFileSync(checkpoint.files[0].source, "Changed retained history");
+  const upload = f.platform.driver.upload.bind(f.platform.driver);
+  if (mode === "stale-destination" || mode === "missing-destination") {
+    vi.spyOn(f.platform.driver, "upload").mockImplementation(async (...args) => {
+      await upload(...args);
+      if (args[2] === "/sandbox/openrig/work/.claude/skills/skill/SKILL.md") {
+        if (mode === "stale-destination") f.files.set(args[2], Buffer.from("Stale destination revision"));
+        else f.files.delete(args[2]);
+      }
+    });
+  }
   const nativePrepare = f.guest.getMockImplementation()!;
   let restored = false;
   f.guest.mockImplementation(async (binding, args) => {
     if (args[0] === "--prepare") {
       restored = true;
       expect(f.files.get("/sandbox/openrig/work/.openrig/context/role")?.toString()).toBe("Required restored role");
-      expect(f.files.get("/sandbox/openrig/work/.claude/skills/skill/SKILL.md")?.toString()).toBe("Required restored skill");
+      expect(f.files.get("/sandbox/openrig/work/.claude/skills/skill/SKILL.md")?.toString()).toBe(mode === "changed" ? "Current skill revision for report 2" : "Required restored skill");
+      if (mode === "added") expect(f.files.get("/sandbox/openrig/work/.claude/skills/skill/new-reference.md")?.toString()).toBe("Current added skill reference");
+      if (mode === "removed") expect(f.files.has("/sandbox/openrig/work/.claude/skills/skill/old-reference.md")).toBe(false);
       expect(f.files.get("/sandbox/openrig/work/.claude/plugins/plugin/.claude-plugin/plugin.json")).toBeDefined();
       expect(f.files.get("/sandbox/openrig/work/.openrig/startup/startup.md")?.toString()).toBe("Required filesystem startup, never conversation input");
       expect(f.files.get(`/sandbox/openrig/${nativePath}`)).toEqual(history);
@@ -194,7 +211,7 @@ it.each(["unchanged", "missing", "changed"])("normal exact restore on recreated 
   const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux: f.app.tmuxAdapter, environmentStartup: f.startup });
   vi.spyOn(adapter, "checkReady").mockResolvedValue({ ready: true });
   const result = await f.app.restoreOrchestrator.restore(snapshot.id, { adapters: { "openshell-claude": adapter }, fsOps: { exists: existsSync } });
-  if (mode === "unchanged") { expect(result.launched?.[0]?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
+  if (["unchanged", "changed", "added", "removed"].includes(mode)) { expect(result.launched?.[0]?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
   else { expect(restored).toBe(false); expect(result.launched?.[0]?.status).not.toBe("resumed"); }
   expect(textInput).not.toHaveBeenCalled();
 });
