@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Front-door native commands-directory casing
+
+The paired-TUI path resolver now recognizes the Windows `commands` directory
+independently of its supplied letter case. An owned physical layout reproduced
+`COMMANDS` returning no entry despite an existing paired TUI. The fixture now
+checks source-layout selection, bundled fallback after removing that entry, and
+null when neither exists. POSIX case behavior and source-before-bundled precedence
+are retained. The focused check and CLI TypeScript check pass. No TUI entry was
+executed and no daemon or terminal was contacted; interactive acceptance is open.
+
 ### Kernel runtime authentication probe timeout cleanup
 
 The default kernel runtime probe now resolves native Windows provider commands
