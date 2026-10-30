@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Native transcript partial-write cleanup
+
+Native rotation now records ownership immediately after exclusive creation of its
+staging file, before writing payload bytes. A mid-write error therefore closes
+and removes that owned file while preserving the old transcript and its freshness
+state. A synthetic ENOSPC fixture writes real partial bytes and then throws; it
+checks cleanup, unchanged old bytes, unadvanced freshness and a later successful
+capture. Together with long-name, rotation and boundary fixtures, 26 cases pass.
+This simulates a write error; it does not fill a disk or alter real transcripts.
+
 ### Long native transcript names survive rotation
 
 A valid 250-character transcript filename could be created but not rotated on

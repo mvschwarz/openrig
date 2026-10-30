@@ -417,8 +417,14 @@ export function startTranscriptRotation(
         : `${outputPath}.tmp.${process.pid}`;
       let staged = false;
       try {
-        fs.writeFileSync(tmpPath, payload, { flag: process.platform === "win32" ? "wx" : "w" });
-        staged = true;
+        if (process.platform === "win32") {
+          const fd = fs.openSync(tmpPath, "wx");
+          staged = true;
+          try { fs.writeFileSync(fd, payload); } finally { fs.closeSync(fd); }
+        } else {
+          fs.writeFileSync(tmpPath, payload);
+          staged = true;
+        }
         fs.renameSync(tmpPath, outputPath);
       } finally {
         if (staged) try { fs.unlinkSync(tmpPath); } catch { /* renamed, or retained after cleanup refusal */ }
