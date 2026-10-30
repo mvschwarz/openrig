@@ -34,9 +34,10 @@ async function failedAdd(memberOverrides?: Record<string, unknown>) {
     launchHarness: vi.fn(async () => ({ ok: true })),
   };
   const tmux = mockTmuxAdapter();
+  const fileAt = (file: string) => Object.keys(files).find(key => nodePath.resolve(key) === nodePath.resolve(file));
   const setup = createTestApp(db, {
     tmux, adapters: { pi: adapter },
-    podInstantiatorFsOps: { exists: path => path in files, readFile: path => { if (!(path in files)) throw new Error(`Missing ${path}`); return files[path]!; } },
+    podInstantiatorFsOps: { exists: file => fileAt(file) !== undefined, readFile: file => { const key = fileAt(file); if (key === undefined) throw new Error(`Missing ${file}`); return files[key]!; } },
   });
   const rig = setup.rigRepo.createRig("first-start");
   const seeded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "dev", label: "Dev", members: [{ id: "sibling", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: root }], edges: [] } });
@@ -130,7 +131,7 @@ describe("explicit first-start retry after projection failure", () => {
     expect(JSON.parse(context.resolved_files_json)).toEqual(expect.arrayContaining([expect.objectContaining({ path: expect.stringContaining("role.md"), required: true, deliveryHint: "send_text" })]));
     expect(f.adapter.deliverStartup).toHaveBeenCalled();
     expect(vi.mocked(f.adapter.deliverStartup).mock.calls.flatMap(call => call[0])).toEqual(expect.arrayContaining([
-      expect.objectContaining({ absolutePath: `${root}/agent/role.md`, required: true, deliveryHint: "send_text" }),
+      expect.objectContaining({ absolutePath: nodePath.resolve(root, "agent", "role.md"), required: true, deliveryHint: "send_text" }),
     ]));
     expect(f.sessionRegistry.getSessionsForRig(f.rig.id).filter(s => s.nodeId === f.node.id).every(s => s.resumeToken === null)).toBe(true);
     expect(f.tmux.killSession).not.toHaveBeenCalled();

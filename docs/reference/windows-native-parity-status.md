@@ -858,3 +858,20 @@ readiness is mocked, so this proves OS command/argv transport, not a real Claude
 conversation, authentication or restore continuity. The six-case file is added
 to Windows CI; hosted execution is still pending. The older POSIX-shell-based
 restore-read file remains separate evidence and is not claimed native-green.
+
+The follow-up prefix audit passes five current Codex/Pi checks and all 11 native
+community-environment cases, including recognized npm entries, environment
+assignment/removal, named/resumed conversations and launch-result metadata.
+No additional prefix defect was reproduced in those scoped paths. These are
+owned fake entries and child-environment checks, not real provider acceptance.
+
+Materialized first-start and explicit failed-first-start retry now pass 34/34
+on native Windows. Before correcting their mock filesystem lookup, 33 cases
+stopped at POSIX-spelled fixture keys while the resolver requested native
+absolute paths. The mocks now compare resolved paths, retain mutable fixture
+contents, and assert native startup-file destinations. Production code did not
+change for this correction. Coverage includes selected-seat effects, preserved
+sibling records, snapshot reopen, ownership/refusal controls and projection
+failure/retry. Terminal/runtime operations are mocked and the database is
+in-memory; this does not launch seats or establish live-fleet acceptance.
+Daemon TypeScript passes after the test changes.
