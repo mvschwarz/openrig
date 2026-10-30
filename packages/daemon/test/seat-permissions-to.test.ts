@@ -47,6 +47,13 @@ describe("SeatLifecycleService.setPermissionsTo", () => {
     expect(events(db)).toEqual([expect.objectContaining({ nodeId, from: null, to: "mike@external", reason: "Mike approves tool calls", operator: "ops@perm-rig" })]);
   });
 
+  it("records the operator's explicit opt-in to refuse every request, and audits it", () => {
+    expect(service().setPermissionsTo({ seatRef: "dev-runner@perm-rig", to: "deny", reason: "high stakes", operator: "ops@perm-rig" }))
+      .toMatchObject({ ok: true, from: null, to: "deny", changed: true });
+    expect(owner(db, nodeId)).toBe("deny");
+    expect(events(db)).toEqual([expect.objectContaining({ nodeId, from: null, to: "deny", reason: "high stakes" })]);
+  });
+
   it("records no change when the same person is chosen again, and clears to no one", () => {
     service().setPermissionsTo({ seatRef: "dev-runner@perm-rig", to: "mike@external", reason: "first" });
     expect(service().setPermissionsTo({ seatRef: "dev-runner@perm-rig", to: "mike@external", reason: "again" })).toMatchObject({ ok: true, changed: false });

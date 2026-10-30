@@ -68,28 +68,38 @@ describe("rig seat set-permissions-to", () => {
     expect(calls[0]!.path).toBe("/api/seat/set-permissions-to/dev-runner%40perm-rig");
     expect(calls[0]!.body).toEqual({ to: "mike@external", reason: "Mike approves" });
     expect(exitCode).toBeUndefined();
-    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: no one (requests are refused) -> mike@external (audited).");
+    expect(logs.join("\n")).toContain("dev.runner@perm-rig's permission requests: the default person -> mike@external (audited).");
   });
 
   it("--clear posts clear", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
     const program = makeCommand({ status: 200, data: { ok: true, seat, from: "mike@external", to: null, changed: true } }, calls);
     const { logs } = await captureLogs(async () => {
-      await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--clear", "--reason", "back to refusal"]);
+      await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--clear", "--reason", "back to the default person"]);
     });
-    expect(calls[0]!.body).toEqual({ clear: true, reason: "back to refusal" });
-    expect(logs.join("\n")).toContain("mike@external -> no one (requests are refused)");
+    expect(calls[0]!.body).toEqual({ clear: true, reason: "back to the default person" });
+    expect(logs.join("\n")).toContain("mike@external -> the default person");
   });
 
-  it("requires exactly one of --to or --clear, before any request", async () => {
+  it("--deny posts the explicit opt-in to refuse, and prints it", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
-    for (const extra of [[], ["--to", "mike@external", "--clear"]]) {
+    const program = makeCommand({ status: 200, data: { ok: true, seat, from: null, to: "deny", changed: true } }, calls);
+    const { logs } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--deny", "--reason", "high stakes"]);
+    });
+    expect(calls[0]!.body).toEqual({ deny: true, reason: "high stakes" });
+    expect(logs.join("\n")).toContain("the default person -> refused (--deny)");
+  });
+
+  it("requires exactly one of --to, --clear or --deny, before any request", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    for (const extra of [[], ["--to", "mike@external", "--clear"], ["--deny", "--clear"], ["--to", "mike@external", "--deny"]]) {
       const program = makeCommand({ status: 200, data: {} }, calls);
       const { errors, exitCode } = await captureLogs(async () => {
         await program.parseAsync(["node", "rig", "seat", "set-permissions-to", "dev.runner", "--reason", "x", ...extra]);
       });
       expect(exitCode).toBe(1);
-      expect(errors.join("\n")).toContain("exactly one of --to <person> or --clear");
+      expect(errors.join("\n")).toContain("exactly one of --to <person>, --clear or --deny");
     }
     expect(calls).toHaveLength(0);
   });

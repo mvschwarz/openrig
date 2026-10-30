@@ -115,9 +115,20 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ body: { state: "answered", optionId: "reject" } });
   });
 
-  it("with no override and no one to ask, refuses and asks no one", async () => {
-    const f = fixture({ owner: null, people: [] });
-    expect(await f.submit()).toMatchObject({ status: 409, body: { code: "route_unsupported" } });
+  it.each([
+    ["no person is registered", { owner: null, people: [] }],
+    ["several people are registered and none is the default", { owner: null, people: ["mike", "dana"] }],
+    ["the seat's chosen person is no longer registered", { owner: "gone@external", people: ["mike"] }],
+  ])("permits at once with the agent's offered allow when %s, and asks no one", async (_case, options) => {
+    const f = fixture(options);
+    expect(await f.submit()).toMatchObject({ status: 200, body: { ok: true, state: "permitted", optionId: "allow" } });
+    expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.tags?.includes("runner-permission"))).toHaveLength(0);
+    expect(f.waitsOnPerson()).toBe(false);
+  });
+
+  it("refuses every request only when the seat's operator opted in to denial", async () => {
+    const f = fixture({ owner: "deny", people: ["mike"] });
+    expect(await f.submit()).toMatchObject({ status: 409, body: { code: "denied_by_seat" } });
     expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.tags?.includes("runner-permission"))).toHaveLength(0);
   });
 
@@ -127,16 +138,19 @@ describe("a runner seat's answered permission path", () => {
     expect(f.queueRepo.getById(String(submitted.body.askId))).toMatchObject({ destinationSession: OTHER_PERSON });
   });
 
-  it("asks the chosen person with the agent's offered options, allow_always hidden, and the seat reads needs input", async () => {
+  it("asks the chosen person with every option the agent offered, allow_always with its native meaning, and the seat reads needs input", async () => {
     const f = fixture();
     const submitted = await f.submit();
     expect(submitted).toMatchObject({ status: 200, body: { ok: true, created: true } });
     const ask = f.queueRepo.getById(String(submitted.body.askId))!;
     expect(ask).toMatchObject({ state: "pending", sourceSession: SEAT, destinationSession: PERSON });
-    expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "reject"]);
+    expect(ask.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
     expect(ask.body).toContain("Edit src/app.ts");
+    expect(ask.body).toMatch(/Always allow \(allow_always, always\): the agent's harness remembers this choice/);
     expect(f.waitsOnPerson()).toBe(true);
     expect(await f.read(String(submitted.body.askId))).toMatchObject({ status: 200, body: { state: "pending" } });
+    expect(await f.answer(String(submitted.body.askId), { optionId: "always" })).toMatchObject({ status: 200 });
+    expect(await f.read(String(submitted.body.askId))).toMatchObject({ body: { state: "answered", optionId: "always" } });
   });
 
   it("returns the same ask for the same request, and refuses its request id in another turn", async () => {
@@ -154,11 +168,12 @@ describe("a runner seat's answered permission path", () => {
   });
 
   it.each([
-    ["an option id a person's choice can't carry", [{ optionId: "allow:1", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]],
-    ["only one option left once allow_always is hidden", [{ optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]],
-  ])("refuses %s, and asks no one", async (_case, options) => {
+    ["an option id a person's choice can't carry", [{ optionId: "allow:1", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }], "allow:1"],
+    ["more options than an ask can show", ["a", "b", "c", "d"].map((id) => ({ optionId: `reject-${id}`, name: id, kind: "reject_once" }))
+      .concat([{ optionId: "always", name: "Always", kind: "allow_always" }]), "always"],
+  ])("permits with the agent's own allow when %s, and asks no one", async (_case, options, optionId) => {
     const f = fixture();
-    expect(await f.submit({ options })).toMatchObject({ status: 422, body: { code: "options_unsupported" } });
+    expect(await f.submit({ options })).toMatchObject({ status: 200, body: { ok: true, state: "permitted", optionId } });
     expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.destinationSession === PERSON)).toHaveLength(0);
   });
 
@@ -189,13 +204,34 @@ describe("a runner seat's answered permission path", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
-  it("never takes another person's click or typed words as the answer", async () => {
+  it("takes any registered person's click, but no one else's", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
-    expect((await f.answer(askId, { optionId: "allow" }, OTHER_PERSON)).status).not.toBe(200);
+    expect((await f.answer(askId, { optionId: "allow" }, "stranger@external")).status).not.toBe(200);
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
-    await f.answer(askId, { decision: "yes go ahead" });
-    expect(await f.read(askId)).toMatchObject({ body: { state: "refused", reason: "typed_reply" } });
+    expect(await f.answer(askId, { optionId: "allow" }, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+  });
+
+  it.each([
+    ["a typed yes", { decision: "Yes." }, "answered", "allow"],
+    ["a typed no", { decision: "no" }, "answered", "reject"],
+    ["typed words that are neither", { decision: "what does this edit do?" }, "permitted", "allow"],
+  ])("reads %s from the person as the offered option, and no answer as the default", async (_case, choice, state, optionId) => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state, optionId } });
+  });
+
+  it.each([
+    ["deny", "answered", "reject"],
+    ["drop", "permitted", "allow"],
+  ])("reads Mission Control's %s on the ask as the person's no, or as no answer", async (verb, state, optionId) => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb, qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state, optionId } });
   });
 
   it("takes the primary user's ordinary answer from the terminal, as on any ask", async () => {
