@@ -51,6 +51,12 @@ interactive installed-TUI checks, live provider continuity and visible
 terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
+
+At `696fcc5`, reconciliation with the earlier `9bbed2287` finite ledger found
+two changed sources already in that inventory and seven changed production sources
+outside its regex candidate set. All nine now have a supplemental source hash and
+scoped evidence record. This exposes the candidate set's coverage limit; it does
+not make the unchanged rows current acceptance or prove coverage of every feature.
 ## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured
