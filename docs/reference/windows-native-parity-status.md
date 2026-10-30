@@ -305,3 +305,13 @@ unchanged, and releasing the lock allows the same operation to remove it and
 return the empty additions result. The reader process is closed before teardown;
 no ACL, provider, shared file or real seat is changed. Daemon TypeScript passes.
 
+Native account-home snapshot routes now have their own plan/API-key reference
+round-trip cases instead of inheriting the POSIX provider-execution test's skip.
+An in-memory rig is stopped with a snapshot and restored through real Hono routes;
+its selected native home and private synthetic token-file reference survive, and
+status does not expose the synthetic token bytes. These two cases, restore-plan
+preview and mocked service snapshot/restore checks pass 52 tests with two POSIX
+provider-execution cases skipped. Daemon TypeScript passes. Tmux/resume/service
+adapters are fixtures: this does not demonstrate actual provider sign-in, Docker,
+running-seat continuity or fleet restoration.
+
