@@ -17,6 +17,9 @@ afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursiv
 const relay = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
 const collector = path.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs");
 const relayParser = createRequire(import.meta.url)(relay) as { settingsRelayPath(command: string): { executable: string; relay: string } | null };
+const activityCommand = (executable: string, script: string) => process.platform === "win32"
+  ? "& " + [executable, script].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
+  : `${shellQuote(executable)} ${shellQuote(script)}`;
 
 it.runIf(process.platform === "win32")("recognizes literal native short paths in both readers without accepting tilde expansion", () => {
   const executable = "C:/PROGRA~1/nodejs/node.exe", script = "C:/Users/USERNA~1/state/claude-activity-hooks/activity-relay.cjs";
@@ -75,8 +78,8 @@ it.each(["legacy", "pinned", "unquoted", "absolute-unquoted", "plugin-unquoted"]
   }));
   const a = f.adapter();
   const result = await f.project(a);
-  const wanted = `${shellQuote(process.execPath)} ${shellQuote(f.relayDest)}`;
-  expect(result.hooks.Stop.flatMap((g: any) => g.hooks)).toEqual([custom, { type: "command", command: wanted, timeout: 5 }]);
+  const wanted = activityCommand(process.execPath, f.relayDest);
+  expect(result.hooks.Stop.flatMap((g: any) => g.hooks)).toEqual([custom, { type: "command", command: wanted, timeout: 5, ...(process.platform === "win32" ? { shell: "powershell" } : {}) }]);
   expect(result.permissions).toEqual(permissions);
   expect(result.statusLine).toEqual({ type: "command", padding: 3,
     command: `${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}` });
@@ -98,7 +101,7 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
   fs.symlinkSync(process.execPath, executable);
   const a = f.adapter(executable);
   const first = await f.project(a);
-  expect(first.hooks.Stop[0].hooks[0].command).toBe(`node ${shellQuote(f.relayDest)}`);
+  expect(first.hooks.Stop[0].hooks[0].command).toBe(activityCommand("node", f.relayDest));
   expect(first.statusLine.command).toBe(`node ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
   expect(relayParser.settingsRelayPath(first.hooks.Stop[0].hooks[0].command))
     .toEqual({ executable: "node", relay: f.relayDest });
@@ -142,7 +145,7 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
   try {
     const port = (server.address() as { port: number }).port;
     const command = result.hooks.Stop[0].hooks[0].command as string;
-    expect(command).toBe(`${shellQuote(executable)} ${shellQuote(f.relayDest)}`);
+    expect(command).toBe(activityCommand(executable, f.relayDest));
     await new Promise<void>((ok, fail) => {
       const child = spawn("/bin/sh", ["-c", command], { cwd: f.cwd, timeout: 5000,
         env: { PATH: "", HOME: f.root, OPENRIG_HOME: f.state, OPENRIG_URL: `http://127.0.0.1:${port}`,
@@ -176,6 +179,31 @@ it.each(["node", shellQuote("/Node O'Brien/node")])("keeps the adapter and stand
   for (const invalid of [command + " extra", command + " 'extra'", `${shellQuote("/custom/wrapper")} ${shellQuote(script)}`, command + "\necho extra"]) {
     expect(relayParser.settingsRelayPath(invalid)).toBeNull();
   }
+});
+
+it.runIf(process.platform === "win32")("executes a generated activity hook in the native PowerShell fallback without Git Bash", async () => {
+  const f = fixture();
+  const result = await f.project(f.adapter());
+  // Keep the real writer's command, replacing only the owned copied script's effects.
+  fs.writeFileSync(f.relayDest, "process.stdout.write('owned-native-hook-executed')");
+  const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  env.PATH = "";
+  const hook = result.hooks.Stop[0].hooks[0];
+  expect(hook.shell).toBe("powershell");
+  expect(parseManagedClaudeNodeCommand(hook.command)).toEqual({ executable: process.execPath, args: [f.relayDest] });
+  expect(relayParser.settingsRelayPath(hook.command)).toEqual({ executable: process.execPath, relay: f.relayDest });
+  for (const suffix of ["; echo injected", " | echo injected", " $(echo injected)", " extra", "\necho injected"]) {
+    expect(parseManagedClaudeNodeCommand(hook.command + suffix)).toBeNull();
+    expect(relayParser.settingsRelayPath(hook.command + suffix)).toBeNull();
+  }
+  const run = spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", hook.command], {
+    cwd: f.cwd, env, encoding: "utf8", input: "{}", timeout: 5000, windowsHide: true,
+  });
+  expect(run.error).toBeUndefined();
+  expect(run.status, run.stderr).toBe(0);
+  expect(run.stdout).toBe("owned-native-hook-executed");
 });
 
 it.each(["explicit", "legacy"])("runs every Claude plugin hook command with the %s interpreter selection", kind => {

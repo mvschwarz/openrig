@@ -1227,7 +1227,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
     const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
-    const ownedCmd = managedClaudeNodeCommand(this.nodeExecutable, relayDest);
+    const legacyOwnedCmd = managedClaudeNodeCommand(this.nodeExecutable, relayDest);
+    const parsedOwnedCmd = parseManagedClaudeNodeCommand(legacyOwnedCmd)!;
+    const ownedCmd = process.platform === "win32"
+      ? "& " + [parsedOwnedCmd.executable, ...parsedOwnedCmd.args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
+      : legacyOwnedCmd;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
     // PREVALIDATE BEFORE ANY MUTATION using the SHARED delivery validation (same gate
@@ -1276,6 +1280,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
         const hook: Record<string, unknown> = { type: "command", command: ownedCmd };
+        if (process.platform === "win32") hook["shell"] = "powershell";
         if (typeof timeout === "number") hook["timeout"] = timeout;
         groups.push({ hooks: [hook] });
         hooks[event] = groups;

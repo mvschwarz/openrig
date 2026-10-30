@@ -233,9 +233,16 @@ function uid() {
 const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 
 // Keep this finite Node-command grammar in parity with parseManagedClaudeNodeCommand.
-// Canonical POSIX quotes and literal unquoted words only; no expansion or wrappers.
+// Canonical POSIX quotes, literal words, or Windows PowerShell literal call arguments; no expansion or wrappers.
 function settingsRelayPath(command) {
   if (/[\r\n]/.test(command)) return null;
+  if (process.platform === "win32" && command.trim().startsWith("&")) {
+    const text = command.trim();
+    const token = "'(?:[^']|'')*'";
+    if (!new RegExp(`^&[ \\t]+${token}(?:[ \\t]+${token})+$`).test(text)) return null;
+    const words = text.slice(1).match(new RegExp(token, "g"));
+    command = words.map(word => "'" + word.slice(1, -1).replaceAll("''", "'").replace(/'/g, `'"'"'`) + "'").join(" ");
+  }
   const literal = process.platform === "win32" ? /[-A-Za-z0-9_./:@%+=,][-A-Za-z0-9_./:@%+=,~]*/.source : /[-A-Za-z0-9_./:@%+=,]+/.source;
   const token = `'(?:[^']|'"'"')*'|${literal}`;
   const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim());

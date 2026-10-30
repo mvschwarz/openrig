@@ -34,7 +34,9 @@ const STATE_DIR = "/custom-instance/O'Brien";
 const RELAY_DEST = pathResolve(STATE_DIR, "state", "claude-activity-hooks", "activity-relay.cjs");
 const SETTINGS = pathResolve(CWD, ".claude", "settings.local.json");
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
-const OWNED_CMD = `${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
+const OWNED_CMD = process.platform === "win32"
+  ? "& " + [process.execPath, RELAY_DEST].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
+  : `${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
 const OWNED_MARKER = join("state", "claude-activity-hooks", "activity-relay.cjs");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
 
