@@ -189,7 +189,10 @@ export function composeView(
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
-        recoveryCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
+        recoveryCommand: ctx.localPlatform === "win32"
+          ? "& " + ["ssh", "-t", dest, recoveryCommand].map(powershellQuote).join(" ")
+          : `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
+        ...(ctx.localPlatform === "win32" ? { recoveryShell: "powershell" as const } : {}),
         readOnly: m.readOnly,
       });
       continue;
@@ -223,6 +226,7 @@ export function composeView(
         ? "& " + [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
           ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession].map(powershellQuote).join(" ")
         : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      ...(ctx.localPlatform === "win32" ? { recoveryShell: "powershell" as const } : {}),
       attachArgv,
       readOnly: m.readOnly,
     });

@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### Manual terminal recovery carries the daemon's shell
+
+Owned daemon/TUI fixtures reproduced native manual recovery instructions combining
+POSIX `env -u TMUX` with a PowerShell call operator. Executing the generated line
+in PowerShell failed with a parser error. Composed native recovery commands now
+carry their PowerShell shell identity; daemon notes and TUI rendering use the
+matching environment reset, independently of the TUI host's OS. Older responses
+without this optional field retain POSIX rendering. Native SSH recovery also
+quotes local SSH arguments for PowerShell while retaining POSIX quoting inside
+the remote command and requesting a terminal.
+
+Owned PowerShell recorder functions verify local attach argument boundaries and
+TMUX removal, plus SSH read-only/interactive recovery with quotes and metacharacters
+in the synthetic session name. No actual tmux/SSH process or connection is used.
+TUI checks cover native and legacy response rendering. The complete terminal
+service file and these focused files pass (88/88); daemon and TUI TypeScript checks
+pass. This does not establish visible terminal or live cross-host acceptance.
+
 ### Finite Codex plugin commands contain native descendants
 
 Owned npm-entry fixtures reproduced detached descendants remaining alive after
