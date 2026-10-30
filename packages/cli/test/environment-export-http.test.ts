@@ -1,3 +1,6 @@
+import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -32,7 +35,8 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   const driver = { version: 1 as const, list: async () => ({ complete: true, resources: [] }), create: async (input: { operationId: string }) => { resource.operationId = input.operationId; return resource; },
     inspect: async () => resource, upload: async () => {}, read: async () => Buffer.alloc(0),
     download: async (_binding: unknown, _source: string, destination: string) => { downloads++; writeFileSync(destination, artifact); } };
-  const fixture = createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts") } as never });
+  const queue = new QueueRepository(db, new EventBus(db)); queue.attachOutbox(new OutboxHandler(db));
+  const fixture = createTestApp(db, { appDeps: { queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts") } as never });
   const rig = fixture.rigRepo.createRig("team"), node = fixture.rigRepo.addNode(rig.id, "team.worker", { runtime: "openshell-claude", cwd: root });
   fixture.sessionRegistry.registerSession(node.id, "worker@team");
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
@@ -42,7 +46,7 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   await platform.project("binding-one", { operationId: "projection-one", generation: "generation-one", files: [] });
   // This is the existing queue writer, not a separate guest task store.
   const created = await fixture.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@team" }, body: JSON.stringify({ qitemId: "export-task", destinationSession: "worker@team", body: "Return the selected report" }) });
-  expect(created.status).toBeLessThan(300);
+  expect(created.status, JSON.stringify(await created.clone().json())).toBeLessThan(300);
   const daemon = await new Promise<ReturnType<typeof serve>>(resolve => {
     const server = serve({ fetch: fixture.app.fetch, hostname: "127.0.0.1", port: 0 }, () => resolve(server));
   });

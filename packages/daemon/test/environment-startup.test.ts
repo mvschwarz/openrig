@@ -82,3 +82,18 @@ it("refuses an exact-resume request without launching a fresh native", async () 
   expect(result).toMatchObject({ ok: false, recovery: "attention_required" });
   expect(f.activity).not.toHaveBeenCalled(); expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
 });
+
+it("refuses a new generation before projecting over a saved execution", async () => {
+  const f = await fixture(); expect((await f.startup.launch(f.binding, {}, f.tmux)).ok).toBe(true);
+  const before = [...f.files].map(([key,value]) => [key,value.toString("base64")]);
+  const generation = f.platform.get("binding-one")!.generation;
+  await expect(f.startup.project({ entries: [] } as unknown as ProjectionPlan, { ...f.binding, launchGeneration: "generation-two" })).rejects.toMatchObject({ code: "environment_prior_execution_unconfirmed" });
+  expect([...f.files].map(([key,value]) => [key,value.toString("base64")])).toEqual(before);
+  expect(f.platform.get("binding-one")!.generation).toBe(generation);
+});
+it("refuses startup input replacement before touching a saved execution", async () => {
+  const f = await fixture(); expect((await f.startup.launch(f.binding, {}, f.tmux)).ok).toBe(true);
+  const before = [...f.files].map(([key,value]) => [key,value.toString("base64")]);
+  await expect(f.startup.deliverStartup([], f.binding)).rejects.toMatchObject({ code: "environment_prior_execution_unconfirmed" });
+  expect([...f.files].map(([key,value]) => [key,value.toString("base64")])).toEqual(before);
+});

@@ -875,6 +875,18 @@ describe("StartupOrchestrator", () => {
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
+  it("does not mark pending or project when saved environment execution refuses the prelude", async () => {
+    const seed=seedSession();
+    sessionRegistry.updateStartupStatus(seed.sessionId,"ready");
+    const preflight=vi.fn(async () => { throw new Error("saved execution preserved"); });
+    const adapter=mockAdapter({runtime:"openshell-claude",environment:{} as RuntimeAdapter["environment"],preflightEnvironmentStartup:preflight});
+    const input=makeInput(seed,{adapter});
+    const result=await createOrchestrator().startNode(input);
+    expect(result).toMatchObject({ok:false,startupStatus:"attention_required",errors:["saved execution preserved"]});
+    expect(preflight).toHaveBeenCalledTimes(1); expect(adapter.project).not.toHaveBeenCalled(); expect(adapter.launchHarness).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(seed.sessionId)).toEqual({startup_status:"ready"});
+  });
+
   // T1: fresh launch enters pending before startup delivery
   it("marks pending before delivery", async () => {
     const seed = seedSession();
