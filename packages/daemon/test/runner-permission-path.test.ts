@@ -295,6 +295,26 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId } });
   });
 
+  it.each([
+    ["a plain queue handoff", "a click", { optionId: "always" }, "always"],
+    ["a plain queue handoff", "a typed no", { decision: "no" }, "reject"],
+    ["Mission Control's route", "a click", { optionId: "always" }, "always"],
+    ["Mission Control's route", "a typed no", { decision: "no" }, "reject"],
+  ] as const)("routed to an agent seat and then by %s to a person, %s from that person reaches the agent", async (how, _case, choice, optionId) => {
+    const f = fixture();
+    const SEAT_B = "dev-other@perm-rig";
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: SEAT_B, reason: "the other seat decides", notify: false } as never);
+    const seatRow = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === SEAT_B && row.handedOffFrom === askId)!;
+    expect(seatRow.humanQuestions ?? null).toBeNull();
+    if (how === "a plain queue handoff") await f.queueRepo.handoff({ qitemId: seatRow.qitemId, fromSession: SEAT_B, toSession: OTHER_PERSON, nudge: false });
+    else await f.contract.act({ verb: "route", qitemId: seatRow.qitemId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
+    const personRow = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === OTHER_PERSON && row.handedOffFrom === seatRow.qitemId)!;
+    expect(personRow.humanQuestions?.[0]?.options.map((option) => option.id)).toEqual(["allow", "always", "reject"]);
+    expect(await f.answer(personRow.qitemId, choice, OTHER_PERSON)).toMatchObject({ status: 200 });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId } });
+  });
+
   it("reads a row set to state denied as the person's no", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
