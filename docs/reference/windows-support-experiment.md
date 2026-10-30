@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Standalone native TUI uses its paired CLI
+
+Without launcher-injected `OPENRIG_TUI_CLI_ENTRY`, the standalone Windows TUI
+previously tried to execute bare `rig` directly. Owned fixtures with only an npm
+`rig.cmd` shim reproduced ENOENT for prerequisite reads. The TUI now finds the
+paired existing CLI JS entry in either the workspace-build or assembled layout,
+then uses its current Node interpreter. Explicit launcher entries still win;
+POSIX selection is unchanged. A missing paired entry retains the existing
+unavailable-command behavior rather than selecting another installation.
+
+Both owned layout cases pass with actual Node subprocess argv readback, including
+spaces, percent, exclamation, ampersand and quote characters; missing paired
+entries and explicit-entry precedence are checked. The TUI TypeScript check
+passes. No real CLI command, daemon, terminal, credential or installed provider
+was invoked; visible standalone-TUI and packaged-install acceptance remain open.
+
 ### Execution arrangement retains native path aliases
 
 An owned execution-view fixture reproduced valid uppercase Windows composition
