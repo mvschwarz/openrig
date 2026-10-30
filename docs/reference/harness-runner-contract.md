@@ -1,7 +1,7 @@
-# Harness and runner contract (DRAFT for 0.7.6)
+# Harness and runner contract (DRAFT, published with 0.7.6)
 
 > **Status.** This is a draft for contributors.
-> - **In the 0.7.6 candidate, not yet released:** the `runner` field and OpenRig's side of declaration, identity and activity
+> - **Released in 0.7.6:** the `runner` field and OpenRig's side of declaration, identity and activity
 >   (sections 2-4).
 > - **Proposed runner-author behavior:** the input, cancellation and permission recipe in sections 5-7, and the
 >   runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
@@ -11,7 +11,7 @@
 >
 > No harness has been run end to end under this contract yet. The first candidate is dsh over ACP.
 >
-> Candidate scope and pinned references are in the [joined author guide](author-contracts.md). The
+> Release status and pinned references are in the [joined author guide](author-contracts.md). The
 > [community presets reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md)
 > describes the implemented fields at that base; this chapter also labels proposed author behavior.
 
@@ -32,7 +32,7 @@ the same harness can run in many places, and one place can host many harnesses.
 honestly.** A runner that guesses is worse than a quiet screen read as unknown.
 
 **Vocabulary.** "Preset", "runner preset", `launch_result`, `resume`, `first_input` and `passes_model` are existing
-terms at the candidate base. Broader names you may see in design discussion, such as *HarnessSpec*, are **proposals**, not file
+terms in 0.7.6. Broader names you may see in design discussion, such as *HarnessSpec*, are **proposals**, not file
 formats or loaders that exist.
 
 ## 2. Declare it: what the preset says, fixed at launch
@@ -43,7 +43,7 @@ format: 1
 name: dsh
 command: dsh-seat              # your runner; it starts the agent itself
 maintainer: <you>
-runner: true                   # in the 0.7.6 candidate
+runner: true                   # since 0.7.6
 launch_result: true            # required with runner
 resume: true                   # only after you've checked a real reopen and a refused missing one
 limits:

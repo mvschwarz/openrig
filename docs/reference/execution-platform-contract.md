@@ -2,7 +2,7 @@
 
 This chapter describes the placement and resource responsibilities of an integration author. The harness/runner chapter owns native protocol, model input, activity, attention, permission exchange and turn cancellation. This chapter owns where that harness runs, which files and credentials it can reach, how native state survives an environment change, and how results and resources return to their owners.
 
-**Status:** a design contract for authors, with an existing-compatible composition and one measured private implementation. The measured baseline used OpenRig 0.7.4, OpenShell 0.1.6 and Claude Code 2.1.310. Inclusion of this draft in 0.7.6 documentation does not implement a generic environment driver, a `DeploySpec` loader or a cross-host native-resume guarantee. Proposed operations below are not commands or accepted configuration keys. Capability support must be stated for the actual integration and version.
+**Status:** a design contract for authors, with an existing-compatible composition and one measured private implementation. The measured baseline used OpenRig 0.7.4, OpenShell 0.1.6 and Claude Code 2.1.310. 0.7.6 published this draft; publishing it does not implement a generic environment driver, a `DeploySpec` loader or a cross-host native-resume guarantee. Proposed operations below are not commands or accepted configuration keys. Capability support must be stated for the actual integration and version.
 
 ## Keep the identities and responsibilities separate
 
