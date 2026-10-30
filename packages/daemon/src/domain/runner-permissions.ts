@@ -23,6 +23,7 @@ const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
 /** allow_always is hidden from the answerer in this version, so one answer can't become standing policy. */
 const ANSWERABLE_KINDS = new Set(["allow_once", "reject_once", "reject_always"]);
 const WITHDRAW_REASONS = new Set(["turn_cancelled", "turn_ended", "exited"]);
+const MAX_AGENT_TEXT = 500;
 
 export type PermissionOwnerRefusal = { ok: false; code: "permissions_to_not_a_person" | "permissions_to_unavailable"; message: string };
 
@@ -135,10 +136,11 @@ export class RunnerPermissions {
       return { ok: false, code: "duplicate_request", message: `Request ${request.requestId} of this conversation was already submitted in turn ${tagValue(existing, TURN_TAG)}.` };
     }
 
-    const title = request.toolCall.title ?? "a tool call";
-    const kind = request.toolCall.kind ?? "other";
+    // The agent's own text, shown to the person: bounded like the summary.
+    const title = clip(request.toolCall.title ?? "a tool call", MAX_AGENT_TEXT);
+    const kind = clip(request.toolCall.kind ?? "other", MAX_AGENT_TEXT);
     const selection = this.latestSelection(seat.nodeId);
-    const offered = request.options.map((option) => `- ${option.name} (${option.kind}, ${option.optionId})${option.kind === "allow_always" ? ": hidden in this version" : ""}`);
+    const offered = request.options.map((option) => `- ${clip(option.name, MAX_AGENT_TEXT)} (${option.kind}, ${option.optionId})${option.kind === "allow_always" ? ": hidden in this version" : ""}`);
     await this.deps.queueRepo.create({
       qitemId: askId,
       sourceSession: seat.sessionName,
@@ -166,19 +168,24 @@ export class RunnerPermissions {
     return { ok: true, askId, created: true };
   }
 
-  read(seat: { nodeId: string } | null, askId: string): ReadResult {
+  /** A grant's seat carries its launch generation: it reads only its own launch's requests. Only the current
+   *  occupant's request can read pending or answered; an earlier occupant's reads stale, whatever answer it holds. */
+  read(seat: { nodeId: string; generation?: string } | null, askId: string): ReadResult {
     const item = this.deps.queueRepo.getById(askId);
     const origin = item ? runnerPermissionOrigin(item) : null;
     if (!item || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
+    const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
+    const callerMatches = !seat?.generation || seat.generation === origin.generation;
     if (item.state === "pending") {
-      if (this.deps.currentGeneration(origin.nodeId) === origin.generation) return { ok: true, state: "pending" };
-      this.close(item, STALE_NOTE, "relaunched: a later occupant holds this seat");
+      if (askIsCurrent && callerMatches) return { ok: true, state: "pending" };
+      if (!askIsCurrent) this.close(item, STALE_NOTE, "relaunched: a later occupant holds this seat");
       return { ok: true, state: "stale" };
     }
     if (item.state === "canceled") {
       const withdrawn = this.deps.queueRepo.listTransitions(askId).some((transition) => transition.transitionNote?.startsWith(WITHDRAWN_NOTE));
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
+    if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
     const answer = item.humanAnswers?.[QUESTION_ID];
     const offered = item.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
     if (item.state === "done" && typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
@@ -186,7 +193,7 @@ export class RunnerPermissions {
   }
 
   /** Wait up to `waitMs` for the ask to change, then read it. Subscribes before reading, so a change between the two isn't missed. */
-  async readWhenChanged(seat: { nodeId: string } | null, askId: string, waitMs: number): Promise<ReadResult> {
+  async readWhenChanged(seat: { nodeId: string; generation?: string } | null, askId: string, waitMs: number): Promise<ReadResult> {
     let release: () => void = () => {};
     const changed = new Promise<void>((resolve) => { release = resolve; });
     const unsubscribe = this.deps.eventBus.subscribe((event) => {
@@ -204,7 +211,7 @@ export class RunnerPermissions {
     }
   }
 
-  withdraw(seat: { nodeId: string; sessionName?: string } | null, askId: string, reason: string): WithdrawResult {
+  withdraw(seat: { nodeId: string; generation?: string } | null, askId: string, reason: string): WithdrawResult {
     if (!WITHDRAW_REASONS.has(reason)) {
       return { ok: false, code: "invalid_permission_request", message: "reason must be turn_cancelled, turn_ended or exited." };
     }

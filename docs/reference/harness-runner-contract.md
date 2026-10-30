@@ -212,8 +212,13 @@ When the seat's operator has chosen a person to answer
 2. **Read** the answer with `GET <base>/api/activity/permission-requests/<askId>?waitSeconds=25` (25 at most), and read
    again until the agent's turn ends. The `state` is `pending`, `answered` (with `optionId`), `withdrawn`, `stale` or
    `refused`.
+   - **`pending` means read again,** not cancel.
+   - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
+     refused (`409 activity_grant_stale`), even during a read's wait.
+   - **An earlier occupant's request reads `stale`,** never an answer, whatever was chosen.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
-   request is still its live one. For any other state, answer `cancelled` and hold attention, as in the first version.
+   request is still its live one. For `withdrawn`, `stale`, `refused` or a refused read, answer `cancelled` and hold
+   attention, as in the first version.
 4. **Withdraw** when the turn is cancelled or ends, or the agent exits:
    `POST <base>/api/activity/permission-requests/<askId>/withdraw` with
    `{"reason": "turn_cancelled" | "turn_ended" | "exited"}`.
@@ -239,7 +244,7 @@ the agent described it, the offered options, and who chose this person and when.
 - **`allow_always` is never offered** in this version, so one answer can't become standing policy.
 - **An unanswered request stays pending and visible.** It never times out into a grant.
 - **Ordinary `rig send` text is never an answer.** While the request is pending, the seat reads needs input, and sends
-  are refused.
+  are normally refused. A send that does get through reaches the agent as a prompt, never as an answer.
 
 **Limits in 0.7.7:**
 - **The answer owner is a registered person only.** Choosing a seat (another agent) to answer is a later change.

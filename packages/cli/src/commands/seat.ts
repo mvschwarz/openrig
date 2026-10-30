@@ -64,6 +64,7 @@ interface SeatStatusResponse {
   session_status: string | null;
   launch_cwd?: string | null;
   permissions_to?: string | null;
+  runner?: boolean;
   runtime_home?: {
     variable: string;
     home: string | null;
@@ -202,7 +203,8 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Logical ID: ${status.logical_id}`);
   console.log(`Current occupant: ${display(status.current_occupant)}`);
   if (status.launch_cwd !== undefined) console.log(`Working directory for future launches: ${display(status.launch_cwd)}`);
-  if (status.permissions_to !== undefined) {
+  // Only a runner submits permission requests; a plain seat's own prompts are its harness's.
+  if (status.permissions_to || status.runner) {
     console.log(`Runner permission requests answered by: ${status.permissions_to ?? "no one (refused, attention held)"}`);
   }
   if (status.runtime_home) {

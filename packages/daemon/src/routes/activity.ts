@@ -134,6 +134,15 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (claimedGeneration && claimedGeneration !== grant.generation) {
     return refuse(409, "activity_grant_stale", "This post claims a launch generation its grant wasn't issued for; nothing was recorded.");
   }
+  const standing = grantStandingRefusal(c, store, grant, "nothing was recorded.");
+  if (standing) return { refused: standing };
+  const sessionName = claimedSession ?? store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? null;
+  return { body: { ...body, nodeId: grant.nodeId, generation: grant.generation, ...(sessionName ? { sessionName } : {}) } };
+}
+
+/** A grant speaks only while its launch generation occupies the seat: refused when its occupant was replaced (stale) or
+ *  hasn't registered yet (pending). `outcome` says what the refusal left undone. */
+function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string): Response | null {
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -142,16 +151,15 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
       registered: (nodeId, generation) => registry.isOccupantGenerationRegistered(nodeId, generation),
     });
   } catch {
-    return refuse(503, "generation_resolver_error", "Occupant generation is unavailable.");
+    return c.json({ ok: false, code: "generation_resolver_error", error: "Occupant generation is unavailable." }, 503);
   }
   if (standing === "stale") {
-    return refuse(409, "activity_grant_stale", "This activity grant's launch generation no longer occupies the seat; nothing was recorded.");
+    return c.json({ ok: false, code: "activity_grant_stale", error: `This activity grant's launch generation no longer occupies the seat; ${outcome}` }, 409);
   }
   if (standing === "pending") {
-    return refuse(409, "activity_grant_pending", "This activity grant's launch hasn't registered its occupant yet; nothing was recorded.");
+    return c.json({ ok: false, code: "activity_grant_pending", error: `This activity grant's launch hasn't registered its occupant yet; ${outcome}` }, 409);
   }
-  const sessionName = claimedSession ?? store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? null;
-  return { body: { ...body, nodeId: grant.nodeId, generation: grant.generation, ...(sessionName ? { sessionName } : {}) } };
+  return null;
 }
 
 /** The shared front of the Pi usage routes: configuration, the local hook token, a JSON object body, and the
@@ -748,13 +756,27 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
 async function readPermission(c: Context, installTokenAccepted: boolean): Promise<Response> {
   const ctx = permissionContext(c, installTokenAccepted);
   if ("refused" in ctx) return ctx.refused;
+  const before = grantStillSpeaks(c, ctx, "nothing was read.");
+  if (before) return before;
   const waitSeconds = Math.max(0, Math.min(25, Number.parseInt(c.req.query("waitSeconds") ?? "0", 10) || 0));
-  const result = await ctx.permissions.readWhenChanged(ctx.grant ? { nodeId: ctx.grant.nodeId } : null, c.req.param("askId") ?? "", waitSeconds * 1000);
-  if (ctx.grant && new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
-    return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked." }, 401);
-  }
+  const result = await ctx.permissions.readWhenChanged(grantSeat(ctx), c.req.param("askId") ?? "", waitSeconds * 1000);
+  // The grant may have been revoked, or its occupant replaced, while the read waited.
+  const after = grantStillSpeaks(c, ctx, "nothing was read.");
+  if (after) return after;
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, 404);
   return c.json(result);
+}
+
+/** A grant reads and withdraws only its own launch's requests: its seat and generation. */
+const grantSeat = (ctx: PermissionContext) => ctx.grant ? { nodeId: ctx.grant.nodeId, generation: ctx.grant.generation } : null;
+
+/** A grant still speaks for its seat: it isn't revoked, and its launch generation still occupies the seat. */
+function grantStillSpeaks(c: Context, ctx: PermissionContext, outcome: string): Response | null {
+  if (!ctx.grant) return null;
+  if (new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
+    return c.json({ ok: false, code: "activity_grant_revoked", error: `This activity grant was revoked; ${outcome}` }, 401);
+  }
+  return grantStandingRefusal(c, ctx.store, ctx.grant, outcome);
 }
 
 /** Withdraw this seat's own request when its turn is cancelled or ends, or its agent exits: any later answer isn't sent. */
@@ -767,10 +789,9 @@ async function withdrawPermission(c: Context, installTokenAccepted: boolean): Pr
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
   }
-  if (ctx.grant && new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
-    return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked." }, 401);
-  }
-  const result = ctx.permissions.withdraw(ctx.grant ? { nodeId: ctx.grant.nodeId } : null, c.req.param("askId") ?? "", String(body?.reason ?? ""));
+  const refusal = grantStillSpeaks(c, ctx, "nothing was withdrawn.");
+  if (refusal) return refusal;
+  const result = ctx.permissions.withdraw(grantSeat(ctx), c.req.param("askId") ?? "", String(body?.reason ?? ""));
   if (!result.ok) return c.json({ ok: false, code: result.code, error: result.message }, result.code === "not_found" ? 404 : 400);
   return c.json(result);
 }
