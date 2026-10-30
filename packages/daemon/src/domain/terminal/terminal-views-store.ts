@@ -18,6 +18,7 @@
 
 import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { createPrivateTextFile } from "../private-text-file.js";
 import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -138,14 +139,13 @@ export class TerminalViewsStore {
   }
 
   private writeAtomic(file: TerminalViewsFile): void {
+    const tmp = join(dirname(this.path), `.openrig-views-${randomUUID()}.tmp`);
     if (process.platform === "win32" && existsSync(this.path) && lstatSync(this.path).isFile()) {
-      const staging = `${this.path}.tmp-${randomUUID()}`;
-      createPrivateTextFile(staging, serialize(file));
-      try { replaceWindowsFilePreservingMetadata(this.path, staging); }
-      finally { try { unlinkSync(staging); } catch { /* Published or retained private staging. */ } }
+      createPrivateTextFile(tmp, serialize(file));
+      try { replaceWindowsFilePreservingMetadata(this.path, tmp); }
+      finally { try { unlinkSync(tmp); } catch { /* Published or retained private staging. */ } }
       return;
     }
-    const tmp = `${this.path}.tmp`;
     writeFileSync(tmp, serialize(file), "utf-8");
     renameSync(tmp, this.path);
   }

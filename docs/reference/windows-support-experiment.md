@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Terminal-view store long filenames (2026-10-30)
+
+An owned valid 245-character view filename could be saved initially, but native
+replacement failed when the store appended a UUID staging suffix to that name.
+Both publication paths now use a short unique sibling staging name, retaining
+the existing native metadata-preserving replacement helper.
+
+The actual-file case failed before repair and now saves, replaces, re-reads and
+removes the view with no staging leftovers. Daemon TypeScript checking passes.
+This covers the store's explicit path constructor; the default fixed filename
+was not itself a long-name failure. No real saved layout or terminal was touched,
+and no provider/UI acceptance is claimed.
+
 ### Pi current-record native path aliases (2026-10-30)
 
 An owned Pi JSONL file reported through its expanded long path was rejected as
