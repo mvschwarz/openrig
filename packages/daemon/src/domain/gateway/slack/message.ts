@@ -261,7 +261,11 @@ function convertMarkdown(text: string, openFence: string): { text: string; openF
       return escapeSlackText(line);
     }
     const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
-    if (heading) return heading[1] ? `*${inlineMarkdownToMrkdwn(heading[1])}*` : "";
+    if (heading) {
+      if (!heading[1]) return "";
+      const inner = inlineMarkdownToMrkdwn(heading[1]);
+      return /^\*[^*\n]+\*$/.test(inner) ? inner : `*${inner}*`;
+    }
     // Section mrkdwn has no list syntax; a plain "- " reads better than a typed bullet character.
     const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
     if (item) {
@@ -280,8 +284,15 @@ function convertMarkdown(text: string, openFence: string): { text: string; openF
  *  `*bold*` is not a list item. Code spans and ``` or ~~~ fenced blocks are only escaped. `openFence` is the
  *  fence a split brief's earlier part left open (see openFenceAfter). */
 export function markdownToSlackMrkdwn(text: string, openFence = ""): string {
-  return convertMarkdown(text, openFence).text;
+  const converted = convertMarkdown(text, openFence);
+  // Slack knows only ``` blocks, and only inside one message: a part that starts or ends inside one is wrapped to match.
+  const head = openFence.startsWith("`") ? "```\n" : "";
+  const tail = converted.openFence.startsWith("`") ? "\n```" : "";
+  return `${head}${converted.text}${tail}`;
 }
+
+/** Room a split part needs for the ``` lines markdownToSlackMrkdwn may add around it. */
+export const CODE_FENCE_ROOM = 8;
 
 /** The fence still open after `text`, so the next part of a split brief continues inside it. */
 export function openFenceAfter(text: string, openFence = ""): string {

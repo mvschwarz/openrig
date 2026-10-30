@@ -22,6 +22,7 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
 
   it("turns # and ## headings into a bold line", () => {
     expect(md("# Title\ntext\n## Next step ##")).toBe("*Title*\ntext\n*Next step*");
+    expect(md("## **Plan**\n# __Done__")).toBe("*Plan*\n*Done*");
   });
 
   it("turns a safe https [text](url) into <url|text>", () => {
@@ -94,9 +95,11 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
     const body = "```\n" + "x".repeat(1900) + "\n# literal\n**literal**\n```\n# after";
     const pieces = splitForSlack(body, () => 1910);
     expect(pieces.length).toBe(2);
+    expect(md(pieces[0]!).endsWith("\n```")).toBe(true);
     const second = md(pieces[1]!, openFenceAfter(pieces[0]!));
-    expect(second).toContain("# literal\n**literal**\n```");
+    expect(second.startsWith("```\n# literal\n**literal**\n```")).toBe(true);
     expect(second.endsWith("*after*")).toBe(true);
+    expect(md("~~~\nx", "~~~")).toBe("~~~\nx");
   });
 
   it("delivers a code block split across Slack messages as code in every part", async () => {
@@ -117,7 +120,12 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
       expect(await deliver(decision)).toEqual({ ok: true });
       expect(posts.length).toBeGreaterThan(1);
       const last = posts.at(-1)!.blocks;
+      for (const p of posts) {
+        const code = p.blocks.map((b) => b.text?.text ?? "").join("\n").split("```").length - 1;
+        expect(code % 2).toBe(0);
+      }
       expect(last.map((b) => b.text?.text ?? "").join("\n")).toContain("# literal\n- literal\n**literal**\n```\n*Next*");
+      expect(last.find((b) => b.text?.text.includes("# literal"))!.text!.text.startsWith("```\n")).toBe(true);
       expect(last).toContainEqual(list([{ style: "bullet", indent: 0, items: [[{ type: "text", text: "item" }]] }]));
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -170,7 +178,7 @@ describe("list items in a row body render as native Slack lists", () => {
       { type: "section", text: { type: "mrkdwn", text: "```\n- not a list\n```" } },
       list([{ style: "bullet", indent: 0, items: [[t("a list")]] }]),
     ]);
-    expect(buildBodyBlocks("- still code\n```", "```")[0]).toEqual({ type: "section", text: { type: "mrkdwn", text: "- still code\n```" } });
+    expect(buildBodyBlocks("- still code\n```", "```")[0]).toEqual({ type: "section", text: { type: "mrkdwn", text: "```\n- still code\n```" } });
   });
 
   it("falls back to one mrkdwn section when list runs would pass 50 blocks", () => {

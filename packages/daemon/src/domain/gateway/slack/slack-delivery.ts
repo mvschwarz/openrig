@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
 import {
-  buildOutboundMessage, attributionFromSession, openFenceAfter, reconcileToken, redactSecrets, splitForSlack,
+  buildOutboundMessage, attributionFromSession, CODE_FENCE_ROOM, openFenceAfter, reconcileToken, redactSecrets, splitForSlack,
   HumanMessageShapeError, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type SlackMediaRef,
 } from "./message.js";
 import type { SeenStore } from "./state-store.js";
@@ -610,7 +610,7 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   // A part's room is what its subject, options, evidence, sender and marker leave of both limits.
   const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
     const frame = renderPart(opts, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
-    return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
+    return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve - CODE_FENCE_ROOM;
   };
   const primary: DeliveryPart = { ...q, humanDetail: undefined };
   // A retry replays its first attempt's cuts, so no piece moves between the parts already posted and the rest.
