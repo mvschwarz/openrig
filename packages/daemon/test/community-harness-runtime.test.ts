@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
+import { communityHarnessLabel, listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter, withCommunityHarnessResolver, withCommunityHarnesses } from "../src/adapters/community-harness-runtime-adapter.js";
 import { migrate } from "../src/db/migrate.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -57,11 +57,49 @@ it.each([true, false])("loads first_input=%s independently from other declaratio
   expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false, message: expect.stringContaining("first_input must be true or false") });
 });
 
+describe("protocol field", () => {
+  it("loads protocol: pi-rpc and defaults resume to true", () => {
+    const dir = presets({ "synth.yaml": GOOD + "protocol: pi-rpc\n" });
+    const found = loadCommunityHarnessPreset("synth", dir);
+    expect(found).toMatchObject({
+      ok: true,
+      preset: {
+        name: "synth",
+        protocol: "pi-rpc",
+        resume: true,
+      },
+    });
+  });
+
+  it.each([
+    ["an unknown protocol", "protocol: grpc\n", "protocol must be 'screen' or 'pi-rpc'"],
+    ["protocol: pi-rpc with runner: true", "protocol: pi-rpc\nrunner: true\n", "protocol: pi-rpc and runner: true can't both be set"],
+    ["protocol: pi-rpc with launch_result: true", "protocol: pi-rpc\nlaunch_result: true\n", "protocol: pi-rpc manages session identity through the Pi runner"],
+    ["protocol: pi-rpc with names_conversation: true", "protocol: pi-rpc\nnames_conversation: true\n", "protocol: pi-rpc manages session identity through the Pi runner"],
+    ["protocol: pi-rpc with startup_assisted: true", "protocol: pi-rpc\nstartup_assisted: true\n", "protocol: pi-rpc and startup_assisted can't both be set"],
+    ["protocol: pi-rpc with first_input: true", "protocol: pi-rpc\nfirst_input: true\n", "protocol: pi-rpc and first_input can't both be set"],
+  ])("refuses %s", (_case, extra, message) => {
+    const dir = presets({ "synth.yaml": GOOD + extra });
+    expect(loadCommunityHarnessPreset("synth", dir)).toMatchObject({ ok: false, message: expect.stringContaining(message) });
+  });
+
+  it("labels pi-rpc presets with structured activity needsInput", () => {
+    const dir = presets({ "synth.yaml": GOOD + "protocol: pi-rpc\n" });
+    const label = communityHarnessLabel("synth", dir, {
+      resumeType: "community:synth",
+      resumeToken: "/state/pi/synth/sessions/test.jsonl",
+      resumeProvenance: "launcher",
+    });
+    expect(label.needsInput).toBe("from structured activity and screen observations");
+    expect(label.reportedConversation).toBe("/state/pi/synth/sessions/test.jsonl");
+  });
+});
+
 describe("community harness presets", () => {
   it("loads a preset with the fields this format reads", () => {
     const dir = presets({ "synth.yaml": GOOD });
     expect(loadCommunityHarnessPreset("synth", dir)).toEqual({ ok: true, preset: {
-      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, path: join(dir, "synth.yaml") } });
+      name: "synth", command: "synth-harness --serve", maintainer: "Example Maintainer", limits: ["resume unsupported"], protocol: "screen", launchResult: false, namesConversation: false, resume: false, startupAssisted: false, firstInput: false, runner: false, passesModel: false, path: join(dir, "synth.yaml") } });
   });
 
   it.each([

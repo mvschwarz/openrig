@@ -578,9 +578,10 @@ export class StartupOrchestrator {
     // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
     // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
     // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
-    if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
-        input.skipHarnessLaunch ? undefined : input.adapter.runner()); }
+    if (input.adapter instanceof CommunityHarnessRuntimeAdapter || ("communityHarness" in input.adapter && input.adapter.communityHarness)) {
+      const harnessName = ((input.adapter as unknown as { communityHarness?: string }).communityHarness) ?? input.adapter.runtime;
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, harnessName,
+        input.skipHarnessLaunch ? undefined : (typeof (input.adapter as unknown as { runner?: () => boolean }).runner === "function" ? (input.adapter as unknown as { runner: () => boolean }).runner() : false)); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 

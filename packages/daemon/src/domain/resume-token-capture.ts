@@ -114,8 +114,8 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: "process_unreadable" };
     }
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
-  } else if (runtime === "pi" || runtime === "omp") {
-    const stateStore = runtime === "pi" ? deps.piRunnerStateStore : deps.ompRunnerStateStore;
+  } else if (runtime === "pi" || runtime === "omp" || (typeof resumeType === "string" && resumeType.startsWith("community:"))) {
+    const stateStore = runtime === "omp" ? deps.ompRunnerStateStore : deps.piRunnerStateStore;
     if (!stateStore) return { outcome: "noop" }; // dep absent — silent no-op
     const state = stateStore.readSessionFile(input.sessionName);
     if (!state.ok) {

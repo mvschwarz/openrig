@@ -167,4 +167,31 @@ describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () =
     expect(validateResumeToken("claude-code", validPath).ok).toBe(false);
     expect(validateResumeToken("codex", validPath).ok).toBe(false);
   });
+
+  describe("community harnesses", () => {
+    it("validates session-file tokens for community harnesses as community:<runtime>", () => {
+      const r = validateResumeToken("omo", validPath);
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.resumeType).toBe("community:omo");
+        expect(r.token).toBe(validPath);
+      }
+    });
+
+    it("validates id-shaped tokens for community harnesses as community:<runtime>", () => {
+      const r = validateResumeToken("custom-agent", "chat-session-1234");
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.resumeType).toBe("community:custom-agent");
+        expect(r.token).toBe("chat-session-1234");
+      }
+    });
+
+    it("rejects path traversal in session files for community harnesses", () => {
+      const sneaky = "/home/op/.openrig/state/pi/../../etc/passwd.jsonl";
+      const r = validateResumeToken("omo", sneaky);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/\.\./);
+    });
+  });
 });

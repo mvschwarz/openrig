@@ -9,7 +9,9 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file" | `community:${string}`;
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -48,6 +50,7 @@ export function resumeTypeForRuntime(runtime: string | null): ResumeType | null 
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
   if (runtime === "omp") return "omp_session_file";
+  if (runtime && isCommunityHarnessRuntime(runtime)) return `community:${runtime}`;
   return null;
 }
 
@@ -107,6 +110,14 @@ export function validateResumeToken(
   }
   if (resumeType === "pi_session_file" || resumeType === "omp_session_file") {
     return validateSessionFileToken(resumeType, token);
+  }
+  if (typeof resumeType === "string" && resumeType.startsWith("community:")) {
+    if (token.startsWith("/") && token.endsWith(SESSION_FILE_SUFFIX)) {
+      const sf = validateSessionFileToken("pi_session_file", token);
+      if (!sf.ok) return sf;
+      return { ok: true, resumeType, token: sf.token };
+    }
+    return validateIdShapedToken(resumeType, token);
   }
   return validateIdShapedToken(resumeType, token);
 }
