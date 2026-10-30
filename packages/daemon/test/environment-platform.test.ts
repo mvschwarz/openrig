@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -12,7 +12,7 @@ const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex")
 // The real daemon routes, SQLite and host filesystem; only the provider transport is fake.
 // These checks never launch OpenShell or a native agent.
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "environment-platform-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-platform-")));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
   const db = createFullTestDb(); cleanup.push(() => db.close());
   const resources: Array<Record<string, unknown>> = [], files = new Map<string, string>();
@@ -49,7 +49,12 @@ function fixture() {
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider-ref", policy: join(root, "policy.yaml") } };
   writeFileSync(input.placement.policy, "version: 1\n"); mkdirSync(join(root, "exports"));
   const create = () => request("/create", input);
-  return { root, db, resources, files, driver, input, request, create, health: () => f.app.request("/healthz"),
+  const task = async () => {
+    const response = await f.app.request("/api/queue", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@environment-fixture" },
+      body: JSON.stringify({ qitemId: "task-one", destinationSession: "worker@environment-fixture", body: "Produce the selected artifact" }) });
+    expect(response.status).toBeLessThan(300);
+  };
+  return { root, db, resources, files, driver, input, request, create, task, health: () => f.app.request("/healthz"),
     counts: () => ({ creates, downloads }), loseCreate: () => { loseCreate = true; }, restart: () => { f = build(); } };
 }
 
@@ -140,5 +145,58 @@ describe("maintained environment binding and projection", () => {
 
   it("keeps the ordinary host health route available without an environment selection", async () => {
     const f = fixture(); expect((await f.health()).status).toBe(200); expect((await f.request("/missing")).status).toBe(404);
+  });
+});
+
+
+describe("managed environment artifact return", () => {
+  async function prepared() {
+    const f = fixture(); expect((await f.create()).status).toBe(201); await f.task();
+    expect((await f.request("/binding-one/project", { operationId: "projection-one", generation: "generation-one", files: [] })).status).toBe(200);
+    const body = JSON.stringify({ task: "task-one", revision: 2, report: "actual artifact bytes" });
+    f.files.set("/sandbox/openrig/work/artifacts/report.json", body);
+    const input = { operationId: "export-one", taskId: "task-one", generation: "generation-one", path: "report.json", sha256: hash(body), bytes: Buffer.byteLength(body),
+      schema: { format: "json-object/v1", fields: { task: "string", revision: "number", report: "string" }, required: ["task", "revision", "report"] },
+      context: { task: "task-one", revision: 2 } };
+    return { ...f, body, exportInput: input, export: () => f.request("/binding-one/export", input) };
+  }
+  it("publishes verified bytes once and appends a durable receipt to the same work row", async () => {
+    const f = await prepared(), result = await f.export();
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ version: 1, bindingId: "binding-one", taskId: "task-one", generation: "generation-one",
+      sha256: hash(f.body), bytes: Buffer.byteLength(f.body), actor: "coordinator@environment-fixture" });
+    expect(readFileSync(result.body.path, "utf8")).toBe(f.body);
+    const notes = f.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = 'task-one'").all() as { transition_note: string }[];
+    expect(notes.filter(n => n.transition_note.includes("export-one"))).toHaveLength(1);
+    const replay = await f.export(); expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(result.body); expect(f.counts().downloads).toBe(1);
+  });
+  it("reconciles host publication before receipt after restart without requiring the guest", async () => {
+    const f = await prepared();
+    const first = await f.export(); expect(first.status).toBe(200);
+    f.db.prepare("UPDATE environment_operations SET state='requested', receipt_json=NULL WHERE operation_id='export-one'").run();
+    f.files.clear(); f.restart();
+    const result = await f.export(); expect(result.status).toBe(200);
+    expect(result.body.sha256).toBe(hash(f.body)); expect(f.counts().downloads).toBe(1);
+    const notes = f.db.prepare("SELECT transition_note FROM queue_transitions WHERE qitem_id = 'task-one'").all() as { transition_note: string }[];
+    expect(notes.filter(n => n.transition_note.includes("export-one"))).toHaveLength(1);
+  });
+  it("refuses changed host bytes on replay rather than overwriting them", async () => {
+    const f = await prepared(); const first = await f.export(); expect(first.status).toBe(200);
+    writeFileSync(first.body.path, "changed owner bytes");
+    expect((await f.export()).status).toBe(409); expect(readFileSync(first.body.path, "utf8")).toBe("changed owner bytes");
+  });
+  it("refuses a matching hash whose task context does not match the selected contract", async () => {
+    const f = await prepared(); f.exportInput.context.revision = 3;
+    expect((await f.export()).status).toBe(409);
+    expect(f.db.prepare("SELECT receipt_json FROM environment_operations WHERE operation_id='export-one'").get()).toMatchObject({ receipt_json: null });
+  });
+  it("refuses stale generation before download or publication", async () => {
+    const f = await prepared(); f.exportInput.generation = "older-generation";
+    expect((await f.export()).status).toBe(409); expect(f.counts().downloads).toBe(0);
+  });
+  it("never exports native state or a path outside the artifact root", async () => {
+    const f = await prepared(); f.exportInput.path = "../../native/history.jsonl";
+    expect((await f.export()).status).toBe(400); expect(f.counts().downloads).toBe(0);
   });
 });
