@@ -10,7 +10,7 @@ export interface GuardedDeliverySummary {
 }
 
 /** Historical attempts contain outcomes, never executable options or callbacks. */
-interface Receipt { ids: string[]; result?: SendResult }
+interface Receipt { ids: string[]; result?: SendResult; expectedIdentity?: import("./expected-conversation.js").ExpectedConversation }
 type Deliver = (session: string, text: string, opts: SendOpts) => Promise<SendResult>;
 /** Applicability needs the intended queue row and recipient, not a saved delivery receipt. */
 export type QueueWakeFacts = Pick<OutboxEntry, "outboxId" | "auditPointer" | "destinationSession">;
@@ -42,7 +42,7 @@ export class DraftAwareDelivery {
   /** The existing per-seat lease serializes requests. Each current request gets an attempt, not an old result. */
   async send(session: string, text: string, opts: SendOpts, ids: string[]): Promise<SendResult> {
     if (!ids.length || new Set(ids).size !== ids.length) throw new DeliveryGuardError("invalid_delivery_ids", "Distinct delivery IDs are required.");
-    const pending = this.attempt(session, text, opts, { ids });
+    const pending = this.attempt(session, text, opts, { ids, ...(opts.expectedIdentity ? { expectedIdentity: opts.expectedIdentity } : {}) });
     this.sends.add(pending);
     try { return await pending; }
     finally { this.sends.delete(pending); }
@@ -69,7 +69,10 @@ export class DraftAwareDelivery {
         }
       })();
       recorded = true;
-    } catch { /* Bookkeeping cannot veto input; report its absence with the actual result. */ }
+    } catch (error) {
+      if (opts.expectedIdentity) throw error; // A conditional send cannot lose its durable constraint and still type.
+      /* Legacy bookkeeping cannot veto input; report its absence with the actual result. */
+    }
     try {
       await this.guard.beforeInput(session);
       result = await this.deliver(session, text, { ...opts,

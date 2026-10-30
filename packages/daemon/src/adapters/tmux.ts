@@ -1021,11 +1021,12 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const submit = keys.some(key => key === "Enter" || key === "C-m");
       if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+      if (options?.beforeKeys) await options.beforeKeys();
       beforeWrite(); beforeInput?.();
       const result = await this.sendKeysUnchecked(pane, keys);
       if (result.ok && submit) this.deliveryGuard?.noteSubmitted(identity);
