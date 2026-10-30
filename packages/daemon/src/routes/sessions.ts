@@ -1,3 +1,4 @@
+import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import type { Context } from "hono";
 import { expectedConversation, resolveExpectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
 import { unknownModelObservation, type CurrentModelReader } from "../domain/model-divergence/current-model-reader.js";
@@ -755,7 +756,7 @@ const generationRecord = async (c: Context) => {
   if (expected) {
     try { original = await resolveExpectedConversation(expected, registry, tmuxAdapter, store);
       sessionId = original.identity.nativeId; transcriptPath = original.path;
-    } catch (error) { return c.json({ error: (error as { code?: string }).code ?? "expected_identity_unavailable", message: (error as Error).message }, 409); }
+    } catch (error) { return c.json({ error: error instanceof DeliveryGuardError ? error.code : "expected_identity_unavailable", message: (error as Error).message }, 409); }
   } else if (runtime === "codex") {
     const binding = registry.getBindingForNode(context!.nodeId);
     const identity = new SeatIdentityStore(registry.db).getForNode(context!.nodeId);
@@ -825,27 +826,28 @@ const generationRecord = async (c: Context) => {
       // replacing a rollout at the same path changes it, even if its native id is unchanged.
       const generationId = JSON.stringify([original?.generation ?? occupant?.generationUuid ?? null, sessionId, transcriptPath, stat.dev, stat.ino, stat.birthtimeMs]);
       if (runtime === "codex" || expected) {
-        let header = "";
-        for (let offset = 0; offset < Math.min(totalBytes, MAX_SUFFIX_BYTES) && !header.includes("\n");) {
+        // Native records are append-only. Identify the opened file at its first identity-bearing line,
+        // rather than parsing megabytes of old conversation again on every suffix poll.
+        let pending = "", nativeId: string | undefined;
+        for (let offset = 0; offset < Math.min(totalBytes, MAX_SUFFIX_BYTES) && nativeId === undefined;) {
           const chunk = Buffer.alloc(Math.min(64 * 1024, totalBytes - offset, MAX_SUFFIX_BYTES - offset));
           const n = fs.readSync(fd, chunk, 0, chunk.length, offset);
           if (!n) break;
-          header += chunk.subarray(0, n).toString("utf8");
-          offset += n;
-        }
-        let meta;
-        try { meta = JSON.parse(header.slice(0, header.indexOf("\n"))); } catch { /* explicit no-answer below */ }
-        if (runtime === "claude-code" && expected) {
-          // Claude may prefix its JSONL with snapshots; identity must be present in the opened record.
-          const head = Buffer.alloc(Math.min(totalBytes, MAX_SUFFIX_BYTES));
-          const n = fs.readSync(fd, head, 0, head.length, 0);
-          const ids = new Set<string>();
-          for (const line of head.subarray(0, n).toString("utf8").split("\n")) {
-            try { const row = JSON.parse(line); if (typeof row.sessionId === "string") ids.add(row.sessionId); } catch { /* incomplete last line */ }
+          pending += chunk.subarray(0, n).toString("utf8"); offset += n;
+          for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n")) {
+            const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+            let row;
+            try { row = JSON.parse(line); } catch { /* explicit no-answer below */ }
+            if (runtime === "codex") {
+              nativeId = row?.type === "session_meta" && typeof row.payload?.id === "string" ? row.payload.id : "";
+              break;
+            }
+            if (typeof row?.sessionId === "string") { nativeId = row.sessionId; break; }
           }
-          if (ids.size !== 1 || !ids.has(sessionId!)) return c.json({ error: "expected_identity_mismatch", message: "The opened record does not identify only the expected original conversation." }, 409);
-        } else if (meta?.type !== "session_meta" || meta.payload?.id !== sessionId) {
-          return c.json({ error: "record_identity_mismatch", message: `The rollout header does not identify current thread '${sessionId}'.` }, 409);
+        }
+        if (nativeId !== sessionId) {
+          return c.json({ error: expected ? "expected_identity_mismatch" : "record_identity_mismatch",
+            message: "The opened record does not identify the selected native conversation." }, 409);
         }
       }
       original?.assertCurrent();
@@ -860,7 +862,7 @@ const generationRecord = async (c: Context) => {
       fs.closeSync(fd);
     }
   } catch (err) {
-    return c.json({ error: expected ? (err as { code?: string }).code ?? "expected_identity_unavailable" : "record_unreadable", message: `Generation record for '${sessionName}' is unreadable: ${(err as Error).message}` }, 409);
+    return c.json({ error: expected ? err instanceof DeliveryGuardError ? err.code : "expected_identity_unavailable" : "record_unreadable", message: `Generation record for '${sessionName}' is unreadable: ${(err as Error).message}` }, 409);
   }
 };
 sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), generationRecord);

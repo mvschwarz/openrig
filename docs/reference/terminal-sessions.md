@@ -451,8 +451,16 @@ unverified identity returns 409 (`expected_identity_unavailable`). Conflicting
 reuse of a delivery ID returns 409 (`delivery_identity_conflict`). No conditional
 operation falls back to the replacement. Use these dedicated paths when detecting
 support: older daemons return 404 instead of silently ignoring an unknown field.
-The ordinary read and send endpoints keep their existing behavior for callers
-that do not opt in.
+Ordinary reads and sends without an expectation or an ID bound by an earlier
+conditional send keep their existing behavior. Reusing a bound ID also carries
+its stored constraint when the caller omits the expectation.
+
+While a runtime switch is preparing or confirmed, a conditional send returns
+409 `expected_identity_unavailable` with `sent:false` and `inputPhase:"not_reached"`.
+It retains neither the input nor the expectation. Retry the conditional endpoint
+with the original `expectedIdentity`; an ordinary send is not an identity-bound
+retry unless its ID already has a stored constraint. Ordinary sends during the
+switch keep their existing retained response.
 
 This is a finite process/record observation followed by a terminal write; tmux has
 no atomic native-conversation compare-and-write operation. A native conversation

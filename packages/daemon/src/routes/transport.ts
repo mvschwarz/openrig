@@ -130,6 +130,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const target = resolved.sessions.length === 1 ? resolved.sessions[0]!.sessionName : null;
     const switching = target ? runtimeSwitchSummary(db, { session: target }) : null;
     if (target && switching && (switching.phase === "preparing" || switching.phase === "confirmed")) {
+      if (expectedIdentity) return c.json({ ok: false, sessionName: target, sent: false, inputPhase: "not_reached",
+        reason: "expected_identity_unavailable", error: "The seat is switching runtime. No input or expected-identity constraint was retained; retry the conditional endpoint with the original expectedIdentity.",
+        runtimeSwitch: switching }, 409);
       return c.json({ ok: true, sessionName: target, outcome: "retained", sent: false, verified: false, reason: "runtime_switch_in_progress",
         runtimeSwitch: switching,
         warning: `${target} is switching runtime (${switching.from} -> ${switching.to}, switch ${switching.id}) until about ${switching.deadlineAt}. Send it again after the switch; it then reaches whoever holds the seat.` });

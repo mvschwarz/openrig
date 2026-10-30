@@ -2439,6 +2439,7 @@ export class SessionTransport {
     // The constraint belongs to the durable input, including later committed dispatch and ID reuse.
     const outbox = new OutboxHandler(this.db);
     let ids = opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []);
+    let admitted = false;
     try {
       let expected = opts?.expectedIdentity ? expectedConversation(opts.expectedIdentity) : undefined;
       for (const id of ids) {
@@ -2461,6 +2462,7 @@ export class SessionTransport {
           }, expected!);
         }
       })();
+      admitted = true;
       await resolveExpectedConversation(expected, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
       const result = await this.sendClassifiedInput(sessionName, text, { ...opts, expectedIdentity: expected,
         ...(opts?.committedOutboxIds ? {} : { deliveryId: ids[0] }) });
@@ -2478,7 +2480,7 @@ export class SessionTransport {
       // Before-input conditional failures never fall back to an ordinary send.
       const written = (error as { inputWritten?: boolean }).inputWritten;
       const attempted = (error as { inputAttempted?: boolean }).inputAttempted;
-      if (!written && !attempted) for (const id of ids) { try { if (outbox.getById(id)) outbox.markFailed(id); } catch { /* Original refusal remains authoritative. */ } }
+      if (admitted && !written && !attempted) for (const id of ids) { try { if (outbox.getById(id)) outbox.markFailed(id); } catch { /* Original refusal remains authoritative. */ } }
       return { ok: false, sessionName, identityContract: 1, outboxIds: ids,
         sent: written ? true : attempted ? undefined : false,
         inputPhase: written ? "written" : attempted ? "attempted" : "not_reached",
@@ -2558,7 +2560,7 @@ export class SessionTransport {
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
-            memberOpts?.committedOutboxIds ?? [memberOpts?.deliveryId ?? `guard-send-${randomUUID()}`]);
+            memberOpts?.committedOutboxIds ?? [memberOpts?.expectedIdentity && memberOpts.deliveryId ? memberOpts.deliveryId : `guard-send-${randomUUID()}`]);
         }
         return this.sendUnguarded(sessionName, memberText, memberOpts);
       }, async target => {
