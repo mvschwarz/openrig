@@ -307,6 +307,7 @@ export function createTestApp(
      * PodRigInstantiator used by /api/up apply-mode tests that need
      * real agent.yaml resolution. Default (always-false) preserved.
      */
+    skillsRootResolver?: () => string;
     podInstantiatorFsOps?: {
       exists: (p: string) => boolean;
       readFile: (p: string) => string;
@@ -403,6 +404,7 @@ export function createTestApp(
     startupOrchestrator,
     fsOps: opts?.podInstantiatorFsOps ?? { readFile: () => "", exists: () => false },
     claudeActivityAssets: opts?.claudeActivityAssets,
+    skillsRootResolver: opts?.skillsRootResolver,
     adapters,
   });
 

@@ -64,9 +64,9 @@ jobs:
       - name: Native plugin staging and content authority
         working-directory: packages/daemon
         run: npx vitest run test/windows-claude-plugin-hooks.test.ts test/plugin-vendor-service.test.ts test/codex-core-plugin-route.test.ts test/codex-owned-hook-trust.test.ts --maxWorkers=1
-      - name: Native profile freshness and scoped catalog scans
+      - name: Native profile worker responsiveness and catalog scans
         working-directory: packages/daemon
-        run: npx vitest run test/profile-resolution-worker.test.ts -t "preserves fresh reads|scans each identical|shares raw scans" --maxWorkers=1
+        run: npx vitest run test/profile-resolution-worker.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly
