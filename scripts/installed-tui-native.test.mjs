@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import http from "node:http";
+import { once } from "node:events";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { npmCommand } from "./npm-command.mjs";
 
-test("installed native npm TUI shim starts and exits an isolated demo", {
+test("installed native npm TUI shim supports owned demo and connected reads", {
   skip: process.platform !== "win32" || process.env.RUN_NATIVE_INSTALLED_TUI !== "1"
     ? "opt-in RUN_NATIVE_INSTALLED_TUI=1; requires an assembled native CLI package" : false,
 }, async () => {
@@ -42,6 +44,44 @@ test("installed native npm TUI shim starts and exits an isolated demo", {
     const { resolveTuiCliEntry } = await import(pathToFileURL(path.join(installed, "tui/dist/cli-command.js")).href);
     assert.equal(resolveTuiCliEntry({}), fs.realpathSync.native(path.join(installed, "dist/index.js")));
     const { BUILD_INFO } = await import(pathToFileURL(path.join(installed, "dist/build-info.js")).href);
-    console.log(JSON.stringify({ installedBuild: BUILD_INFO, pairedCli: true, demoEnteredAndRestored: true }));
+    const { spawnWindowsJobProcess } = await import(pathToFileURL(path.join(installed, "daemon/dist/domain/windows-job-process.js")).href);
+    const requests = [];
+    const server = http.createServer((request, response) => {
+      requests.push({ method: request.method, path: request.url });
+      response.setHeader("Content-Type", "application/json");
+      if (request.method === "GET" && request.url === "/api/rigs/summary") response.end("[]");
+      else { response.statusCode = 404; response.end('{"error":"owned fixture has no data for this read"}'); }
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const url = `http://127.0.0.1:${server.address().port}`;
+    let child;
+    try {
+      child = spawnWindowsJobProcess(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "& $env:OPENRIG_TEST_TUI_COMMAND --url $env:OPENRIG_TEST_TUI_URL --socket $env:OPENRIG_TEST_TUI_SOCKET; exit $LASTEXITCODE"],
+      { cwd: home, env: { ...env, OPENRIG_TEST_TUI_URL: url, OPENRIG_TEST_TUI_SOCKET: path.join(home, "connected.sock") }, stdio: ["pipe", "pipe", "pipe"] });
+      const exited = once(child, "exit");
+      let rendered = "", errors = "";
+      child.stdout.on("data", bytes => { rendered = (rendered + bytes).slice(-2 * 1024 * 1024); });
+      child.stderr.on("data", bytes => { errors = (errors + bytes).slice(-8192); });
+      const deadline = Date.now() + 10000;
+      // The first summary is startup; a second summary proves entry into the
+      // connected work read lane. Other endpoints intentionally remain 404.
+      while (requests.filter(request => request.path === "/api/rigs/summary").length < 2
+        && child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(requests.filter(request => request.path === "/api/rigs/summary").length >= 2, `connected reads unavailable: ${errors}`);
+      assert.ok(requests.every(request => request.method === "GET"), "entering connected work must not send a mutation");
+      child.stdin.end("q");
+      let exitTimer;
+      const code = await Promise.race([exited.then(([code]) => code), new Promise(resolve => { exitTimer = setTimeout(() => resolve("timeout"), 5000); })])
+        .finally(() => clearTimeout(exitTimer));
+      assert.equal(code, 0, errors);
+      assert.ok(rendered.includes("\x1b[?1049h") && rendered.includes("\x1b[?1049l"));
+      console.log(JSON.stringify({ installedBuild: BUILD_INFO, pairedCli: true, demoEnteredAndRestored: true, connectedSummaryReads: requests.filter(request => request.path === "/api/rigs/summary").length, onlyGetRequests: true }));
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await once(child, "close"); }
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
   } finally { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Installed TUI transitions into connected read mode
+
+The isolated npm TUI check also launches without `--demo`, against an owned
+loopback HTTP fixture. It observes two rig-summary reads: startup and the
+connected work lane. All captured requests are GET; the real installed shim
+then processes quit and restores its screen. The temporary process runs inside
+an owned native Job. This combined demo/connected check passes in 28 seconds on
+the existing cumulative `c778b2a52` artifact. Other fixture endpoints deliberately
+return 404, so this does not certify complete page projections or actual daemon,
+provider, restore or visible-desktop interaction.
+
 ### Installed npm TUI demo runs from an isolated prefix
 
 The opt-in `RUN_NATIVE_INSTALLED_TUI=1 node --test
