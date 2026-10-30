@@ -29,6 +29,8 @@ import { KernelBootTracker } from "./kernel-boot-tracker.js";
 import { RigSpecCodec } from "./rigspec-codec.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { readPlatformEnv } from "./platform-env.js";
+import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -282,13 +284,26 @@ export function selectVariant(probe: RuntimeProbeResult): string {
 
 /** Default auth probe — shells out to the runtime CLIs. */
 export async function defaultProbeRuntimes(): Promise<RuntimeProbeResult> {
-  const { exec } = await import("node:child_process");
+  const { exec, execFile } = await import("node:child_process");
   const { promisify } = await import("node:util");
   const execAsync = promisify(exec);
+  const execFileAsync = promisify(execFile);
 
   async function tryProbe(cmd: string): Promise<RuntimeAuthStatus> {
     try {
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 5000 });
+      const run = async () => {
+        if (process.platform !== "win32") return execAsync(cmd, { timeout: 5000 });
+        // These are the three fixed probe commands below. Native npm entries
+        // run without cmd, inside the same owned Job as other temporary probes.
+        const [name, ...args] = cmd.split(" ");
+        const selected = resolveWindowsProviderCommand(name as "claude" | "codex", process.env);
+        const launch = prepareWindowsJobProcess(selected.command, [...selected.prefix, ...args], { env: process.env });
+        try {
+          return await execFileAsync(launch.file, launch.args, { ...launch.options,
+            timeout: 5000, killSignal: "SIGKILL", encoding: "utf8" });
+        } finally { launch.dispose(); }
+      };
+      const { stdout, stderr } = await run();
       const out = `${stdout}\n${stderr}`.toLowerCase();
       // Conservative parse: any indicator the CLI considers itself
       // unauthenticated marks the runtime unavailable. Tighter parsing

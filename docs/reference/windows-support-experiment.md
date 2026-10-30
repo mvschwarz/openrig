@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Kernel runtime authentication probe timeout cleanup
+
+The default kernel runtime probe now resolves native Windows provider commands
+and runs temporary auth/version probes inside the existing kill-on-close Job,
+instead of timing out only their cmd shell. An owned npm CLI fixture confirmed
+that the old five-second timeout returned while its Node child remained alive;
+the child's own finite timer cleaned up that baseline run. The corrected probe
+returns unavailable and leaves no fixture child alive. Fixed probe argv, the
+five-second limit, stdout/stderr authentication classification and POSIX behavior
+are retained.
+
+The initial fixture attempts lacked npm's dp0 setup and did not establish a
+product failure; the valid-shim reproduction is the relevant baseline. Kernel
+boot, tracker and native timeout files pass 52 checks; daemon TypeScript checking
+passes. Only synthetic providers/config and owned subprocesses were used. No real
+authentication, kernel team boot, provider invocation or deployment was performed.
+
 ### Current native Job and file-holder observations
 
 At source head dfca7a642, the full focused Windows Job/file-holder fixture files
