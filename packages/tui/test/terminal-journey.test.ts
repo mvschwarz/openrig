@@ -180,9 +180,11 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(text).toContain("saved:remote view");
     expect(text).toContain("selected daemon's desktop");
     expect(text).toContain("Headless or remote");
-    const command = snap.terminals!.preview!.composed.pages[0]![0]!.recoveryCommand!;
-    expect(command).toMatch(/^ssh -t /);
-    expect(text).toContain(`env -u TMUX ${command}`);
+    const member = snap.terminals!.preview!.composed.pages[0]![0]!;
+    const command = member.recoveryCommand!;
+    expect(member.recoveryShell).toBe(process.platform === "win32" ? "powershell" : "sh");
+    const reset = process.platform === "win32" ? "Remove-Item Env:TMUX -ErrorAction SilentlyContinue; " : "env -u TMUX ";
+    expect(text).toContain(`${reset}${command.replace(/^ssh (?!-t(?:\s|$))/, "ssh -t ")}`);
     expect(text).not.toContain("ssh -t -t");
     expect(text).toContain("viewer@other.example");
     expect(text).toContain("seat with spaces");
