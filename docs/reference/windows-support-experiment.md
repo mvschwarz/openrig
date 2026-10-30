@@ -2,6 +2,28 @@
 
 ## Current review status (2026-10-30)
 
+### CLI and daemon legacy workspace defaults through native aliases
+
+Both settings readers recognized old workspace defaults only by exact text or
+normalized Windows separators. An owned fixture reproduced both readers keeping
+the old `slices` path as a file override when it named the existing legacy default
+through a junction and different casing, instead of deriving the current
+`missions` layout. The same issue applied to the old steering-file layout.
+
+Both readers now additionally compare existing paths using native realpath.
+Exact/separator matching and POSIX behavior are retained; failed resolution does
+not infer equivalence. The native fixture covers both old defaults, different
+custom directories and an absent custom file. It fails in both readers before
+the repair and passes afterward. With the complete extended CLI config tests,
+112 tests pass; CLI and daemon TypeScript checking pass. This used owned files
+and directories only, with no live home settings, workspace initialization,
+daemon launch or restore.
+
+The complete NodeLauncher source was also reviewed: native kept-pane takeover
+requires a readable default shell before ending a process, and launch registration
+retains its existing ownership checks. No real pane, seat, database, transcript
+rotation or lifecycle operation was executed; this is source review only.
+
 ### Terminal, reconciliation and protocol review continuation
 
 The current tmux executor, session reconciler, proof routes, SFTP protocol,

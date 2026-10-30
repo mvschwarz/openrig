@@ -15,7 +15,7 @@
 // resolveWorkspacePaths) project the raw strings into structured data
 // the daemon's UEP routes + Slice Story View consume.
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, rmdirSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, rmdirSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync, realpathSync } from "node:fs";
 import { createWindowsPrivateDirectory } from "../private-text-file.js";
 import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 import { randomUUID } from "node:crypto";
@@ -593,6 +593,14 @@ function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): s
   }
 }
 
+function matchesLegacyWorkspaceDefault(value: unknown, expected: string): boolean {
+  if (value === expected) return true;
+  if (process.platform !== "win32" || typeof value !== "string") return false;
+  if (path.normalize(value) === path.normalize(expected)) return true;
+  try { return realpathSync.native(value) === realpathSync.native(expected); }
+  catch { return false; }
+}
+
 function deriveLegacyWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): string | null {
   switch (key) {
     case "workspace.slices_root": return path.join(workspaceRoot, "slices");
@@ -1135,8 +1143,7 @@ export class SettingsStore {
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
       const legacyDefault = deriveLegacyWorkspaceDefault(key, wr);
-      if (legacyDefault !== null && (fileVal === legacyDefault
-        || (process.platform === "win32" && typeof fileVal === "string" && path.normalize(fileVal) === path.normalize(legacyDefault)))) {
+      if (legacyDefault !== null && matchesLegacyWorkspaceDefault(fileVal, legacyDefault)) {
         return { value: defaultValue, source: "default", defaultValue };
       }
       // Validate the file-source value too. Hand-edited config.json
