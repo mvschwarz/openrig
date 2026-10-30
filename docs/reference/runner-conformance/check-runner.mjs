@@ -81,6 +81,8 @@ const tokens = new Map();
 const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
 const ANSWERABLE = new Set(["allow_once", "reject_once", "reject_always"]);
 const text = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
+// A JSON-RPC id or prompt number as the runner passed it: a number reads as its decimal string, so 7 and "7" match.
+const idText = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : text(value);
 const server = createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => { raw += chunk; });
@@ -132,13 +134,15 @@ function askState(h, entry) {
   return { state: "pending" };
 }
 
-// Submit, checked as OpenRig checks it: the seat and generation, the request's ids as strings, and 2-4 answerable options.
+// Submit, checked as OpenRig checks it: the seat and generation, nativeRef as a string, turnId and requestId as a string
+// or a number, and 2-4 answerable options.
 function submitAsk(h, body, raw, send) {
   const script = h.asks.script;
   const problems = [];
   if (!body) return send(400, { ok: false, code: "invalid_json" });
   if (body.sessionName !== h.session) return send(404, { ok: false, code: "session_not_found" });
-  for (const key of ["nativeRef", "turnId", "requestId"]) if (!text(body[key])) problems.push(`${key} must be a non-empty string (got ${JSON.stringify(body[key])})`);
+  if (!text(body.nativeRef)) problems.push(`nativeRef must be a non-empty string (got ${JSON.stringify(body.nativeRef)})`);
+  for (const key of ["turnId", "requestId"]) if (!idText(body[key])) problems.push(`${key} must be a non-empty string or a number (got ${JSON.stringify(body[key])})`);
   const options = Array.isArray(body.options) ? body.options : null;
   if (!options) problems.push("options must be an array");
   else if (options.some((o) => !text(o?.optionId) || !text(o?.name) || !text(o?.kind))) problems.push("each option needs optionId, name and kind");
@@ -149,11 +153,12 @@ function submitAsk(h, body, raw, send) {
   const answerable = options.filter((o) => o.kind !== "allow_always");
   if (answerable.length < 2 || answerable.length > 4 || new Set(answerable.map((o) => o.optionId)).size !== answerable.length
     || answerable.some((o) => !OPTION_ID.test(o.optionId) || !ANSWERABLE.has(o.kind))) return send(422, { ok: false, code: "options_unsupported" });
-  const key = JSON.stringify([body.generation, body.nativeRef, body.requestId]);
+  const requestId = idText(body.requestId), turnId = idText(body.turnId);
+  const key = JSON.stringify([body.generation, text(body.nativeRef), requestId]);
   const earlier = h.asks.byKey.get(key);
   if (earlier) return send(200, { ok: true, askId: earlier.askId, created: false });
-  if ([...h.asks.byKey.values()].some((e) => e.requestId === body.requestId && e.turnId !== body.turnId)) return send(409, { ok: false, code: "duplicate_request" });
-  const entry = { askId: `ask-${h.label}-${h.asks.byKey.size + 1}`, requestId: body.requestId, turnId: body.turnId, created: Date.now(), waiters: new Set() };
+  if ([...h.asks.byKey.values()].some((e) => e.requestId === requestId && e.turnId !== turnId)) return send(409, { ok: false, code: "duplicate_request" });
+  const entry = { askId: `ask-${h.label}-${h.asks.byKey.size + 1}`, requestId, turnId, created: Date.now(), waiters: new Set() };
   entry.wake = () => { for (const w of [...entry.waiters]) w(); entry.waiters.clear(); };
   if (script.answer) setTimeout(entry.wake, script.answer.afterMs ?? 0);
   h.asks.byKey.set(key, entry);
@@ -399,8 +404,8 @@ const cases = {
       if (label === "allow") {
         r.check("the submit passes OpenRig's checks", h.asks.submitted[0]?.problems.length === 0, h.asks.submitted[0]?.problems.join("; "));
         r.check("it uses the hook token", submitted.token === h.token, "no bearer token");
-        r.check("requestId is the agent's JSON-RPC id, as a string", sent.requestId === String(asked?.msg.id), `requestId=${JSON.stringify(sent.requestId)}`);
-        r.check("turnId is the accepted prompt's", accepted && sent.turnId === String(accepted.body.turnId), `turnId=${JSON.stringify(sent.turnId)}`);
+        r.check("requestId is the agent's JSON-RPC id", idText(sent.requestId) === String(asked?.msg.id), `requestId=${JSON.stringify(sent.requestId)}`);
+        r.check("turnId is the accepted prompt's", accepted && idText(sent.turnId) === String(accepted.body.turnId), `turnId=${JSON.stringify(sent.turnId)}`);
         r.check("nativeRef and generation name this conversation and occupant", sent.nativeRef === h.record()?.nativeRef && sent.generation === h.generation,
           `nativeRef=${sent.nativeRef} generation=${sent.generation}`);
         r.check("the agent's options are passed on as offered", JSON.stringify((sent.options ?? []).map((o) => o.optionId)) === JSON.stringify(options),

@@ -52,7 +52,7 @@ let nextId = 1;
 const answers = new Map();
 let cancelTurn = null;
 
-// Numbers, as JSON-RPC agents commonly use: a runner that passes one on as a string id has to convert it.
+// Numbers, as JSON-RPC agents commonly use. A runner passes one on unchanged, and OpenRig reads it as its decimal string.
 function ask(method, params) {
   const id = 1000 + nextId++;
   send({ jsonrpc: "2.0", id, method, params });
