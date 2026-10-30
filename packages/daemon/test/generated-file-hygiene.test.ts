@@ -9,6 +9,8 @@ import { mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../src/domain/generated-file-hygiene.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionEntry } from "../src/domain/projection-planner.js";
+import { resourceDirectoryName } from "../src/domain/resource-directory-name.js";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 function walk(dir: string): string[] {
@@ -22,6 +24,14 @@ const fsOps = {
   listFiles: walk, statMode: (p: string) => fs.statSync(p).mode, chmod: fs.chmodSync, copyFile: fs.copyFileSync,
 };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+const ignoredPath = (cwd: string, file: string) => execFileSync("git", ["-C", cwd, "check-ignore", "--stdin", "-z"], { input: file + "\0", encoding: "utf8" });
+const realGitPath = () => process.platform === "win32"
+  ? execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "where.exe"), ["git.exe"], { encoding: "utf8", windowsHide: true }).trim().split(/\r?\n/)[0]!
+  : execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+function writeGitWrapper(bin: string, source: string, delayMs = 0) {
+  if (process.platform === "win32") writeWindowsNodeFixture(bin, "git", `import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\n${source}`, { delayMs });
+  else fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}\n${delayMs ? `Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,${delayMs});\n` : ""}${source}`, { mode: 0o755 });
+}
 
 describe("generated file Git hygiene", () => {
   let root: string;
@@ -65,8 +75,8 @@ describe("generated file Git hygiene", () => {
 
   it.each(["openrig-core", "shared:openrig-core"])("keeps only newly generated %s plugin files out of git add", async effectiveId => {
     write("source/.codex-plugin/plugin.json", '{"name":"core"}', root);
-    write("source/scripts/a [literal]*?.sh", "echo core", root);
-    const pluginDir = `.codex/plugins/${effectiveId}`;
+    write(process.platform === "win32" ? "source/scripts/a [literal].sh" : "source/scripts/a [literal]*?.sh", "echo core", root);
+    const pluginDir = `.codex/plugins/${resourceDirectoryName(effectiveId)}`;
     const userPlugin = write(`${pluginDir}/user.txt`);
     const ignore = write(".gitignore", "# User rules\n/local-only/\n");
     const ignoreBefore = fs.readFileSync(ignore);
@@ -108,11 +118,11 @@ describe("generated file Git hygiene", () => {
   it("preserves arbitrary exclude bytes and escapes exact paths from a subdirectory", () => {
     const original = Buffer.from([35, 255, 13, 10, ...Buffer.from("/custom\r\n# no final newline")]);
     fs.writeFileSync(excludePath(repo), original);
-    const generated = write("sub/.codex/plugins/openrig-core/a [literal]*?!#.md");
+    const generated = write(process.platform === "win32" ? "sub/.codex/plugins/openrig-core/a [literal]!#.md" : "sub/.codex/plugins/openrig-core/a [literal]*?!#.md");
     excludeNewGeneratedFiles(path.join(repo, "sub"), [generated]);
     const after = fs.readFileSync(excludePath(repo));
     expect(after.subarray(0, original.length)).toEqual(original);
-    expect(git(repo, "check-ignore", "--", generated).trim()).toBe(generated);
+    expect(ignoredPath(repo, generated)).toBe(generated + "\0");
     write("sub/.codex/plugins/openrig-core/a lOTHERx!#.md");
     expect(git(repo, "status", "--porcelain", "-uall")).toContain("sub/.codex/plugins/openrig-core/a lOTHERx!#.md");
     excludeNewGeneratedFiles(path.join(repo, "sub"), [generated]);
@@ -130,6 +140,17 @@ describe("generated file Git hygiene", () => {
     expect(excludeNewGeneratedFiles(alias, [aliasFile])).toEqual([]);
     expect(fs.readFileSync(excludePath(repo))).toEqual(excluded);
     expect(execFileSync("git", ["-C", repo, "check-ignore", "--stdin", "-z"], { input: aliasFile + "\0", encoding: "utf8" })).toBe(aliasFile + "\0");
+  });
+
+  it.skipIf(process.platform !== "win32")("excludes generated core plugin files through an owned native junction", () => {
+    const alias = path.join(root, "repo-junction"); fs.symlinkSync(repo, alias, "junction");
+    const file = write(".codex/plugins/openrig-core/payload.txt");
+    const aliasFile = path.join(alias, path.relative(repo, file));
+    expect(excludeNewGeneratedFiles(alias, [aliasFile])).toEqual([]);
+    const before = fs.readFileSync(excludePath(repo));
+    expect(excludeNewGeneratedFiles(alias, [aliasFile])).toEqual([]);
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+    expect(ignoredPath(repo, aliasFile)).toBe(aliasFile + "\0");
   });
 
   it("keeps later sibling user guidance visible (review F1)", () => {
@@ -156,7 +177,7 @@ describe("generated file Git hygiene", () => {
   ] as const)("preserves current sibling %s plugin conflicts with Git case matching (ignorecase=%s)", (effectiveId, ignoreCase) => {
     git(repo, "config", "core.ignorecase", String(ignoreCase));
     const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
-    const name = `.codex/plugins/${effectiveId}/payload.txt`;
+    const name = `.codex/plugins/${resourceDirectoryName(effectiveId)}/payload.txt`;
     write(name, "User", linked);
     const generated = write(ignoreCase ? name.replace("payload", "PAYLOAD") : name);
     const warnings = excludeNewGeneratedFiles(repo, [generated]);
@@ -179,7 +200,7 @@ describe("generated file Git hygiene", () => {
     const result = await project([other]);
     expect(result.warnings?.join(" ")).toContain("untracked");
     git(repo, "add", "-A");
-    expect(git(repo, "ls-files", "-z")).toBe(`.codex/plugins/${effectiveId}/payload.txt\0`);
+    expect(git(repo, "ls-files", "-z")).toBe(`.codex/plugins/${resourceDirectoryName(effectiveId)}/payload.txt\0`);
   });
 
   it("leaves a recreated tracked path visible and supports non-Git workspaces", () => {
@@ -248,22 +269,23 @@ describe("generated file Git hygiene", () => {
     const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
     const files = Array.from({ length: 24 }, (_, i) => write(`.codex/plugins/openrig-core/file${i}`));
     const beforePath = process.env.PATH;
-    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const realGit = realGitPath();
     const bin = path.join(root, "bin"), log = path.join(root, "git-calls"); fs.mkdirSync(bin);
-    fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+    writeGitWrapper(bin, `
 const fs = require('node:fs'), cp = require('node:child_process');
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2))+'\\n');
 try { process.stdout.write(cp.execFileSync(${JSON.stringify(realGit)},process.argv.slice(2), {input:fs.readFileSync(0)})); }
 catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
-`, { mode: 0o755 });
+`);
     try {
       process.env.PATH = bin + path.delimiter + beforePath;
       expect(excludeNewGeneratedFiles(repo, files)).toEqual([]);
     } finally { process.env.PATH = beforePath; }
     const calls: string[][] = fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
     for (const cwd of [repo, linked]) {
-      expect(calls.filter(args => args[1] === cwd && args.includes("ls-files"))).toHaveLength(1);
-      expect(calls.filter(args => args[1] === cwd && args.includes("info/exclude"))).toHaveLength(1);
+      const sameDirectory = (args: string[]) => fs.realpathSync.native(args[1]!) === fs.realpathSync.native(cwd);
+      expect(calls.filter(args => sameDirectory(args) && args.includes("ls-files"))).toHaveLength(1);
+      expect(calls.filter(args => sameDirectory(args) && args.includes("info/exclude"))).toHaveLength(1);
     }
   });
 
@@ -278,7 +300,7 @@ catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
     const tracked = write("AGENTS.md"); git(repo, "add", "AGENTS.md");
     const generated = write(".codex/plugins/openrig-core/payload.txt");
     expect(excludeNewGeneratedFiles(repo, [generated, tracked])).toEqual([]);
-    expect(git(repo, "check-ignore", "--", generated).trim()).toBe(generated);
+    expect(ignoredPath(repo, generated)).toBe(generated + "\0");
     expect(git(repo, "ls-files", "--", "AGENTS.md").trim()).toBe("AGENTS.md");
   });
 
@@ -296,14 +318,13 @@ catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
 
   it("uses one overall Git deadline and leaves excludes unchanged when it expires", () => {
     const beforePath = process.env.PATH;
-    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const realGit = realGitPath();
     const bin = path.join(root, "slow-bin"); fs.mkdirSync(bin);
-    fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+    writeGitWrapper(bin, `
 const cp = require('node:child_process');
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);
 try { process.stdout.write(cp.execFileSync(${JSON.stringify(realGit)},process.argv.slice(2), {input:require('node:fs').readFileSync(0)})); }
 catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
-`, { mode: 0o755 });
+`, 1800);
     const before = fs.readFileSync(excludePath(repo));
     const file = write(".codex/plugins/openrig-core/file");
     const start = performance.now();
@@ -312,8 +333,11 @@ catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
       process.env.PATH = bin + path.delimiter + beforePath;
       warnings = excludeNewGeneratedFiles(repo, [file]);
     } finally { process.env.PATH = beforePath; }
-    expect(performance.now() - start).toBeLessThan(6500);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeGreaterThan(4500);
+    expect(elapsed).toBeLessThan(6500);
     expect(warnings.join(" ")).toContain("generated_file_exclude_skipped");
+    expect(warnings.join(" ")).toMatch(/ETIMEDOUT|deadline exceeded/);
     expect(fs.readFileSync(excludePath(repo))).toEqual(before);
   }, 10000);
 

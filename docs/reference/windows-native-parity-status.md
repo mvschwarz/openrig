@@ -950,3 +950,25 @@ passes. All files/Git repositories are owned temporary fixtures; no provider,
 live seat or runtime switch is executed. The new regression file is in Windows
 CI, which has not run. The broader generated-file hygiene file still has its
 separate invalid-fixture/symlink/wrapper limitations and is not claimed green.
+
+The subsequent complete generated-file hygiene file reports 28 passes and one
+failure: ordinary directory-symlink creation remains host-denied with `EPERM`.
+The distinct native junction case passes, including idempotent exclusion and
+Git's NUL-delimited alias readback; it does not waive the symlink case.
+
+Fixtures now use Windows-valid literal metacharacters (spaces/brackets/`!`/`#`)
+on Windows, retaining `*`/`?` filename cases on POSIX. Qualified plugin fixtures
+use the production directory mapping. NUL-delimited Git output avoids confusing
+Git's quoted display of native backslashes with a changed filename. Current and
+sibling worktree case conflicts, existing user-file visibility, exact exclusions
+and the large ignored-tree bounds pass.
+
+The Git batching and overall-deadline tests also execute on Windows through
+owned native wrappers. Read counts compare canonical physical directories, so
+DOS short-name spellings do not hide a call. The slow fixture delays in its
+native entry before starting Node/Git; the five-second overall deadline expires
+during that delay, records a timeout/deadline warning and leaves exclude bytes
+unchanged. The test now requires elapsed time between 4.5 and 6.5 seconds, so an
+unrelated immediate error cannot count as deadline evidence. A default-delay
+native Claude fixture still passes after extending the test helper. No product
+code changed in this follow-up; daemon TypeScript passes.

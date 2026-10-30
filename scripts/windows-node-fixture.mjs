@@ -4,7 +4,9 @@ import { execFileSync } from "node:child_process";
 
 /** A real native executable for tests of shell-free Windows subprocess APIs.
  * It forwards literal argv/stdio/status to an owned Node fixture, never cmd.exe. */
-export function writeWindowsNodeFixture(directory, name, source) {
+export function writeWindowsNodeFixture(directory, name, source, options = {}) {
+  const delayMs = options.delayMs ?? 0;
+  if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > 30000) throw Error("Invalid native fixture delay");
   const script = join(directory, name + ".mjs"), executable = join(directory, name + ".exe");
   const cs = join(directory, name + ".cs");
   const compiler = ["Framework64", "Framework"].map(folder => join(process.env.SystemRoot ?? "C:\\Windows", "Microsoft.NET", folder, "v4.0.30319", "csc.exe")).find(existsSync);
@@ -21,6 +23,7 @@ class Fixture {
     b.Append((char)92,slashes*2); b.Append((char)34); return b.ToString();
   }
   static int Main(string[] args) {
+    ${delayMs ? `System.Threading.Thread.Sleep(${delayMs});` : ""}
     var command=new StringBuilder(Quote(${JSON.stringify(script)}));
     foreach(string arg in args) command.Append(' ').Append(Quote(arg));
     var info=new ProcessStartInfo(${JSON.stringify(process.execPath)},command.ToString());
