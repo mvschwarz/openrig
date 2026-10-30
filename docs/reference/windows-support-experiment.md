@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Spec launch command preview (2026-10-30)
+
+The TUI's displayed spec-launch command now uses PowerShell environment
+assignment and single-quote escaping on Windows. Previously it displayed a
+POSIX environment prefix and POSIX apostrophe escaping even for native paths.
+POSIX rendering remains available on POSIX hosts. The actual argv-based
+launch process is unchanged.
+
+An owned PowerShell process with a local `rig` function reads back the folder,
+source and selected-host value, including Unicode, apostrophes and shell
+metacharacters. The function consumes PowerShell's `--` delimiter; its presence
+in the rendered command is checked separately. This is shell-rendering evidence,
+not a real rig launch or a native npm-shim argument acceptance result. The
+adjacent graph/launch/signal files and TUI TypeScript check pass.
+
 ### Codex Git metadata resolver review (2026-10-30)
 
 The resolver already invokes Git directly with argv and checks that returned
