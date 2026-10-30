@@ -29,7 +29,7 @@ const failing = (report: Report) => report.results.filter((r) => r.status === "f
 
 describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
-    const { code, report } = await check(["--resume", "--first-input", "--answered"]);
+    const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
     expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 0, advisory: 1 });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
@@ -48,9 +48,9 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 90_000);
 
-  it("skips the answered path, resume and first input when the runner claims none of them, and says why", async () => {
-    const { code, report } = await check(["--cases", "4b,6,9"]);
-    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "skip"], ["6", "skip"], ["9", "skip"]]);
+  it("skips resume and first input when the runner's preset declares neither, and says why", async () => {
+    const { code, report } = await check(["--cases", "6,9"]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["6", "skip"], ["9", "skip"]]);
     expect(report.results.every((r) => r.reason)).toBe(true);
     expect(code).toBe(0);
   }, 60_000);
@@ -65,15 +65,19 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["cancelled-always", "2", "cancelled is reported only on the agent's own stop reason"],
     ["no-token", "3", "every post uses the hook token"],
     ["no-sequence", "3", "every post carries the contract's fields"],
-    ["allow-permission", "4", "the answer is a refusal, never an allow option"],
-    ["stop-while-attention", "4", "no idle Stop or beat while holding that attention"],
-    ["silent-permission", "4", "what was asked is shown in the pane"],
+    ["refuse-on-404", "4", "404: the agent gets its allow_once option"],
+    ["prefer-always", "4", "404: the agent gets its allow_once option"],
+    ["refuse-on-unreachable", "4", "unreachable: the agent gets its allow_once option"],
+    ["permit-on-deny", "4", "denied_by_seat: the answer is a refusal, never an allow option"],
+    ["stop-while-attention", "4", "denied_by_seat: no idle Stop or beat while holding that attention"],
+    ["silent-permission", "4", "denied_by_seat: what was asked is shown in the pane"],
     ["no-submit", "4b", "allow: the request is submitted to /api/activity/permission-requests"],
     ["wrong-request-id", "4b", "requestId is the agent's JSON-RPC id"],
     ["self-prompt", "4b", "OpenRig records the prompt; the runner doesn't post permission_prompt itself"],
     ["deliver-twice", "4b", "allow: it's delivered once"],
-    ["deliver-unoffered", "4b", "unoffered option: the agent gets cancelled, never an allow option"],
-    ["grant-on-refusal", "4b", "route_unsupported: the agent gets cancelled, never an allow option"],
+    ["refuse-on-refusal", "4b", "duplicate_request: the agent gets its allow_once option"],
+    ["cancel-on-read-error", "4b", "unreachable read: the agent gets its allow_once option"],
+    ["permit-on-read-refusal", "4b", "refused read (409): the agent gets cancelled"],
     ["no-withdraw", "4b", "pending: /abort withdraws the ask with turn_cancelled"],
     ["late-deliver", "4b", "pending: an answer after the withdraw isn't delivered"],
     ["paste-answers", "4b", "pending: a pasted message isn't an answer"],
@@ -85,7 +89,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],
   ])("catches %s in case %s", async (broken, id, name) => {
-    const { code, report } = await check(["--cases", id, "--resume", "--first-input", "--answered"], ` --break ${broken}`);
+    const { code, report } = await check(["--cases", id, "--resume", "--first-input"], ` --break ${broken}`);
     const result = report.results.find((r) => r.id === id)!;
     expect(result.status).toBe("fail");
     // A case with several runs (1b's four failed handshakes, 6's three resumes) names each check after its run.

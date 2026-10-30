@@ -104,30 +104,43 @@ let busy = false;
 let cancelSent = false;
 const queue = [];
 
-// Permissions. The runner submits the live request to OpenRig's answered path; an OpenRig without it (404) or any refusal
-// means refuse at once and hold attention, as in the first version. An answer is delivered once, while that request is
-// still live, and the ask is withdrawn when the turn is cancelled or ends, or the agent exits.
+// Permissions. Every request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
+// person's, or OpenRig's permit. When no one can be asked (OpenRig answers 404, can't be reached, refuses for any reason
+// other than denied_by_seat, or reads with a status the contract doesn't list), the runner permits with the agent's
+// allow_once, else allow_always. Only denied_by_seat, or no allow option to permit, means refuse at once and hold
+// attention. An answer is delivered once, while that request is still live, and the ask is withdrawn when the turn is
+// cancelled or ends, or the agent exits.
 let live = null;
 const refuse = (id) => answer(id, { result: { outcome: { outcome: "cancelled" } } });
 const select = (id, optionId) => answer(id, { result: { outcome: { outcome: "selected", optionId } } });
+const allowOf = (options) => {
+  const kinds = breaks.has("prefer-always") ? ["allow_always", "allow_once"] : ["allow_once", "allow_always"];
+  for (const kind of kinds) { const option = options.find((o) => o.kind === kind); if (option) return option; }
+  return undefined;
+};
 async function onPermission(msg) {
   const { toolCall, options } = msg.params;
   if (!breaks.has("silent-permission")) show(`permission asked: ${toolCall?.title}`);
-  attention = true;
-  const holdAttention = () => void post("Notification", "permission_prompt");
-  if (breaks.has("allow-permission")) { select(msg.id, options[0].optionId); return; }
-  if (breaks.has("no-submit")) { refuse(msg.id); holdAttention(); return; }
+  const refuseAndHold = () => { refuse(msg.id); attention = true; void post("Notification", "permission_prompt"); };
+  const permit = () => { const allow = allowOf(options); if (allow) select(msg.id, allow.optionId); else refuseAndHold(); };
+  if (breaks.has("no-submit")) { refuseAndHold(); return; }
   const askedInTurn = turn;
   const submitted = await api("POST", "/api/activity/permission-requests", {
     sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION,
     nativeRef: sessionId, turnId: String(turn), requestId: breaks.has("wrong-request-id") ? `${msg.id}-other` : msg.id,
     toolCall: { title: toolCall?.title, kind: toolCall?.kind }, options, occurredAt: new Date().toISOString() });
+  if (submitted.status === 200 && submitted.body?.state === "permitted") { select(msg.id, submitted.body.optionId); return; }
   if (submitted.status !== 200 || !submitted.body?.askId) {
-    if (breaks.has("grant-on-refusal")) select(msg.id, options[0].optionId); else refuse(msg.id);
-    holdAttention();
+    const status = submitted.status;
+    if (submitted.body?.code === "denied_by_seat") { if (breaks.has("permit-on-deny")) permit(); else refuseAndHold(); }
+    else if ((status === 404 && breaks.has("refuse-on-404")) || (status === 0 && breaks.has("refuse-on-unreachable"))
+      || (status !== 404 && status !== 0 && breaks.has("refuse-on-refusal"))) refuseAndHold();
+    else permit();
     return;
   }
-  if (breaks.has("self-prompt")) holdAttention();
+  // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
+  attention = true;
+  if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false };
   live = ask;
   // The agent may have exited, or ended the turn, while the submit was on its way.
@@ -136,13 +149,18 @@ async function onPermission(msg) {
   for (;;) {
     const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}?waitSeconds=25`);
     if (ask.done && !breaks.has("late-deliver")) return;
-    const state = read.body?.state;
-    if (read.status === 200 && state === "pending") continue;
-    if (state === "answered" && (ask.offered.includes(read.body.optionId) || breaks.has("deliver-unoffered"))) {
+    const state = read.status === 200 ? read.body?.state : undefined;
+    if (state === "pending") continue;
+    if ((state === "answered" || state === "permitted") && ask.offered.includes(read.body.optionId)) {
       select(ask.id, read.body.optionId);
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
       attention = false;
-    } else if (!ask.done) refuse(ask.id);
+    } else if (!ask.done) {
+      // Withdrawn, stale or a refused read: the request can't take an answer. Anything else means no one can answer it.
+      const cannotTake = state === "withdrawn" || state === "stale" || [401, 403, 409].includes(read.status);
+      if (cannotTake ? !breaks.has("permit-on-read-refusal") : breaks.has("cancel-on-read-error")) refuse(ask.id);
+      else { permit(); attention = !allowOf(options); }
+    }
     ask.done = true;
     if (live === ask) live = null;
     return;
