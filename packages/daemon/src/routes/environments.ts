@@ -51,6 +51,8 @@ environmentRoutes.post("/:bindingId/export", async c => {
       { actor: identity.session, ...resolveRecordedIdentity(c, identity) }));
   } catch (error) { return failure(c, error); }
 });
+// Requester audit is trusted transport attribution, not credential-backed seat authentication.
+// The transport-derived requester supersedes any requestedBy claim in the body.
 environmentRoutes.post("/:bindingId/effect", async c => {
   const identity = requireSenderIdentity(c, { verb: "environment effect" }); if (!identity.ok) return identity.response;
   try { const body = { ...await c.req.json<{ effect: string }>(), requestedBy: identity.session }; return c.json(await (c.get("environmentLifecycle" as never) as EnvironmentLifecycle).effect(c.req.param("bindingId"), body as never)); }

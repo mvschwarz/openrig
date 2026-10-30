@@ -162,8 +162,8 @@ it.each(["unchanged", "missing", "changed"])("normal exact restore on recreated 
   f.db.prepare("UPDATE nodes SET pod_id='restore-pod' WHERE id=?").run(f.node.id);
   const session = f.app.sessionRegistry.registerSession(f.node.id, f.binding.tmuxSession!);
   f.app.sessionRegistry.updateStatus(session.id, "running");
-  f.app.sessionRegistry.updateResumeToken(session.id, "community:openshell-claude", first.resumeToken!);
-  f.db.prepare("UPDATE sessions SET community_harness='openshell-claude' WHERE id=?").run(session.id);
+  f.app.sessionRegistry.recordLauncherReportedToken(session.id, "community:openshell-claude", first.resumeToken!);
+  f.app.sessionRegistry.recordCommunityHarnessSelection(session.id, "openshell-claude", false);
   f.db.prepare("INSERT INTO node_startup_context(node_id,projection_entries_json,resolved_files_json,startup_actions_json,runtime) VALUES (?,?,?,?,?)")
     .run(f.node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify([{ type: "send_text", text: "NEVER REPLAY", phase: "after_ready" }]), "openshell-claude");
   const snapshot = f.app.snapshotCapture.captureSnapshot(f.rig.id, "manual");

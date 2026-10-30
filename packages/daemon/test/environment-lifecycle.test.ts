@@ -177,7 +177,7 @@ describe("finite completion is selected work plus a verified actual export", () 
       const inspect = f.driver.inspect;
       f.driver.inspect = async () => { enter(); await gate; return inspect(); };
       const attempt = f.lifecycle.checkCompletions(); await entered;
-      if (change === "task") f.queue.update({ qitemId: "task-one", actorSession: "worker@lifecycle", state: "in-progress", transitionNote: "Reopen selected work" });
+      if (change === "task") f.queue.update({ qitemId: "task-one", actorSession: "worker@lifecycle", state: "in-progress", reopen: true, transitionNote: "Reopen selected work" });
       if (change === "artifact") writeFileSync(artifact, "changed while observing provider");
       if (change === "generation") f.db.prepare("UPDATE environment_bindings SET generation='generation-two' WHERE binding_id='binding-one'").run();
       release(); await attempt; expect(f.counts().stopCalls, change).toBe(0);
