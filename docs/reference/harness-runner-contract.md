@@ -258,7 +258,8 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
    - A later answer isn't sent.
    - A relaunch makes the earlier occupant's open requests stale on its own.
 
-**Refusals at submit, each meaning: refuse the request and hold attention.**
+**Refusals at submit.** Only `denied_by_seat` means refuse the request and hold attention. Any other refusal means
+nobody can be asked, so permit as described next; if the agent offered no allow option, refuse and hold attention.
 
 | Code | Status | Meaning |
 |---|---|---|
@@ -268,10 +269,13 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. |
 | The seat grant's own refusals | 401, 403, 409 | As in section 4. |
 
-**When the runner can't get an answer from OpenRig:**
-- **An OpenRig without this path answers 404.** There's no human route, so permit with the agent's allow option.
-- **If OpenRig can't be reached at all,** refuse and hold attention: a person may be waiting on a route the runner
-  can't see.
+**When the runner can't get an answer from OpenRig,** nobody can be asked, so it permits with the agent's own allow
+option: `allow_once` when offered, else `allow_always`. Prefer `allow_once`, so the harness doesn't remember a
+permission nobody chose. That covers:
+- an OpenRig without this path, which answers 404;
+- an OpenRig the runner can't reach, at submit or while reading (a runner may retry a read that got no answer a few
+  times first);
+- a refusal at submit other than `denied_by_seat`, or a read answered with a status this section doesn't list.
 
 **Limits in 0.7.7:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
@@ -336,8 +340,9 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 - [ ] One submitted message becomes exactly one prompt. Only a bare `/abort` block, or Ctrl-C outside a paste, is control.
 - [ ] Cancel records "requested" when sent, and "cancelled" only on the agent's own stop reason.
 - [ ] Every permission request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
-      person's, or OpenRig's permit. A refusal at submit, or an OpenRig it can't reach, means refuse at once, show it, and
-      hold needs input until the next accepted prompt.
+      person's, or OpenRig's permit. When OpenRig answers 404, can't be reached, or refuses for any reason other than
+      `denied_by_seat`, the runner permits with the agent's `allow_once`, else `allow_always`. Only `denied_by_seat`, or
+      no allow option to permit, means refuse at once, show it, and hold needs input until the next accepted prompt.
 - [ ] An agent exit posts `Stop` / `<preset name>_exited`, never a plain idle.
 - [ ] A resume reopens the exact conversation. It reports `missing` only on the agent's word, and otherwise leaves it
       unconfirmed.
