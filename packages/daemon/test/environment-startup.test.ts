@@ -30,7 +30,7 @@ async function fixture() {
   });
   // The fixed CLI boundary is replaced; no OpenShell executable or provider is invoked.
   const driver = Object.assign(new OpenShellDriver(async () => { throw new Error("unexpected vendor invocation"); }), {
-    list: async () => ({ complete: true, resources: [] }), create: async () => resource, inspect: async () => resource,
+    list: async () => ({ complete: true, resources: [] }), create: async (input: { operationId: string }) => { resource.operationId = input.operationId; return resource; }, inspect: async () => resource,
     upload: async (_binding: unknown, source: string, destination: string) => { files.set(destination, readFileSync(source)); },
     read: async (_binding: unknown, path: string) => { const data = files.get(path); if (!data) throw new EnvironmentError("environment_file_missing", "No file"); return data; },
     guest,

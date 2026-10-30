@@ -29,7 +29,7 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   const artifact = JSON.stringify({ task: "export-task", revision: 1, report: "useful bytes" });
   let downloads = 0;
   const resource = { id: "immutable-id", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" };
-  const driver = { version: 1 as const, list: async () => ({ complete: true, resources: [] }), create: async () => resource,
+  const driver = { version: 1 as const, list: async () => ({ complete: true, resources: [] }), create: async (input: { operationId: string }) => { resource.operationId = input.operationId; return resource; },
     inspect: async () => resource, upload: async () => {}, read: async () => Buffer.alloc(0),
     download: async (_binding: unknown, _source: string, destination: string) => { downloads++; writeFileSync(destination, artifact); } };
   const fixture = createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts") } as never });

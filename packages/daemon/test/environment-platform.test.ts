@@ -23,7 +23,7 @@ function fixture() {
     async list() { return { complete: true, resources: [...resources] }; },
     async create(input: { operationId: string; placement: { name: string; workspace: string } }) {
       creates++;
-      expect(db.prepare("SELECT count(*) AS n FROM environment_operations WHERE operation_id = ?").get(input.operationId)).toMatchObject({ n: 1 });
+      expect(db.prepare("SELECT count(*) AS n FROM environment_operations WHERE effect_id = ?").get(input.operationId)).toMatchObject({ n: 1 });
       const resource = { id: "immutable-resource-1", name: input.placement.name, workspace: input.placement.workspace,
         phase: "Ready", fingerprint: "host-key-1", operationId: input.operationId };
       resources.push(resource);
@@ -93,6 +93,13 @@ describe("maintained environment binding and projection", () => {
     f.resources.push({ ...f.resources[0], id: "conflicting-resource" });
     expect((await f.create()).status).toBe(409);
     expect(f.counts().creates).toBe(1);
+  });
+
+  it("does not adopt a different daemon's resource with the same user operation name", async () => {
+    const f = fixture();
+    f.resources.push({ id: "foreign-resource", name: "worker-one", workspace: "workspace", phase: "Ready", operationId: "create-one" });
+    expect((await f.create()).status).toBe(409); expect(f.counts().creates).toBe(0);
+    expect((await f.request("/binding-one")).body.resource).toBeNull();
   });
 
   it("does not reuse an operation identity with different placement", async () => {

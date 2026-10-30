@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { isAbsolute, posix, resolve } from "node:path";
 
@@ -92,22 +92,23 @@ export class EnvironmentPlatform {
       baseRuntime: input.baseRuntime, guestRoot: input.guestRoot, guestBaseUrl: url.origin,
       placement: { gateway: place.gateway, workspace: place.workspace, name: place.name, image: place.image, provider: place.provider, policy: place.policy, policySha256 } };
   }
-  private intent(id: string, kind: string, binding: EnvironmentConfig, ownership: "owned" | "attached", request: unknown): { fresh: boolean; state: string; receipt: any } {
+  private intent(id: string, kind: string, binding: EnvironmentConfig, ownership: "owned" | "attached", request: unknown): { fresh: boolean; state: string; effectId: string; receipt: any } {
     identifier(id, "operationId");
     return this.db.transaction(() => {
       const prior = this.db.prepare("SELECT * FROM environment_operations WHERE operation_id = ?").get(id) as Record<string, any> | undefined;
       if (prior) {
         if (prior.binding_id !== binding.bindingId || prior.kind !== kind || prior.request_json !== stable(request))
           fail("environment_operation_changed", "An operation identity cannot be reused with different input");
-        return { fresh: false, state: prior.state, receipt: prior.receipt_json ? JSON.parse(prior.receipt_json) : null };
+        return { fresh: false, state: prior.state, effectId: prior.effect_id, receipt: prior.receipt_json ? JSON.parse(prior.receipt_json) : null };
       }
       const existing = this.get(binding.bindingId);
       if (existing) fail("environment_binding_exists", "Create or attach a new binding; existing ownership is immutable");
       this.db.prepare("INSERT INTO environment_bindings(binding_id,version,node_id,seat,ownership,config_json) VALUES (?,1,?,?,?,?)")
         .run(binding.bindingId, binding.nodeId ?? null, binding.seat, ownership, JSON.stringify(binding));
-      this.db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,state) VALUES (?,?,?,?,'intent')")
-        .run(id, binding.bindingId, kind, stable(request));
-      return { fresh: true, state: "intent", receipt: null };
+      const effectId = `env-${randomUUID()}`;
+      this.db.prepare("INSERT INTO environment_operations(operation_id,binding_id,kind,request_json,effect_id,state) VALUES (?,?,?,?,?,'intent')")
+        .run(id, binding.bindingId, kind, stable(request), effectId);
+      return { fresh: true, state: "intent", effectId, receipt: null };
     })();
   }
   private confirm(operationId: string, bindingId: string, resource: EnvironmentResource): EnvironmentBinding {
@@ -123,7 +124,7 @@ export class EnvironmentPlatform {
     let listed: Awaited<ReturnType<EnvironmentDriver["list"]>>;
     try { listed = await this.driver.list(config.placement); } catch { return { status: 202, binding: this.get(config.bindingId), code: "environment_unconfirmed" }; }
     if (!listed.complete) return { status: 202, binding: this.get(config.bindingId), code: "environment_listing_incomplete" };
-    const matches = listed.resources.filter(r => r.operationId === input.operationId);
+    const matches = listed.resources.filter(r => r.operationId === op.effectId);
     if (matches.length > 1) fail("environment_duplicate_resources", "More than one resource matches the saved create operation");
     if (matches.length === 1) {
       const found = matches[0]!;
@@ -136,8 +137,8 @@ export class EnvironmentPlatform {
     const claimed = this.db.prepare("UPDATE environment_operations SET state = 'requested' WHERE operation_id = ? AND state = 'intent'").run(input.operationId);
     if (!claimed.changes) return { status: 202, binding: this.get(config.bindingId), code: "environment_create_unconfirmed" };
     try {
-      const resource = await this.driver.create({ operationId: input.operationId, placement: config.placement });
-      if (!resource.id || resource.name !== config.placement.name || resource.workspace !== config.placement.workspace || resource.operationId !== input.operationId)
+      const resource = await this.driver.create({ operationId: op.effectId, placement: config.placement });
+      if (!resource.id || resource.name !== config.placement.name || resource.workspace !== config.placement.workspace || resource.operationId !== op.effectId)
         return { status: 202, binding: this.get(config.bindingId), code: "environment_create_unconfirmed" };
       return { status: 201, binding: this.confirm(input.operationId, config.bindingId, resource) };
     } catch { return { status: 202, binding: this.get(config.bindingId), code: "environment_create_unconfirmed" }; }

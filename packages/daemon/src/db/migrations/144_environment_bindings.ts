@@ -23,6 +23,7 @@ export const environmentBindingsSchema: Migration = {
       binding_id TEXT NOT NULL REFERENCES environment_bindings(binding_id),
       kind TEXT NOT NULL,
       request_json TEXT NOT NULL,
+      effect_id TEXT,
       state TEXT NOT NULL CHECK(state IN ('intent', 'requested', 'confirmed', 'refused')),
       receipt_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
