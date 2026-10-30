@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -67,6 +68,7 @@ describe("workflow project typed acceptance — real CLI to HTTP boundary", () =
     await new Promise<void>((resolve) => {
       server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info) => {
         url = `http://127.0.0.1:${info.port}`;
+        allowFetchTarget(url);
         resolve();
       });
     });

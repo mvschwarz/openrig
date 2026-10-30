@@ -210,3 +210,9 @@ integration cases remain skipped; daemon TypeScript passes. This is not live
 provider, fleet or deployment acceptance. Unsupported configured shell semantics
 retain the diagnostic fallback. No candidate psmux protocol binary was substituted.
 
+Workspace doctor and typed workflow acceptance fixtures now pass 16/16 on native
+Windows. Doctor assertions compare the complete native resolved path; the workflow
+fixture registers only its own ephemeral loopback server with the fetch guard.
+The real CLI-to-HTTP acceptance checks still reject mismatched fields without
+mutation. This scoped result does not establish live workspace or fleet acceptance.
+
