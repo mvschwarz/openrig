@@ -133,15 +133,15 @@ it('automatic: a map that is ready while the seat is mid-turn waits for idle ins
   expect(f.compactIndex()).toBeGreaterThan(-1);
 });
 
-it('automatic: a seat that never goes idle is disarmed by the existing preparation deadline, never sent to', async () => {
+it('automatic: a completed map that never reaches idle expires at the bounded idle deadline', async () => {
   const f = fixture();
   await f.e.maybeAutoCompact(input);
   f.stageMap();
   f.activity('running');
   await f.e.maybeAutoCompact(input);
-  f.advance(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.advance(AUTO_PREP_WAIT_MS_DEFAULT + AUTO_RETRY_AFTER_STOP_MS_DEFAULT + 1);
   await f.e.maybeAutoCompact(input);
-  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', reason: 'preparation_incomplete', compact: 'not_sent'});
+  expect(f.e.getPreparationState(seat)).toMatchObject({status: 'stopped', reason: 'map_complete_seat_never_idle', compact: 'not_sent'});
   expect(f.compactIndex()).toBe(-1);
 });
 
@@ -696,3 +696,18 @@ for (const completedStages of [1, 2]) {
     expect(f.events).toEqual(before);
   });
 }
+
+
+it('automatic: completed map survives the prep deadline and sends once at the next idle boundary without re-preparing', async () => {
+  const f = fixture(); await f.e.maybeAutoCompact(input); f.stageMap();
+  const first = f.e.getPreparationState(seat)!;
+  f.activity('running'); f.advance(AUTO_PREP_WAIT_MS_DEFAULT + 1);
+  f.e.reconcilePreparations();
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'waiting',
+    deadlineAt: first.deadlineAt, idleDeadlineAt: first.deadlineAt! + AUTO_RETRY_AFTER_STOP_MS_DEFAULT});
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: false, reason: 'waiting_for_idle'});
+  expect(f.texts()).toHaveLength(1);
+  f.activity('idle'); expect(await f.e.maybeAutoCompact(input)).toEqual({triggered: true});
+  expect(f.texts().filter(t => t.startsWith('/compact'))).toHaveLength(1);
+  expect(f.e.getPreparationState(seat)).toMatchObject({attemptId: first.attemptId, status: 'compact-sent'});
+});

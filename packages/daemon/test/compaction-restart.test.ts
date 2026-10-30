@@ -6,7 +6,7 @@ import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Hono} from 'hono';
-import {ClaudeCompactionEnforcer, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, RESTART_RECOVERY_WINDOW_MS_DEFAULT, buildPostCompactTurnBoundaryPrompt} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {compactionRoutes} from '../src/routes/compaction.js';
@@ -342,4 +342,17 @@ it.each(['unresolved','rejected'])('owner notice starts after the lifecycle leas
  expect(held).toEqual([false]);
  if(mode==='rejected')expect(e.getOwedRestore(seat)?.lastDelivery?.noticeErrorClass).toBe('RangeError');
  expect(readFileSync(recordFile(e),'utf8')).not.toContain('PRIVATE NOTICE ERROR');
+});
+
+
+it('a restart retains a completed automatic map after its prep deadline and the delayed compact still owes restore', async () => {
+ const f=fixture(),first=f.daemon();await first.maybeAutoCompact(high);const a=completeMap(first);
+ f.hooks.busy=true;f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);
+ const restarted=f.daemon();await restarted.maybeAutoCompact(high);
+ expect(restarted.getPreparationState(seat)).toMatchObject({attemptId:a.attemptId,status:'waiting'});
+ expect(prepPrompts(f)).toHaveLength(1);expect(compacts(f)).toHaveLength(0);
+ f.hooks.busy=false;await restarted.maybeAutoCompact(high);
+ expect(compacts(f)).toHaveLength(1);expect(prepPrompts(f)).toHaveLength(1);
+ for(let i=0;i<4;i++)await staleTick(restarted);
+ expect(boundaries(f)).toHaveLength(1);expect(restores(f)).toHaveLength(1);expect(audits(f)).toHaveLength(1);
 });
