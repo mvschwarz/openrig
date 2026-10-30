@@ -10,9 +10,11 @@ import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createFullTestDb, createTestApp } from "../../daemon/test/helpers/test-app.js";
+import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { EnvironmentPlatform } from "../../daemon/src/domain/environment-platform.js";
 import { createDb } from "../../daemon/src/db/connection.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 import { addGrant, revokeGrant, startMcpHttpServer } from "../src/mcp-http.js";
 
@@ -23,7 +25,7 @@ const hash = (data: string) => createHash("sha256").update(data).digest("hex");
 it("returns real artifact bytes under the authenticated work grant, refusing wrong seat and revoked credentials", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-http-")));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
-  const db = createFullTestDb(); cleanup.push(() => db.close());
+  const db = createDb(":memory:"); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
   const identity = join(root, "identity.sqlite"), idDb = createDb(identity);
   idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
   idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'environment-test-host')").run(); idDb.close();
