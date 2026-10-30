@@ -28,6 +28,20 @@ describe("replaceFile staging ownership", () => {
     expect(fs.readdirSync(root).sort()).toEqual(["destination", "source"]);
   });
 
+  it.runIf(process.platform === "win32")("stages a long readonly asset name without falling back to an in-place copy", () => {
+    const { src } = files();
+    const name = "a".repeat(245) + ".txt";
+    const dest = path.join(root, name);
+    fs.writeFileSync(dest, "old complete bytes");
+    fs.chmodSync(dest, 0o444);
+    replaceFile(src, dest);
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+    expect(fs.statSync(dest).mode & 0o222).toBe(0);
+    replaceFile(src, dest);
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+    expect(fs.readdirSync(root).sort()).toEqual([name, "destination", "source"].sort());
+  });
+
   it.skipIf(process.platform !== "win32")("restores the old readonly attribute if replacement still fails", () => {
     const { src, dest } = files(); fs.chmodSync(dest, 0o444);
     const failure = Object.assign(new Error("replacement blocked"), { code: "EPERM" });

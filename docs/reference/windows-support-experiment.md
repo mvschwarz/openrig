@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Long read-only asset replacement
+
+The packaged-asset replacement helper now reserves a short unique sibling
+directory rather than extending the destination basename. Previously a valid
+249-character Windows asset name exceeded the component limit when staged;
+the in-place fallback then failed on a read-only destination. An owned fixture
+reproduces that failure and now replaces the complete bytes twice while keeping
+the source and destination read-only, without leftover staging directories.
+Existing staging-failure fallback, collision ownership, partial-copy preservation,
+and failed-replacement attribute restoration remain covered. Daemon type checking
+passes; the replacement file has 10 passes and 2 retained file-symlink privilege
+failures on this host. No installed assets or live runtime files were replaced.
+
 ### Database conflict records through Windows path aliases
 
 Database containment and conflict-record resolution now use native Windows

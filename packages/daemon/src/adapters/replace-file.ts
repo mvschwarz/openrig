@@ -10,7 +10,7 @@ import path from "node:path";
 export function replaceFile(src: string, dest: string): void {
   let staging: string;
   try {
-    staging = fs.mkdtempSync(`${dest}.tmp-`);
+    staging = fs.mkdtempSync(path.join(path.dirname(dest), ".openrig-asset-"));
   } catch {
     fs.copyFileSync(src, dest);
     return;
