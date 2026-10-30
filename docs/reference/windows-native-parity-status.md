@@ -406,3 +406,11 @@ injected provider sends. No external provider request or actual gateway starts.
 Current source hashes, report digest and the skipped case name are retained in
 the local audit ledger; these checks do not establish hosted provider acceptance.
 
+Activity endpoint persistence and parent-session environment regressions pass
+18/18 on native Windows. The health-policy persistence case now performs a second
+real update, exercising replacement of an existing file, then reads back the
+changed policy/version and both audit records including the correct predecessor.
+That selected case passes; other health-diagnosis cases were filtered. All files
+and policy changes belong to owned test homes, with no actual diagnosis dispatch,
+fleet environment update or running daemon configuration change.
+
