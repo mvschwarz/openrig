@@ -220,6 +220,52 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+// ponytail: private-use sentinels hold code spans and links aside; input already carrying U+E000/U+E001 renders those spans as text.
+const HOLD_OPEN = "";
+const HOLD_CLOSE = "";
+const HOLD_PATTERN = /(\d+)/g;
+
+/** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. Code spans
+ *  stay literal; a link becomes `<url|text>` only for a safe https URL and a label without `|`,
+ *  otherwise it stays escaped text. Everything else is escaped, so no control sequence survives. */
+function inlineMarkdownToMrkdwn(line: string): string {
+  const held: string[] = [];
+  const hold = (rendered: string) => `${HOLD_OPEN}${held.push(rendered) - 1}${HOLD_CLOSE}`;
+  const restore = (s: string) => s.replace(HOLD_PATTERN, (_, i: string) => held[Number(i)] ?? "");
+  let out = line
+    .replace(/`[^`\n]+`/g, (code) => hold(escapeSlackText(code)))
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (link, label: string, url: string) =>
+      isSafeHttpsUrl(url) && !/[<>|]/.test(url) && !label.includes("|") ? hold(`<${escapeSlackText(url)}|${restore(escapeSlackText(label))}>`) : link);
+  out = escapeSlackText(out)
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
+    .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*");
+  return restore(out);
+}
+
+/** Agent-written Markdown as Slack mrkdwn, through the same inert pipeline as every other
+ *  queue-controlled field (secrets redacted, then &, <, > escaped). `**b**`/`__b__` become
+ *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `•` (indented: `◦`), and safe https
+ *  `[text](url)` links `<url|text>`. A list marker needs a following space, so `*bold*` is not
+ *  a list item. Code spans and fenced blocks are only escaped. */
+export function markdownToSlackMrkdwn(text: string): string {
+  let fenced = false;
+  return redactSecrets(text).split("\n").map((line) => {
+    if (/^\s*```/.test(line)) {
+      fenced = !fenced;
+      return escapeSlackText(line);
+    }
+    if (fenced) return escapeSlackText(line);
+    const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
+    if (heading) return heading[1] ? `*${inlineMarkdownToMrkdwn(heading[1])}*` : "";
+    const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+    if (item) {
+      const [, indent = "", rest = ""] = item;
+      return `${indent}${indent ? "◦" : "•"} ${inlineMarkdownToMrkdwn(rest)}`;
+    }
+    return inlineMarkdownToMrkdwn(line);
+  }).join("\n");
+}
+
 function isSafeHttpsUrl(url: string): boolean {
   if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) return false;
   try {
@@ -389,7 +435,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     ? (!gateEvidence || gateEvidenceCarried
       ? ""
       : bounded(`Evidence: ${inert(gateEvidence)}`, SLACK_SECTION_CAP, "body"))
-    : bounded(inert(String(q.body || "")), SLACK_SECTION_CAP, "body");
+    : bounded(markdownToSlackMrkdwn(String(q.body || "")), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
   const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
