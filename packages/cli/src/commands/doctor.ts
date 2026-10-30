@@ -18,6 +18,7 @@ import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
 import { checkProviderReadiness } from "../provider-auth.js";
+import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
 
 interface DoctorCheck {
   name: string;
@@ -41,6 +42,9 @@ export interface DoctorDeps {
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
   fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
+   *  null: this platform has none. */
+  callerUid?: number | null;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
    *
@@ -56,6 +60,44 @@ export interface DoctorDeps {
 
 const DEFAULT_PORT = 7433;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
+
+/** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
+ *  not authentication. Another user's daemon fails unless OPENRIG_URL selects this endpoint on purpose; an owner that
+ *  can't be compared warns. Nothing is stopped or refused here. */
+async function listenerOwnerCheck(where: string, base: string, res: { json?: () => Promise<unknown> }, deps: DoctorDeps): Promise<DoctorCheck> {
+  const env = deps.env ?? process.env;
+  const at = `Port ${where} (${base}, OpenRig home ${getOpenRigHome(env)})`;
+  const callerUid = deps.callerUid === undefined ? process.geteuid?.() : deps.callerUid ?? undefined;
+  let reported: { pid?: unknown; euid?: unknown } = {};
+  try {
+    const body: unknown = res.json ? await res.json() : null;
+    if (body && typeof body === "object") reported = body as { pid?: unknown; euid?: unknown };
+  } catch { /* no readable body: the owner stays unknown */ }
+  const pid = Number.isSafeInteger(reported.pid) && (reported.pid as number) > 0 ? `, pid ${reported.pid as number}` : "";
+  const euid = Number.isSafeInteger(reported.euid) && (reported.euid as number) >= 0 ? reported.euid as number : undefined;
+  const ownDaemon = "To run your own, give this OpenRig home a free port and start its daemon there: rig config set daemon.port <free-port>, then rig daemon start.";
+  if (euid === undefined || callerUid === undefined) {
+    return {
+      name: "port", status: "warn",
+      message: `${at} is in use by an OpenRig daemon whose OS user is unknown.`,
+      reason: euid === undefined
+        ? "It doesn't report an effective user id, so doctor can't tell whether it's yours or another user's on this machine."
+        : "This platform has no effective user id to compare, so doctor can't tell whether it's yours.",
+      fix: `Check that it's yours with rig daemon status. ${ownDaemon}`,
+    };
+  }
+  if (euid === callerUid) return { name: "port", status: "pass", message: `${at} is in use by your OpenRig daemon (euid ${euid}${pid}).` };
+  const users = `another OS user (euid ${euid}${pid}); you are euid ${callerUid}`;
+  if (readOpenRigUrl(env) === base) {
+    return { name: "port", status: "pass", message: `${at} is the endpoint OPENRIG_URL selects, served by an OpenRig daemon of ${users}.` };
+  }
+  return {
+    name: "port", status: "fail",
+    message: `${at} is in use by an OpenRig daemon of ${users}.`,
+    reason: `It isn't this OpenRig home's daemon: a command that reaches ${base} acts in that user's OpenRig. The daemon reports its own pid and euid on /healthz, a self-report rather than authentication.`,
+    fix: `${ownDaemon} To use a shared daemon on purpose, set OPENRIG_URL to its address.`,
+  };
+}
 
 function defaultCheckPort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -234,12 +276,10 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
     }
-    // Port in use — check if it's our daemon via healthz
+    // Port in use — check if it's an OpenRig daemon via healthz, and whose.
     try {
       const res = await fetchFn(`${daemonBase}/healthz`);
-      if (res.ok) {
-        return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} in use by OpenRig daemon.` };
-      }
+      if (res.ok) return listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, deps);
     } catch { /* not our daemon */ }
     return {
       name: "port",

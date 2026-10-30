@@ -937,6 +937,13 @@ tmux scrollback:
           console.log(`  ${step.id}: ${step.message}`);
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
+        // A failed doctor check also leaves setup not ready, so name it here, such as a port held by another user's daemon.
+        // Provider checks are the steps above, reused.
+        const stepIds = new Set(result.steps.map(step => step.id));
+        for (const check of result.verification?.checks.filter(check => check.status === "fail" && !stepIds.has(check.name)) ?? []) {
+          console.log(`  ${check.name}: ${check.message}`);
+          if (check.fix) console.log(`    Fix: ${check.fix}`);
+        }
         console.log("Only the harnesses selected for your project need a login; an unused harness does not (rerun with --providers to leave it out).");
         console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
