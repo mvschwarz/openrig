@@ -112,7 +112,9 @@ def launch(root):
     if set(secret) != allowed or secret["OPENRIG_OCCUPANT_GENERATION"] != value["generation"]:
         raise Refused("environment_activity_projection_invalid")
     env.update(secret)
-    env.update({"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+    env.update({"DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "OPENRIG_RUNTIME": "openshell-claude", "OPENRIG_NODE": "/usr/bin/node",
+                "OPENRIG_ENVIRONMENT_BINDING": value["bindingId"]})
     if safe(root, "control/provider-api-ref").exists():
         atomic(root, "native/settings.json", json.dumps({"apiKeyHelper": "cat /sandbox/openrig/control/provider-api-ref"}).encode())
     # Provider-owned injection may supply these native endpoint references. No host environment is copied.
