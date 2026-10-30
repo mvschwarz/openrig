@@ -1,8 +1,9 @@
 // Answered permissions for a runner seat (the harness runner contract §7, "the answered path"). A runner whose agent asks
 // permission submits the request; OpenRig opens one ordinary ask to the default person, or to the person the seat's
 // operator chose instead (`rig seat set-permissions-to`), with exactly the agent's offered options as its choices; the
-// runner reads the one answer back and gives it to that same live request. Nothing here grants: no one to ask, a stale or
-// withdrawn request, a typed reply or a close without an offered option all leave the agent's request refused, as before.
+// runner reads the one answer back and gives it to that same live request. With no one to ask, or an ask closed without
+// a choice, OpenRig's default is permit with the agent's own allow option; a person's no is never a grant, and only the
+// seat's opt-in (`--deny`) refuses every request.
 
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
@@ -70,7 +71,7 @@ export function resolvePermissionOwner(ref: string, registry: () => LoadResult):
 }
 
 /** With no override, the default person answers, as for any ask that names no one: the chosen default, else the only
- *  registered person. With no one to ask, the request stays refused (what to do then is still to be decided). */
+ *  registered person. With no one to ask, the caller permits. */
 export function defaultPermissionOwner(registry: () => LoadResult): { ok: true; address: string } | { ok: false; message: string } {
   let loaded: LoadResult;
   try {
@@ -101,7 +102,7 @@ export type SubmitResult =
 export type ReadResult =
   | { ok: true; state: "pending" | "withdrawn" | "stale" }
   | { ok: true; state: "answered" | "permitted"; optionId: string }
-  | { ok: true; state: "refused"; reason: "no_allow_offered" }
+  | { ok: true; state: "refused"; reason: "no_allow_offered" | "said_no" }
   | { ok: false; code: "not_found"; message: string };
 export type WithdrawResult = ReadResult | { ok: false; code: "invalid_permission_request"; message: string };
 
@@ -217,9 +218,10 @@ export class RunnerPermissions {
   /** A grant's seat carries its launch generation: it reads only its own launch's requests. Only the current
    *  occupant's request can read pending or answered; an earlier occupant's reads stale, whatever answer it holds. */
   read(seat: { nodeId: string; generation?: string } | null, askId: string): ReadResult {
-    const item = this.deps.queueRepo.getById(askId);
-    const origin = item ? runnerPermissionOrigin(item) : null;
-    if (!item || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
+    const asked = this.deps.queueRepo.getById(askId);
+    const origin = asked ? runnerPermissionOrigin(asked) : null;
+    if (!asked || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
+    const item = this.liveEnd(asked);
     const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
     const callerMatches = !seat?.generation || seat.generation === origin.generation;
     // Still open (pending, or claimed or parked by the person): no answer yet.
@@ -229,17 +231,17 @@ export class RunnerPermissions {
       return { ok: true, state: "stale" };
     }
     if (item.state === "canceled") {
-      const withdrawn = this.deps.queueRepo.listTransitions(askId).some((transition) => transition.transitionNote?.startsWith(WITHDRAWN_NOTE));
+      const withdrawn = this.deps.queueRepo.listTransitions(item.qitemId).some((transition) => transition.transitionNote?.startsWith(WITHDRAWN_NOTE));
       return { ok: true, state: withdrawn ? "withdrawn" : "stale" };
     }
     if (!askIsCurrent || !callerMatches) return { ok: true, state: "stale" };
     const answer = item.humanAnswers?.[QUESTION_ID];
     const offered = item.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.map((option) => option.id) ?? [];
     if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
-    // A plain no in words, or a deny from the Feed, is the agent's reject; a plain yes is its allow.
+    // A plain no in words, or a deny from the Feed, is the agent's reject, and never a grant; a plain yes is its allow.
     const allowId = tagValue(item, ALLOW_TAG), rejectId = tagValue(item, REJECT_TAG);
     const said = item.closureReason === "denied" ? "no" : typedYesOrNo(answer);
-    if (said === "no" && rejectId) return { ok: true, state: "answered", optionId: rejectId };
+    if (said === "no") return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
     if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
     // Closed without an option is no answer, so OpenRig's default applies: permit.
     return allowId ? { ok: true, state: "permitted", optionId: allowId } : { ok: true, state: "refused", reason: "no_allow_offered" };
@@ -249,12 +251,15 @@ export class RunnerPermissions {
   async readWhenChanged(seat: { nodeId: string; generation?: string } | null, askId: string, waitMs: number): Promise<ReadResult> {
     let release: () => void = () => {};
     const changed = new Promise<void>((resolve) => { release = resolve; });
+    let liveId = askId; // after a route or handoff, the colleague's row is where the answer lands
     const unsubscribe = this.deps.eventBus.subscribe((event) => {
-      if ((event as { type?: string; qitemId?: string }).type === "queue.updated" && (event as { qitemId?: string }).qitemId === askId) release();
+      const changedId = (event as { type?: string; qitemId?: string }).type === "queue.updated" ? (event as { qitemId?: string }).qitemId : undefined;
+      if (changedId === askId || changedId === liveId) release();
     });
     try {
       const now = this.read(seat, askId);
       if (!now.ok || now.state !== "pending" || waitMs <= 0) return now;
+      liveId = this.liveEnd(this.deps.queueRepo.getById(askId)!).qitemId;
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([changed, new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); })]);
       if (timer) clearTimeout(timer);
@@ -270,8 +275,22 @@ export class RunnerPermissions {
     }
     const now = this.read(seat, askId);
     if (!now.ok || now.state !== "pending") return now;
-    this.close(this.deps.queueRepo.getById(askId)!, WITHDRAWN_NOTE, reason);
+    this.close(this.liveEnd(this.deps.queueRepo.getById(askId)!), WITHDRAWN_NOTE, reason);
     return { ok: true, state: "withdrawn" };
+  }
+
+  /** A person who routes or hands the ask to a colleague means the colleague decides: follow it to the live successor. */
+  private liveEnd(item: QueueItem): QueueItem {
+    let current = item;
+    for (let hops = 0; current.state === "handed-off" && hops < 10; hops++) {
+      const next = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE qitem_id != ? AND json_valid(chain_of_record)
+        AND EXISTS (SELECT 1 FROM json_each(chain_of_record) WHERE value = ?) ORDER BY ts_created DESC LIMIT 1`)
+        .get(current.qitemId, current.qitemId) as { qitem_id: string } | undefined;
+      const successor = next ? this.deps.queueRepo.getById(next.qitem_id) : null;
+      if (!successor) break;
+      current = successor;
+    }
+    return current;
   }
 
   /** A relaunch makes every open ask from the seat's earlier generations stale, so none of them can still be answered. */

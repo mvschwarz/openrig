@@ -211,6 +211,9 @@ export class MissionControlWriteContract {
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
             chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
+            // A runner's permission ask passed to a colleague: the colleague decides, so they get the agent's options.
+            ...(runnerPermissionOrigin(source) && source.humanQuestions && this.queueRepo.isPersonAddress(input.destinationSession)
+              ? { humanIntent: "decision" as const, humanAlert: true, humanQuestions: source.humanQuestions } : {}),
             // Default nudge handled post-commit per Phase D pattern.
             nudge: input.notify,
           });

@@ -214,7 +214,8 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 |---|---|
 | clicks an option: the asked person, any other registered person, or the primary user in the TUI | that option |
 | replies with just a yes ("yes", "ok", "allow", "go ahead" …) | the agent's allow (`allow_once`, else `allow_always`) |
-| replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`) |
+| replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
+| routes or hands it to a colleague | the ask waits for the colleague, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
 | closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
 
@@ -247,27 +248,34 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 2. **Read** the answer with `GET <base>/api/activity/permission-requests/<askId>?waitSeconds=25` (25 at most), and read
    again until the agent's turn ends.
    - **The `state`** is `pending` (read again, don't cancel), `answered` or `permitted` (each with `optionId`),
-     `withdrawn` or `stale`.
+     `refused` (with `reason`: `said_no` when the person said no and the agent offered no reject option, or
+     `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
+     `stale`.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
-   request is still its live one. For `withdrawn`, `stale` or a refused read, answer `cancelled`.
+   request is still its live one. For `refused`, `withdrawn` or `stale`, answer `cancelled` and hold no attention: no
+   person is still waiting. A refusal of the read itself follows the refusals below.
 4. **Withdraw** when the turn is cancelled or ends, or the agent exits:
    `POST <base>/api/activity/permission-requests/<askId>/withdraw` with
    `{"reason": "turn_cancelled" | "turn_ended" | "exited"}`.
    - A later answer isn't sent.
    - A relaunch makes the earlier occupant's open requests stale on its own.
 
-**Refusals at submit.** Only `denied_by_seat` means refuse the request and hold attention. Any other refusal means
-nobody can be asked, so permit as described next; if the agent offered no allow option, refuse and hold attention.
+**Refusals, at submit or while reading.** One rule covers both. Cancel only a request that certainly isn't the current
+occupant's live one, and hold no attention. Anything that may still be a live request permits, as when OpenRig can't
+answer. Only the seat's opt-in refuses and holds attention.
 
-| Code | Status | Meaning |
-|---|---|---|
-| `denied_by_seat` | 409 | The seat's operator opted in to refusal (`--deny`). |
-| `options_unsupported` | 422 | No one can be asked, and the agent offered no allow option to permit. |
-| `duplicate_request` | 409 | This request id was already submitted in another turn. |
-| `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. |
-| The seat grant's own refusals | 401, 403, 409 | As in section 4. |
+| Code | Status | Meaning | The runner |
+|---|---|---|---|
+| `denied_by_seat` | 409 | The seat's operator opted in to refusal (`--deny`). | refuses and holds attention |
+| `options_unsupported` | 422 | No one can be asked, and the agent offered no allow option to permit. | refuses and holds attention |
+| `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
+| `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
+| `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
+| `activity_grant_revoked` | 401 | The grant was revoked: a relaunch reissues it. | answers `cancelled` |
+| `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
+| `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |
 
 **When the runner can't get an answer from OpenRig,** nobody can be asked, so it permits with the agent's own allow
 option: `allow_once` when offered, else `allow_always`. Prefer `allow_once`, so the harness doesn't remember a
@@ -275,7 +283,7 @@ permission nobody chose. That covers:
 - an OpenRig without this path, which answers 404;
 - an OpenRig the runner can't reach, at submit or while reading (a runner may retry a read that got no answer a few
   times first);
-- a refusal at submit other than `denied_by_seat`, or a read answered with a status this section doesn't list.
+- a refusal the table marks "permits", and any status or code this section doesn't list.
 
 **Limits in 0.7.7:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
@@ -340,9 +348,11 @@ permission nobody chose. That covers:
 - [ ] One submitted message becomes exactly one prompt. Only a bare `/abort` block, or Ctrl-C outside a paste, is control.
 - [ ] Cancel records "requested" when sent, and "cancelled" only on the agent's own stop reason.
 - [ ] Every permission request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
-      person's, or OpenRig's permit. When OpenRig answers 404, can't be reached, or refuses for any reason other than
-      `denied_by_seat`, the runner permits with the agent's `allow_once`, else `allow_always`. Only `denied_by_seat`, or
-      no allow option to permit, means refuse at once, show it, and hold needs input until the next accepted prompt.
+      person's, or OpenRig's permit. When OpenRig can't answer (404, unreachable, or a refusal section 7's table marks
+      "permits"), the runner permits with the agent's `allow_once`, else `allow_always`. A refusal that says the request
+      isn't the current occupant's, or a `refused` answer, means answer `cancelled` and hold nothing. Only
+      `denied_by_seat`, or no allow option to permit, means refuse at once, show it, and hold needs input until the next
+      accepted prompt.
 - [ ] An agent exit posts `Stop` / `<preset name>_exited`, never a plain idle.
 - [ ] A resume reopens the exact conversation. It reports `missing` only on the agent's word, and otherwise leaves it
       unconfirmed.
