@@ -219,7 +219,9 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
     that `--verify` recognises it.
   - **A turn ending isn't the work being done.** Task completion is whatever the work's own record says: a queue task
     marked done, or an artifact written.
-  - **Your own tests** should run against a fake agent that covers each section above.
+  - **Your own tests** should run against a fake agent that covers each section above. The
+    [runner conformance check](runner-conformance/README.md) does that for you: point it at your runner, and it reports
+    which promises your runner keeps.
 - **The useful real check** for a maintainer:
   - a seat starts and reads ready only after the handshake;
   - one multi-line message becomes one prompt;
