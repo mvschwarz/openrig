@@ -557,8 +557,12 @@ export class SuccessorSessionLauncher {
    *  shell spawn latency; a null probe counts as unverified (refuse, never assume). */
   private async verifyPaneIsBlankShell(paneId: string, expectedShell: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
     if (this.tmuxAdapter.isNativeWindows) {
-      const observed = await this.tmuxAdapter.getPaneCommand(paneId);
-      if (observed && isWindowsShellHost(observed) && await this.nativeIdleShell(paneId).catch(() => false)) return { ok: true };
+      let observed: string | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt) await this.sleep(this.exitPollMs);
+        observed = await this.tmuxAdapter.getPaneCommand(paneId);
+        if (observed && isWindowsShellHost(observed) && await this.nativeIdleShell(paneId).catch(() => false)) return { ok: true };
+      }
       return { ok: false, observed };
     }
     let observed = await this.tmuxAdapter.getPaneCommand(paneId);

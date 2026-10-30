@@ -88,9 +88,25 @@ describe("SuccessorSessionLauncher", () => {
     const witness = vi.fn(async () => idle);
     const result = await launcher(undefined, true, witness).createSuccessor({ node: { id: "node-1", runtime: "codex" }, departingSessionName: "owned@fixture" });
     expect(witness).toHaveBeenCalledWith("%7");
+    expect(witness).toHaveBeenCalledTimes(idle ? 1 : 2);
     expect(result.ok).toBe(idle);
     expect(launchHarness).toHaveBeenCalledTimes(idle ? 1 : 0);
     if (!idle) expect(result).toMatchObject({ code: "successor_pane_not_blank", replacementStarted: true });
+  });
+
+  it.each(["label", "witness", "probe-error"])("retries one transient native blank-shell %s observation before launching", async condition => {
+    getDefaultShell.mockResolvedValue("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+    getPaneCommand.mockResolvedValue("powershell.exe");
+    const witness = vi.fn(async () => true);
+    if (condition === "label") getPaneCommand.mockResolvedValueOnce(null);
+    if (condition === "witness") witness.mockResolvedValueOnce(false);
+    if (condition === "probe-error") witness.mockRejectedValueOnce(new Error("owned transient observation failure"));
+    const result = await launcher(undefined, true, witness).createSuccessor({ node: { id: "node-1", runtime: "codex" }, departingSessionName: "owned@fixture" });
+    expect(result).toMatchObject({ ok: true });
+    expect(getPaneCommand).toHaveBeenCalledTimes(2);
+    expect(witness).toHaveBeenCalledTimes(condition === "label" ? 1 : 2);
+    expect(launchHarness).toHaveBeenCalledOnce();
+    expect(witness.mock.invocationCallOrder.at(-1)).toBeLessThan(launchHarness.mock.invocationCallOrder[0]!);
   });
 
   it("creates no native Windows staging session when its default shell is unknown", async () => {
