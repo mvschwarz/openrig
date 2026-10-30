@@ -203,4 +203,13 @@ describe("list items in a row body render as native Slack lists", () => {
       { style: "ordered", indent: 0, offset: 1, items: [[t("two")]] },
     ])]);
   });
+
+  it("adds no empty code section before a list when a part continues a code block", () => {
+    const m = buildOutboundMessage({ qitemId: "q", summary: "s", body: "code\n```\n- one\n- two", bodyOpenFence: "```" }, { sourceLabel: "host" });
+    const body = m.blocks.slice(2);
+    expect(body).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "```\ncode\n```" } },
+      list([{ style: "bullet", indent: 0, items: [[t("one")], [t("two")]] }]),
+    ]);
+  });
 });

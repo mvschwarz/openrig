@@ -346,9 +346,11 @@ export function buildBodyBlocks(text: string, openFence = ""): unknown[] {
   let run: string[] = [];
   let lists: List[] = [];
   const flushText = () => {
-    const converted = markdownToSlackMrkdwn(run.join("\n"), runFence);
-    if (converted.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(converted, SLACK_SECTION_CAP, "body") } });
+    const source = run.join("\n");
     run = [];
+    if (!source.trim()) return;
+    const converted = markdownToSlackMrkdwn(source, runFence);
+    if (converted.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(converted, SLACK_SECTION_CAP, "body") } });
   };
   const flushLists = () => {
     if (lists.length) blocks.push({ type: "rich_text", elements: lists });
