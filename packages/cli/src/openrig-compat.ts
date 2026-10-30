@@ -41,7 +41,7 @@ export function isFixtureScopedHome(home: string): boolean {
       return homeKey === key || homeKey.startsWith(key.endsWith("/") ? key : `${key}/`);
     },
   );
-  return underTemp && /(^|\/)openrig-qa[^/]*/.test(process.platform === "win32" ? home.replace(/\\/g, "/") : home);
+  return underTemp && /(^|\/)openrig-qa[^/]*/.test(homeKey);
 }
 
 export function getOpenRigHome(env: NodeJS.ProcessEnv = process.env): string {

@@ -54,6 +54,7 @@ describe("OPR.0.4.3.12 — isFixtureScopedHome (path-only predicate)", () => {
     const root = tmpdir();
     expect(isFixtureScopedHome(join(root, "openrig-qa-native"))).toBe(true);
     expect(isFixtureScopedHome(join(root.toUpperCase(), "openrig-qa-native"))).toBe(true);
+    expect(isFixtureScopedHome(join(root, "openrig-qa-native").toUpperCase())).toBe(true);
     expect(isFixtureScopedHome(join(`${root}-outside`, "openrig-qa-native"))).toBe(false);
   });
   const created: string[] = [];

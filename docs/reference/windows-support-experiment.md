@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### QA fixture-home path casing
+
+The CLI's path-only QA-home predicate now applies its existing Windows case
+normalization to the `openrig-qa` name as well as the temporary root. Previously
+an upper-case spelling of the same conventional fixture path returned false.
+The compatibility tests pass with that alias, while sibling temporary roots,
+ordinary temporary homes, and non-temporary QA-named paths remain excluded.
+This changes fixture classification only; it creates no fixture marker and
+does not start a daemon, run restore-check, or alter live home selection.
+
 ### Long read-only asset replacement
 
 The packaged-asset replacement helper now reserves a short unique sibling
