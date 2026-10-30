@@ -59,7 +59,7 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("runs
     expect(await adapter.getDefaultShell()).toBeTruthy();
     // Configure the held empty server before its first actual session.
     await invoke(["tmux", "set-option", "-g", "remain-on-exit", "on"]);
-    const command = `[IO.File]::WriteAllText(${powershellQuote(output)},(ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED; pane=$env:TMUX_PANE }))`;
+    const command = `[IO.File]::WriteAllText(${powershellQuote(output)},(ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED; pane=$env:TMUX_PANE; registry=$env:PSMUX_DATA_DIR }))`;
     await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile -EncodedCommand ${Buffer.from(command, "utf16le").toString("base64")}`]);
     adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { SystemRoot: process.env.SystemRoot, SELECTED: "synthetic-selected" } });
     expect(await adapter.createSession("seat", dir, { OPENRIG_NODE_ID: "synthetic-seat" })).toEqual({ ok: true });
@@ -69,16 +69,23 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("runs
     expect(observed.selected).toBe("synthetic-selected");
     expect(observed.unrelated).toBeNull();
     expect(observed.pane).toBeTruthy();
+    expect(observed.registry).toBe(registry);
     const pane = (await adapter.listPanes("seat"))[0]!;
     const deadDeadline = Date.now() + 5000;
     while (!await adapter.isPaneDead(pane.id) && Date.now() < deadDeadline) await new Promise(resolve => setTimeout(resolve, 50));
     expect(await adapter.isPaneDead(pane.id)).toBe(true);
     await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile`]);
     const nextOutput = join(dir, "respawn.json");
-    expect(await adapter.respawnPane(pane.id, command.replace(output, nextOutput), { cwd: dir, env: { OPENRIG_NODE_ID: "synthetic-seat", SELECTED: "successor" } })).toEqual({ ok: true });
+    const routeOutput = join(dir, "route.txt");
+    const routeScript = join(dir, "route.cjs");
+    writeFileSync(routeScript, `const r=require('child_process').spawnSync(${JSON.stringify(process.env.OPENRIG_TEST_PSMUX)},${JSON.stringify(["-L", namespace, "list-panes", "-t", "=seat:", "-F", "#{pane_id}"])},{encoding:'utf8',timeout:5000});require('fs').writeFileSync(${JSON.stringify(routeOutput)},JSON.stringify({status:r.status,stdout:r.stdout,stderr:r.stderr,error:r.error?.message}));`);
+    const routeCommand = `if ($env:PSMUX_DATA_DIR -ne ${powershellQuote(registry)}) { throw 'Owned registry missing' }; & ${powershellQuote(process.execPath)} ${powershellQuote(routeScript)}; `;
+    expect(await adapter.respawnPane(pane.id, routeCommand + command.replace(output, nextOutput), { cwd: dir, env: { OPENRIG_NODE_ID: "synthetic-seat", SELECTED: "successor" } })).toEqual({ ok: true });
     const nextDeadline = Date.now() + 7000;
     while (!existsSync(nextOutput) && Date.now() < nextDeadline) await new Promise(resolve => setTimeout(resolve, 50));
     expect(JSON.parse(readFileSync(nextOutput, "utf8"))).toMatchObject({ selected: "successor", unrelated: null });
+    if (!existsSync(routeOutput)) console.log("owned route diagnostics", (await adapter.capturePaneScreen("seat"))?.slice(-2500));
+    expect(JSON.parse(readFileSync(routeOutput, "utf8"))).toMatchObject({ status: 0, stdout: observed.pane + "\n", stderr: "" });
   } finally {
     await invoke(["tmux", "kill-server"]).catch(() => {});
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

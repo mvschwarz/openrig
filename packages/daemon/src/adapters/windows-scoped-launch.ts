@@ -21,7 +21,7 @@ export function windowsScopedLaunch(shell: string, command: string, selected: Re
     if (value !== undefined) env.set(key.toUpperCase(), [key, value]);
     else env.delete(key.toUpperCase());
   }
-  const paneKeys = ["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL", "PSMUX_SESSION", "PSMUX_SOCKET_NAME", "PSMUX_TARGET_SESSION", "PSMUX_SOCKET_PATH"];
+  const paneKeys = ["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL", "PSMUX_SESSION", "PSMUX_SOCKET_NAME", "PSMUX_TARGET_SESSION", "PSMUX_SOCKET_PATH", "PSMUX_DATA_DIR"];
   for (const key of paneKeys) env.delete(key);
   const content = `$ErrorActionPreference='Stop'\n$p=New-Object Diagnostics.ProcessStartInfo\n$p.UseShellExecute=$false\n$p.FileName=${q(executable)}\n$p.Arguments=${q(args)}\n$p.WorkingDirectory=(Get-Location).ProviderPath\n$p.EnvironmentVariables.Clear()\n`
     + [...env.values()].map(([key, value]) => `$p.EnvironmentVariables[${q(key)}]=${q(value)}\n`).join("")

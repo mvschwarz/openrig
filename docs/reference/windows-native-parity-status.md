@@ -67,6 +67,12 @@ The native adapter uses a direct `--` command boundary. Stock 3.4.0 aliases
 `default-command` to `default-shell`, so native initial launch preserves shell words
 instead of executing that same value as a nested command. Native empty-server
 startup uses psmux's queued `exit-empty off` operation, followed by option readback.
+The scoped child also retains the pane's `PSMUX_DATA_DIR`: an owned stock fixture
+first reproduced its loss as a null value, then passed after the routing metadata
+was preserved. A Node child inside the respawned shell reads the same pane through
+the stock client and its owned namespace. Two final runs passed; preceding attempts
+to capture the native client's output were empty, and an initial Node-observer run
+produced no receipt. Those observations do not establish general client reliability.
 
 Together with credential transport fixtures, 15 tests pass and three POSIX-only
 integration cases remain skipped; daemon TypeScript passes. This is not live
