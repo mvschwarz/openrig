@@ -890,3 +890,20 @@ The test uses the real Windows seat-environment conversion with a narrow owned
 child environment, in-memory DB and mocked terminal dispatch/readiness surfaces.
 Its YAML command is encoded as data so spaces and native backslashes survive
 preset loading. It does not use a real community provider or live terminal.
+
+Claude managed-block destinations and conflict detection pass all 37 cases on
+native Windows after test corrections. The real-file journey now JSON-encodes
+the native cwd in YAML instead of treating backslashes as YAML escapes; conflict
+fixtures compare native paths and normalize mock filesystem keys. Coverage
+includes the selected `CLAUDE.local.md` destination, preservation/idempotence,
+restore/expansion/teardown and export/import selection. No production change
+was required by these fixture failures, and terminal/provider activity remains
+mocked.
+
+The team/kernel permission file passes 197/197. On Windows its subprocess tests
+parse the emitted literal Node command and execute that owned hook entry
+directly with stdin, rather than requiring `/bin/sh`. This verifies allow/ask
+decisions, unchanged input/settings, malformed-input fallback and paths with
+spaces/apostrophes. It neither executes the command described in the hook input
+nor proves Claude's own Windows hook-shell dispatch. POSIX tests retain their
+shell execution. Daemon TypeScript passes after all three test-file changes.
