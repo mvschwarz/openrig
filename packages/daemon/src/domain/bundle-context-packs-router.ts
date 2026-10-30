@@ -208,6 +208,7 @@ export function routeContextPacks(
       continue;
     }
     const dirName = nodePath.basename(sourcePackDir);
+    const targetKey = process.platform === "win32" ? dirName.toLowerCase() : dirName;
     // Target = <targetContextPacksDir>/<basename(parentDir)>/ (the operator-
     // host canonical layout per context-pack-types.ts:9-10).
     const targetAbs = nodePath.resolve(input.targetContextPacksDir, dirName);
@@ -222,7 +223,7 @@ export function routeContextPacks(
       });
       continue;
     }
-    if (routedDirNames.has(dirName)) {
+    if (routedDirNames.has(targetKey)) {
       records.push({
         declaredPath: declared,
         status: "conflict",
@@ -234,7 +235,7 @@ export function routeContextPacks(
       // Never merge into an installed pack: a merge would change a
       // `rig context add --git` install's content digest, and its
       // `rig context source update` would then refuse it as locally edited.
-      routedDirNames.add(dirName);
+      routedDirNames.add(targetKey);
       const identical = fs.listFiles(sourcePackDir).every((relativePath) => {
         const installed = nodePath.join(targetAbs, relativePath);
         return fs.exists(installed) && fs.readFile(installed) === fs.readFile(nodePath.join(sourcePackDir, relativePath));
@@ -250,7 +251,7 @@ export function routeContextPacks(
       continue;
     }
     fs.copyDir(sourcePackDir, targetAbs);
-    routedDirNames.add(dirName);
+    routedDirNames.add(targetKey);
     records.push({
       declaredPath: declared,
       status: "routed",

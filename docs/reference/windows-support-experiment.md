@@ -26,6 +26,21 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native bundle target-name collisions (2026-10-30)
+
+Owned native filesystem checks reproduced case-only target aliases across all
+five bundle routers. Image/workflow/plugin/skill routing counted both entries
+as routed and overwrote the first target; context routing retained the bytes but
+reported kept-existing rather than a same-batch conflict. Native routing now
+compares target names without case and retains the first successful entry,
+reporting conflict for the later one. POSIX target-case behavior is retained.
+All five actual filesystem checks pass after failing before their corrections;
+the first target's exact bytes are asserted. Daemon typecheck passes. The older
+two image/context mock-router files remain 8/25 passing at their preceding
+observation: their mock sets use POSIX absolute paths while the consumer resolves
+native paths. That incomplete regression evidence is not a claim of whole-router
+or installed-bundle acceptance. No operator libraries were changed.
+
 ## Native bundle integrity path keys (2026-10-30)
 
 The current owned bootstrap fixture reproduced seven failures when a bundle
