@@ -64,6 +64,9 @@ multiline Unicode values, unrelated inherited-variable removal, fresh pane ident
 working-directory preservation and bootstrap-file removal, and a cmd command with
 quoted output path. The stock psmux fixture covers held empty-server startup, its
 first actual seat, and dead-pane respawn with a new explicit environment override.
+It also creates an interactive scoped shell and sends a command through the real
+native console-input path; the resulting file confirms its selected environment
+and absence of the unrelated server-only value.
 The native adapter uses a direct `--` command boundary. Stock 3.4.0 aliases
 `default-command` to `default-shell`, so native initial launch preserves shell words
 instead of executing that same value as a nested command. Native empty-server

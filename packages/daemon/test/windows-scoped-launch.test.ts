@@ -86,6 +86,13 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("runs
     expect(JSON.parse(readFileSync(nextOutput, "utf8"))).toMatchObject({ selected: "successor", unrelated: null });
     if (!existsSync(routeOutput)) console.log("owned route diagnostics", (await adapter.capturePaneScreen("seat"))?.slice(-2500));
     expect(JSON.parse(readFileSync(routeOutput, "utf8"))).toMatchObject({ status: 0, stdout: observed.pane + "\n", stderr: "" });
+    await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile -NoExit`]);
+    expect(await adapter.createSession("interactive", dir, { OPENRIG_NODE_ID: "synthetic-interactive", SELECTED: "interactive-selected" })).toEqual({ ok: true });
+    const interactiveOutput = join(dir, "interactive.json");
+    expect(await adapter.sendShellCommand("interactive", `[IO.File]::WriteAllText(${powershellQuote(interactiveOutput)}, (ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED }))`)).toEqual({ ok: true });
+    const inputDeadline = Date.now() + 7000;
+    while (!existsSync(interactiveOutput) && Date.now() < inputDeadline) await new Promise(resolve => setTimeout(resolve, 50));
+    expect(JSON.parse(readFileSync(interactiveOutput, "utf8"))).toEqual({ selected: "interactive-selected", unrelated: null });
   } finally {
     await invoke(["tmux", "kill-server"]).catch(() => {});
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
