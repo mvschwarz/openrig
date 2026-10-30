@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Long proof artifact replacement names (2026-10-30)
+
+The same staging-component failure was reproduced in proof artifact replacement
+for both an existing and a new 234-character artifact name. Long target basenames
+now use a short staging stem with the existing unique suffix; ordinary short
+staging names and exclusive-open behavior remain unchanged. Both actual owned
+write cases pass with content readback and no staging leftovers.
+
+The two-file run reports 44 passed and three failed of 47, with no filtered
+tests. The remaining failures are one host-denied file-symlink fixture and two
+POSIX mode assertions; they are not waived or described as native ACL evidence.
+CLI TypeScript checking passes. Full-path limits and restore-packet directory
+staging still require separate review.
+
 ### File-editor long filenames (2026-10-30)
 
 An owned 234-character filename can be created directly on this Windows host,

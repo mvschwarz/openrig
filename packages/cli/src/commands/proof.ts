@@ -559,7 +559,11 @@ export function replaceArtifactFile(target: string, content: string, stagingId: 
   const existing = fs.lstatSync(target, { throwIfNoEntry: false });
   const nativeRegular = process.platform === "win32" && existing?.isFile();
   const stagingDirectory = nativeRegular ? createWindowsPrivateDirectory(path.dirname(target)) : undefined;
-  const staging = path.join(stagingDirectory ?? path.dirname(target), `.${path.basename(target)}.${stagingId}.replace-tmp`);
+  const basename = path.basename(target);
+  // Keep room for the unique suffix even when the target already approaches
+  // the filesystem's component limit. Ordinary short staging names stay stable.
+  const stagingStem = Buffer.byteLength(basename, "utf8") <= 100 ? basename : "openrig-artifact";
+  const staging = path.join(stagingDirectory ?? path.dirname(target), `.${stagingStem}.${stagingId}.replace-tmp`);
   const keepMode = existing?.isFile() ? existing.mode & 0o777 : undefined;
   let fd: number;
   try { fd = fs.openSync(staging, "wx", keepMode ?? 0o666); }
