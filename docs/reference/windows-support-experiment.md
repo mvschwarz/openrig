@@ -2,6 +2,29 @@
 
 ## Current review status (2026-10-30)
 
+### Bounded native Codex login-state probe
+
+The default synchronous `login status` probe had no timeout. An owned npm-layout
+fixture kept it waiting for its nine-second self-exit; the pre-repair timeout case
+failed while the ordinary exit-zero/exit-one cases passed. Native login-state
+queries now use the existing background Job Object helper with a five-second
+bound, output still ignored, and exact helper cleanup. A timeout or ambiguous
+helper exit 125 reports unavailable. Exit zero/one retain logged-in/signed-out
+classification. POSIX probe execution is retained.
+
+Nine tests pass across the owned native probe and complete home-fallback test
+files: timeout, detached-child termination, ordinary login states, ambiguous exit,
+and home selection. Daemon TypeScript checking passes. The failed fixture was
+waited out using its finite self-exit, with no numeric-PID kill. Tests used owned
+homes without auth files and an owned fake Codex; no installed provider, real
+login, credential file, seat or daemon was accessed. Full native authentication
+and provider integration remain open.
+
+The complete rig-teardown source was also reviewed: existing ownership, unknown
+probe and retained guidance/skill semantics remain. No teardown, service stop,
+session mutation or cleanup of real material was executed; source review is
+separate from actual native stop/restore acceptance.
+
 ### Native managed Claude capability-query descendants
 
 The complete managed-launch module was reviewed. Its native `--help` query used

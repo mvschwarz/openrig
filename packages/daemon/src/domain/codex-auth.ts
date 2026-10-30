@@ -25,6 +25,7 @@ import { createPrivateTextFile } from "./private-text-file.js";
 import { resolveCodexCommand } from "./windows-provider-command.js";
 import { readPlatformEnv } from "./platform-env.js";
 import { spawnSync } from "node:child_process";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
 
 /** Strict profile-name whitelist: alnum-led, then [A-Za-z0-9._-], 1..64 chars. Excludes /, \, ~,
  *  leading dot, whitespace, control, and shell metacharacters. Fail closed. */
@@ -258,12 +259,19 @@ function defaultLoginStatus(codexHome: string): "logged_in" | "not_logged_in" | 
   const env = { ...process.env, CODEX_HOME: codexHome };
   let launch: ReturnType<typeof resolveCodexCommand>;
   try { launch = resolveCodexCommand(env); } catch { return "unavailable"; }
-  const r = spawnSync(launch.command, [...launch.prefix, "login", "status"], {
-    stdio: "ignore",
-    env, windowsHide: true,
-  });
-  if (r.error) return "unavailable";
-  return r.status === 0 ? "logged_in" : "not_logged_in";
+  let probe: ReturnType<typeof prepareWindowsJobProcess> | undefined;
+  try {
+    const args = [...launch.prefix, "login", "status"];
+    if (process.platform === "win32") probe = prepareWindowsJobProcess(launch.command, args, { env });
+    const r = spawnSync(probe?.file ?? launch.command, probe?.args ?? args, {
+      ...probe?.options, stdio: "ignore", env: probe?.options.env ?? env, windowsHide: true,
+      ...(probe ? { timeout: 5000, killSignal: "SIGKILL" as const } : {}),
+    });
+    // 125 also names a native helper failure; it cannot prove a signed-out CLI.
+    if (r.error || (probe && r.status === 125)) return "unavailable";
+    return r.status === 0 ? "logged_in" : "not_logged_in";
+  } catch { return "unavailable"; }
+  finally { probe?.dispose(); }
 }
 
 export interface AuthStatusResult {
