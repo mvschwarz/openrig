@@ -4,6 +4,7 @@ import type { ExecFn } from "../adapters/tmux.js";
 import type { ExternalInstallAction } from "./external-install-planner.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { executeWindowsInstall } from "./windows-install-exec.js";
 
 const execFileAsync = promisify(execFile);
 type ArgvExec = (file: string, args: string[]) => Promise<string>;
@@ -47,7 +48,7 @@ export class ExternalInstallExecutor {
   constructor(deps: { exec: ExecFn; db: Database.Database; execArgv?: ArgvExec }) {
     this.exec = deps.exec;
     this.db = deps.db;
-    this.execArgv = deps.execArgv ?? (async (file, args) => (await execFileAsync(file, args, {
+    this.execArgv = deps.execArgv ?? (process.platform === "win32" ? executeWindowsInstall : async (file, args) => (await execFileAsync(file, args, {
       encoding: "utf8", windowsHide: true, timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024,
     })).stdout);
   }

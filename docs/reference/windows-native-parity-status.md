@@ -382,3 +382,11 @@ no post-install success probe or instantiation follows it. Existing selective
 approval regressions remain passing; daemon TypeScript passes. This does not
 establish installer rollback, descendant termination or safe automatic retry.
 
+Windows native install execution now uses the existing atomic kill-on-close Job
+helper rather than a root-only execFile timeout. An owned Node fixture times out
+with ETIMEDOUT, its root and detached descendant both exit, and an unrelated owned
+child survives. Combined with executor argv/nonzero/journaling regressions, 13
+tests pass and daemon TypeScript passes. Output is bounded to 4 MiB and the
+production deadline is ten minutes. No real installer ran: external installer
+services, host modifications and rollback remain outside this process-tree proof.
+
