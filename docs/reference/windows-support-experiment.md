@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Current package build and assembled-entry readback
+
+The complete native Windows package build passed for implementation head
+`aafc656edadbef26e7a7eed073ddc4aa6fca54bb` (05:04:07–05:05:03 UTC, 56 seconds).
+Daemon, UI, TUI, CLI and assembly completed with unchanged tracked source. The
+artifact honestly retains `dirty: true` for the working copy; this is not a clean
+release-certification claim.
+
+Readback confirmed the new community entry resolver, seat environment, terminal
+composer and TUI modules in the assembled package. Its standalone native TUI
+resolver selects the paired packaged CLI entry. Source and assembled openrig-core
+both pass version checking at 0.1.31 with content SHA-256
+`93fa63894ca2799955e397b26a43e5595c61d0221ab17895792066bc4e105b6a`.
+No CLI command, provider, installed plugin or daemon was invoked by readback.
+This refreshes build evidence only: a current-head installation gate, full test
+coverage, visible-terminal acceptance and live deployment remain separate.
+
 ### Community npm launchers use their declared Node entries
 
 Owned native fixtures reproduced standard global and project-local npm community
