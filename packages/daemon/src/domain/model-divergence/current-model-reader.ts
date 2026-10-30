@@ -17,6 +17,8 @@ import {
 } from "./effective-model-readers.js";
 import type { EffectiveModelRead, PinnedSeat } from "./model-divergence-monitor.js";
 
+const canonicalRecordPath = process.platform === "win32" ? realpathSync.native : realpathSync;
+
 export interface ModelObservation {
   status: "observed" | "unknown";
   model: string | null;
@@ -92,7 +94,7 @@ export class CurrentModelReader {
 
   private selectPi(seat: Seat, native: CurrentGenerationDeps): Promise<PiRecordSelection> {
     return resolveIdentityVerifiedPiRecord({ ...this.occupant(seat), runner: this.deps.piRunner(seat.sessionName) }, native,
-      (path) => { try { return realpathSync(path); } catch { return null; } });
+      (path) => { try { return canonicalRecordPath(path); } catch { return null; } });
   }
 
   /** The identity-verified current Pi runner of a seat and its own session file, selected the same
@@ -142,7 +144,7 @@ export class CurrentModelReader {
         occupantBootAt: this.deps.sessions.currentOccupantTenure(seat.nodeId)?.bootAt ?? null,
         binding: binding ? { tmuxSession: binding.tmuxSession, tmuxPane: binding.tmuxPane } : null,
         runner: this.deps.piRunner(seat.sessionName),
-      }, native, (path) => { try { return realpathSync(path); } catch { return null; } });
+      }, native, (path) => { try { return canonicalRecordPath(path); } catch { return null; } });
     }
     const selected = await this.select(seat, native);
     if (!selected.ok) return selected;

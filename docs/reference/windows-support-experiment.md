@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Pi current-record native path aliases (2026-10-30)
+
+An owned Pi JSONL file reported through its expanded long path was rejected as
+outside its own session directory when that directory retained a DOS-short
+spelling, leaving model reporting UNKNOWN. CurrentModelReader now supplies
+native Windows realpath to both Pi record selection and effective-model reading;
+POSIX resolution is unchanged.
+
+The new actual-file case failed before repair and now returns the recorded
+model and current Pi record. Its lineage, occupancy and runner sidecar are
+synthetic, not a live provider observation. The existing returned-path assertion
+was reconciled to the native canonical spelling while retaining the exact
+runner/occupant checks. All 47 current-model-reader checks and daemon TypeScript
+checking pass. No live transcript, process environment, seat or pin was read or
+changed for these fixtures.
+
 ### Native settings fixture reconciliation (2026-10-30)
 
 After the settings implementation repairs, the remaining settings assertions
