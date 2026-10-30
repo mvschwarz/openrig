@@ -8,6 +8,36 @@ import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from ".
 import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
 import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { readPlatformEnv } from "./platform-env.js";
+import { isCommunityHarnessRuntime } from "./built-in-runtimes.js";
+
+// Only the literal /usr/bin/env prefixes emitted by the community adapter.
+// Interpret their data as child environment fields, never as a Windows program.
+const COMMUNITY_LAUNCH_ENV = new Set([
+  "OPENRIG_FIRST_INPUT", "OPENRIG_MODEL", "OPENRIG_LAUNCH_RESULT",
+  "OPENRIG_LAUNCH_ATTEMPT", "OPENRIG_RESUME_REF", "OPENRIG_CONVERSATION",
+]);
+function nativeCommunityCommand(command: string, env: Record<string, string>): { command: string; remove: string[] } {
+  const words = parseLiteralLaunchWords(command);
+  const remove = new Set<string>();
+  while (words.at(0) === "/usr/bin/env") {
+    words.shift();
+    while (words.length) {
+      if (words[0] === "-u") {
+        words.shift();
+        const key = words.shift();
+        if (!key || !COMMUNITY_LAUNCH_ENV.has(key)) throw new Error("Unsupported community launch environment removal");
+        delete env[key]; remove.add(key);
+        continue;
+      }
+      const equals = words[0]!.indexOf("=");
+      if (equals < 1) break;
+      const assignment = words.shift()!, key = assignment.slice(0, equals);
+      if (!COMMUNITY_LAUNCH_ENV.has(key)) throw new Error("Unsupported community launch environment assignment");
+      env[key] = assignment.slice(equals + 1); remove.delete(key);
+    }
+  }
+  return { command: words.map(shellQuote).join(" "), remove: [...remove] };
+}
 
 // Explicit public launch metadata, not a prefix/denylist over credential names.
 // Provider keys and OPENRIG_ACTIVITY_HOOK_TOKEN keep their non-typed channel.
@@ -202,6 +232,8 @@ export class SeatLaunchEnvironment {
       if (this.launchPlatform === "win32") {
         if (!searchPath) throw new Error("Launch PATH unavailable");
         env.PATH = `${binDir}${path.delimiter}${searchPath}`;
+        const community = isCommunityHarnessRuntime(target.runtime) ? nativeCommunityCommand(command, env) : undefined;
+        if (community) command = community.command;
         // Classic Claude emits only these command-scoped assignments. Decode
         // their literal words, without exporting the resume marker to the pane.
         if (target.runtime === "claude-code") {
@@ -215,7 +247,7 @@ export class SeatLaunchEnvironment {
         }
         if (clearing && homeVar && configuredHome !== undefined) env[homeVar] = configuredHome;
         return renderWindowsLaunch(command, env, {
-          remove: [...(accountHome ? ACCOUNT_HOME_PROVIDER_ENV : []), ...(clearing && homeVar ? [homeVar] : [])],
+          remove: [...(accountHome ? ACCOUNT_HOME_PROVIDER_ENV : []), ...(clearing && homeVar ? [homeVar] : []), ...(community?.remove ?? [])],
           ...(target.claudeTokenStep ? { beforeStart: target.claudeTokenStep } : {}),
         });
       }

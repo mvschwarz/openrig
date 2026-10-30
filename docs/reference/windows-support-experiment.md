@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### Community launch metadata reaches native children
+
+Five owned community-adapter fixtures reproduced native launches that returned
+without running the intended child: generated first-input/model/conversation and
+launch-result metadata still prefixed the command with POSIX `/usr/bin/env`.
+The Windows seat environment now decodes only the community adapter's six named
+metadata fields and explicit removals into the child environment before native
+launch. Nested generated prefixes retain assignment/removal order; the pane's
+environment is not changed. Built-in runtime and POSIX command construction are
+unchanged; this does not translate arbitrary POSIX launch scripts.
+
+Seven native cases pass: model and first-input transmission, clearing inherited
+values, named fresh/resumed conversations, a matching launch-result record, and
+the existing two npm Codex seat-launch cases. They use owned Node scripts and
+actual PowerShell subprocesses with synthetic inputs and identity. No actual
+community provider, conversation, credential, pane or daemon was used. Daemon
+TypeScript checking passes. Full provider/native launch acceptance remains open.
+
 ### Manual terminal recovery carries the daemon's shell
 
 Owned daemon/TUI fixtures reproduced native manual recovery instructions combining
