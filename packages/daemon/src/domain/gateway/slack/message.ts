@@ -222,6 +222,22 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+/** Split a matched bare URL from what follows it in the sentence: trailing punctuation, a
+ *  `)` or `]` with no opening partner inside the URL, and closing `**` or unbalanced `__`
+ *  markers. `…/Function_(mathematics)` and `#object.__init__` stay whole. */
+function trimBareUrl(match: string): [url: string, rest: string] {
+  const count = (s: string, part: string) => s.split(part).length - 1;
+  let url = match;
+  for (;;) {
+    if (url.endsWith("**")) url = url.slice(0, -2);
+    else if (url.endsWith("__") && count(url, "__") % 2 === 1) url = url.slice(0, -2);
+    else if (/[.,;:!?]$/.test(url)) url = url.slice(0, -1);
+    else if (url.endsWith(")") && count(url, ")") > count(url, "(")) url = url.slice(0, -1);
+    else if (url.endsWith("]") && count(url, "]") > count(url, "[")) url = url.slice(0, -1);
+    else return [url, match.slice(url.length)];
+  }
+}
+
 /** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. The line is
  *  escaped first, so it holds no raw `<` or `>`, and `<n>` can mark a code span or link set aside
  *  without colliding with input. A Markdown `[text](url)` or a Slack `<url|text>` / `<url>` becomes
@@ -242,7 +258,10 @@ function inlineMarkdownToMrkdwn(line: string): string {
     .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => link(m, url, label))
     .replace(/&lt;(https:\/\/[^\s|]+?)(?:\|(.+?))?&gt;/g, (m, url: string, label?: string) => link(m, url, label))
     // A bare URL is held as written: Slack links it, and `__` or `**` inside it is not bold.
-    .replace(/https:\/\/[^\s<>|`]+/g, hold)
+    .replace(/https:\/\/[^\s<>|`]+/g, (m) => {
+      const [url, rest] = trimBareUrl(m);
+      return hold(url) + rest;
+    })
     .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
     .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*"));
 }
@@ -318,24 +337,27 @@ function richInline(text: string): RichInline[] {
     if (last?.type === "text" && !last.style) last.text += t;
     else if (t) out.push({ type: "text", text: t });
   };
+  const re = new RegExp(RICH_INLINE.source, "g");
   let at = 0;
-  for (const m of text.matchAll(RICH_INLINE)) {
+  for (let m = re.exec(text); m; m = re.exec(text)) {
     plain(text.slice(at, m.index));
     const [all, code, mdLabel, mdUrl, slackUrl, slackLabel, bare, b1, b2, b3] = m;
     const url = mdUrl ?? slackUrl;
     const label = mdLabel ?? slackLabel;
+    const bold = b1 ?? b2 ?? b3;
+    at = m.index + all.length;
     if (code !== undefined) out.push({ type: "text", text: code, style: { code: true } });
     else if (bare !== undefined) {
-      // Sentence punctuation after a bare URL stays text, as Slack's own linking does.
-      const url = bare.replace(/[.,;:!?)\]]+$/, "");
-      if (isSafeHttpsUrl(url)) out.push({ type: "link", url });
-      else plain(url);
-      plain(bare.slice(url.length));
-    }
-    else if (url === undefined) out.push({ type: "text", text: b1 ?? b2 ?? b3 ?? all, style: { bold: true } });
-    else if (isSafeHttpsUrl(url) && !/[<>|]/.test(url)) out.push(label ? { type: "link", url, text: label } : { type: "link", url });
+      const [target] = trimBareUrl(bare);
+      if (isSafeHttpsUrl(target)) out.push({ type: "link", url: target });
+      else plain(target);
+      // What follows the URL (closing markers included) is parsed again.
+      at = re.lastIndex = m.index + target.length;
+    } else if (bold !== undefined) {
+      // Bold content is parsed again, so a link inside stays a link and the text around it is bold.
+      for (const el of richInline(bold)) out.push(el.type === "text" ? { ...el, style: { ...el.style, bold: true } } : el);
+    } else if (url !== undefined && isSafeHttpsUrl(url) && !/[<>|]/.test(url)) out.push(label ? { type: "link", url, text: label } : { type: "link", url });
     else plain(all);
-    at = m.index + all.length;
   }
   plain(text.slice(at));
   return out.length ? out : [{ type: "text", text: " " }];

@@ -227,4 +227,20 @@ describe("list items in a row body render as native Slack lists", () => {
     expect(md(`see ${url} and **b**`)).toBe(`see ${url} and *b*`);
     expect(md("https://example.com/a?x=1&y=__z__")).toBe("https://example.com/a?x=1&amp;y=__z__");
   });
+
+  it("keeps balanced parentheses in a bare URL and leaves sentence brackets outside", () => {
+    const wiki = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+    expect(buildBodyBlocks(`- ${wiki}\n- (see ${wiki}).`)).toEqual([list([{ style: "bullet", indent: 0, items: [
+      [{ type: "link", url: wiki }],
+      [t("(see "), { type: "link", url: wiki }, t(").")],
+    ] }])]);
+    expect(md(`(see ${wiki}).`)).toBe(`(see ${wiki}).`);
+  });
+
+  it("keeps bold that encloses a bare URL", () => {
+    expect(md("**See https://example.com** and __See https://example.com__")).toBe("*See https://example.com* and *See https://example.com*");
+    expect(buildBodyBlocks("- **See https://example.com** now")).toEqual([list([{ style: "bullet", indent: 0, items: [
+      [t("See ", { bold: true }), { type: "link", url: "https://example.com" }, t(" now")],
+    ] }])]);
+  });
 });
