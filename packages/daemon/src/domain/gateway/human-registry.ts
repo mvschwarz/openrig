@@ -4,7 +4,8 @@
 // (routing / default delivery channel) — two DISTINCT axes.
 //
 // TRUTH MODEL (design-record §7 / plan §1): each human is one YAML fragment at
-// <home>/gateway/humans/<entityId>.yaml. The registry is a GENERATED PROJECTION of
+// <home>/gateway/humans/<entityId>.yaml (bounded hash stem for long native ids).
+// The registry is a GENERATED PROJECTION of
 // the fragments (humans.generated.yaml) — NEVER hand-edited; the fragment is truth.
 // The projection carries a DO-NOT-EDIT header and a drift pin (mirrors the
 // attestation-lineage.generated codegen convention). Admission/resolution is the
@@ -281,6 +282,24 @@ export function participantsPath(home: string = getOpenRigHome()): string {
   return join(home, "gateway", "participants.yaml");
 }
 
+// Leave room for archive timestamps, collision counters and orphan sidecars.
+// The prefix cannot collide with a literal entity id (the slug excludes '~').
+function nativeHumanStem(entityId: string): string {
+  return entityId.length > 200
+    ? `~human-${createHash("sha256").update(entityId).digest("hex")}` : entityId;
+}
+
+function humanStoragePath(dir: string, entityId: string, extension: string): string {
+  const legacy = join(dir, `${entityId}${extension}`);
+  const stem = nativeHumanStem(entityId);
+  if (stem === entityId) return legacy;
+  const mapped = join(dir, `${stem}${extension}`);
+  // Preserve existing valid long-name records rather than creating a duplicate.
+  if (existsSync(legacy)) return legacy;
+  // A registry copied from Windows remains readable on another host.
+  return process.platform === "win32" || existsSync(mapped) ? mapped : legacy;
+}
+
 /** People and shared channels share one address space (<id>@external): the shared channel registered under `entityId`,
  *  if the participant file names one. A file that doesn't parse names none here — it never blocks registering a person,
  *  and its own error is reported where it's read. */
@@ -340,7 +359,8 @@ export type ProjectResult =
 /** Generate the canonical registry projection from the fragments (the ONE generator
  *  used by both the write path and the drift/load check). Load-time validation is the
  *  SAME validateHumanFragment as add-time; the filename must equal <entityId>.yaml
- *  (collision-free key). Entities are sorted by entityId for a stable, diffable body. */
+ *  or its bounded native storage name (collision-free key). Entities are sorted
+ *  by entityId for a stable, diffable body. */
 export function projectHumans(home: string = getOpenRigHome()): ProjectResult {
   const dir = humansDir(home);
   const entities: HumanFragment[] = [];
@@ -355,8 +375,8 @@ export function projectHumans(home: string = getOpenRigHome()): ProjectResult {
       }
       const v = validateHumanFragment(raw);
       if (!v.ok) return { ok: false, error: `invalid human fragment ${f}: ${v.error}` };
-      if (`${v.fragment.entityId}.yaml` !== f) {
-        return { ok: false, error: `human fragment ${f} declares entityId "${v.fragment.entityId}" — the filename must be <entityId>.yaml` };
+      if (`${v.fragment.entityId}.yaml` !== f && `${nativeHumanStem(v.fragment.entityId)}.yaml` !== f) {
+        return { ok: false, error: `human fragment ${f} declares entityId "${v.fragment.entityId}" — the filename must be <entityId>.yaml or its bounded native storage name` };
       }
       entities.push(v.fragment);
     }
@@ -445,7 +465,7 @@ export function addHumanFragment(
 ): AddHumanResult {
   const v = validateHumanFragment(raw);
   if (!v.ok) return { ok: false, error: v.error };
-  const file = join(humansDir(home), `${v.fragment.entityId}.yaml`);
+  const file = fragmentPathFor(v.fragment.entityId, home);
   if (!opts.replace && existsSync(file)) {
     return { ok: false, error: `human "${v.fragment.entityId}" already exists at ${file} — pass an explicit replace to update it (no silent overwrite)` };
   }
@@ -579,10 +599,12 @@ export function parseBindingSpec(spec: string):
 }
 
 function fragmentPathFor(entityId: string, home: string): string {
-  return join(humansDir(home), `${entityId}.yaml`);
+  return humanStoragePath(humansDir(home), entityId, ".yaml");
 }
 
 function knownEntityIds(home: string): string[] {
+  const projection = projectHumans(home);
+  if (projection.ok) return projection.entities.map(entity => entity.entityId);
   const dir = humansDir(home);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
@@ -690,7 +712,7 @@ function handleConflict(fragment: HumanFragment, home: string): string | undefin
 // lives outside the fragment because the fragment's keys are a closed set every reader validates, and the fragment
 // loaders skip dot-entries, so older readers never see it.
 function availabilityChangePath(entityId: string, home: string): string {
-  return join(humansDir(home), ".availability", `${entityId}.json`);
+  return humanStoragePath(join(humansDir(home), ".availability"), entityId, ".json");
 }
 function recordAvailabilityChange(entityId: string, home: string): { ok: true; changeId: string } | { ok: false; error: string } {
   const changeId = randomUUID();
@@ -828,8 +850,9 @@ export function removeHumanFragment(
     return { ok: false, error: `failed to create archive dir ${archiveDir}: ${(err as Error).message}` };
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  let archivedPath = join(archiveDir, `${entityId}.${stamp}.yaml`);
-  for (let n = 1; existsSync(archivedPath); n++) archivedPath = join(archiveDir, `${entityId}.${stamp}-${n}.yaml`);
+  const archiveStem = process.platform === "win32" ? nativeHumanStem(entityId) : entityId;
+  let archivedPath = join(archiveDir, `${archiveStem}.${stamp}.yaml`);
+  for (let n = 1; existsSync(archivedPath); n++) archivedPath = join(archiveDir, `${archiveStem}.${stamp}-${n}.yaml`);
   try {
     renameSync(path, archivedPath);
     // A later re-add of the same id starts a fresh change record, never inheriting this one.

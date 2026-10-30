@@ -2,6 +2,33 @@
 
 ## Current review status (2026-10-30)
 
+### Native human-registry archive and sidecar names
+
+A valid 240-character human entity id could be added, read and edited on Windows,
+but removal failed when the archive timestamp extended its filename past the
+native component limit. Native storage now uses a deterministic SHA-256 stem for
+ids longer than 200 characters, leaving room for archive and orphan-record
+suffixes. The logical entity id and external address remain unchanged. Existing
+valid long-name fragments remain authoritative; projection validation recognizes
+the native storage name, and readers can retain that name after a cross-host copy.
+Ordinary names retain their existing layout.
+
+The owned native fixture failed at long-id removal before the repair and passes
+afterward through add, duplicate refusal, list/show, field/availability updates,
+known-id diagnostics, forced archive with a synthetic orphan record, and re-add.
+It also converts the new long-id fragment to an existing legacy filename before
+editing/removing it. The `con` and `aux.person` cases already passed before this
+repair; their storage behavior was retained. Three final native lifecycle cases,
+62 existing registry/lifecycle/handle cases, and daemon TypeScript checking pass.
+No real registry, contact, Slack connection,
+queue item, delivery or daemon was accessed. Complete native gateway integration
+remains open.
+
+The package-build entry and scenario-executor test files also pass (9/9): owned
+Node stand-ins, junction entry/import behavior, exit/deadline classification,
+fake Docker argv/receipt, and remote-selection/settlement refusals. No actual
+package build, Docker engine/container or remote host was started by these checks.
+
 ### Current Pi occupant record through native path aliases
 
 The current-generation Pi record resolver still compared the managed runner entry
