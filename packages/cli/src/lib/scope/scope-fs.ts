@@ -556,6 +556,14 @@ export function findSlice(
 }
 
 function findOwningMission(missionsRoot: string, slicePath: string): string | null {
+  // Catalog roots are canonical native paths; callers may use an 8.3 or case
+  // alias for the very same slice. Compare both in that physical namespace.
+  if (process.platform === "win32") {
+    try {
+      const owning = walkToMission(canonicalPath(missionsRoot), canonicalPath(slicePath));
+      if (owning) return owning;
+    } catch { /* Keep the existing lexical-path fallback below. */ }
+  }
   // path.dirname never ends in a separator, so compare against the normalized root
   // (a configured or --workspace root may be written as `/w/missions/`); resolve the
   // slice the same way so a relative root and a relative candidate stay comparable.

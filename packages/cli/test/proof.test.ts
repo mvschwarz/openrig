@@ -731,6 +731,13 @@ describe("rig proof add: an absolute slice path in another catalogued project", 
     expect(process.exitCode).toBeUndefined();
   });
 
+  it.runIf(process.platform === "win32")("resolves a native case alias to the catalogued slice without changing project custody", async () => {
+    await add(slice("beta").toUpperCase());
+    expect(fs.existsSync(path.join(slice("beta"), "proof", "qa-clear.md"))).toBe(true);
+    expect(fs.existsSync(path.join(slice("alpha"), "proof"))).toBe(false);
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it("keeps an explicit --workspace: a slice outside it is still refused", async () => {
     await add(slice("beta"), ["--workspace", path.join(root, "alpha")]);
     expect(errs.join("\n")).toContain("no parent mission");
