@@ -39,6 +39,8 @@ import { nodesRoutes } from "../src/routes/sessions.js";
 import { compactNodeProjection } from "../../cli/src/commands/ps.js";
 import { denyWindowsDirectoryCreation } from "./helpers/directory-permissions.js";
 import { expectPrivateFile } from "./helpers/private-file.js";
+import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 // -- Mocks --
 
@@ -188,31 +190,49 @@ describe("StartupOrchestrator", () => {
     } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it.skipIf(process.platform === "win32")("community contract: a named resume whose launcher exits keeps its DB name and never starts fresh", async () => {
+  it("community contract: a named resume whose launcher exits keeps its DB name and never starts fresh", async () => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-named-missing-"));
     try {
       const trace = nodePath.join(root, "attempt.json");
       const script = nodePath.join(root, "missing.mjs");
       nodeFs.writeFileSync(script, `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(trace)}, JSON.stringify({resume:process.env.OPENRIG_RESUME_REF, fresh:process.env.OPENRIG_CONVERSATION ?? null})); process.exit(4);`);
-      nodeFs.writeFileSync(nodePath.join(root, "synth.yaml"), `format: 1\nname: synth\ncommand: ${process.execPath} ${script}\nmaintainer: Example\nlimits: []\nnames_conversation: true\nresume: true\n`);
+      nodeFs.writeFileSync(nodePath.join(root, "synth.yaml"), `format: 1\nname: synth\ncommand: ${JSON.stringify([process.execPath, script].map(shellQuote).join(" "))}\nmaintainer: Example\nlimits: []\nnames_conversation: true\nresume: true\n`);
       const seed = seedSession();
       db.prepare("UPDATE nodes SET runtime='synth' WHERE id=?").run(seed.nodeId);
       sessionRegistry.recordCommunityHarnessSelection(seed.sessionId, "synth");
       sessionRegistry.recordLauncherReportedToken(seed.sessionId, "community:synth", "saved-name", "passed");
       let foreground = "node";
+      const native = process.platform === "win32";
+      const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+      const powershell = nodePath.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const childEnv = { SystemRoot: systemRoot, WINDIR: systemRoot, HOME: root, USERPROFILE: root, TEMP: root, TMP: root,
+        OPENRIG_HOME: nodePath.join(root, "instance"),
+        PATH: [nodePath.dirname(process.execPath), nodePath.dirname(powershell), nodePath.join(systemRoot, "System32")].join(nodePath.delimiter) };
+      const cli = nodePath.join(root, "rig.mjs"); nodeFs.writeFileSync(cli, "// inert paired CLI\n");
+      const launchEnvironment = native ? new SeatLaunchEnvironment({
+        getPaneCommand: async () => "powershell",
+        getSessionEnv: async (_session: string, key: string) => ({ OPENRIG_NODE_ID: seed.nodeId, OPENRIG_SESSION_NAME: "r01-impl" }[key]),
+      } as unknown as TmuxAdapter, childEnv, root, cli, undefined, "win32") : undefined;
       const sendShellCommand = vi.fn(async (_session: string, command: string) => {
         let status: number | null = 0;
-        try { execFileSync("/bin/sh", ["-c", command], { cwd: root, timeout: 3000, stdio: "ignore" }); }
+        try {
+          if (native) execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+            Buffer.from("$ErrorActionPreference='Stop'; " + command + "\nexit $LASTEXITCODE", "utf16le").toString("base64")],
+          { cwd: root, env: childEnv, windowsHide: true, timeout: 10000, stdio: "ignore" });
+          else execFileSync("/bin/sh", ["-c", command], { cwd: root, timeout: 3000, stdio: "ignore" });
+        }
         catch (error) { status = (error as { status: number | null }).status; }
         expect(status).toBe(4);
-        foreground = "bash";
+        foreground = native ? "powershell" : "bash";
         return { ok: true as const };
       });
       const adapter = new CommunityHarnessRuntimeAdapter("synth", { presetsDir: () => root,
+        ...(launchEnvironment ? { seatLaunchEnvironment: launchEnvironment } : {}),
         tmux: { hasSession: async () => true, getPaneCommand: async () => foreground, sendShellCommand } });
       const result = await createOrchestrator().startNode(makeInput(seed, { adapter, isRestore: true,
         resumeToken: "saved-name", resumeType: "community:synth", readinessTimeoutMs: 1 }));
       expect(result).toMatchObject({ ok: false, startupStatus: "failed" });
+      expect(sendShellCommand.mock.calls.length, JSON.stringify(result)).toBe(1);
       expect(JSON.parse(nodeFs.readFileSync(trace, "utf8"))).toEqual({ resume: "saved-name", fresh: null });
       expect(sendShellCommand).toHaveBeenCalledTimes(1);
       expect(db.prepare("SELECT resume_token, resume_type FROM sessions WHERE id=?").get(seed.sessionId))

@@ -875,3 +875,18 @@ sibling records, snapshot reopen, ownership/refusal controls and projection
 failure/retry. Terminal/runtime operations are mocked and the database is
 in-memory; this does not launch seats or establish live-fleet acceptance.
 Daemon TypeScript passes after the test changes.
+
+The complete startup-orchestrator file at `8f53276` reports 166 passes, four
+file-symlink creation failures (`EPERM`) and two skips. No production change
+was needed for those four host-limited cases. One skipped POSIX-only named
+community-resume failure case now also runs natively: an isolated PowerShell
+command starts an owned Node fixture, reads the saved resume name, and exits
+with status 4. The orchestrator records failure, keeps the exact saved DB
+name/type and dispatches only once, without starting a fresh conversation.
+That selected native case passes; the other prior skip and file-link limits
+remain separate, and the full edited file has not been rerun.
+
+The test uses the real Windows seat-environment conversion with a narrow owned
+child environment, in-memory DB and mocked terminal dispatch/readiness surfaces.
+Its YAML command is encoded as data so spaces and native backslashes survive
+preset loading. It does not use a real community provider or live terminal.
