@@ -255,7 +255,7 @@ function inlineMarkdownToMrkdwn(line: string): string {
   };
   return restore(escapeSlackText(line)
     .replace(/`[^`\n]+`/g, hold)
-    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => link(m, url, label))
+    .replace(/\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, (m, label: string, url: string) => link(m, url, label))
     .replace(/&lt;(https:\/\/[^\s|]+?)(?:\|(.+?))?&gt;/g, (m, url: string, label?: string) => link(m, url, label))
     // A bare URL is held as written: Slack links it, and `__` or `**` inside it is not bold.
     .replace(/https:\/\/[^\s<>|`]+/g, (m) => {
@@ -325,7 +325,7 @@ type RichInline =
   | { type: "link"; url: string; text?: string };
 
 // Code spans, Markdown links, Slack links, bare https URLs, then **bold**, __bold__ and *bold*.
-const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|(https:\/\/[^\s<>|`]+)|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
+const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|(https:\/\/[^\s<>|`]+)|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
 
 /** One already-redacted list item as rich text elements. Rich text is never parsed for
  *  mentions or links, so plain text needs no escaping; a link element is emitted only for a

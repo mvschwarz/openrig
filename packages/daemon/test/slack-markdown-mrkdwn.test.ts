@@ -243,4 +243,10 @@ describe("list items in a row body render as native Slack lists", () => {
       [t("See ", { bold: true }), { type: "link", url: "https://example.com" }, t(" now")],
     ] }])]);
   });
+
+  it("keeps balanced parentheses in a Markdown link target", () => {
+    const wiki = "https://en.wikipedia.org/wiki/Function_(mathematics)";
+    expect(md(`see [wiki](${wiki}).`)).toBe(`see <${wiki}|wiki>.`);
+    expect(buildBodyBlocks(`- [wiki](${wiki})`)).toEqual([list([{ style: "bullet", indent: 0, items: [[{ type: "link", url: wiki, text: "wiki" }]] }])]);
+  });
 });
