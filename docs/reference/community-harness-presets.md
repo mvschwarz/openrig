@@ -295,8 +295,9 @@ checked only against a stand-in agent.
   - it turns each submitted block into one prompt;
   - it reports turn boundaries as activity hooks;
   - it cancels on `/abort` or Ctrl-C, as the [runner contract](harness-runner-contract.md) describes.
-- **Permissions:** where OpenRig offers it, it sends each request to OpenRig, which asks the default person or the
-  seat's override. Otherwise, or when no one can be asked, it refuses the request and holds needs input.
+- **Permissions:** it sends each request to OpenRig, which asks the default person or the seat's override.
+  - **When no one can be asked,** it permits with dsh's own allow option, which is OpenRig's default.
+  - **It refuses and holds needs input** only after `--deny`, or when OpenRig can't be reached.
 - **Each seat gets its own dsh home,** with dsh's session-log and plugin-list uploads to DeepSeek turned off. Give that
   home credentials, or put a provider key in the seat's environment.
 - **Resume isn't declared.** The runner reopens a conversation by the method dsh advertises, and reports one missing only

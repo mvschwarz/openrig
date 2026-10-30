@@ -37,8 +37,14 @@ The runner submits each request to OpenRig, which asks one person:
 
 That person answers one of the options dsh offered, and the runner gives that answer to the same live request, once.
 
-When no one can be asked, or on an OpenRig without this path, the runner refuses the request at once and shows it in the
-pane. The seat then reads needs input until the next prompt.
+**When no one can be asked, the request is permitted** with dsh's own allow option. That's OpenRig's default, and the
+runner does the same on an older OpenRig without this path.
+
+**The runner refuses** only in two cases:
+- the seat's operator opted in to refusal, with `rig seat set-permissions-to <seat> --deny`;
+- OpenRig can't be reached.
+
+A refused request is shown in the pane, and the seat reads needs input until the next prompt.
 
 ## Before you declare resume
 

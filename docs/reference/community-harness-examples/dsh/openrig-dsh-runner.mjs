@@ -4,8 +4,9 @@
 //
 // It follows docs/reference/harness-runner-contract.md: it hosts `dsh --profile acp` over ACP on stdio, writes the
 // launch record once the conversation is open, turns each submitted block into one prompt, reports turn boundaries as
-// activity hooks, cancels on /abort or Ctrl-C, and sends permission requests to OpenRig for a person to answer
-// (refusing and holding needs input when no one can be asked). Copy it and maintain it as your own.
+// activity hooks, cancels on /abort or Ctrl-C, and sends permission requests to OpenRig: a person answers, or OpenRig
+// permits when no one can be asked (refusing and holding needs input only when the seat opted in to refusal or
+// OpenRig can't be reached). Copy it and maintain it as your own.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
@@ -308,8 +309,8 @@ async function main() {
   };
 
   // The answered path: OpenRig opens one ask to the default person (or the seat's override, `rig seat
-  // set-permissions-to`), and the runner reads the answer back for this same live request. Without that path (404) or
-  // with a refusal, it refuses.
+  // set-permissions-to`), and the runner reads the answer back for this same live request. With no one to ask, OpenRig
+  // permits at once, and so does the runner on an older OpenRig without the path (404). A refusal at submit refuses.
   const askOwner = async (requestId, toolCall, options) => {
     const turn = state.turn;
     const live = () => state.running && state.turn === turn && !state.cancelRequestedAt && !agentExited;
@@ -324,7 +325,19 @@ async function main() {
       if (askId) withdraw(askId, state.cancelRequestedAt ? "turn_cancelled" : agentExited ? "exited" : "turn_ended");
       return CANCELLED;
     }
-    if (submitted.status === 404) return refuse("this OpenRig has no answered path");
+    const offered = (optionId) => options.some((option) => option.optionId === optionId);
+    // No one can be asked: OpenRig's default is permit, with the agent's own allow option.
+    if (submitted.body?.ok && submitted.body.state === "permitted" && offered(submitted.body.optionId)) {
+      say(`[permission] permitted: ${submitted.body.reason ?? "no one can be asked"} (${submitted.body.optionId})`);
+      return { outcome: { outcome: "selected", optionId: submitted.body.optionId } };
+    }
+    // An older OpenRig has no human route at all, so the same default applies.
+    if (submitted.status === 404) {
+      const allow = options.find((option) => option.kind === "allow_once") ?? options.find((option) => option.kind === "allow_always");
+      if (!allow) return refuse("this OpenRig has no answered path, and the agent offered no allow option");
+      say(`[permission] permitted: this OpenRig has no answered path (${allow.optionId})`);
+      return { outcome: { outcome: "selected", optionId: allow.optionId } };
+    }
     if (!askId) return refuse(submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig refused it (${submitted.body?.code ?? submitted.status})`);
     state.holding = true; // OpenRig recorded the seat's permission prompt when it opened the ask
     say(`[permission] OpenRig asked a person (${askId}); waiting for their answer`);
@@ -347,9 +360,10 @@ async function main() {
           done = true;
           state.asks.delete(ask);
           const answer = read.body ?? {};
-          if (answer.state === "answered" && options.some((option) => option.optionId === answer.optionId) && live()) {
+          // A person's option, or OpenRig's permit when they closed it without one.
+          if ((answer.state === "answered" || answer.state === "permitted") && offered(answer.optionId) && live()) {
             state.holding = false;
-            say(`[permission] answered: ${answer.optionId}`);
+            say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
           } else {
             say(`[permission] not answered (${answer.state ?? answer.code ?? read.status}); refused, and the seat reads needs input until the next prompt`);

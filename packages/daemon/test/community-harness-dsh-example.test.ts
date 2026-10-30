@@ -62,7 +62,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "refuse" | "answer" | "pending";
+type Permissions = "absent" | "deny" | "permitted" | "answer" | "pending";
 interface Hook { auth: string | undefined; body: Record<string, unknown> }
 
 const cleanups: Array<() => void> = [];
@@ -83,7 +83,8 @@ async function fakeOpenRig(permissions: Permissions) {
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
         submits.push({ auth: req.headers.authorization, body });
-        if (permissions === "refuse") return json(409, { ok: false, code: "route_unsupported", error: "No one is chosen to answer this seat's permission requests." });
+        if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
+        if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
         return json(200, { ok: true, askId: "ask-1", created: true });
       }
       const withdraw = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)\/withdraw$/);
@@ -215,8 +216,20 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(requests(seat.log(), "session/prompt")).toHaveLength(1);
   });
 
-  it.each(["absent", "refuse"] as const)("refuses a permission request at once, shows it and holds needs input (answered path %s)", async (permissions) => {
+  it.each(["absent", "permitted"] as const)("permits with the agent's own allow when no one can be asked (OpenRig %s)", async (permissions) => {
     const openrig = await fakeOpenRig(permissions);
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("PERMIT an edit");
+    const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
+    expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
+    expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+    expect(seat.out()).toMatch(/\[permission\] permitted/);
+  });
+
+  it("refuses a permission request at once, shows it and holds needs input when the seat opted in to refusal", async () => {
+    const openrig = await fakeOpenRig("deny");
     const seat = start(openrig);
     await waitFor(seat.launch, "the launch record");
     seat.type("PERMIT an edit");
