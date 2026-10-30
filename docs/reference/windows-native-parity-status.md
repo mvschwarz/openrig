@@ -397,3 +397,12 @@ partial, and no rig is instantiated. Cumulative install/probe/executor suites
 pass 46 cases; eight selected bootstrap/approval cases pass, with the other
 bootstrap cases filtered. These receipts still do not claim a real installation.
 
+The retired separate-process gateway wrapper has no production caller in the
+scanned daemon sources; the in-daemon gateway subsystem is the current path.
+It was classified as retired rather than expanded with new native behavior.
+The live experimental Jev command/native-input suites pass 25 cases with one
+platform-specific case skipped, using owned files, synthetic credentials and
+injected provider sends. No external provider request or actual gateway starts.
+Current source hashes, report digest and the skipped case name are retained in
+the local audit ledger; these checks do not establish hosted provider acceptance.
+
