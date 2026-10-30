@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { resolveCodexHome, authStatus, authValidate } from "../src/lib/codex-auth.js";
-import { createPrivateTextFile } from "../../../daemon/src/domain/private-text-file.js";
+import { createPrivateTextFile } from "../../daemon/src/domain/private-text-file.js";
 import { expectPrivateFile } from "./helpers/private-file.js";
 
 const SENTINEL = "SENTINEL_TOKEN_MUST_NEVER_APPEAR_sk-abc123";
@@ -32,13 +32,10 @@ function writeFixture(file: string, content: string, mode = 0o600) {
   expectPrivateFile(file);
   if (mode === 0o600) return;
   // Deliberately unsafe synthetic file: test a real extra read grant, not chmod bits.
-  const script = `$ErrorActionPreference='Stop'
-$p='${file.replace(/'/g, "''")}'
-$acl=Get-Acl -LiteralPath $p
-$everyone=[System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
-$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone,'Read','Allow'))
-Set-Acl -LiteralPath $p -AclObject $acl`;
-  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, stdio: "pipe" });
+  // Change only the DACL: Set-Acl may attempt privileged security-descriptor
+  // sections even though this fixture needs only a public read ACE.
+  execFileSync(path.join(process.env.SystemRoot!, "System32", "icacls.exe"), [file, "/grant", "*S-1-1-0:(R)"],
+    { windowsHide: true, stdio: "pipe", timeout: 5000, env: { SystemRoot: process.env.SystemRoot } });
 }
 
 describe("authStatus (OPR.0.4.1.29 — presence/mode/login-state, NEVER secrets)", () => {
