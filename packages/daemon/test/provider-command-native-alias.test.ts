@@ -6,16 +6,20 @@ import { resolveWindowsProviderCommand } from "../src/domain/windows-provider-co
 import { verifyClaudePaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { windowsArguments } from "../src/adapters/windows-argv.js";
 
-it.runIf(process.platform === "win32").each(["claude", "codex"] as const)("canonicalizes both selected npm %s interpreter and script", name => {
+it.runIf(process.platform === "win32").each([
+  ["claude", false], ["codex", false], ["claude", true], ["codex", true],
+] as const)("canonicalizes both selected npm %s interpreter and script (local=%s)", (name, local) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-npm-alias-"));
   try {
     const packageName = name === "claude" ? "@anthropic-ai/claude-code" : "@openai/codex";
     const pkg = path.join(root, "node_modules", ...packageName.split("/")); fs.mkdirSync(pkg, { recursive: true });
-    const script = path.join(pkg, "cli.js"), node = path.join(root, "node.exe");
+    const bin = local ? path.join(root, "node_modules", ".bin") : root;
+    fs.mkdirSync(bin, { recursive: true });
+    const script = path.join(pkg, "cli.js"), node = path.join(bin, "node.exe");
     fs.writeFileSync(script, "// owned, never executed"); fs.writeFileSync(node, "owned identity fixture; never executed");
     fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: packageName, bin: { [name]: "cli.js" } }));
-    fs.writeFileSync(path.join(root, `${name}.cmd`), `@echo off\r\n"node" "%dp0%\\node_modules\\${packageName.replaceAll("/", "\\")}\\cli.js" %*\r\n`);
-    expect(resolveWindowsProviderCommand(name, { PATH: root, PATHEXT: ".CMD;.EXE" }, root)).toEqual({
+    fs.writeFileSync(path.join(bin, `${name}.cmd`), `@echo off\r\n"node" "%dp0%\\${local ? ".." : "node_modules"}\\${packageName.replaceAll("/", "\\")}\\cli.js" %*\r\n`);
+    expect(resolveWindowsProviderCommand(name, { Path: `"${path.relative(root, bin) || "."}"`, Pathext: ".CMD;.EXE" }, root)).toEqual({
       command: fs.realpathSync.native(node), prefix: [fs.realpathSync.native(script)],
     });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

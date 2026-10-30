@@ -280,3 +280,10 @@ The existing managed-runner synthetic process-table suite passed 22 cases in
 the combined attempts. The temporary-directory cleanup assumption remains
 unresolved; no shared process or ACL was changed to force the fixture through.
 
+Provider command identity fixtures now cover both global npm shims and project
+`node_modules/.bin` shims for Claude and Codex, selected through quoted relative
+PATH entries and mixed-case environment keys. All five native alias cases pass,
+including the existing executable identity check. The resolved interpreter and
+entry are compared to native canonical paths; synthetic executable/script files
+are never executed. This establishes selection behavior, not provider readiness.
+
