@@ -26,6 +26,17 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native activity self-report verification (2026-10-30)
+
+Four current activity-rung checks returned null because the injected reader
+split filenames only on `/`, while the production reader joined native paths.
+The fixture now uses the host basename operation. An additional owned real-file
+check uses the default reader in a path containing spaces, selects the latest
+matching seat record and ignores a newer foreign-seat record. The complete
+activity-adapter-rungs file passes 12/12. No production activity behavior was
+changed; this does not attest undocumented provider file formats or inspect
+actual seat/provider records.
+
 ## Native agent-image display names (2026-10-30)
 
 The actual image install/scan roundtrip failed for the supported display name
