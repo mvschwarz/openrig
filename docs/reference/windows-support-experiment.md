@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Selected project root identity uses native canonical paths
+
+The selected-project guard previously compared `realpathSync` strings and could
+report that an unchanged Windows project had moved when its path was supplied
+with different case. It now uses `realpathSync.native` on Windows, retaining the
+POSIX behavior. An owned filesystem fixture failed before the repair and passes
+afterward for mixed-case paths, a directory junction, distinct/missing roots and
+the actual `selectedProject` lookup with an aliased root query. Daemon TypeScript
+checking passes. No real workspace catalog, project source or live route was read.
+
 ### Native transcript partial-write cleanup
 
 Native rotation now records ownership immediately after exclusive creation of its
