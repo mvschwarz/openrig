@@ -132,8 +132,10 @@ const server = createServer((req, res) => {
 function askState(h, entry) {
   const script = h.asks.script;
   if (entry.withdrawn) return script.late ?? { state: "withdrawn" };
-  if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) return script.answer.optionId
-    ? { state: script.answer.state, optionId: script.answer.optionId } : { state: script.answer.state };
+  if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) {
+    const { state, optionId, reason } = script.answer;
+    return { state, ...(optionId ? { optionId } : {}), ...(reason ? { reason } : {}) };
+  }
   return { state: "pending" };
 }
 
@@ -458,18 +460,22 @@ const cases = {
     }
 
     // OpenRig's permit, at submit or at a read, is delivered like an answer. So is the runner's own permit when OpenRig
-    // can't give an answer: a refusal at submit other than denied_by_seat, a read that gets no answer, or a read status
-    // section 7 doesn't list. A stale or withdrawn ask, or a refused read, can't take an answer: the agent gets cancelled.
+    // can't give an answer: a refusal section 7's table marks "permits" (two of them 409s, like stale_generation, so the
+    // code decides, never the status), a read that gets no answer, or a status or code the section doesn't list. A
+    // refusal saying the request isn't the current occupant's, and a refused, stale or withdrawn read, can't take an
+    // answer: the agent gets cancelled, and nothing is held.
     const outcomes = [
       ["permitted at submit", { submit: { permitted: true } }, "allow-once"],
       ["permitted at read", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once" } }, "allow-once"],
       ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, "allow-once"],
-      ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, "allow-once"],
+      ["activity_grant_pending", { submit: { status: 409, code: "activity_grant_pending" } }, "allow-once"],
       ["unreachable read", { read: { drop: true } }, "allow-once"],
       ["unlisted read status (500)", { read: { status: 500, code: "internal_error" } }, "allow-once"],
+      ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, null],
+      ["activity_grant_stale read", { read: { status: 409, code: "activity_grant_stale" } }, null],
+      ["refused read (said_no)", { answer: { afterMs: 300, state: "refused", reason: "said_no" } }, null],
       ["stale ask", { answer: { afterMs: 300, state: "stale" } }, null],
       ["withdrawn ask", { answer: { afterMs: 300, state: "withdrawn" } }, null],
-      ["refused read (409)", { read: { status: 409, code: "activity_grant_stale" } }, null],
     ];
     await Promise.all(outcomes.map(async ([label, asks, optionId]) => {
       const h = await open(label.replace(/[^a-z0-9]+/g, "-"), asks, [{ permission: true, holdMs: scale(800) }, {}]);
@@ -478,6 +484,8 @@ const cases = {
       const got = await waitFor(() => outcome(h), scale(label === "unreachable read" ? 10000 : 4000));
       if (!optionId) {
         r.check(`${label}: the agent gets cancelled`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
+        r.check(`${label}: nothing is held`, await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(3000))
+          && !h.hooks("Notification", "permission_prompt").length, "no Stop/end_turn after the cancel, or the runner posted permission_prompt");
         return;
       }
       r.check(`${label}: the agent gets its allow_once option`, got?.outcome === "selected" && got.optionId === optionId, `got ${JSON.stringify(got)}`);
