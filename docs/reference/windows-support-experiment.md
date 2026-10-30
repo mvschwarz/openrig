@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Execution arrangement retains native path aliases
+
+An owned execution-view fixture reproduced valid uppercase Windows composition
+references yielding an indeterminate arrangement instead of the mission YAML.
+The read surface now resolves existing member paths and the slices root through
+native canonical spelling and recognizes the slice filename case-insensitively
+on Windows. POSIX handling and the shared composition validator remain unchanged.
+Both alias-only references and an actually uppercase filename retain the YAML
+arrangement and its canonical source path.
+
+Five selected cases pass: those two native cases, ordinary YAML promotion, malformed
+YAML fallback, and absent optional YAML fallback. The first combined run also
+exposed an existing POSIX-only slash assertion; it now uses the platform path
+join. The daemon TypeScript check passes. Sixty-five other cases were filtered,
+not run; this is targeted source review and owned fixture evidence, not complete
+execution-view or live-runtime acceptance. No real workspace/database was used.
+
 ### Explicit missions-directory casing on Windows
 
 An owned native fixture reproduced `rig scope` root resolution rejecting an
