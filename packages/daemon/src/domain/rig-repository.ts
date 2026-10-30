@@ -200,6 +200,8 @@ export interface RigStartupLayers {
   cultureFile?: string;
   startup?: StartupBlock;
   podStartupFiles?: Record<string, StartupFile[]>;
+  /** Export-only authored actions, never inherited by seats added later. */
+  podStartupActions?: Record<string, StartupBlock["actions"]>;
   /** Validated declarations for seats created without a first launch. One source per materialization. */
   materializedSources?: Array<{ root: string; spec: import("./types.js").RigSpec; nodeIds: string[]; cwdOverride?: string }>;
 }
