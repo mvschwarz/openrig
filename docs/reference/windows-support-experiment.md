@@ -26,6 +26,19 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native bin-wrapper selection checks (2026-10-30)
+
+The bin-wrapper file originally reported three file-symlink creation failures
+and one passing command-load failure check. Two interpreter-selection tests
+inject identity resolution and do not consume the wrapper link; their fixtures
+now use inert regular files and the native node.exe basename on Windows.
+An additional owned directory-junction case verifies physical package entry
+resolution without requiring file-symlink privilege. The complete file now
+reports 4/5 passing: paired-entry resolution, both interpreter selections and
+JSON/human command-module-load failure pass; the real file-symlink case still
+fails with EPERM and is retained. No interpreter was re-executed or real CLI
+installation changed by these fixtures; file-link acceptance remains separate.
+
 ## Native ABI script entry identity (2026-10-30)
 
 Invoking the installed ABI script through the Windows-equivalent basename
