@@ -10,10 +10,31 @@ export function resourceDirectoryName(id: string, platform: NodeJS.Platform = pr
   // otherwise alias each other on a case-insensitive Windows volume.
   let name = Array.from(id, char => /^[a-z0-9._-]$/.test(char) ? char : escape(char)).join("").replace(/[. ]+$/, escape);
   if (reserved.test(name)) name = escape(name[0]!) + name.slice(1);
+  if (name.length > 255) {
+    // Three hex digits per caseless CJK character keep every POSIX-sized
+    // UTF-8 component (<=255 bytes) within 173 UTF-16 units on Windows.
+    // %_ cannot occur in the ordinary percent encoding. Its digit records
+    // trailing hex padding, so the complete identity remains reversible.
+    const hex = Buffer.from(id).toString("hex"), padding = (3 - hex.length % 3) % 3;
+    const packed = hex.padEnd(hex.length + padding, "0").match(/.{3}/g)!
+      .map(group => String.fromCharCode(0x4e00 + parseInt(group, 16))).join("");
+    name = `%_${padding}${packed}`;
+    if (name.length > 255) throw new Error("Resource identity exceeds native directory component capacity");
+  }
   return name;
 }
 
 export function resourceIdFromDirectoryName(name: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32") return name;
+  if (/^%_[012][\u4e00-\u5dff]+$/.test(name)) {
+    const padding = Number(name[2]);
+    const hex = Array.from(name.slice(3), char => (char.charCodeAt(0) - 0x4e00).toString(16).padStart(3, "0")).join("");
+    if (padding && !hex.endsWith("0".repeat(padding))) return name;
+    const unpadded = padding ? hex.slice(0, -padding) : hex;
+    if (unpadded.length % 2) return name;
+    const id = Buffer.from(unpadded, "hex").toString("utf8");
+    try { if (resourceDirectoryName(id, platform) === name) return id; } catch { /* Not a canonical encoded identity. */ }
+    return name;
+  }
   try { return decodeURIComponent(name); } catch { return name; }
 }

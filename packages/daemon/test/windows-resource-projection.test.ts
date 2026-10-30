@@ -32,8 +32,31 @@ it("keeps qualified and literal escape spellings distinct and leaves POSIX names
   });
 });
 
-it.skipIf(process.platform !== "win32").each(["claude-code", "codex", "pi", "omp"] as const)(
-  "projects and replays a qualified %s skill under its native target", async runtime => {
+it.runIf(process.platform === "win32")("round-trips compact single-component names through native files, including all padding lengths", () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "resource-compact-"));
+  try {
+    const ids = [90, 91, 92, 248].map(length => "shared:" + "A".repeat(length));
+    ids.push("Shared:" + "A".repeat(90), "shared:" + "Ä".repeat(80), "shared:" + "ä".repeat(80), "shared:" + "中文".repeat(40));
+    const names = ids.map(id => resourceDirectoryName(id, "win32"));
+    expect(new Set(names.map(name => name.toLowerCase())).size).toBe(ids.length);
+    expect(new Set(names.slice(0, 3).map(name => name[2]))).toEqual(new Set(["0", "1", "2"]));
+    for (let index = 0; index < ids.length; index++) {
+      const name = names[index]!;
+      expect(name.length).toBeLessThanOrEqual(255); expect(path.basename(name)).toBe(name);
+      expect(name).not.toMatch(/[<>:"/\\|?*\x00-\x1f]|[. ]$/);
+      expect(resourceIdFromDirectoryName(name, "win32")).toBe(ids[index]);
+      expect(resourceDirectoryName(ids[index]!, "linux")).toBe(ids[index]);
+      const directory = path.join(root, name); fs.mkdirSync(directory);
+      fs.writeFileSync(path.join(directory, "SKILL.md"), ids[index]!);
+      expect(fs.readFileSync(path.join(directory, "SKILL.md"), "utf8")).toBe(ids[index]);
+    }
+    for (const name of ["%_0丂", "%_1丁", "%_2丁", "%_9invalid"]) expect(resourceIdFromDirectoryName(name, "win32")).toBe(name);
+    expect(resourceDirectoryName("%_1丂", "win32")).not.toBe("%_1丂");
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
+
+it.skipIf(process.platform !== "win32").each((["claude-code", "codex", "pi", "omp"] as const).flatMap(runtime => ["short", "long"].map(size => ({ runtime, size }))))(
+  "projects and replays a qualified $runtime $size skill under its native target", async ({ runtime, size }) => {
     const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), "qualified-skill-")));
     try {
       const cwd = path.join(root, "repo"), source = path.join(root, "source");
@@ -45,22 +68,25 @@ it.skipIf(process.platform !== "win32").each(["claude-code", "codex", "pi", "omp
       const deps = { fsOps, tmux: {} as TmuxAdapter, stateRoot, runnerEntryPath: path.join(root, "unused-runner.js") };
       const adapter = runtime === "claude-code" ? new ClaudeCodeAdapter(deps) : runtime === "codex" ? new CodexRuntimeAdapter(deps)
         : runtime === "pi" ? new PiRuntimeAdapter(deps) : new OmpRuntimeAdapter(deps);
-      const entry = { category: "skill" as const, effectiveId: "shared:skill", sourceSpec: "shared", sourcePath: root,
+      const id = size === "long" ? "shared:" + "A".repeat(90) : "shared:skill";
+      const entry = { category: "skill" as const, effectiveId: id, sourceSpec: "shared", sourcePath: root,
         resourcePath: "source", absolutePath: source, classification: "safe_projection" as const };
       const result = await adapter.project({ runtime, cwd, entries: [entry], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
         { cwd, tmuxSession: "owned@fixture" } as NodeBinding);
-      expect(result.failed).toEqual([]); expect(result.projected).toEqual(["shared:skill"]);
+      expect(result.failed).toEqual([]); expect(result.projected).toEqual([id]);
       const skillsRoot = runtime === "claude-code" ? path.join(cwd, ".claude", "skills") : runtime === "codex" ? path.join(cwd, ".agents", "skills")
         : path.join(piSeatPaths(stateRoot, "owned@fixture").agentDir, "skills");
-      const target = path.join(skillsRoot, "shared%3Askill", "SKILL.md");
+      const directory = size === "long" ? resourceDirectoryName(id) : "shared%3Askill";
+      expect(path.basename(directory)).toBe(directory);
+      const target = path.join(skillsRoot, directory, "SKILL.md");
       expect(fs.readFileSync(target, "utf8")).toBe("# Owned skill\n");
       expect(await adapter.listInstalled({ cwd, tmuxSession: "owned@fixture" } as NodeBinding))
-        .toContainEqual(expect.objectContaining({ effectiveId: "shared:skill", installedPath: path.dirname(target) }));
-      if (runtime === "claude-code") expect(claudeConflictTargetPath("skill", "shared:skill", cwd)).toBe(target);
-      if (runtime === "pi" || runtime === "omp") expect(adapter.skillTargetPath!("owned@fixture", "shared:skill")).toBe(target);
+        .toContainEqual(expect.objectContaining({ effectiveId: id, installedPath: path.dirname(target) }));
+      if (runtime === "claude-code") expect(claudeConflictTargetPath("skill", id, cwd)).toBe(target);
+      if (runtime === "pi" || runtime === "omp") expect(adapter.skillTargetPath!("owned@fixture", id)).toBe(target);
       fs.writeFileSync(target, "# Operator edit\n");
       const kept = seatSkillsToKeep([entry], { skillsRoot } as SeatSkillPaths);
-      expect([...kept.keep]).toEqual(["shared:skill"]); expect(kept.warnings).toHaveLength(1);
+      expect([...kept.keep]).toEqual([id]); expect(kept.warnings).toHaveLength(1);
       expect(fs.readFileSync(target, "utf8")).toBe("# Operator edit\n");
       const preparation = planCwdPreparation({ runtime, cwd, entries: [entry], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
         [], { cwd, tmuxSession: "owned@fixture" } as NodeBinding, adapter, { lastHash: () => undefined } as unknown as ProjectionManifestStore);
@@ -68,14 +94,14 @@ it.skipIf(process.platform !== "win32").each(["claude-code", "codex", "pi", "omp
       fs.unlinkSync(target);
       const replay = seatSkillReplay({ entries: [entry], files: [], paths: { skillsRoot } as SeatSkillPaths,
         rehydration: { missing: [target], refused: [] } });
-      expect([...replay.skipEntryIds]).toEqual(["shared:skill"]);
+      expect([...replay.skipEntryIds]).toEqual([id]);
       expect(fs.existsSync(target)).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   },
 );
 
-it.skipIf(process.platform !== "win32").each(["claude-code", "codex"] as const)(
-  "projects a qualified %s plugin without an invalid NTFS component", async runtime => {
+it.skipIf(process.platform !== "win32").each((["claude-code", "codex"] as const).flatMap(runtime => ["short", "long"].map(size => ({ runtime, size }))))(
+  "projects a qualified $runtime $size plugin without an invalid NTFS component", async ({ runtime, size }) => {
     const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), "qualified-projection-")));
     try {
       const cwd = path.join(root, "repo"), source = path.join(root, "source");
@@ -83,20 +109,24 @@ it.skipIf(process.platform !== "win32").each(["claude-code", "codex"] as const)(
       fs.writeFileSync(path.join(source, "payload.txt"), "owned plugin bytes");
       const git = (...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", windowsHide: true });
       git("init", "-q");
+      git("config", "core.quotepath", "false");
       const fsOps = { exists: fs.existsSync, readFile: (file: string) => fs.readFileSync(file, "utf8"),
         writeFile: (file: string, bytes: string) => fs.writeFileSync(file, bytes), mkdirp: (dir: string) => fs.mkdirSync(dir, { recursive: true }),
         copyFile: fs.copyFileSync, listFiles: walk, homedir: root };
       const adapter = runtime === "codex" ? new CodexRuntimeAdapter({ fsOps, tmux: {} as TmuxAdapter })
         : new ClaudeCodeAdapter({ fsOps, tmux: {} as TmuxAdapter });
-      const result = await adapter.project({ runtime, cwd, entries: [{ category: "plugin", effectiveId: "shared:openrig-core",
+      const id = size === "long" ? "shared:" + "A".repeat(90) : "shared:openrig-core";
+      const result = await adapter.project({ runtime, cwd, entries: [{ category: "plugin", effectiveId: id,
         sourceSpec: "shared", sourcePath: root, resourcePath: "source", absolutePath: source, classification: "safe_projection",
         pluginType: runtime === "codex" ? "codex" : "claude" }], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
       { cwd } as NodeBinding);
       expect(result.failed).toEqual([]);
-      expect(result.projected).toEqual(["shared:openrig-core"]);
-      const relative = `${runtime === "codex" ? ".codex" : ".claude"}/plugins/shared%3Aopenrig-core/payload.txt`;
+      expect(result.projected).toEqual([id]);
+      const relative = `${runtime === "codex" ? ".codex" : ".claude"}/plugins/${size === "long" ? resourceDirectoryName(id) : "shared%3Aopenrig-core"}/payload.txt`;
       expect(fs.readFileSync(path.join(cwd, relative), "utf8")).toBe("owned plugin bytes");
-      if (runtime === "codex") expect(git("check-ignore", "--", relative).trim()).toBe(relative);
+      // Automatic Git exclusion is specific to the shipped core plugin; the
+      // long arbitrary plugin above must not broaden that ownership rule.
+      if (runtime === "codex" && size === "short") expect(git("check-ignore", "--", relative).trim()).toBe(relative);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   },
 );
