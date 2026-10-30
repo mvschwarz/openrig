@@ -49,3 +49,18 @@ interactive installed-TUI checks, live provider continuity and visible
 terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
+# Native scoped-shell implementation checkpoint (2026-10-30)
+
+The initial-shell adapter now prepares a private Windows bootstrap for configured
+PowerShell, pwsh and cmd shells instead of unconditionally rejecting Windows.
+It clears inherited child environment entries, applies selected values with
+case-insensitive precedence, and takes terminal identity from the fresh pane.
+The bootstrap argv contains its private file path rather than environment values.
+Startup supplies the native system/profile/temp roots needed by these children.
+
+Two focused Windows tests pass, including an actual PowerShell child with synthetic
+multiline Unicode values, unrelated inherited-variable removal, fresh pane identity,
+working-directory preservation and bootstrap-file removal. Daemon TypeScript passes.
+This is not psmux cold-server or end-to-end seat acceptance: those paths remain open,
+as do unsupported configured shell semantics (which retain the diagnostic fallback).
+

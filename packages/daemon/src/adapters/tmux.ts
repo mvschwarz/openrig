@@ -15,6 +15,7 @@ import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateCon
 import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
 import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
 import { windowsCmdBridgeInvocation } from "../domain/windows-cmd-bridge.js";
+import { windowsScopedLaunch } from "./windows-scoped-launch.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -409,7 +410,6 @@ export class TmuxAdapter {
     try {
       const policy = this.launchEnvironment();
       if (policy.inheritTmuxEnvironment) return null;
-      if (process.platform === "win32") throw new Error("POSIX launch boundary unavailable");
       let shell = await this.getDefaultShell();
       // tmux reads these options from a running server. The first seat on a new server starts the empty server here,
       // as a first start does, so it gets the same scoped environment as every later seat (#2041).
@@ -433,6 +433,12 @@ export class TmuxAdapter {
       // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
       const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
       addSeatRuntimeDir(selected, policy.runtimeDir);
+      if (process.platform === "win32") {
+        const file = this.fileOps.tmpName();
+        const launch = windowsScopedLaunch(shell, command ?? "", selected, file);
+        await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+        return launch.argv;
+      }
       const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {

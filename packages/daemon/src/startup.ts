@@ -677,6 +677,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // session (OPR.0.4.3.04), so a handed-over successor self-identifies +
   // reports activity exactly like a launched seat.
   const launchSessionEnv: Record<string, string | undefined> = {
+    ...(process.platform === "win32" ? Object.fromEntries(["SystemRoot", "WINDIR", "ComSpec", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"].map(key => [key, process.env[key]])) : {}),
     PATH: process.env.PATH,
     OPENRIG_HOME,
     OPENRIG_DB: seatDbPath,
