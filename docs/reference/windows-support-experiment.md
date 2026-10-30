@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Project catalog cwd inference (2026-10-30)
+
+The catalog reader had the same DOS-short/long path disagreement as registration:
+an owned working directory inside a declared project was not recognized when
+native expansion supplied its long spelling. The reader's selected-root and
+cwd canonicalization now both use native Windows realpath; POSIX is unchanged.
+
+The actual owned-directory case failed before repair and passes afterward. It
+also reads an explicitly selected sibling project and confirms that two entries
+for the same physical root still produce a project_required ambiguity with both
+candidates. Daemon TypeScript checking passes. This is catalog-selection evidence,
+not a live work-install or operating-posture acceptance result.
+
 ### Project registration physical-path identity (2026-10-30)
 
 An owned existing project was refused as a same-ID/different-root conflict
