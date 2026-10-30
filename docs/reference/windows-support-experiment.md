@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Codex Git metadata resolver review (2026-10-30)
+
+The resolver already invokes Git directly with argv and checks that returned
+metadata paths are directories. Native owned-repository checks cover an
+ordinary repository, missing metadata, a linked worktree, malformed metadata,
+and a separate metadata directory containing spaces: five selected checks
+pass, with 21 other tests filtered out. The linked-worktree assertion previously
+compared Git's long slash-separated path with Node's DOS-short backslash path;
+it now compares native physical identities and still checks both directories.
+No resolver implementation defect was established in these cases. This does
+not prove native provider sandbox access, fresh/resume/fork launch acceptance,
+or the POSIX unreadable-directory fixture on Windows.
+
 ### Generated-file Git hygiene paths (2026-10-30)
 
 An owned native Git fixture exposed two path mismatches in generated-file
