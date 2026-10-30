@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenShellDriver } from "../src/adapters/openshell-driver.js";
@@ -25,4 +25,27 @@ it("preserves a typed missing-file result from the fixed guest helper", async ()
     : JSON.stringify({ ok: false, code: "environment_file_missing" }));
   const binding = { guestRoot: "/sandbox/openrig", placement: { gateway: "gateway", workspace: "workspace", name: "worker-one" }, resource: { id: "immutable", name: "worker-one", workspace: "workspace" } } as EnvironmentBinding;
   await expect(new OpenShellDriver(command).read(binding, "/sandbox/openrig/work/role.md")).rejects.toMatchObject({ code: "environment_file_missing" });
+});
+
+it("ingests bounded raw bytes instead of vendor tar after a growing stat", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "openshell-ingest-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  let vendorDownloads = 0;
+  const command = vi.fn(async (args: string[]) => {
+    if (args.includes("get")) return JSON.stringify({ id: "immutable", name: "worker-one", workspace: "workspace", phase: "Ready", labels: {} });
+    if (args.includes("download")) { vendorDownloads++; writeFileSync(join(root, "artifact.json"), Buffer.alloc(1024*1024+1)); return ""; }
+    if (args.includes("--stat")) return JSON.stringify({ ok: true, bytes: 2 });
+    return JSON.stringify({ ok: true, base64: Buffer.alloc(1024*1024+1).toString("base64") });
+  });
+  const binding = { guestRoot: "/sandbox/openrig", placement: { gateway: "gateway", workspace: "workspace", name: "worker-one" }, resource: { id: "immutable", name: "worker-one", workspace: "workspace" } } as EnvironmentBinding;
+  await expect(new OpenShellDriver(command).download(binding, "/sandbox/openrig/work/artifacts/report.json", join(root,"artifact.json"))).rejects.toMatchObject({ code: "environment_file_invalid" });
+  expect(vendorDownloads).toBe(0); expect(existsSync(join(root,"artifact.json"))).toBe(false);
+});
+it("transfers one bounded file without extracting a vendor archive", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "openshell-ingest-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const command = vi.fn(async (args: string[]) => args.includes("get") ? JSON.stringify({ id: "immutable", name: "worker-one", workspace: "workspace", phase: "Ready" })
+    : JSON.stringify({ ok: true, base64: Buffer.from('{"ok":true}').toString("base64") }));
+  const binding = { guestRoot: "/sandbox/openrig", placement: { gateway: "gateway", workspace: "workspace", name: "worker-one" }, resource: { id: "immutable", name: "worker-one", workspace: "workspace" } } as EnvironmentBinding;
+  await new OpenShellDriver(command).download(binding, "/sandbox/openrig/work/artifacts/report.json", join(root,"artifact.json"));
+  expect(readFileSync(join(root,"artifact.json"),"utf8")).toBe('{"ok":true}');
+  expect(command.mock.calls.some(([args]) => args.includes("download"))).toBe(false);
 });

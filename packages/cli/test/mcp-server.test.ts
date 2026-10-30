@@ -44,10 +44,10 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 36 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // T1: MCP server lists all 37 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
   // the team, slice, mission and two context reads, the artifact read, the decision room and delegated decision, and the
   // worker's handoff and unclaim
-  it("lists all 36 tools", async () => {
+  it("lists all 37 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -64,6 +64,7 @@ describe("MCP Server", () => {
       "rig_context_pack",
       "rig_discover",
       "rig_down",
+      "rig_environment_export",
       "rig_human_decision_room",
       "rig_mission",
       "rig_ps",
@@ -243,7 +244,8 @@ describe("MCP Server", () => {
     const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
     // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
-    const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
+    const destructive = ["rig_bind", "rig_discover", "rig_down",
+      "rig_environment_export", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
       "rig_queue_update", "rig_restore", "rig_send", "rig_up"];
     const hints = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
     expect(Object.keys(hints).sort()).toEqual([...reads, ...additive, ...destructive].sort());
@@ -591,6 +593,7 @@ describe("MCP Server", () => {
 
     const result = await mcpClient.callTool({
       name: "rig_down",
+      "rig_environment_export",
       arguments: { rigId: "rig-1", delete: true, force: false, snapshot: false },
     });
 
@@ -656,6 +659,7 @@ describe("MCP Server", () => {
 
     const result = await mcpClient.callTool({
       name: "rig_down",
+      "rig_environment_export",
       arguments: { rigId: "missing" },
     });
 
@@ -676,6 +680,7 @@ describe("MCP Server", () => {
 
     const result = await mcpClient.callTool({
       name: "rig_down",
+      "rig_environment_export",
       arguments: { rigId: "rig-1" },
     });
 
@@ -689,7 +694,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(36);
+    expect(result.tools.length).toBe(37);
 
     // Clean disconnect
     await cleanup();
@@ -703,7 +708,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(36);
+    expect(result2.tools.length).toBe(37);
 
     await client2.close();
     await server2.close();

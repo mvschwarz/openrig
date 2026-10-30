@@ -1,3 +1,6 @@
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, rmSync } from "node:fs";
@@ -35,7 +38,8 @@ function fixture() {
     async read(_binding: unknown, destination: string) { if (!files.has(destination)) throw new EnvironmentError("environment_file_missing", "Guest file is missing"); return Buffer.from(files.get(destination)!); },
     async download(_binding: unknown, source: string, destination: string) { downloads++; if (!files.has(source)) throw new Error("guest unavailable"); writeFileSync(destination, files.get(source)!); },
   };
-  const build = () => createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "exports") } as never });
+  const queue = new QueueRepository(db, new EventBus(db)); queue.attachOutbox(new OutboxHandler(db));
+  const build = () => createTestApp(db, { appDeps: { queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "exports") } as never });
   let f = build();
   const rig = f.rigRepo.createRig("environment-fixture");
   const node = f.rigRepo.addNode(rig.id, "worker", { runtime: "openshell-claude", cwd: root });
@@ -53,7 +57,7 @@ function fixture() {
   const task = async () => {
     const response = await f.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@environment-fixture" },
       body: JSON.stringify({ qitemId: "task-one", destinationSession: "worker@environment-fixture", body: "Produce the selected artifact" }) });
-    expect(response.status).toBeLessThan(300);
+    expect(response.status, JSON.stringify(await response.clone().json())).toBeLessThan(300);
   };
   return { root, db, resources, files, driver, input, request, create, task, health: () => f.app.request("/healthz"),
     counts: () => ({ creates, downloads }), loseCreate: () => { loseCreate = true; }, restart: () => { f = build(); } };
@@ -210,4 +214,22 @@ describe("managed environment artifact return", () => {
     const f = await prepared(); f.exportInput.path = "../../native/history.jsonl";
     expect((await f.export()).status).toBe(400); expect(f.counts().downloads).toBe(0);
   });
+});
+
+it("allows a corrected attach after a refused immutable identity", async () => {
+  const f = fixture(); f.resources.push({ id: "correct-id", name: "worker-one", workspace: "workspace", phase: "Ready" });
+  expect((await f.request("/attach", { ...f.input, operationId: "bad-attach", resourceId: "wrong-id" })).status).toBe(409);
+  const result = await f.request("/attach", { ...f.input, operationId: "correct-attach", resourceId: "correct-id" });
+  expect(result.status).toBe(201); expect(result.body.resource.id).toBe("correct-id");
+});
+it("allows a corrected create when the old binding has never requested a provider effect", async () => {
+  const f = fixture(); f.resources.push({ id: "foreign", name: "worker-one", workspace: "workspace", phase: "Ready" });
+  expect((await f.create()).status).toBe(409);
+  const result = await f.request("/create", { ...f.input, operationId: "correct-create", placement: { ...f.input.placement, name: "worker-two" } });
+  expect(result.status).toBe(201); expect(f.counts().creates).toBe(1);
+});
+it("reports an already-bound seat as a typed conflict", async () => {
+  const f = fixture(); expect((await f.create()).status).toBe(201);
+  const result = await f.request("/create", { ...f.input, bindingId: "other-binding", operationId: "other-create" });
+  expect(result.status).toBe(409); expect(result.body.code).toBe("environment_seat_bound");
 });
