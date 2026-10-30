@@ -465,3 +465,12 @@ not contain production-source hashes themselves; overlapping counts are not a
 new cumulative test total. Historical tmux/startup evidence still needs its own
 reconciliation rather than inheriting a current whole-runtime claim.
 
+A fresh scoped-shell receipt at `786a74f` records identical before/after HEAD
+and hashes for tmux, native scoped launch and startup. Four cases pass, including
+stock psmux 3.4.0 cold empty-server setup, first scoped session, selected child
+environment and dead-pane respawn/routing. No source changed during execution.
+Startup's environment injection is hash-recorded, not createDaemon acceptance;
+no daemon deployment, existing seat or provider was activated. An initial local
+receipt-wrapper construction failed before any test ran; the corrected standalone
+runner produced this terminal receipt rather than treating that failure as a pass.
+
