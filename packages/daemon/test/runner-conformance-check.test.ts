@@ -69,7 +69,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["stop-while-attention", "4", "no idle Stop or beat while holding that attention"],
     ["silent-permission", "4", "what was asked is shown in the pane"],
     ["no-submit", "4b", "allow: the request is submitted to /api/activity/permission-requests"],
-    ["numeric-request-id", "4b", "the submit passes OpenRig's checks"],
+    ["wrong-request-id", "4b", "requestId is the agent's JSON-RPC id"],
     ["self-prompt", "4b", "OpenRig records the prompt; the runner doesn't post permission_prompt itself"],
     ["deliver-twice", "4b", "allow: it's delivered once"],
     ["deliver-unoffered", "4b", "unoffered option: the agent gets cancelled, never an allow option"],

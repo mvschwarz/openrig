@@ -120,7 +120,7 @@ async function onPermission(msg) {
   const askedInTurn = turn;
   const submitted = await api("POST", "/api/activity/permission-requests", {
     sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, generation: env.OPENRIG_OCCUPANT_GENERATION,
-    nativeRef: sessionId, turnId: String(turn), requestId: breaks.has("numeric-request-id") ? msg.id : String(msg.id),
+    nativeRef: sessionId, turnId: String(turn), requestId: breaks.has("wrong-request-id") ? `${msg.id}-other` : msg.id,
     toolCall: { title: toolCall?.title, kind: toolCall?.kind }, options, occurredAt: new Date().toISOString() });
   if (submitted.status !== 200 || !submitted.body?.askId) {
     if (breaks.has("grant-on-refusal")) select(msg.id, options[0].optionId); else refuse(msg.id);
