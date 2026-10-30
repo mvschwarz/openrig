@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { renderWindowsManagedLaunch } from "../src/adapters/windows-launch.js";
 import { parseWindowsCommandLine, windowsArguments } from "../src/adapters/windows-argv.js";
 import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
@@ -56,7 +57,7 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
-  it.runIf(process.platform === "win32").each(["supported", "timeout", "malformed", "missing", "generation-change"])(
+  it.runIf(process.platform === "win32").each(["supported", "timeout", "malformed", "missing", "generation-change", "later-generation"])(
     "keeps native permission selection and audit effects bound for %s capability discovery", async kind => {
       const f = fixture(), db = createFullTestDb(); cleanups.push(() => db.close());
       const rigRepo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
@@ -70,17 +71,20 @@ describe("managed Windows launch", () => {
         tmuxAdapter: { sendText, sendKeys, sendShellCommand } as never,
         runtimeAdapters: { "claude-code": { claudeManagedLaunch: managed } as never } });
       if (kind === "missing") f.env.PATH = path.join(f.home, "missing-bin");
+      let queries = 0;
       vi.mocked(execFile).mockImplementation(((file: string, args: string[], options: { env: Record<string, string> }, done: (error: Error | null, help: string) => void) => {
+        queries++;
         expect(queriedCommand(file, args, options).file).toBe(f.executable);
         expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
         if (kind === "generation-change") registry.registerSession(node.id, "replacement@native-choice", "handover");
         done(kind === "timeout" ? new Error("owned capability timeout") : null,
-          kind === "malformed" ? "no permission vocabulary" : '--permission-mode <mode> (choices: "auto", "default")');
+          kind === "malformed" ? "no permission vocabulary" : kind === "later-generation" && queries > 1
+            ? '--permission-mode <mode> (choices: "acceptEdits")' : '--permission-mode <mode> (choices: "auto", "default")');
       }) as never);
       const result = await service.setPermissions({ nodeId: node.id, mode: "auto", actor: "operator", reason: "native fixture choice" });
       const selections = db.prepare("SELECT mode,actor FROM node_permission_selections WHERE node_id=?").all(node.id);
       const events = db.prepare("SELECT payload FROM events WHERE type='node.permissions_changed'").all();
-      if (kind === "supported") {
+      if (kind === "supported" || kind === "later-generation") {
         expect(result).toMatchObject({ ok: true, changed: true });
         expect(selections).toEqual([{ mode: "auto", actor: "operator" }]);
         expect(events).toHaveLength(1);
@@ -89,9 +93,36 @@ describe("managed Windows launch", () => {
         expect(selections).toEqual([]); expect(events).toEqual([]);
       }
       expect(JSON.stringify({ selections, events })).not.toContain(f.env.ANTHROPIC_API_KEY);
-      expect(execFile).toHaveBeenCalledTimes(kind === "missing" ? 0 : 1);
+      if (kind === "later-generation") {
+        registry.registerSession(node.id, "next@native-choice", "handover");
+        registry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "next@native-choice", tmuxPane: "%2" });
+        const adapter = new ClaudeCodeAdapter({ tmux: { sendText, sendKeys, sendShellCommand } as never,
+          fsOps: { readFile: () => { throw Error("No projection expected"); }, writeFile: vi.fn(), exists: () => false, mkdirp: vi.fn(), copyFile: vi.fn() }, claudeManagedLaunch: managed });
+        expect(await adapter.launchHarness({ nodeId: node.id, cwd: f.cwd, tmuxSession: "next@native-choice", tmuxPane: "%2", permissionMode: "auto" } as never,
+          { name: "next@native-choice" })).toMatchObject({ ok: false });
+        expect(db.prepare("SELECT mode,actor FROM node_permission_selections WHERE node_id=?").all(node.id)).toEqual(selections);
+        expect(db.prepare("SELECT payload FROM events WHERE type='node.permissions_changed'").all()).toEqual(events);
+      }
+      expect(execFile).toHaveBeenCalledTimes(kind === "missing" ? 0 : kind === "later-generation" ? 2 : 1);
       expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled(); expect(sendShellCommand).not.toHaveBeenCalled();
     });
+
+  it.runIf(process.platform === "win32")("passes a reserved successor generation to the native child without committing the current tenure", async () => {
+    const f = fixture(); fs.copyFileSync(process.execPath, f.executable);
+    const launch = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1", generation: "reserved-successor" }, "auto");
+    const command = launch.command(["-e", "console.log(JSON.stringify({node:process.env.OPENRIG_NODE_ID,generation:process.env.OPENRIG_OCCUPANT_GENERATION}))"]);
+    const before = f.db.prepare("SELECT generation_uuid FROM occupant_tenures").all();
+    expect(before).toEqual([{ generation_uuid: "generation" }]);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const output = await new Promise<string>((resolve, reject) => native.execFile(
+      path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
+      { env: { SystemRoot: process.env.SystemRoot, HOME: f.home, USERPROFILE: f.home, OPENRIG_OCCUPANT_GENERATION: "wrong-pane-generation" },
+        encoding: "utf8", timeout: 10000, windowsHide: true },
+      (error, stdout) => error ? reject(error) : resolve(stdout)));
+    expect(JSON.parse(output.trim())).toEqual({ node: "node", generation: "reserved-successor" });
+    expect(f.db.prepare("SELECT generation_uuid FROM occupant_tenures").all()).toEqual(before);
+  });
 
   it.runIf(process.platform === "win32")("queries and launches a recognized owned npm Claude entry with a frozen interpreter and script", async () => {
     const f = fixture();
