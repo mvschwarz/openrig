@@ -907,3 +907,20 @@ decisions, unchanged input/settings, malformed-input fallback and paths with
 spaces/apostrophes. It neither executes the command described in the hook input
 nor proves Claude's own Windows hook-shell dispatch. POSIX tests retain their
 shell execution. Daemon TypeScript passes after all three test-file changes.
+
+Shipped-role orientation and scope-view projection pass 30/30 on native Windows
+after correcting fixture-only path and line-ending assumptions. Shipped agent
+references use portable slash-separated paths, removal of the one orientation
+line accepts CRLF without rewriting the rest of the source, and scope fixtures
+resolve native filesystem paths. Authored requirements/evidence remain the
+scope data source; `PROGRESS.md` is still display-only. No production code was
+changed for these two files.
+
+The accompanying generated-file hygiene exploration is not green: its current
+file has 12 failures, including Windows-invalid fixture filenames, directory
+symlink privilege, POSIX command wrappers and Git's quoted native path output.
+Qualified plugin IDs such as `shared:openrig-core` are still used as literal
+directory components in those fixtures and in projection target construction;
+native namespaced projection needs a dedicated reproduction and reconciliation
+of target paths and generated-file exclusion before any parity claim. The
+successful role/scope checks do not close that separate projection requirement.
