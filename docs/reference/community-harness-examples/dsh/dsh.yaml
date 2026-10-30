@@ -1,0 +1,20 @@
+# Install as $OPENRIG_HOME/community-harnesses/dsh.yaml, with openrig-dsh-runner.mjs (executable) on the seat's PATH.
+format: 1
+name: dsh
+command: openrig-dsh-runner.mjs
+maintainer: Your name or team
+runner: true
+launch_result: true
+first_input: true
+limits:
+  - written for dsh 0.2.1-rc.2 (npm @deepseek-ai/dsh) over ACP protocol 1, with Node 22 or later, and checked against a stand-in agent only
+  - each seat gets its own dsh home under $OPENRIG_HOME/state/dsh/<node>/home, holding a patch that turns off dsh's session-log and plugin-list uploads to DeepSeek; give it credentials (.credentials.yaml there) or a provider key in the seat's env
+  - DSH_PERMISSION_MODE defaults to workspace-write; a permission request goes to the default person or the seat's override (rig seat set-permissions-to), is permitted with dsh's allow_once (else allow_always) when no one can be asked or OpenRig can't answer, and is refused and held as needs input only after --deny
+  - allow_always creates a standing grant in dsh, which OpenRig doesn't record or revoke; the runner prefers allow_once, and where dsh keeps the grant and for how long isn't checked
+  - resume isn't declared until a real dsh has reopened a conversation and refused a missing one; the runner reopens by the method dsh advertises and reports missing only on dsh's own not-found error
+  - a prompt whose whole text is /abort can't be sent; a Ctrl-C byte inside a paste also aborts; without a TTY, input is read line by line; this isn't a binary-safe channel
+  - one prompt at a time; a message that arrives mid-turn waits for the next turn
+  - the seat's model isn't passed; dsh uses its own configured model
+  - no guidance, skills or startup files are placed; dsh reads its own AGENTS.md and skill folders
+  - when the pane closes, the runner cancels a running turn and stops dsh; anything dsh's tools started may keep running
+  - fork unsupported

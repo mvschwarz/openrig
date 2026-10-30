@@ -285,6 +285,30 @@ on it, not Pi choosing by itself to park or hand work on.
 
 Copy both and maintain them as your own.
 
+## An example runner: dsh
+
+[`community-harness-examples/dsh/`](community-harness-examples/dsh/) has a runner preset (`runner: true`) and a small runner
+for DeepSeek Harness, which speaks ACP on stdio and has no terminal UI of its own. It's written for dsh 0.2.1-rc.2 and
+checked only against a stand-in agent.
+- **The runner:**
+  - it opens the conversation and writes the launch record;
+  - it turns each submitted block into one prompt;
+  - it reports turn boundaries as activity hooks;
+  - it cancels on `/abort` or Ctrl-C, as the [runner contract](harness-runner-contract.md) describes.
+- **Permissions:** it sends each request to OpenRig, which asks the default person or the seat's override.
+  - **When no one can be asked, or OpenRig can't answer,** it permits with dsh's own allow option (`allow_once`, else
+    `allow_always`), which is OpenRig's default. `allow_always` creates a standing grant in dsh.
+  - **It refuses and holds needs input** only after `--deny`. A person's no when dsh offered no reject option, or a
+    request OpenRig says isn't the current occupant's, is answered cancelled.
+- **Each seat gets its own dsh home,** with dsh's session-log and plugin-list uploads to DeepSeek turned off. Give that
+  home credentials, or put a provider key in the seat's environment.
+- **Resume isn't declared.** The runner reopens a conversation by the method dsh advertises, and reports one missing only
+  on dsh's own not-found error. Declare `resume: true` only after a real dsh has reopened a conversation and refused a
+  missing one.
+
+Its [README](community-harness-examples/dsh/README.md) has the setup and a check you can run without a model. Copy both
+and maintain them as your own.
+
 The launcher is the contributor's code, in the contributor's package. OpenRig runs no code from a preset and loads no
 module into its daemon. A preset that sets `launch_result`, `names_conversation`, `startup_assisted`, `first_input`, `runner` or `passes_model` is refused by an older
 OpenRig that doesn't know the field.
