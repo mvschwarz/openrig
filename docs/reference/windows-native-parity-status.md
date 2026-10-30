@@ -1311,3 +1311,31 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+# Experimental native Windows installer entry
+
+The optional POSIX `scripts/install.sh` wrapper has a native Node counterpart:
+
+```powershell
+node scripts/install-windows.mjs --dry-run --package C:\path\to\openrig-cli.tgz
+node scripts/install-windows.mjs --package C:\path\to\openrig-cli.tgz
+```
+
+Use a tarball built from this experimental branch. Omitting `--package` selects
+`@openrig/cli`; a published version may not contain native Windows support.
+This entry does not change the official support status or the documented WSL2 route.
+The preview executes no subprocesses. Execution checks Node/npm, installs globally
+through npm's JavaScript entry, resolves that installation's CLI, runs its ABI
+checker when available, and invokes `setup --dry-run` followed by `setup`.
+Setup can install tools and write defaults; the wrapper does not log in, elevate,
+select a permission policy, or launch a daemon/team. It preserves failing stage
+exit codes and distinguishes an installed CLI from incomplete setup. A missing
+ABI checker is explicitly skipped, never reported as a compatibility pass.
+
+Native owned-prefix fixtures in `scripts/install-windows.test.mjs` pass 10/10:
+literal paths containing spaces/metacharacters, inert preview/import, directory
+alias execution, installed JavaScript entry selection, install/ABI/setup failures,
+missing checker reporting, and refusal of an npm root outside the selected prefix.
+They use a fixture npm implementation and do not establish real network installation
+or provider setup acceptance. The first run exposed an uncaptured npm prefix/root
+result; capturing those outputs fixes the observed failure. No user-global install
+was performed for these checks. Existing package-gate evidence remains separate.
