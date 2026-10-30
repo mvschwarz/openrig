@@ -6,6 +6,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { renderWindowsManagedLaunch } from "../src/adapters/windows-launch.js";
 import { parseWindowsCommandLine, windowsArguments } from "../src/adapters/windows-argv.js";
 import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
@@ -57,6 +58,37 @@ function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; mem
 }
 
 describe("managed Windows launch", () => {
+  it.runIf(process.platform === "win32").each(["staged-generation", "staged-executable", "staged-environment", "pasted-environment"])(
+    "revalidates the Windows staged command at the %s boundary", async condition => {
+      const f = fixture(), staged = path.join(f.home, "owned-launch.ps1");
+      const unlinked: string[] = [], pasted: string[] = [], keys: string[][] = [];
+      const change = () => {
+        if (condition.endsWith("generation")) f.db.exec("UPDATE occupant_tenures SET generation_uuid='replacement'");
+        else if (condition.endsWith("executable")) fs.appendFileSync(f.executable, "changed");
+        else f.env.HOME = path.join(f.home, "different-home");
+      };
+      const terminal = new TmuxAdapter(async () => { throw Error("No POSIX transport expected"); }, {
+        tmpName: () => staged, bufferName: () => "unused",
+        writeFile: async () => { if (condition.startsWith("staged")) change(); },
+        unlink: async file => { unlinked.push(file); },
+      }, undefined, "psmux");
+      vi.spyOn(terminal, "getPaneCommand").mockResolvedValue("powershell");
+      const internals = terminal as unknown as {
+        sendTextUnchecked(target: string, text: string, check: () => void): Promise<{ ok: true }>;
+        sendKeysUnchecked(target: string, values: string[]): Promise<{ ok: true }>;
+      };
+      vi.spyOn(internals, "sendTextUnchecked").mockImplementation(async (_target, text, check) => {
+        check(); pasted.push(text); if (condition.startsWith("pasted")) change(); return { ok: true };
+      });
+      vi.spyOn(internals, "sendKeysUnchecked").mockImplementation(async (_target, values) => { keys.push(values); return { ok: true }; });
+      const adapter = new ClaudeCodeAdapter({ tmux: terminal, claudeManagedLaunch: f.managed,
+        fsOps: { readFile: () => "{}", writeFile: vi.fn(), exists: () => false, mkdirp: vi.fn(), copyFile: vi.fn() } });
+      expect(await adapter.launchHarness({ nodeId: "node", cwd: f.cwd, tmuxSession: "seat", tmuxPane: "%1", permissionMode: "auto" } as never,
+        { name: "seat" })).toMatchObject({ ok: false });
+      expect(pasted).toHaveLength(condition.startsWith("pasted") ? 1 : 0);
+      expect(keys).toEqual([]); expect(unlinked).toEqual([staged]);
+    });
+
   it.runIf(process.platform === "win32")("preserves fork call-entry arguments across capability discovery in the native child", async () => {
     const f = fixture();
     const node = path.join(f.home, "node.exe"), pkg = path.join(f.home, "node_modules", "@anthropic-ai", "claude-code");

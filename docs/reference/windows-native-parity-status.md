@@ -1225,3 +1225,9 @@ A separate generated PowerShell command starts an owned Node executable with a r
 A Windows adapter case now mutates the caller's binding and fork options during capability discovery, then executes the generated PowerShell command through an owned npm-style Claude entry backed by Node. The child receives the original model, permission mode, Unicode name and literal parent ID, plus the new fork session ID and fork flag. No session file is read. This verifies the native call-entry snapshot through actual argv delivery rather than relying on the Linux shell assertions.
 
 The complete Windows managed-launch file passes 31/31 (native-fork-7a774c7-fixed.json). The initial new fixture omitted the terminal send result; that fixture error was corrected without a product change. Daemon TypeScript checking and the documentation guard exit 0. Capability discovery and post-launch verification are mocked; no real Claude conversation or deployed seat was started. Other unresolved S03 branches remain outside this proof.
+
+### Windows staged-launch revalidation boundaries
+
+Four additional cases connect the real Claude adapter and Windows managed helper to TmuxAdapter's psmux staging path. Changes to generation, executable bytes or managed HOME after script staging refuse before paste. A managed HOME change after a permitted paste refuses before Enter. Each refusal unlinks the unconsumed staged script. The complete Windows managed-launch file passes 35/35 (native-stage-c4a4960-native.json); daemon TypeScript checking and the documentation guard exit 0.
+
+These inject file staging and terminal transport responses to control the await boundaries. They exercise the production Windows staging and context checks, but do not prove console delivery, physical script deletion, real psmux behavior or a provider launch. Those claims require their separate evidence; the Linux buffer tests are not relabeled as native coverage.
