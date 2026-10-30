@@ -513,19 +513,20 @@ describe("runDoctorChecks", () => {
     const result = await runDoctorChecks(deps).portCheck;
     expect(result.status).toBe("pass");
     expect(result.message).toContain("your OpenRig daemon");
-    expect(result.message).toContain("pid 4242");
+    expect(result.message).toContain("the endpoint reports euid 1002, pid 4242");
     expect(result.message).toContain("http://127.0.0.1:7433");
     expect(result.message).toContain("/home/me/.openrig");
   });
 
-  it("port served by another OS user's OpenRig daemon -> fail, naming both users and how to run your own", async () => {
+  // A warning, not a failure: a share set up through config alone can't be told from the first-user accident, and it must
+  // keep working. The person still reads whose daemon it is and both ways on.
+  it("port served by another OS user's OpenRig daemon -> warn, naming both users as reported and how to run your own", async () => {
     const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_HOME: "/home/video075/.openrig" },
       fetch: healthz({ ok: true, pid: 1116629, euid: 1001 }) });
     const result = await runDoctorChecks(deps).portCheck;
-    expect(result.status).toBe("fail");
+    expect(result.status).toBe("warn");
     expect(result.message).toContain("another OS user");
-    expect(result.message).toContain("euid 1001, pid 1116629");
-    expect(result.message).toContain("you are euid 1002");
+    expect(result.message).toContain("the endpoint reports euid 1001, pid 1116629; your euid is 1002");
     expect(result.message).toContain("/home/video075/.openrig");
     expect(result.reason).toContain("self-report");
     expect(result.fix).toContain("rig config set daemon.port");
@@ -551,7 +552,29 @@ describe("runDoctorChecks", () => {
     const result = await runDoctorChecks(deps).portCheck;
     expect(result.status).toBe("pass");
     expect(result.message).toContain("OPENRIG_URL");
-    expect(result.message).toContain("another OS user");
+    expect(result.message).toContain("the endpoint reports euid 1001, pid 1116629; your euid is 1002");
+  });
+
+  it("takes OPENRIG_URL's localhost as the configured 127.0.0.1 endpoint", async () => {
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, env: { OPENRIG_URL: "http://localhost:7433" },
+      fetch: healthz({ ok: true, pid: 1116629, euid: 1001 }) });
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(result.status).toBe("pass");
+    expect(result.message).toContain("OPENRIG_URL");
+  });
+
+  // A listener that sends an OK header and never finishes its body must not hold doctor, or setup, before anything prints.
+  it("settles a /healthz body that never finishes as owner unknown within its bound, and releases the request", async () => {
+    let signal: AbortSignal | undefined;
+    const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 50,
+      fetch: async (_url: string, init?: { signal?: AbortSignal }) => { signal = init?.signal; return { ok: true, json: () => new Promise<unknown>(() => {}) }; } });
+    const started = Date.now();
+    const result = await runDoctorChecks(deps).portCheck;
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(result.status).toBe("warn");
+    expect(result.message).toContain("OS user is unknown");
+    expect(result.reason).toContain("didn't finish");
+    expect(signal?.aborted).toBe(true);
   });
 });
 
