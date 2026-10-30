@@ -14,7 +14,7 @@ export type EnvironmentArtifactReceipt = { version: 1; operationId: string; bind
   identityProvenance: QueueUpdateInput["identityProvenance"]; identityPrincipal: string | null };
 const stable = (v: unknown): string => JSON.stringify(v, (_key, x) => x && typeof x === "object" && !Array.isArray(x)
   ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x);
-const refuse = (code: string, message: string, status = 409): never => { throw new EnvironmentError(code, message, status); };
+function refuse(code: string, message: string, status = 409): never { throw new EnvironmentError(code, message, status); }
 
 /** Transfers and verifies actual bytes; publication and the existing work note reconcile on the same operation. */
 export class EnvironmentArtifacts {
