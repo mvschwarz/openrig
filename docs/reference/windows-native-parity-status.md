@@ -315,3 +315,11 @@ provider-execution cases skipped. Daemon TypeScript passes. Tmux/resume/service
 adapters are fixtures: this does not demonstrate actual provider sign-in, Docker,
 running-seat continuity or fleet restoration.
 
+The gate process observer and native executable fixture have also been checked
+against their current sources: five Node tests pass, including an actual names-only
+host census and an owned compiled receiver preserving literal argv, stdin, stdout,
+stderr and exit status. Malformed/unavailable observations remain unavailable
+rather than zero foreign load. The gate npm fixture wrapper was source-reviewed;
+its full caller integration was not rerun. This closes a scoped evidence gap in
+the old source-only ledger, not complete gate-lane or fleet acceptance.
+
