@@ -53,8 +53,9 @@ describe("doctor default executor", () => {
     const calls = fixture.exec.mock.calls as Array<[string, { timeout?: number }]>;
     // #980's capture probe runs on its own throwaway socket, and every one of its commands is bounded.
     const capture = calls.filter(([command]) => command.includes(" -L openrig-check-"));
+    const emptyConfig = process.platform === "win32" ? "NUL" : "/dev/null";
     expect(capture.map(([command]) => command.replace(/openrig-check-\d+/, "openrig-check-N"))).toEqual([
-      "tmux -L openrig-check-N -f /dev/null new-session -d -s check", "tmux -L openrig-check-N -f /dev/null kill-server"]);
+      `tmux -L openrig-check-N -f ${emptyConfig} new-session -d -s check`, `tmux -L openrig-check-N -f ${emptyConfig} kill-server`]);
     expect(capture.every(([,options]) => options.timeout === TMUX_CAPTURE_PROBE_TIMEOUT_MS)).toBe(true);
     const prior = calls.filter(([command]) => !/^(claude|codex) /.test(command) && !command.includes(" -L openrig-check-"));
     expect(prior.some(([command]) => command === "tmux list-sessions")).toBe(true);

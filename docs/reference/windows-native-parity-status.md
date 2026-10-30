@@ -254,3 +254,10 @@ written, and the dangling link remains intact. This does not cover file symlinks
 or waive their privilege requirement. The documentation parser now accepts CRLF
 as well as LF, so fenced commands are actually checked on Windows checkouts.
 
+The default doctor executor fixture now checks the native empty configuration
+name (`NUL` on Windows, `/dev/null` on POSIX) while retaining every probe timeout
+assertion; both tests pass with child-process and network operations mocked.
+Four selected bin-wrapper tests also pass, including native directory aliases,
+sibling Node selection and missing-module diagnostics. The separate file-symlink
+wrapper test is not included and retains its unverified privilege limitation.
+
