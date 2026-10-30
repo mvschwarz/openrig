@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Native seat-skill first creation filename limit
+
+The existing-file replacement path already used short staging, but first creation
+still appended a PID/timestamp to the complete destination filename. An owned
+248-character filename reproduced a Windows first-write failure. First creation
+now uses a short UUID sibling on Windows; POSIX staging and the exclusive hardlink
+publication are unchanged.
+
+Five native cases pass: first creation/replacement with readback and no staging
+residue, preservation of a competing file created before publication, and the
+complete existing native path cases covering casing, sibling/junction refusal,
+record rehydration and preservation of edits. Daemon TypeScript checking passes.
+Only owned temporary seat-storage fixtures were used; no installed skills,
+provider, live seat, restore, delivery or daemon was accessed. Full skill-storage
+module and live recovery acceptance remain open.
+
 ### Status, registry, readiness and native process-facts review
 
 The current CLI status and host-registry modules, Pi readiness metadata reader,

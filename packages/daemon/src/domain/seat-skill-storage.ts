@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
@@ -184,7 +184,9 @@ export function writeInsideSeatStorage(root: string, file: string, bytes: string
     }
     return;
   }
-  const temp = `${file}.openrig-${process.pid}-${Date.now()}`;
+  const temp = process.platform === "win32"
+    ? nodePath.join(nodePath.dirname(file), `.openrig-skill-${randomUUID()}.tmp`)
+    : `${file}.openrig-${process.pid}-${Date.now()}`;
   fs.writeFileSync(temp, bytes, { flag: "wx", ...(mode !== undefined ? { mode } : {}) });
   try {
     if (mode !== undefined) fs.chmodSync(temp, mode);
