@@ -2434,6 +2434,8 @@ export class SessionTransport {
   }
 
   private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // Ordinary sends without an input ID have no stored constraint to hydrate.
+    if (!opts?.expectedIdentity && !opts?.deliveryId && !opts?.committedOutboxIds?.length) return this.sendClassifiedInput(sessionName, text, opts);
     // The constraint belongs to the durable input, including later committed dispatch and ID reuse.
     const outbox = new OutboxHandler(this.db);
     let ids = opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []);
