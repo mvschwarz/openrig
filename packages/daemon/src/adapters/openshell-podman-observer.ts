@@ -36,10 +36,11 @@ export class OpenShellPodmanObserver {
     const owned = rows.filter(row => row.Labels?.["openshell.ai/sandbox-id"] === id && row.Labels?.["openshell.managed"] === "true");
     const workload = owned.filter(row => row.Labels?.["openshell.ai/isolation-role"] === "sandbox");
     const supervisor = rows.filter(row => Array.isArray(row.Names) && row.Names.some((name: string) => name.replace(/^\//, "") === `openshell-supervisor-${id}`));
-    if (workload.length !== 1 || supervisor.length !== 1 || workload[0].Labels?.["openshell.ai/sandbox-workspace"] !== binding.placement.workspace)
+    const workloadContainer = workload[0], supervisorContainer = supervisor[0];
+    if (workload.length !== 1 || supervisor.length !== 1 || !workloadContainer || !supervisorContainer || workloadContainer.Labels?.["openshell.ai/sandbox-workspace"] !== binding.placement.workspace)
       throw new EnvironmentError("environment_cleanup_unconfirmed", "The exact local workload and supervisor must be observed before deletion");
     const volumes = [`openshell-sandbox-${id}-workspace`, `openshell-control-${id}`, `openshell-channel-${id}`];
-    const containers = [workload[0], supervisor[0]];
+    const containers = [workloadContainer, supervisorContainer];
     const mounted = new Set<string>();
     for (const container of containers) {
       if (typeof container.Id !== "string" || !/^[0-9a-f]{64}$/.test(container.Id)) throw new EnvironmentError("environment_cleanup_unconfirmed", "Engine container identity is malformed");
@@ -49,7 +50,7 @@ export class OpenShellPodmanObserver {
       for (const mount of actual.Mounts) if (mount.Type === "volume" && typeof mount.Name === "string") mounted.add(mount.Name);
     }
     if (volumes.some(volume => !mounted.has(volume))) throw new EnvironmentError("environment_cleanup_unconfirmed", "Expected workspace/control/channel volumes are not attributable to the selected containers");
-    return { version: 1, ...selected, resourceId: id, workspace: binding.placement.workspace, workloadId: workload[0].Id, supervisorId: supervisor[0].Id, volumes };
+    return { version: 1, ...selected, resourceId: id, workspace: binding.placement.workspace, workloadId: workloadContainer.Id, supervisorId: supervisorContainer.Id, volumes };
   }
   async observe(binding: EnvironmentBinding, selected?: PodmanCleanupSelection): Promise<DependentObservation> {
     if (!selected || selected.version !== 1 || selected.resourceId !== binding.resource!.id || selected.workspace !== binding.placement.workspace)

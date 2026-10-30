@@ -268,7 +268,7 @@ export class EnvironmentLifecycle {
     const task = this.queue?.getById(input.taskId);
     if (!task || task.destinationSession !== binding.seat) refuse("environment_task_changed", "Finite completion selects work owned by this exact seat");
     const op = this.intent(binding, input.operationId, "completion", { ...input, resourceId: binding.resource!.id });
-    return { state: op.receipt_json ? "confirmed" : "pending", operationId: input.operationId, ...input };
+    return { state: op.receipt_json ? "confirmed" : "pending", ...input };
   }
   async checkCompletions(): Promise<void> {
     const rows = this.platform.db.prepare("SELECT operation_id, binding_id, request_json FROM environment_operations WHERE kind='completion' AND state <> 'confirmed'").all() as Array<{ operation_id: string; binding_id: string; request_json: string }>;

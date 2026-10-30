@@ -1,3 +1,4 @@
+import { communityHarnessOf } from "./community-harness-presets.js";
 import { readClaudePermissionRules, validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { clearCodexMemberPermissions, readCodexMemberPermissions, validateCodexMemberPermissions, type CodexProfileObserver } from "./codex-member-permissions.js";
 import { parseTerminalPolicy, TerminalPolicyRefusal, TerminalPolicyStore, type TerminalAction } from "./terminal-policy.js";
