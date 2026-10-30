@@ -323,3 +323,11 @@ rather than zero foreign load. The gate npm fixture wrapper was source-reviewed;
 its full caller integration was not rerun. This closes a scoped evidence gap in
 the old source-only ledger, not complete gate-lane or fleet acceptance.
 
+Current cwd expansion, dot-prefix and seat runtime-directory tests pass 32/32.
+Owned native directories exercise literal-path precedence, home and environment
+expansion through launch/profile/preflight selection, including native backslash
+home paths. Runtime-directory forwarding remains Linux-specific. The current two
+production-source hashes and report digest are recorded in the local audit ledger;
+no new implementation gap was found in these checked paths. Actual seat launches
+and OS session-bus behavior were not exercised.
+
