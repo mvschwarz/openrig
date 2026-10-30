@@ -342,6 +342,16 @@ export class StartupOrchestrator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.startNodeWithWarnings(input, warnings));
     }
+    // A contained runtime reconciles saved execution before the ordinary startup prelude writes state or files.
+    if (input.adapter.environment) {
+      input = { ...input, binding: { ...input.binding, launchGeneration: input.binding.launchGeneration ?? this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid } };
+      try {
+        if (!input.adapter.preflightEnvironmentStartup) throw new Error("Selected environment lacks startup reconciliation");
+        await input.adapter.preflightEnvironmentStartup(input.binding, { resumeToken: input.resumeToken, forkSource: input.forkSource });
+      } catch (error) {
+        return { ok: false, startupStatus: "attention_required", errors: [(error as Error).message] };
+      }
+    }
     try {
       input = { ...input, binding: new NativePermissionStore(this.db).apply(input.binding, input.adapter.runtime) };
       if (input.adapter.runtime === "claude-code") {

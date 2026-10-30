@@ -66,13 +66,16 @@ export class OpenShellDriver implements EnvironmentDriver {
   }
   async read(binding: EnvironmentBinding, path: string): Promise<Buffer> {
     const result = await this.guest(binding, ["--read", path]);
-    if (typeof result.base64 !== "string") throw new EnvironmentError("openshell_response_invalid", "Guest file bytes are unavailable");
-    return Buffer.from(result.base64, "base64");
+    if (typeof result.base64 !== "string" || result.base64.length > 4 * Math.ceil(1024 * 1024 / 3)
+      || !/^[A-Za-z0-9+/]*={0,2}$/.test(result.base64) || result.base64.length % 4 !== 0)
+      throw new EnvironmentError("environment_file_invalid", "A bounded single-file response is required");
+    const bytes = Buffer.from(result.base64, "base64");
+    if (bytes.length > 1024 * 1024) throw new EnvironmentError("environment_file_invalid", "The returned file exceeds the byte cap");
+    return bytes;
   }
   async download(binding: EnvironmentBinding, source: string, destination: string): Promise<void> {
-    await this.guest(binding, ["--stat", source]);
-    await this.checked(binding);
-    await this.command([...this.prefix(binding.placement), "download", binding.placement.name, source, destination]);
+    const bytes = await this.read(binding, source);
+    writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
   }
   connectArgs(binding: EnvironmentBinding): string[] { return [...this.prefix(binding.placement), "connect", binding.placement.name]; }
 }

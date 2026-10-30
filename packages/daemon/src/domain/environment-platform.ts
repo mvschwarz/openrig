@@ -102,7 +102,14 @@ export class EnvironmentPlatform {
         return { fresh: false, state: prior.state, effectId: prior.effect_id, receipt: prior.receipt_json ? JSON.parse(prior.receipt_json) : null };
       }
       const existing = this.get(binding.bindingId);
-      if (existing) fail("environment_binding_exists", "Create or attach a new binding; existing ownership is immutable");
+      if (existing) {
+        const protectedOperation = this.db.prepare("SELECT 1 FROM environment_operations WHERE binding_id = ? AND state <> 'intent'").get(binding.bindingId);
+        if (existing.resource || protectedOperation) fail("environment_binding_exists", "The existing binding has a provider effect; reconcile it before replacement");
+        this.db.prepare("DELETE FROM environment_operations WHERE binding_id = ?").run(binding.bindingId);
+        this.db.prepare("DELETE FROM environment_bindings WHERE binding_id = ?").run(binding.bindingId);
+      }
+      if (this.db.prepare("SELECT 1 FROM environment_bindings WHERE seat = ? OR (node_id IS NOT NULL AND node_id = ?)").get(binding.seat, binding.nodeId ?? null))
+        fail("environment_seat_bound", "This stable seat or node already has another binding");
       this.db.prepare("INSERT INTO environment_bindings(binding_id,version,node_id,seat,ownership,config_json) VALUES (?,1,?,?,?,?)")
         .run(binding.bindingId, binding.nodeId ?? null, binding.seat, ownership, JSON.stringify(binding));
       const effectId = `env-${randomUUID()}`;
@@ -146,11 +153,11 @@ export class EnvironmentPlatform {
   async attach(input: EnvironmentConfig & { operationId: string; resourceId: string; fingerprint?: string }): Promise<{ status: number; binding: EnvironmentBinding }> {
     const config = this.config(input); identifier(input.operationId, "operationId");
     if (typeof input.resourceId !== "string" || !input.resourceId) fail("invalid_environment_request", "An immutable resource ID is required", 400);
-    const op = this.intent(input.operationId, "attach", config, "attached", { config, resourceId: input.resourceId, fingerprint: input.fingerprint });
     const candidate = { ...config, ownership: "attached" as const, resource: { id: input.resourceId, name: config.placement.name,
       workspace: config.placement.workspace, fingerprint: input.fingerprint, phase: "unknown" }, generation: null };
     const observed = await this.driver.inspect(candidate);
     this.assertResource(candidate, observed);
+    const op = this.intent(input.operationId, "attach", config, "attached", { config, resourceId: input.resourceId, fingerprint: input.fingerprint });
     return { status: op.state === "confirmed" ? 200 : 201, binding: this.confirm(input.operationId, config.bindingId, observed) };
   }
   assertResource(binding: EnvironmentBinding, resource: EnvironmentResource, ready = false): void {
@@ -176,6 +183,10 @@ export class EnvironmentPlatform {
     if (new Set(planned.map(p => p.path)).size !== planned.length) fail("invalid_environment_request", "Duplicate projection destinations", 400);
     const saved = this.db.prepare("SELECT projection_json FROM environment_bindings WHERE binding_id = ?").get(id) as { projection_json: string | null };
     const previous = new Map<string, ProjectionReceipt>((saved.projection_json ? JSON.parse(saved.projection_json).files : []).map((f: ProjectionReceipt) => [f.path, f]));
+    const changedPaths = new Set(planned.map(item => item.path));
+    const retained = [...previous.values()].filter(file => !changedPaths.has(file.path));
+    if (retained.length + planned.length > 4096 || retained.reduce((sum, file) => sum + file.bytes, 0) + planned.reduce((sum, item) => sum + item.data.length, 0) > 32 * 1024 * 1024)
+      fail("environment_projection_too_large", "The combined destination projection exceeds its file or byte cap");
     const receipt: ProjectionReceipt[] = [];
     for (const { file, path, data } of planned) {
       const destination = posix.join(binding.guestRoot, path);
@@ -192,7 +203,8 @@ export class EnvironmentPlatform {
       receipt.push({ path, sha256: file.sha256, bytes: data.length, required: file.required,
         ...(!file.transient ? { sourceFile: file.sourceIdentity?.path ?? file.source, sourceSha256: file.sourceIdentity?.sha256 ?? file.sha256 } : {}) });
     }
-    const result = { version: 1 as const, bindingId: id, generation: input.generation, files: receipt };
+    const result = { version: 1 as const, bindingId: id, generation: input.generation,
+      files: retained.concat(receipt) };
     this.db.prepare("UPDATE environment_bindings SET projection_json = ?, generation = ? WHERE binding_id = ?")
       .run(JSON.stringify(result), input.generation, id);
     return result;

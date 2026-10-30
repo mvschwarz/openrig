@@ -41,7 +41,7 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   fixture.sessionRegistry.registerSession(node.id, "worker@team");
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
   const platform = new EnvironmentPlatform(db, driver);
-  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "worker@team", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7433",
+  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "worker@team", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7782",
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy } });
   await platform.project("binding-one", { operationId: "projection-one", generation: "generation-one", files: [] });
   // This is the existing queue writer, not a separate guest task store.

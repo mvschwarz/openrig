@@ -34,11 +34,6 @@ environmentRoutes.get("/:bindingId", async c => {
       lifecycle: { closeViewer: "unsupported", stopNative: "unsupported", stopCompute: "unsupported", deleteEnvironment: "unsupported", nativeRestore: "unsupported" } });
   } catch (error) { return failure(c, error); }
 });
-environmentRoutes.post("/:bindingId/project", async c => {
-  const identity = requireSenderIdentity(c, { verb: "environment project" }); if (!identity.ok) return identity.response;
-  try { return c.json(await platform(c).project(c.req.param("bindingId"), await c.req.json())); }
-  catch (error) { return failure(c, error); }
-});
 environmentRoutes.post("/:bindingId/validate", async c => {
   try {
     const body = await c.req.json<{ generation: string }>();
@@ -53,8 +48,4 @@ environmentRoutes.post("/:bindingId/export", async c => {
     return c.json(await service.export(c.req.param("bindingId"), await c.req.json<EnvironmentArtifactRequest>(),
       { actor: identity.session, ...resolveRecordedIdentity(c, identity) }));
   } catch (error) { return failure(c, error); }
-});
-environmentRoutes.post("/:bindingId/effect", async c => {
-  try { const body = await c.req.json<{ effect: string }>(); return platform(c).effect(c.req.param("bindingId"), body.effect); }
-  catch (error) { return failure(c, error); }
 });

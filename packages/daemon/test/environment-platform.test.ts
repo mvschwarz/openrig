@@ -50,7 +50,7 @@ function fixture() {
     return { status: res.status, body: await res.json() as Record<string, any> };
   };
   const input = { version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id,
-    seat: "worker@environment-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://host.test:7433",
+    seat: "worker@environment-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://host.test:7782",
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider-ref", policy: join(root, "policy.yaml") } };
   writeFileSync(input.placement.policy, "version: 1\n"); mkdirSync(join(root, "exports"));
   const project = async (body: any) => {

@@ -38,7 +38,7 @@ async function fixture() {
   const platform = new EnvironmentPlatform(db, driver), policy = join(root, "policy.yaml"), connection = join(root, "work.json");
   writeFileSync(policy, "version: 1\n");
   writeFileSync(connection, JSON.stringify({ version: 1, seat: "team-worker@startup-fixture", mcpUrl: "http://guest.test:7781/mcp", token: "fixture-work-token" }), { mode: 0o600 });
-  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "team-worker@startup-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7433", coordinationRef: connection,
+  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "team-worker@startup-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7782", coordinationRef: connection,
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy } });
   const activity = vi.fn(async () => ({ grantId: "grant-one", env: { OPENRIG_ACTIVITY_HOOK_TOKEN: "scoped-fixture-token" } }));
   const startup = new EnvironmentStartup(platform, join(root, "stage"), activity);
@@ -55,7 +55,7 @@ it("stages all resolved startup inputs before native dispatch and binds separate
   expect(result.ok).toBe(true);
   expect(f.files.get("/sandbox/openrig/work/.openrig/startup/role.md")!.toString()).toBe("Current nonce and useful task guidance");
   expect(f.files.get("/sandbox/openrig/work/CLAUDE.md")!.toString()).toContain("Read /sandbox/openrig/work/.openrig/startup/role.md");
-  expect(f.activity).toHaveBeenCalledWith({ nodeId: f.binding.nodeId, generation: "generation-one", seat: "team-worker@startup-fixture", guestBaseUrl: "http://guest.test:7433" });
+  expect(f.activity).toHaveBeenCalledWith({ nodeId: f.binding.nodeId, generation: "generation-one", seat: "team-worker@startup-fixture", guestBaseUrl: "http://guest.test:7782" });
   const coordination = f.files.get("/sandbox/openrig/control/coordination.json")!.toString();
   expect(coordination).toContain("fixture-work-token"); expect(coordination).not.toContain("scoped-fixture-token");
   const receipt = f.db.prepare("SELECT receipt_json FROM environment_operations WHERE kind='launch'").get() as { receipt_json: string };

@@ -65,7 +65,7 @@ import { transcriptRoutes } from "./routes/transcripts.js";
 import { transportRoutes } from "./routes/transport.js";
 import { compactionRoutes } from "./routes/compaction.js";
 import type { ClaudeCompactionEnforcer } from "./domain/claude-compaction-enforcer.js";
-import { activityRoutes } from "./routes/activity.js";
+import { activityRoutes, guestActivityRoutes } from "./routes/activity.js";
 import { askRoutes } from "./routes/ask.js";
 import { wakeResolveRoutes } from "./routes/wake-resolve.js";
 import type { AskService } from "./domain/ask-service.js";
@@ -449,6 +449,22 @@ function isUiAssetRequestPath(requestPath: string): boolean {
     || relativePath === "favicon.ico"
     || relativePath === "robots.txt"
     || relativePath === "manifest.webmanifest";
+}
+
+/** Dedicated activity ingress. Never mount the host API or activity read routes here. */
+export function createGuestActivityApp(deps: AppDeps): Hono {
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("agentActivityStore" as never, deps.agentActivityStore);
+    c.set("sessionRegistry" as never, deps.sessionRegistry);
+    c.set("eventBus" as never, deps.eventBus);
+    c.set("seatActivityService" as never, deps.seatActivityService);
+    c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
+    c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    await next();
+  });
+  app.route("/api/activity", guestActivityRoutes);
+  return app;
 }
 
 export function createApp(deps: AppDeps): Hono {
