@@ -29,6 +29,8 @@ export interface QitemLike {
   /** #1013 — the structured evidenceRef: for a parked gate it rides the evidence link/media
    *  path when it is an https ref, else it renders as one Evidence line (never the packet). */
   evidenceRef?: string | null;
+  /** The code fence an earlier part of a split brief left open; this body starts inside it. */
+  bodyOpenFence?: string | null;
 }
 
 /** #1013 — a workflow gate row parked on a human seat (the projector parks it
@@ -220,6 +222,196 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+/** Split a matched bare URL from what follows it in the sentence: trailing punctuation, a
+ *  `)` or `]` with no opening partner inside the URL, and closing `**` or unbalanced `__`
+ *  markers. `…/Function_(mathematics)` and `#object.__init__` stay whole. */
+function trimBareUrl(match: string): [url: string, rest: string] {
+  const count = (s: string, part: string) => s.split(part).length - 1;
+  let url = match;
+  for (;;) {
+    if (url.endsWith("**")) url = url.slice(0, -2);
+    else if (url.endsWith("__") && count(url, "__") % 2 === 1) url = url.slice(0, -2);
+    else if (/[.,;:!?]$/.test(url)) url = url.slice(0, -1);
+    else if (url.endsWith(")") && count(url, ")") > count(url, "(")) url = url.slice(0, -1);
+    else if (url.endsWith("]") && count(url, "]") > count(url, "[")) url = url.slice(0, -1);
+    else return [url, match.slice(url.length)];
+  }
+}
+
+/** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. The line is
+ *  escaped first, so it holds no raw `<` or `>`, and `<n>` can mark a code span or link set aside
+ *  without colliding with input. A Markdown `[text](url)` or a Slack `<url|text>` / `<url>` becomes
+ *  a live link only for a safe https URL without `<`, `>` or `|` and a label (code included)
+ *  without `|`; otherwise it stays escaped text. */
+function inlineMarkdownToMrkdwn(line: string): string {
+  const held: string[] = [];
+  const hold = (rendered: string) => `<${held.push(rendered) - 1}>`;
+  const restore = (s: string) => s.replace(/<(\d+)>/g, (_, i: string) => held[Number(i)] ?? "");
+  const link = (original: string, url: string, label?: string) => {
+    const text = label === undefined ? undefined : restore(label);
+    const raw = url.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+    if (!isSafeHttpsUrl(raw) || /[<>|]/.test(raw) || text?.includes("|")) return original;
+    return hold(text === undefined ? `<${url}>` : `<${url}|${text}>`);
+  };
+  return restore(escapeSlackText(line)
+    .replace(/`[^`\n]+`/g, hold)
+    .replace(/\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, (m, label: string, url: string) => link(m, url, label))
+    .replace(/&lt;(https:\/\/[^\s|]+?)(?:\|(.+?))?&gt;/g, (m, url: string, label?: string) => link(m, url, label))
+    // A bare URL is held as written: Slack links it, and `__` or `**` inside it is not bold.
+    .replace(/https:\/\/[^\s<>|`]+/g, (m) => {
+      const [url, rest] = trimBareUrl(m);
+      return hold(url) + rest;
+    })
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
+    .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*"));
+}
+
+const FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/;
+
+/** One pass over the lines: the converted text, and the fence still open at its end ("" if none). */
+function convertMarkdown(text: string, openFence: string): { text: string; openFence: string } {
+  let fence = openFence;
+  const lines = redactSecrets(text).split("\n").map((line) => {
+    const marker = FENCE_PATTERN.exec(line)?.[1];
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && /^ {0,3}[`~]+\s*$/.test(line)) fence = "";
+      return escapeSlackText(line);
+    }
+    if (marker) {
+      fence = marker;
+      return escapeSlackText(line);
+    }
+    const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
+    if (heading) {
+      if (!heading[1]) return "";
+      const inner = inlineMarkdownToMrkdwn(heading[1]);
+      return /^\*[^*\n]+\*$/.test(inner) ? inner : `*${inner}*`;
+    }
+    // Section mrkdwn has no list syntax; a plain "- " reads better than a typed bullet character.
+    const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+    if (item) {
+      const [, indent = "", rest = ""] = item;
+      return `${indent}- ${inlineMarkdownToMrkdwn(rest)}`;
+    }
+    return inlineMarkdownToMrkdwn(line);
+  });
+  return { text: lines.join("\n"), openFence: fence };
+}
+
+/** Agent-written Markdown as Slack mrkdwn, through the same inert pipeline as every other
+ *  queue-controlled field (secrets redacted, then &, <, > escaped). `**b**`/`__b__` become
+ *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `- ` (indent kept), and safe https
+ *  `[text](url)` and `<url|text>` links live links. A list marker needs a following space, so
+ *  `*bold*` is not a list item. Code spans and ``` or ~~~ fenced blocks are only escaped. `openFence` is the
+ *  fence a split brief's earlier part left open (see openFenceAfter). */
+export function markdownToSlackMrkdwn(text: string, openFence = ""): string {
+  const converted = convertMarkdown(text, openFence);
+  // Slack knows only ``` blocks, and only inside one message: a part that starts or ends inside one is wrapped to match.
+  const head = openFence.startsWith("`") ? "```\n" : "";
+  const tail = converted.openFence.startsWith("`") ? "\n```" : "";
+  return `${head}${converted.text}${tail}`;
+}
+
+/** Room a split part needs for the ``` lines markdownToSlackMrkdwn may add around it. */
+export const CODE_FENCE_ROOM = 8;
+
+/** The fence still open after `text`, so the next part of a split brief continues inside it. */
+export function openFenceAfter(text: string, openFence = ""): string {
+  return convertMarkdown(text, openFence).openFence;
+}
+
+type RichInline =
+  | { type: "text"; text: string; style?: { bold?: boolean; code?: boolean } }
+  | { type: "link"; url: string; text?: string };
+
+// Code spans, Markdown links, Slack links, bare https URLs, then **bold**, __bold__ and *bold*.
+const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|(https:\/\/[^\s<>|`]+)|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
+
+/** One already-redacted list item as rich text elements. Rich text is never parsed for
+ *  mentions or links, so plain text needs no escaping; a link element is emitted only for a
+ *  URL that passes the same checks as a mrkdwn link. */
+function richInline(text: string): RichInline[] {
+  const out: RichInline[] = [];
+  const plain = (t: string) => {
+    const last = out.at(-1);
+    if (last?.type === "text" && !last.style) last.text += t;
+    else if (t) out.push({ type: "text", text: t });
+  };
+  const re = new RegExp(RICH_INLINE.source, "g");
+  let at = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    plain(text.slice(at, m.index));
+    const [all, code, mdLabel, mdUrl, slackUrl, slackLabel, bare, b1, b2, b3] = m;
+    const url = mdUrl ?? slackUrl;
+    const label = mdLabel ?? slackLabel;
+    const bold = b1 ?? b2 ?? b3;
+    at = m.index + all.length;
+    if (code !== undefined) out.push({ type: "text", text: code, style: { code: true } });
+    else if (bare !== undefined) {
+      const [target] = trimBareUrl(bare);
+      if (isSafeHttpsUrl(target)) out.push({ type: "link", url: target });
+      else plain(target);
+      // What follows the URL (closing markers included) is parsed again.
+      at = re.lastIndex = m.index + target.length;
+    } else if (bold !== undefined) {
+      // Bold content is parsed again, so a link inside stays a link and the text around it is bold.
+      for (const el of richInline(bold)) out.push(el.type === "text" ? { ...el, style: { ...el.style, bold: true } } : el);
+    } else if (url !== undefined && isSafeHttpsUrl(url) && !/[<>|]/.test(url)) out.push(label ? { type: "link", url, text: label } : { type: "link", url });
+    else plain(all);
+  }
+  plain(text.slice(at));
+  return out.length ? out : [{ type: "text", text: " " }];
+}
+
+const LIST_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/;
+// ponytail: Slack documents no indent maximum; 4 covers real briefs and keeps clear of invalid_blocks.
+const MAX_LIST_INDENT = 4;
+
+/** The body as blocks: runs of list items (outside code fences) become one native `rich_text`
+ *  list block each; everything else stays mrkdwn sections. Nesting is two spaces per level. */
+export function buildBodyBlocks(text: string, openFence = ""): unknown[] {
+  type List = { type: "rich_text_list"; style: "bullet" | "ordered"; indent: number; offset?: number; elements: unknown[] };
+  const blocks: unknown[] = [];
+  let fence = openFence;
+  let runFence = openFence;
+  let run: string[] = [];
+  let lists: List[] = [];
+  const flushText = () => {
+    const source = run.join("\n");
+    run = [];
+    if (!source.trim()) return;
+    const converted = markdownToSlackMrkdwn(source, runFence);
+    if (converted.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(converted, SLACK_SECTION_CAP, "body") } });
+  };
+  const flushLists = () => {
+    if (lists.length) blocks.push({ type: "rich_text", elements: lists });
+    lists = [];
+  };
+  for (const line of redactSecrets(text).split("\n")) {
+    const item = fence ? null : LIST_ITEM.exec(line);
+    if (item) {
+      flushText();
+      const [, lead = "", bullet, number, rest = ""] = item;
+      const style = bullet ? "bullet" : "ordered";
+      const indent = Math.min(MAX_LIST_INDENT, Math.floor(lead.replaceAll("\t", "  ").length / 2));
+      const section = { type: "rich_text_section", elements: richInline(rest) };
+      const last = lists.at(-1);
+      if (last && last.style === style && last.indent === indent) last.elements.push(section);
+      // An ordered run keeps its own numbering (a list starting at 5, or resuming after a nested list or a split).
+      else if (number && Number(number) > 1) lists.push({ type: "rich_text_list", style, indent, offset: Number(number) - 1, elements: [section] });
+      else lists.push({ type: "rich_text_list", style, indent, elements: [section] });
+      continue;
+    }
+    flushLists();
+    if (!run.length) runFence = fence;
+    run.push(line);
+    fence = openFenceAfter(line, fence);
+  }
+  flushText();
+  flushLists();
+  return blocks;
+}
+
 function isSafeHttpsUrl(url: string): boolean {
   if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) return false;
   try {
@@ -389,7 +581,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     ? (!gateEvidence || gateEvidenceCarried
       ? ""
       : bounded(`Evidence: ${inert(gateEvidence)}`, SLACK_SECTION_CAP, "body"))
-    : bounded(inert(String(q.body || "")), SLACK_SECTION_CAP, "body");
+    : bounded(markdownToSlackMrkdwn(String(q.body || ""), q.bodyOpenFence ?? ""), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
   const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
@@ -419,11 +611,16 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const repeatBlock = shownRepeat ? { type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] } : null;
   if (repeatBlock) blocks.push(repeatBlock);
   if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
-  if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
+  const bodySection = { type: "section", text: { type: "mrkdwn", text: body } };
+  const bodyBlocks = !body.trim() ? [] : humanGate ? [bodySection] : buildBodyBlocks(String(q.body || ""), q.bodyOpenFence ?? "");
+  const bodyAt = blocks.length;
+  blocks.push(...bodyBlocks);
   if (questionParts) blocks.push(...questionParts.blocks);
   if (replyHint) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: replyHint }] });
   blocks.push(...imageBlocks);
   if (evidence) blocks.push(evidence.block);
+  // A body split into many list and text runs falls back to one mrkdwn section rather than refusing the message.
+  if (blocks.length > 50 && bodyBlocks.length > 1) blocks.splice(bodyAt, bodyBlocks.length, bodySection);
   if (repeatBlock && blocks.length > 50) blocks.splice(blocks.indexOf(repeatBlock), 1);
   if (blocks.length > 50) throw new HumanMessageShapeError("Message exceeds 50 Slack blocks. Reduce attachments before sending.");
   return { text, blocks };
