@@ -565,16 +565,39 @@ describe("runDoctorChecks", () => {
 
   // A listener that sends an OK header and never finishes its body must not hold doctor, or setup, before anything prints.
   it("settles a /healthz body that never finishes as owner unknown within its bound, and releases the request", async () => {
-    let signal: AbortSignal | undefined;
+    // The port check's request carries a signal; doctor's other /healthz reads (the cmux check) don't.
+    const signals: AbortSignal[] = [];
     const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 50,
-      fetch: async (_url: string, init?: { signal?: AbortSignal }) => { signal = init?.signal; return { ok: true, json: () => new Promise<unknown>(() => {}) }; } });
+      fetch: async (_url: string, init?: { signal?: AbortSignal }) => {
+        if (init?.signal) signals.push(init.signal);
+        return { ok: true, json: () => new Promise<unknown>(() => {}) };
+      } });
     const started = Date.now();
     const result = await runDoctorChecks(deps).portCheck;
     expect(Date.now() - started).toBeLessThan(2000);
     expect(result.status).toBe("warn");
     expect(result.message).toContain("OS user is unknown");
     expect(result.reason).toContain("didn't finish");
-    expect(signal?.aborted).toBe(true);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  it("settles a real listener's held /healthz body the same way, through the real fetch", async () => {
+    const { createServer } = await import("node:http");
+    const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 100,
+        configStore: { resolve: () => ({ ...defaultConfig, daemon: { port, host: "127.0.0.1" } }) } as DoctorDeps["configStore"] });
+      delete deps.fetch;
+      const result = await runDoctorChecks(deps).portCheck;
+      expect(result.status).toBe("warn");
+      expect(result.reason).toContain("didn't finish");
+    } finally {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+    }
   });
 });
 
