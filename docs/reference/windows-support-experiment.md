@@ -2,6 +2,15 @@
 
 ## Current review status (2026-10-30)
 
+### Native advertised server flags reach the owned stock server
+
+The stock psmux fixture now checks the daemon's advertised `-S` flags from a
+fresh client without inherited TMUX/pane routing. Those flags independently
+reach the same isolated `-L` session. This passes together with the watcher argv
+and inherited whoami checks on stock 3.4.0. It establishes read routing, not a
+visible terminal attachment or live-daemon acceptance; no implementation change
+was needed for this checked path.
+
 ### Lifecycle compilation accepts native case aliases of its mission
 
 A slice's valid `../../MISSION.YAML` reference was rejected on Windows even

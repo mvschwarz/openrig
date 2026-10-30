@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
 import { chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
+import { tmuxServerArgs } from "../../daemon/src/adapters/tmux-server.js";
 
 it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("routes a stock psmux chatroom watcher and whoami only inside an owned namespace", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "chatroom-psmux-owned-"));
@@ -33,6 +34,13 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("rout
     expect(fs.existsSync(output), "owned watcher did not produce its receipt").toBe(true);
     const received = JSON.parse(fs.readFileSync(output, "utf8"));
     expect(received.args).toEqual(["chatroom", "watch", "--", rig]);
+    // A new terminal has no inherited pane routing. The daemon's advertised
+    // socket flags must independently reach this same owned -L namespace.
+    const server = tmuxServerArgs(received.env);
+    expect(server[0]).toBe("-S");
+    const routed = execFileSync(mux, [...server, "display-message", "-p", "-t", `=${session}`, "#{session_name}"],
+      { env, cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000, stdio: "pipe" });
+    expect(routed.trim()).toBe(session);
     invoke(["set-option", "-t", `=${session}`, "@rigged_node_id", "owned-node"]);
     const module = pathToFileURL(path.resolve(import.meta.dirname, "../src/commands/whoami.ts")).href;
     const identity = execFileSync(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href, "--input-type=module", "-e",
