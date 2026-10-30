@@ -49,7 +49,7 @@ describe("SuccessorSessionLauncher", () => {
     return { runtime, launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier, isNativeWindows = false): SuccessorSessionLauncher {
+  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier, isNativeWindows = false, nativeIdleShell = vi.fn(async () => true)): SuccessorSessionLauncher {
     const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand, isNativeWindows } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
@@ -60,6 +60,7 @@ describe("SuccessorSessionLauncher", () => {
       exitPollMs: 1,
       exitTimeoutMs: 5,
       tmuxOptionDefaults,
+      nativeIdleShell,
     });
   }
 
@@ -79,6 +80,17 @@ describe("SuccessorSessionLauncher", () => {
     expect(getDefaultShell).toHaveBeenCalledOnce();
     expect(respawnPane).toHaveBeenCalledWith("%7", shell, expect.anything());
     expect(getDefaultShell.mock.invocationCallOrder[0]).toBeLessThan(signalPaneProcess.mock.invocationCallOrder[0]!);
+  });
+
+  it.each([true, false])("requires a native idle witness for an extensionless PowerShell label (idle=%s)", async idle => {
+    getDefaultShell.mockResolvedValue("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    getPaneCommand.mockResolvedValue("PowerShell");
+    const witness = vi.fn(async () => idle);
+    const result = await launcher(undefined, true, witness).createSuccessor({ node: { id: "node-1", runtime: "codex" }, departingSessionName: "owned@fixture" });
+    expect(witness).toHaveBeenCalledWith("%7");
+    expect(result.ok).toBe(idle);
+    expect(launchHarness).toHaveBeenCalledTimes(idle ? 1 : 0);
+    if (!idle) expect(result).toMatchObject({ code: "successor_pane_not_blank", replacementStarted: true });
   });
 
   it("creates no native Windows staging session when its default shell is unknown", async () => {

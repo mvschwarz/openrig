@@ -414,3 +414,12 @@ That selected case passes; other health-diagnosis cases were filtered. All files
 and policy changes belong to owned test homes, with no actual diagnosis dispatch,
 fleet environment update or running daemon configuration change.
 
+Successor blank-pane verification now uses the native idle-shell witness for
+Windows instead of POSIX basename equality. PowerShell labels without `.exe`
+and native shell paths are accepted only after stable process/console evidence;
+a shell host with another receiver or unavailable evidence remains refused.
+All 43 successor tests pass, including native witness acceptance/refusal and
+unchanged POSIX successor behavior. The Windows lineage suite also passes its
+synthetic observation cases; daemon TypeScript passes. Actual seat cutover and
+stock psmux successor acceptance are not established by these injected fixtures.
+

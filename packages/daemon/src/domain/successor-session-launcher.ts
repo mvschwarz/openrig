@@ -8,7 +8,8 @@ import type { RuntimeAdapter, NodeBinding, ReadinessResult, ForkSource } from ".
 import { isAttentionRequiredReadinessCode } from "./runtime-adapter.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
+import { verifyPaneIdleShell } from "./native-process-lineage.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import { terminatePaneInPlace, type PaneTerminationResult } from "./pane-cutover.js";
@@ -130,6 +131,7 @@ export class SuccessorSessionLauncher {
   private tmuxOptionDefaults: TmuxOptionDefaultsApplier | null;
   private exitPollMs: number;
   private exitTimeoutMs: number;
+  private nativeIdleShell: (pane: string) => Promise<boolean>;
 
   constructor(
     tmuxAdapter: TmuxAdapter,
@@ -157,6 +159,8 @@ export class SuccessorSessionLauncher {
       /** Cutover retiree-exit poll interval + total bounded timeout (per graceful/forced phase). */
       exitPollMs?: number;
       exitTimeoutMs?: number;
+      /** Native process/console witness; shell names alone never prove idle. */
+      nativeIdleShell?: (pane: string) => Promise<boolean>;
     } = {},
   ) {
     this.tmuxAdapter = tmuxAdapter;
@@ -171,6 +175,7 @@ export class SuccessorSessionLauncher {
     this.tmuxOptionDefaults = opts.tmuxOptionDefaults ?? null;
     this.exitPollMs = opts.exitPollMs ?? 100;
     this.exitTimeoutMs = opts.exitTimeoutMs ?? 3_000;
+    this.nativeIdleShell = opts.nativeIdleShell ?? (target => verifyPaneIdleShell({ target, tmux: this.tmuxAdapter }));
   }
 
   /**
@@ -551,6 +556,11 @@ export class SuccessorSessionLauncher {
    *  hard-coded set here false-refused AFTER the destructive cutover). One bounded retry absorbs
    *  shell spawn latency; a null probe counts as unverified (refuse, never assume). */
   private async verifyPaneIsBlankShell(paneId: string, expectedShell: string): Promise<{ ok: true } | { ok: false; observed: string | null }> {
+    if (this.tmuxAdapter.isNativeWindows) {
+      const observed = await this.tmuxAdapter.getPaneCommand(paneId);
+      if (observed && isWindowsShellHost(observed) && await this.nativeIdleShell(paneId).catch(() => false)) return { ok: true };
+      return { ok: false, observed };
+    }
     let observed = await this.tmuxAdapter.getPaneCommand(paneId);
     if (observed && isShellForeground(observed, expectedShell)) return { ok: true };
     await this.sleep(this.exitPollMs);
