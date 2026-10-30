@@ -418,7 +418,7 @@ async function main() {
     state.cancelRequestedAt = new Date().toISOString();
     peer.notify("session/cancel", { sessionId: state.sessionId });
     say(`\n[openrig-dsh] cancel requested at ${state.cancelRequestedAt}; the turn ends when dsh says so`);
-    state.holding = false;
+    if (!state.refused) state.holding = false; // the seat's own refusal holds until the next accepted prompt
     for (const ask of state.asks) ask.end("turn_cancelled");
   };
 
@@ -445,7 +445,7 @@ async function main() {
     state.running = false;
     for (const ask of state.asks) ask.end("turn_ended");
     say(`\n── turn end (${stopReason}) ──`);
-    if (state.holding) say("[openrig-dsh] a permission request went unanswered, so the seat reads needs input until the next prompt");
+    if (state.holding) say("[openrig-dsh] a permission request was refused, so the seat reads needs input until the next prompt");
     else postIdle(stopReason);
     pump();
   };
