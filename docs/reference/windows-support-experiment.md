@@ -1,5 +1,8 @@
 # Native Windows support experiment
 
+For a compact workflow-by-workflow view of implemented scope, evidence entry
+points and remaining verification, see the [native parity status](windows-native-parity-status.md).
+
 ## Current review status (2026-10-30)
 
 ### Rig export copies culture through valid native directory aliases
