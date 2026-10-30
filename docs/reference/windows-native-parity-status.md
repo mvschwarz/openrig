@@ -42,6 +42,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Spec library | Native rename supports long storage names, reserved device names and case-only changes; [service](../../packages/daemon/test/spec-library-service.test.ts), [routes](../../packages/daemon/test/spec-library-routes.test.ts). | Every authored resource/install combination. |
 | Lifecycle compilation | A differently cased reference to the actual mission is accepted; a distinct file is refused; [compiler](../../packages/daemon/test/project-lifecycle-compiler.test.ts). | Real workflow execution and fleet restore. |
 | Culture export and local copy | Contained native aliases copy correctly while outside destination aliases are refused; [export](../../packages/cli/test/export-import.test.ts), [local copy](../../packages/cli/test/windows-native-local-copy.test.ts). | Real remote transfer and every archive/install path. |
+| Local recap handoff | [Recap write](../../packages/cli/test/context-recap-write.test.ts) passes nine cases. Actual Windows write denial on an owned directory triggers delegation to the fixture server; timeout remains unknown and a connection failure retains its cause. The fixture restores its temporary ACL rule in finally. A directory junction checks refusal through a linked namespace. | Actual daemon/seat permissions; file-symlink behavior is not established by the junction case. |
 
 ## Completion boundary
 
@@ -91,6 +92,11 @@ four failures from POSIX-only prepared-path fixtures. Supplying native absolute
 paths and checking the decoded JSON error preserves archive identity, one-install
 dispatch and no retry after unknown outcome; all 17 module cases pass. Neither
 the old 97-failure total nor these scoped passes establish current CLI acceptance.
+The later stable CLI+TUI run at `dd4bc68` records 7017 passes, 96 failures and
+77 skips across both packages; it is a distinct historical scope. Its recap
+permission failures reproduced on current Windows because POSIX directory mode
+bits did not deny creation. Native ACL-based fixture setup now exercises that
+delegation path, with the exact owned HTTP origin registered and the guard retained.
 
 The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
 512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
