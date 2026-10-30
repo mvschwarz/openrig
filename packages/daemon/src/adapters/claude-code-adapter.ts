@@ -1197,7 +1197,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
     // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
     // seats holding it will never be refreshed.
-    const collectorCmd = managedClaudeNodeCommand(this.nodeExecutable, collectorDest, contextDir, providerUsageDir);
+    const legacyCollectorCmd = managedClaudeNodeCommand(this.nodeExecutable, collectorDest, contextDir, providerUsageDir);
+    const collectorArgs = parseManagedClaudeNodeCommand(legacyCollectorCmd)!;
+    // A bare executable plus an encoded literal call works through either Git Bash
+    // or PowerShell; a quoted executable alone is only an expression in PowerShell.
+    const collectorCmd = process.platform === "win32"
+      ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from(
+        "& " + [collectorArgs.executable, ...collectorArgs.args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
+      : legacyCollectorCmd;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
     // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a

@@ -20,6 +20,9 @@ const relayParser = createRequire(import.meta.url)(relay) as { settingsRelayPath
 const activityCommand = (executable: string, script: string) => process.platform === "win32"
   ? "& " + [executable, script].map(value => "'" + value.replaceAll("'", "''") + "'").join(" ")
   : `${shellQuote(executable)} ${shellQuote(script)}`;
+const collectorCommand = (executable: string, ...args: string[]) => process.platform === "win32"
+  ? "powershell.exe -NoProfile -NonInteractive -EncodedCommand " + Buffer.from("& " + [executable, ...args].map(value => "'" + value.replaceAll("'", "''") + "'").join(" "), "utf16le").toString("base64")
+  : [executable, ...args].map(shellQuote).join(" ");
 
 it.runIf(process.platform === "win32")("recognizes literal native short paths in both readers without accepting tilde expansion", () => {
   const executable = "C:/PROGRA~1/nodejs/node.exe", script = "C:/Users/USERNA~1/state/claude-activity-hooks/activity-relay.cjs";
@@ -82,7 +85,7 @@ it.each(["legacy", "pinned", "unquoted", "absolute-unquoted", "plugin-unquoted"]
   expect(result.hooks.Stop.flatMap((g: any) => g.hooks)).toEqual([custom, { type: "command", command: wanted, timeout: 5, ...(process.platform === "win32" ? { shell: "powershell" } : {}) }]);
   expect(result.permissions).toEqual(permissions);
   expect(result.statusLine).toEqual({ type: "command", padding: 3,
-    command: `${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}` });
+    command: collectorCommand(process.execPath, f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")) });
   const bytes = fs.readFileSync(f.settings, "utf8");
   await f.project(a);
   expect(fs.readFileSync(f.settings, "utf8")).toBe(bytes);
@@ -102,7 +105,7 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
   const a = f.adapter(executable);
   const first = await f.project(a);
   expect(first.hooks.Stop[0].hooks[0].command).toBe(activityCommand("node", f.relayDest));
-  expect(first.statusLine.command).toBe(`node ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(first.statusLine.command).toBe(collectorCommand("node", f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
   expect(relayParser.settingsRelayPath(first.hooks.Stop[0].hooks[0].command))
     .toEqual({ executable: "node", relay: f.relayDest });
   const bytes = fs.readFileSync(f.settings, "utf8");
@@ -127,7 +130,7 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
 
   // A later recognized interpreter replaces the collector rather than treating it as user-owned.
   const refreshed = await f.project(f.adapter());
-  expect(refreshed.statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(f.collectorDest)} ${shellQuote(path.join(f.state, "state/context-usage"))} ${shellQuote(path.join(f.state, "state/provider-usage"))}`);
+  expect(refreshed.statusLine.command).toBe(collectorCommand(process.execPath, f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")));
   expect(refreshed.hooks.Stop).toHaveLength(1);
 });
 
@@ -185,7 +188,7 @@ it.runIf(process.platform === "win32")("executes a generated activity hook in th
   const f = fixture();
   const result = await f.project(f.adapter());
   // Keep the real writer's command, replacing only the owned copied script's effects.
-  fs.writeFileSync(f.relayDest, "process.stdout.write('owned-native-hook-executed')");
+  fs.writeFileSync(f.relayDest, "let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>process.stdout.write('owned-native-hook-executed:'+JSON.parse(s).value))");
   const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
@@ -199,11 +202,36 @@ it.runIf(process.platform === "win32")("executes a generated activity hook in th
     expect(relayParser.settingsRelayPath(hook.command + suffix)).toBeNull();
   }
   const run = spawnSync(executable, ["-NoProfile", "-NonInteractive", "-Command", hook.command], {
-    cwd: f.cwd, env, encoding: "utf8", input: "{}", timeout: 5000, windowsHide: true,
+    cwd: f.cwd, env, encoding: "utf8", input: JSON.stringify({ value: "原生 O'Brien" }), timeout: 5000, windowsHide: true,
   });
   expect(run.error).toBeUndefined();
   expect(run.status, run.stderr).toBe(0);
-  expect(run.stdout).toBe("owned-native-hook-executed");
+  expect(run.stdout).toBe("owned-native-hook-executed:原生 O'Brien");
+});
+
+it.runIf(process.platform === "win32").for(["PowerShell", "Git Bash"])("executes the generated status collector through %s without Node on PATH", async (shell, context) => {
+  const f = fixture();
+  const result = await f.project(f.adapter());
+  const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const bash = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git/bin/bash.exe");
+  if (shell === "Git Bash" && !fs.existsSync(bash)) context.skip();
+  const env = { ...process.env, HOME: f.root };
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  env.PATH = path.dirname(executable);
+  const sample = { session_id: "原生 O'Brien", session_name: "fixture-native", context_window: { used_percentage: 37 } };
+  const run = spawnSync(shell === "PowerShell" ? executable : bash,
+    shell === "PowerShell" ? ["-NoProfile", "-NonInteractive", "-Command", result.statusLine.command] : ["-c", result.statusLine.command], {
+    cwd: f.cwd, env, encoding: "utf8", input: JSON.stringify(sample), timeout: 5000, windowsHide: true,
+  });
+  expect(run.error).toBeUndefined();
+  expect(run.status, run.stderr).toBe(0);
+  expect(JSON.parse(fs.readFileSync(path.join(f.state, "state/context-usage/fixture-native.json"), "utf8")))
+    .toMatchObject({ session_id: sample.session_id, context_window: sample.context_window });
+  expect(parseManagedClaudeNodeCommand(result.statusLine.command)).toEqual({ executable: process.execPath,
+    args: [f.collectorDest, path.join(f.state, "state/context-usage"), path.join(f.state, "state/provider-usage")] });
+  for (const suffix of ["; echo injected", " extra", "\necho injected"]) {
+    expect(parseManagedClaudeNodeCommand(result.statusLine.command + suffix)).toBeNull();
+  }
 });
 
 it.each(["explicit", "legacy"])("runs every Claude plugin hook command with the %s interpreter selection", kind => {

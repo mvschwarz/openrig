@@ -5,6 +5,15 @@ import { tmpdir } from "node:os";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
+import { parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hooks.js";
+
+// Existing assertions compare literal arguments, independently of the native shell envelope.
+const collectorText = (command: string) => {
+  if (!command.startsWith("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")) return command;
+  const parsed = parseManagedClaudeNodeCommand(command);
+  expect(parsed).not.toBeNull();
+  return [parsed!.executable, ...parsed!.args].map(shellQuote).join(" ");
+};
 import { replaceFile } from "../src/adapters/replace-file.js";
 import { denyWindowsDirectoryCreation, windowsDirectoryAccess } from "./helpers/directory-permissions.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -315,9 +324,9 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     const settings = JSON.parse(written[settingsPath]!);
     expect(settings.statusLine).toBeDefined();
     expect(settings.statusLine.type).toBe("command");
-    expect(settings.statusLine.command).toContain("context-collector.cjs");
-    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
-    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "provider-usage"));
+    expect(collectorText(settings.statusLine.command)).toContain("context-collector.cjs");
+    expect(collectorText(settings.statusLine.command)).toContain(join(tmpDir, "state", "context-usage"));
+    expect(collectorText(settings.statusLine.command)).toContain(join(tmpDir, "state", "provider-usage"));
     expect(dirsMade).toContain(join(tmpDir, "state", "context-usage"));
     expect(dirsMade).toContain(join(tmpDir, "state", "provider-usage"));
   });
@@ -342,14 +351,14 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov", padding: 2 } });
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
-      expect(statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(collectorText(statusLine.command)).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
       expect(statusLine.padding).toBe(2);
     });
 
     it("refreshes the three-token collector command OpenRig wrote before provider usage", async () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /project/.openrig/context-collector.cjs /old/state/context" } });
       await deliver();
-      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(collectorText(JSON.parse(written[settingsPath]!).statusLine.command)).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
     });
 
     it("installs the collector into a status line that has no command", async () => {
@@ -357,7 +366,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
       expect(statusLine).toMatchObject({ type: "command", padding: 3 });
-      expect(statusLine.command).toContain(join("/project", ".openrig", "context-collector.cjs"));
+      expect(collectorText(statusLine.command)).toContain(join("/project", ".openrig", "context-collector.cjs"));
     });
 
     it("leaves a settings file it cannot parse byte-for-byte untouched", async () => {
@@ -389,8 +398,9 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     it.each(["", "  \n"])("installs the collector into an empty settings file (%j)", async (text) => {
       written[settingsPath] = text;
       await deliver();
-      expect(JSON.parse(written[settingsPath]!).statusLine.command).toContain(join("/project", ".openrig", "context-collector.cjs"));
-      expect(JSON.parse(written[settingsPath]!).statusLine).toEqual({
+      expect(collectorText(JSON.parse(written[settingsPath]!).statusLine.command)).toContain(join("/project", ".openrig", "context-collector.cjs"));
+      const statusLine = JSON.parse(written[settingsPath]!).statusLine;
+      expect({ ...statusLine, command: collectorText(statusLine.command) }).toEqual({
         type: "command",
         command: `${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
       });
@@ -471,7 +481,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.theme).toBe("dark");
     expect(settings.statusLine).toBeDefined();
     expect(settings.statusLine.type).toBe("command");
-    expect(settings.statusLine.command).toContain("context-collector.cjs");
+    expect(collectorText(settings.statusLine.command)).toContain("context-collector.cjs");
   });
 
   it("ensureContextCollector is a public best-effort seam for adopted tmux sessions", () => {
@@ -486,8 +496,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
     expect(settings.statusLine.type).toBe("command");
-    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
-    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "provider-usage"));
+    expect(collectorText(settings.statusLine.command)).toContain(join(tmpDir, "state", "context-usage"));
+    expect(collectorText(settings.statusLine.command)).toContain(join(tmpDir, "state", "provider-usage"));
     expect(written["/project/.openrig/context-collector.cjs"]).toBe("copied:/fake/collector.js");
   });
 
@@ -692,7 +702,7 @@ describe("provisioned collector command shell paths", () => {
     const original = provision(cwd, join(root, "old state")).statusLine.command;
     const settings = provision(cwd, join(root, "new state"), original);
     expect(settings.statusLine.command).not.toBe(original);
-    expect(settings.statusLine.command).toContain("new state");
+    expect(collectorText(settings.statusLine.command)).toContain("new state");
     expect(settings.statusLine.padding).toBe(2);
     expect(settings.permissions).toEqual({ allow: ["Read"] });
   });
