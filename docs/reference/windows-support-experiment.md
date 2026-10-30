@@ -2,6 +2,25 @@
 
 ## Current review status (2026-10-30)
 
+### File transfer, log worker and control-mode boundary review
+
+The current file-transfer entry and slow-operation recorder were read in full.
+The transfer entry selects native local/SFTP implementations on Windows and
+retains its existing explicit path/host planning. This review did not execute
+a remote transfer or establish additional transport acceptance.
+
+The complete Windows private-log test file passes (3/3): actual owned Worker
+append/rotation beyond MAX_PATH with ACL inspection after writes stop, upgrading
+an existing owned log without losing bytes, and refusing a multiply-linked log
+with an unsuccessful durable drain. No live daemon log or user material was used.
+This does not establish every recorder barrier, shutdown or failure condition.
+
+The tmux control-client boundary was also checked against current startup:
+control mode is opt-in on POSIX, while native Windows keeps the psmux argv
+executor. No control client, terminal server, session, service or fleet process
+was started. The full POSIX control parser/lifecycle was not re-reviewed or
+accepted as a native feature by this boundary check.
+
 ### Native settings-relay path casing and plugin duplicate suppression
 
 The activity relay's settings-command check used a case-sensitive path suffix on
