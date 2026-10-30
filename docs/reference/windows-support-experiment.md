@@ -2,6 +2,21 @@
 
 ## Current review status (2026-10-30)
 
+### Dotted Windows ACP command names
+
+ACP npm-agent resolution now tries the configured PATHEXT entries after an exact
+dotted filename, rather than assuming any dot already names an executable suffix.
+An owned npm-format `owned.agent.cmd` fixture failed to resolve as `owned.agent`
+before this change. It now resolves to its declared Node entry and passes literal
+protocol arguments through without a cmd.exe round trip. The existing Windows ACP
+connector cases also cover dotted names in both global-style and local `.bin`
+layouts, including a competing EXE when CMD has priority, recorded completion,
+unchanged queue ownership, and the synchronous stop-command selection path.
+An explicitly empty PATHEXT still suppresses suffix discovery; explicit shim
+paths still work, and unrelated batch launchers are still refused. The selected
+checks pass 9/9 (16 other cases filtered out); CLI type checking passes. These are owned fake agents and an in-memory queue, not live
+provider, fleet, or real queue acceptance.
+
 ### Host identity sidecar staging filenames
 
 The CLI host-binding writer now uses a short unique sibling staging filename instead

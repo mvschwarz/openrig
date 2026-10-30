@@ -74,7 +74,11 @@ function owner(q: ReturnType<typeof memoryQueue>, seat: string, answers: string[
 const outcomeNote = (q: ReturnType<typeof memoryQueue>) => q.task().notes.find((note) => /^ACP run \S+ outcome /.test(note)) ?? "";
 
 describe("rig acp run", () => {
-  it.runIf(process.platform === "win32").each([[false, false], [true, false], [false, true], [true, true]])("runs a Windows npm ACP agent with exact arguments (explicit path: %s, local install: %s)", async (explicit, local) => {
+  it.runIf(process.platform === "win32").each([
+    [false, false, "fixture-acp"], [true, false, "fixture-acp"],
+    [false, true, "fixture-acp"], [true, true, "fixture-acp"],
+    [false, false, "fixture.acp"], [false, true, "fixture.acp"],
+  ] as const)("runs a Windows npm ACP agent with exact arguments (explicit path: %s, local install: %s, name: %s)", async (explicit, local, agentName) => {
     const q = memoryQueue("scenario:reply NATIVE-PONG");
     const run = options();
     const prefix = join(run.cwd, "npm bin 中文");
@@ -83,21 +87,21 @@ describe("rig acp run", () => {
     mkdirSync(root, { recursive: true });
     mkdirSync(bin, { recursive: true });
     const argvFile = join(run.cwd, "argv.json");
-    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@fixture/acp-agent", type: "module", bin: { "fixture-acp": "agent.mjs" } }));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@fixture/acp-agent", type: "module", bin: { [agentName]: "agent.mjs" } }));
     writeFileSync(join(root, "agent.mjs"), `import { writeFileSync as recordArgv } from "node:fs"; recordArgv(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)));\n${readFileSync(FAKE_AGENT, "utf8").replace(/^#![^\n]*\n/, "")}`);
-    const shim = join(bin, "fixture-acp.cmd");
+    const shim = join(bin, `${agentName}.cmd`);
     writeFileSync(shim, `@ECHO off\r\nSET dp0=%~dp0\r\nSET "_prog=node"\r\n"%_prog%" "%dp0%\\${local ? ".." : "node_modules"}\\@fixture\\acp-agent\\agent.mjs" %*\r\n`);
     vi.stubEnv("PATH", `${bin};${dirname(process.execPath)}`);
     vi.stubEnv("PATHEXT", ".CMD;.EXE");
-    writeFileSync(join(bin, "fixture-acp.exe"), "synthetic decoy: must not execute when CMD precedes EXE");
+    writeFileSync(join(bin, `${agentName}.exe`), "synthetic decoy: must not execute when CMD precedes EXE");
     const args = ["中文 space", "apostrophe'", 'quote"', "", "trailing\\", "%OPENRIG_NODE_ID%", "amp&word"];
-    const outcome = await runAcpAssignment(q.queue, { ...run, agent: [explicit ? shim : "fixture-acp", ...args] });
+    const outcome = await runAcpAssignment(q.queue, { ...run, agent: [explicit ? shim : agentName, ...args] });
     expect(outcome).toMatchObject({ kind: "completed", text: "working… NATIVE-PONG" });
     expect(JSON.parse(readFileSync(argvFile, "utf8"))).toEqual(args);
     expect(outcomeNote(q)).toContain("outcome completed");
     expect(q.task().state).toBe("in-progress");
     // The synchronous stop-command path uses the same selected entry and argv.
-    const selected = resolveAcpAgentCommand(explicit ? shim : "fixture-acp", run.cwd);
+    const selected = resolveAcpAgentCommand(explicit ? shim : agentName, run.cwd);
     const stopped = spawnSync(selected.command, [...selected.prefix, ...args], { cwd: run.cwd, stdio: "ignore", windowsHide: true });
     expect(stopped.error).toBeUndefined();
     expect(stopped.status).toBe(0);
