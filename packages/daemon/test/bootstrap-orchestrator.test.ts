@@ -201,15 +201,19 @@ describe("BootstrapOrchestrator", () => {
     });
   }
 
-  it("carries a reviewed Windows dependency plan through bootstrap to native argv and the action journal", async () => {
+  it.each(["installed", "missing", "unknown", "throws"] as const)("carries a reviewed Windows dependency plan through bootstrap with post-install %s", async postInstall => {
     writePkg(path.join(tmpDir, "test-pkg"), VALID_MANIFEST_YAML + "\nrequirements:\n  cli_tools:\n    - name: git\n",
       { "skills/helper/SKILL.md": "# Owned helper" });
     const sourceRef = writeSpec(SPEC_WITH_PACKAGES_YAML);
     const probeRegistry = new RequirementsProbeRegistry(async () => { throw Error("Unexpected probe shell"); }, { platform: "win32" });
-    vi.spyOn(probeRegistry, "probeAll").mockResolvedValue([{ name: "git", kind: "cli_tool", status: "missing", version: null,
-      detectedPath: null, provider: null, command: null, installHints: null, error: null }]);
+    const missing = [{ name: "git", kind: "cli_tool" as const, status: "missing" as const, version: null,
+      detectedPath: null, provider: null, command: null, installHints: null, error: null }];
+    const probe = vi.spyOn(probeRegistry, "probeAll").mockResolvedValueOnce(missing).mockResolvedValueOnce(missing).mockResolvedValueOnce(missing);
+    if (postInstall === "throws") probe.mockRejectedValueOnce(Error("owned observation unavailable"));
+    else probe.mockResolvedValueOnce([{ ...missing[0]!, status: postInstall }]);
     const execArgv = vi.fn(async () => "owned install result");
-    const orch = buildOrchestrator({ platform: "win32", probeRegistry, execArgv });
+    const instantiator = createMockInstantiator(db), instantiate = vi.spyOn(instantiator, "instantiate");
+    const orch = buildOrchestrator({ platform: "win32", probeRegistry, execArgv, instantiator });
     const plan = await orch.bootstrap({ mode: "plan", sourceRef });
     expect(plan.status).toBe("planned");
     expect(plan.actionKeys).toContain("external_install:cli_tool:git");
@@ -219,7 +223,9 @@ describe("BootstrapOrchestrator", () => {
     expect(blocked.status).toBe("failed");
     expect(execArgv).not.toHaveBeenCalled();
     const applied = await orch.bootstrap({ mode: "apply", sourceRef, approvedActionKeys: ["external_install:cli_tool:git"] });
-    expect(applied.status, JSON.stringify(applied.errors)).toBe("completed");
+    expect(applied.status, JSON.stringify(applied.errors)).toBe(postInstall === "installed" ? "completed" : "partial");
+    expect(instantiate).toHaveBeenCalledTimes(postInstall === "installed" ? 1 : 0);
+    expect(applied.stages.find(stage => stage.stage === "verify_external_installs")?.status).toBe(postInstall === "installed" ? "ok" : "blocked");
     expect(execArgv).toHaveBeenCalledExactlyOnceWith("winget.exe", ["install", "--id", "Git.Git", "--exact", "--source", "winget",
       "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]);
     expect(db.prepare("SELECT provider, status FROM bootstrap_actions WHERE bootstrap_id = ? AND action_kind = 'external_install'").get(applied.runId))

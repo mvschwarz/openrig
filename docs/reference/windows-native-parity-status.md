@@ -367,3 +367,11 @@ passes. No WinGet installer was executed; installer timeout/descendant behavior
 and post-install readiness remain unverified. A failed install receipt does not
 prove rollback or that an external installer made no changes.
 
+Bootstrap now re-probes requirements after a successful WinGet command before
+installing project resources or instantiating the rig. Installed tools permit
+continuation; missing tools, unknown results and observation errors retain the
+install receipt and return partial without instantiation. The message explains
+that the host may already have changed and the daemon PATH may need refreshing.
+Four focused orchestrator cases pass and daemon TypeScript passes. This verifies
+the control flow with injected probes/installation, not an actual WinGet install.
+
