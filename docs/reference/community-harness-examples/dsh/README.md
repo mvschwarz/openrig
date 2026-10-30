@@ -37,14 +37,16 @@ The runner submits each request to OpenRig, which asks one person:
 
 That person answers one of the options dsh offered, and the runner gives that answer to the same live request, once.
 
-**When no one can be asked, the request is permitted** with dsh's own allow option. That's OpenRig's default, and the
-runner does the same on an older OpenRig without this path.
+**When no one can be asked, the request is permitted** with dsh's own allow option: `allow_once` when dsh offers it,
+else `allow_always`. That's OpenRig's default. The runner does the same when OpenRig can't answer: an older OpenRig
+without this path, an OpenRig it can't reach, or a refusal other than `--deny`.
 
-**The runner refuses** only in two cases:
-- the seat's operator opted in to refusal, with `rig seat set-permissions-to <seat> --deny`;
-- OpenRig can't be reached.
+**`allow_always` creates a standing grant in dsh.** OpenRig doesn't record or revoke it, which is why the runner prefers
+`allow_once`. Where dsh keeps the grant, and for how long, isn't checked.
 
-A refused request is shown in the pane, and the seat reads needs input until the next prompt.
+**The runner refuses** only when the seat's operator opted in to refusal, with `rig seat set-permissions-to <seat>
+--deny`, or when dsh offered no allow option. A refused request is shown in the pane, and the seat reads needs input
+until the next prompt.
 
 ## Before you declare resume
 

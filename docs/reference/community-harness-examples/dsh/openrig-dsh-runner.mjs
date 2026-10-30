@@ -5,8 +5,8 @@
 // It follows docs/reference/harness-runner-contract.md: it hosts `dsh --profile acp` over ACP on stdio, writes the
 // launch record once the conversation is open, turns each submitted block into one prompt, reports turn boundaries as
 // activity hooks, cancels on /abort or Ctrl-C, and sends permission requests to OpenRig: a person answers, or OpenRig
-// permits when no one can be asked (refusing and holding needs input only when the seat opted in to refusal or
-// OpenRig can't be reached). Copy it and maintain it as your own.
+// permits when no one can be asked, and so does the runner when OpenRig can't answer (refusing and holding needs input
+// only when the seat opted in to refusal). Copy it and maintain it as your own.
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
@@ -16,12 +16,14 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const RUNNER = "openrig-dsh-runner 1";
-const PRESET = "dsh";
+const NAME = process.env.OPENRIG_RUNTIME || "dsh"; // the preset's name: OpenRig passes it, and checks the record against it
 const LIVENESS_SECONDS = 60;
 const BEAT_MS = 30_000;
 const ACTIVE_EVERY_MS = 15_000;
 const POST_TIMEOUT_MS = 2_000;
 const WAIT_SECONDS = 25;
+const READ_TRIES = 3; // reads in a row that get no answer before the runner permits
+const GRANT_REFUSALS = [401, 403, 409]; // the seat grant's own refusals: this occupant's request is over
 const CANCELLED = { outcome: { outcome: "cancelled" } };
 const ACP_RESOURCE_NOT_FOUND = -32002;
 
@@ -210,7 +212,7 @@ function seatHome() {
 function writeLaunchRecord(fields) {
   const path = process.env.OPENRIG_LAUNCH_RESULT;
   if (!path) return;
-  const record = { format: 1, attempt: process.env.OPENRIG_LAUNCH_ATTEMPT, harness: PRESET, ...fields };
+  const record = { format: 1, attempt: process.env.OPENRIG_LAUNCH_ATTEMPT, harness: NAME, ...fields };
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
   renameSync(temp, path);
@@ -236,7 +238,7 @@ async function main() {
 
   const home = seatHome();
   const activity = new Activity({ sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID,
-    runtime: env.OPENRIG_RUNTIME || PRESET, generation: env.OPENRIG_OCCUPANT_GENERATION });
+    runtime: NAME, generation: env.OPENRIG_OCCUPANT_GENERATION });
   const agentEnv = { ...env, DSH_HOME: home };
   delete agentEnv.OPENRIG_ACTIVITY_HOOK_TOKEN; // dsh's shell tool inherits this environment
   agentEnv.DSH_PERMISSION_MODE ??= "workspace-write";
@@ -284,7 +286,7 @@ async function main() {
     if (stopping) return;
     for (const ask of state.asks) ask.end("exited");
     say(`\n[openrig-dsh] dsh exited (code ${code ?? "none"}, signal ${signal ?? "none"})`);
-    activity.post("Stop", `${PRESET}_exited`);
+    activity.post("Stop", `${NAME}_exited`);
     void finish(code === 0 ? 0 : 1);
   });
 
@@ -310,7 +312,7 @@ async function main() {
 
   // The answered path: OpenRig opens one ask to the default person (or the seat's override, `rig seat
   // set-permissions-to`), and the runner reads the answer back for this same live request. With no one to ask, OpenRig
-  // permits at once, and so does the runner on an older OpenRig without the path (404). A refusal at submit refuses.
+  // permits at once, and so does the runner when OpenRig can't answer. Only the seat's opt-in (`--deny`) refuses.
   const askOwner = async (requestId, toolCall, options) => {
     const turn = state.turn;
     const live = () => state.running && state.turn === turn && !state.cancelRequestedAt && !agentExited;
@@ -331,14 +333,20 @@ async function main() {
       say(`[permission] permitted: ${submitted.body.reason ?? "no one can be asked"} (${submitted.body.optionId})`);
       return { outcome: { outcome: "selected", optionId: submitted.body.optionId } };
     }
-    // An older OpenRig has no human route at all, so the same default applies.
-    if (submitted.status === 404) {
-      const allow = options.find((option) => option.kind === "allow_once") ?? options.find((option) => option.kind === "allow_always");
-      if (!allow) return refuse("this OpenRig has no answered path, and the agent offered no allow option");
-      say(`[permission] permitted: this OpenRig has no answered path (${allow.optionId})`);
+    // When OpenRig can't answer, nobody can be asked either, so the same default applies. allow_once is preferred, so
+    // dsh doesn't remember a permission nobody chose.
+    const allow = options.find((option) => option.kind === "allow_once") ?? options.find((option) => option.kind === "allow_always");
+    const permit = (why) => {
+      if (!allow) return refuse(`${why}, and the agent offered no allow option`);
+      state.holding = false;
+      say(`[permission] permitted: ${why} (${allow.optionId})`);
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
+    };
+    if (!askId) {
+      if (submitted.body?.code === "denied_by_seat") return refuse("the seat's operator chose to refuse its permission requests");
+      return permit(submitted.status === 404 ? "this OpenRig has no answered path"
+        : submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't ask anyone (${submitted.body?.code ?? submitted.status})`);
     }
-    if (!askId) return refuse(submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig refused it (${submitted.body?.code ?? submitted.status})`);
     state.holding = true; // OpenRig recorded the seat's permission prompt when it opened the ask
     say(`[permission] OpenRig asked a person (${askId}); waiting for their answer`);
     return new Promise((resolve) => {
@@ -352,11 +360,12 @@ async function main() {
       } };
       state.asks.add(ask);
       void (async () => {
+        let unanswered = 0;
         while (!done) {
           const read = await callOpenRig("GET", `/api/activity/permission-requests/${encodeURIComponent(askId)}?waitSeconds=${WAIT_SECONDS}`, null, (WAIT_SECONDS + 10) * 1_000);
           if (done) return;
-          if (read.status === 0) { await sleep(2_000); continue; }
-          if (read.status === 200 && read.body?.state === "pending") continue;
+          if (read.status === 0 && ++unanswered < READ_TRIES) { await sleep(2_000); continue; }
+          if (read.status === 200 && read.body?.state === "pending") { unanswered = 0; continue; }
           done = true;
           state.asks.delete(ask);
           const answer = read.body ?? {};
@@ -365,6 +374,9 @@ async function main() {
             state.holding = false;
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
+          } else if (live() && read.status !== 200 && !GRANT_REFUSALS.includes(read.status)) {
+            // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked.
+            resolve(permit(read.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't answer (${answer.code ?? read.status})`));
           } else {
             say(`[permission] not answered (${answer.state ?? answer.code ?? read.status}); refused, and the seat reads needs input until the next prompt`);
             resolve(CANCELLED);
