@@ -22,7 +22,7 @@ describe.skipIf(process.platform !== "win32" || !existsSync(server))("native rec
         dst: { kind: "local", path: destination }, dryRun: false,
       }, start);
       expect(result.ok).toBe(false);
-      expect(result.failedStep).toBe("remote-command-failed");
+      expect(result.failedStep).toBe("local-copy-failed");
       expect(await readFile(destination, "utf8")).toBe("owned original\n");
       expect(result.hint).toContain("existing destination was not removed");
       const staged = (await readdir(root)).filter(file => file.startsWith(".openrig-copy-"));

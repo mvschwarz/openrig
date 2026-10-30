@@ -39,6 +39,14 @@ fixtures are removed after their checks. These checks do not exercise an SSH
 network connection, authentication, Linux server permissions or privileged
 Windows file-symlink creation, and change no remote host or user files.
 
+The readonly replacement check then exposed a diagnostic mismatch: a native
+local rename failure was classified remote-command-failed. SFTP copy now uses
+the existing local-copy-failed result for Node filesystem errors carrying a
+local path/syscall, while retaining SSH-missing, transport and remote-status
+classifications. The actual readonly check failed on the old classification;
+both complete native SFTP files pass 5/5 afterward, and CLI typecheck passes.
+Original/staging bytes and the retention hint remain asserted.
+
 ## Native Git context update consumer (2026-10-30)
 
 The current complete Git-context file passes 8/8 on native Windows using owned

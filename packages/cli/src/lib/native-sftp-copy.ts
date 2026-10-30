@@ -120,7 +120,13 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     return { ok: true, failedStep: "none", transport: "sftp", exitCode: 0, stdout: changes.join("\n"), stderr, filesTransferred, bytesTransferred };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const failedStep = spawnError?.code === "ENOENT" ? "ssh-missing" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
+    // Node filesystem errors carry their local path and syscall. SFTP status
+    // errors and transport errors do not: a local rename/open failure must not
+    // send the operator looking for a problem on the remote host.
+    const localError = error as NodeJS.ErrnoException | undefined;
+    const localFilesystemFailure = typeof localError?.path === "string"
+      && typeof localError.syscall === "string" && !localError.syscall.startsWith("spawn");
+    const failedStep = spawnError?.code === "ENOENT" ? "ssh-missing" : localFilesystemFailure ? "local-copy-failed" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
     return { ok: false, failedStep, transport: "sftp", exitCode: transportExit ?? 1, stdout: changes.join("\n"), stderr: [stderr, message].filter(Boolean).join("\n"), ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; existing destination was not removed.` } : {}) };
   } finally { await client?.close(); }
 }
