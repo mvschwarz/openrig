@@ -67,6 +67,14 @@ The current documented snapshot-refresh case passes independently. The old
 process crash's cause and remaining platform-specific assertions are not cleared
 by the later installed gate or by the notification's successful delivery.
 
+Following a delayed workspace failure notification, the current usage-hosts journey
+passes 12 cases with its fetch guard unchanged. A complete TUI run at `80177a8`
+exposed one stale POSIX recovery-prefix assertion; `24f301a` makes that journey
+expect the daemon-selected native shell. The two journey modules pass 23 cases.
+The subsequent complete TUI run at unchanged `24f301a` records 1190 passes, one
+different test failure and 21 skips. That remaining failure is unclassified here;
+there is no complete-TUI or complete-workspace green claim.
+
 ## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured
