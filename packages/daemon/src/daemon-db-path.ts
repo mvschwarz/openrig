@@ -12,7 +12,7 @@ function resolveForContainment(path: string, seen = new Set<string>()): string {
   if (seen.has(absolute)) throw new Error(`symlink cycle while resolving ${path}`);
   seen.add(absolute);
   try {
-    return realpathSync(absolute);
+    return process.platform === "win32" ? realpathSync.native(absolute) : realpathSync(absolute);
   } catch (realpathError) {
     let stat: ReturnType<typeof lstatSync>;
     try {

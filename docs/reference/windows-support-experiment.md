@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Database conflict records through Windows path aliases
+
+Database containment and conflict-record resolution now use native Windows
+realpath expansion. Previously a record naming an owned file by its long path
+did not match the same file selected through its DOS short path, so even matching
+holder and listener evidence failed to establish the conflict. The owned file
+fixture now joins those aliases before applying the existing warn/stop/one-start
+override rules. Missing holders and a listener naming another PID still do not
+become confirmed conflicts. The fixture injects OS-holder and HTTP answers and
+never opens its sentinel file as SQLite or contacts a real listener.
+
+Daemon type checking passes. The three database test files have 25 passes and
+one retained failure: actual file-symlink creation is refused with EPERM on this
+host. The existing native directory-junction escape/absent-tail case passes but
+does not replace that file-symlink evidence. No live database, daemon process,
+conflict policy, or runtime deployment was changed.
+
 ### Hook CLI lookup for project-local npm installations
 
 The shipped Windows hook CLI resolver now recognizes project-local
