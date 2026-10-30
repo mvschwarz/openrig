@@ -39,8 +39,8 @@ it.runIf(process.platform === "win32")("dispatches a recognized npm Claude probe
     expect(result).toBe("inconclusive");
     expect(sendShellCommand).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fs.readFileSync(observed, "utf8"))).toEqual(expect.arrayContaining(["--resume", "11111111-1111-4111-8111-111111111111"]));
-    expect(identity).toHaveBeenCalledWith(expect.objectContaining({ selectedExecutable: fs.realpathSync(process.execPath),
-      selectedScript: fs.realpathSync(script), requireResume: true }));
+    expect(identity).toHaveBeenCalledWith(expect.objectContaining({ selectedExecutable: fs.realpathSync.native(process.execPath),
+      selectedScript: fs.realpathSync.native(script), requireResume: true }));
     expect(killSession).toHaveBeenCalledTimes(1);
   } finally { idle.mockRestore(); identity.mockRestore(); vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true }); }
 });

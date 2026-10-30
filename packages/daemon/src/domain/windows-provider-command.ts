@@ -38,7 +38,7 @@ export function resolveWindowsProviderCommand(name: "codex" | "claude", env: Nod
     for (const extension of extensions) {
       const candidate = path.join(directory, `${name}${extension}`);
       if (!existsSync(candidate) || !statSync(candidate).isFile()) continue;
-      if (extension === ".exe" || extension === ".com") return { command: realpathSync(candidate), prefix: [] };
+      if (extension === ".exe" || extension === ".com") return { command: realpathSync.native(candidate), prefix: [] };
       const local = path.basename(directory).toLowerCase() === ".bin";
       const modules = local ? path.dirname(directory) : path.join(directory, "node_modules");
       const root = path.join(modules, ...packageName.split("/"));
@@ -53,7 +53,7 @@ export function resolveWindowsProviderCommand(name: "codex" | "claude", env: Nod
       if (!readFileSync(candidate, "utf8").includes(needle)) throw new Error(`Unrecognized Windows ${name} shim`);
       const node = [path.join(directory, "node.exe"), ...searchPath.split(path.delimiter).map(dir => path.resolve(cwd, dir.replace(/^"(.*)"$/, "$1"), "node.exe"))].find(file => existsSync(file) && statSync(file).isFile());
       if (!node) throw new Error(`${name} npm installation requires Node on its launch PATH`);
-      return { command: realpathSync(node), prefix: [realpathSync(file)] };
+      return { command: realpathSync.native(node), prefix: [realpathSync.native(file)] };
     }
   }
   const error = new Error(`No ${name} executable on the Windows launch PATH`) as NodeJS.ErrnoException;

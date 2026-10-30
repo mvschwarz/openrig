@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Provider selection agrees with native OS executable paths
+
+The Windows provider command resolver now returns native real paths for selected
+executables and npm interpreter/script pairs. A real owned executable-path fixture
+reproduced the previous mismatch: selection retained a DOS-short ancestor while
+the injected OS process observation used the native long spelling, so the existing
+exact process verifier refused the same selected executable. Canonicalizing the
+selection fixes that mismatch without loosening executable or conversation checks.
+
+Native executable identity, Claude/Codex npm selection, selected-script aliases and
+the synthetic npm resume dispatch pass five focused checks; daemon TypeScript
+checking passes. The resume fixture expectation was updated to the native path
+contract. Sentinel executable files were never run; the resume dispatch uses its
+separate owned synthetic Node entry. Real providers and OS process ancestry remain
+outside these fixtures, and this change postdates the 1ba7 package build.
+
 ### Reconciled entry and file-transfer evidence
 
 The finite candidate ledger now reconciles nine previously recorded implementation
