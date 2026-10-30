@@ -138,6 +138,11 @@ it("refuses startup input replacement before touching a saved execution", async 
 
 it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-destination", "missing-destination", "missing-history", "changed-history"])("normal exact restore on recreated compute verifies current destination context (%s) without conversation replay", async mode => {
   const f = await fixture();
+  // Normal restore reads the installed preset, rather than the adapter constructor alone.
+  const home = join(f.root, "openrig-home"), presets = join(home, "community-harnesses");
+  mkdirSync(presets, { recursive: true });
+  writeFileSync(join(presets, "openshell-claude.yaml"), readFileSync(new URL("../assets/openshell/preset.yaml", import.meta.url)));
+  vi.stubEnv("OPENRIG_HOME", home); cleanup.push(() => vi.unstubAllEnvs());
   const role = join(f.root, "role.md"), skill = join(f.root, "skill"), plugin = join(f.root, "plugin"), startupFile = join(f.root, "startup.md");
   mkdirSync(skill); mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
   writeFileSync(role, "Required restored role"); writeFileSync(join(skill, "SKILL.md"), "Required restored skill");
@@ -217,7 +222,8 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
   const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux: f.app.tmuxAdapter, environmentStartup: f.startup });
   vi.spyOn(adapter, "checkReady").mockResolvedValue({ ready: true });
   const result = await f.app.restoreOrchestrator.restore(snapshot.id, { adapters: { "openshell-claude": adapter }, fsOps: { exists: existsSync } });
-  if (["unchanged", "changed", "added", "removed"].includes(mode)) { expect(result.launched?.[0]?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
-  else { expect(restored).toBe(false); expect(result.launched?.[0]?.status).not.toBe("resumed"); }
+  const restoredNode = result.ok ? result.result.nodes.find(node => node.nodeId === f.node.id) : undefined;
+  if (["unchanged", "changed", "added", "removed"].includes(mode)) { expect(restoredNode?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
+  else { expect(restored).toBe(false); expect(restoredNode?.status).not.toBe("resumed"); }
   expect(textInput).not.toHaveBeenCalled();
 });
