@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { cleanSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, type SeatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { inspectSeatSkills } from "../src/domain/seat-skill-apply.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -81,10 +83,38 @@ describe("a seat's launch additions in its own storage", () => {
     expect(tree(paths.root)).toEqual([]);
   });
 
-  it("an earlier record that can't be removed is the seat's named result, not a thrown launch", () => {
+  it("an earlier record that can't be removed is the seat's named result, not a thrown launch", async () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.stuck", runtime: "claude-code" });
     mkdirSync(paths.root, { recursive: true });
-    writeFileSync(join(paths.root, "launch-additions.json"), "{}\n");
+    const record = join(paths.root, "launch-additions.json");
+    writeFileSync(record, "{}\n");
+    if (process.platform === "win32") {
+      const script = "$ErrorActionPreference='Stop'; $s=[IO.File]::Open($env:OPENRIG_OWNED_LOCK_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{[Console]::Out.WriteLine('held');[Console]::In.ReadLine()|Out-Null}finally{$s.Dispose()}";
+      const shell = join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+      const child = spawn(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+        windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: { SystemRoot: process.env.SystemRoot, OPENRIG_OWNED_LOCK_FILE: record },
+      });
+      const closed = once(child, "close");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const ready = await Promise.race([once(child.stdout, "data").then(([bytes]) => String(bytes)),
+          new Promise<string>((_, reject) => { timer = setTimeout(() => reject(Error("Owned record lock did not start")), 5000); })]);
+        clearTimeout(timer);
+        expect(ready.trim()).toBe("held");
+        const prepared = prepareSeatLaunchAdditions(paths, {});
+        expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
+        expect(prepared.ok ? "" : prepared.message).toContain("couldn't be removed");
+        expect(readFileSync(record, "utf8")).toBe("{}\n");
+      } finally {
+        clearTimeout(timer);
+        child.stdin.end("\n");
+        timer = setTimeout(() => child.kill(), 3000);
+        await closed.finally(() => clearTimeout(timer));
+      }
+      expect(prepareSeatLaunchAdditions(paths, {})).toEqual({ ok: true, additions: { pluginDirs: [] } });
+      expect(existsSync(record)).toBe(false);
+      return;
+    }
     chmodSync(paths.root, 0o500); // the record is there but its folder isn't writable, so it can't be removed
     try {
       const prepared = prepareSeatLaunchAdditions(paths, {});

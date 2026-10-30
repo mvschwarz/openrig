@@ -298,3 +298,10 @@ five-case scoped receipt does not clear the remaining permission/file-link cases
 or establish a complete launch-additions suite pass. Launch and restore adapters
 are fixtures, not actual provider sessions.
 
+The launch-additions deletion-refusal case now uses a real Windows reader lock
+on its owned old record, while POSIX retains the non-writable-directory fixture.
+The native case passes: refusal names the undeletable record, its bytes stay
+unchanged, and releasing the lock allows the same operation to remove it and
+return the empty additions result. The reader process is closed before teardown;
+no ACL, provider, shared file or real seat is changed. Daemon TypeScript passes.
+
