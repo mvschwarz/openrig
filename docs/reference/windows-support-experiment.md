@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Explicit missions-directory casing on Windows
+
+An owned native fixture reproduced `rig scope` root resolution rejecting an
+existing explicitly named `MISSIONS`/`Missions` directory in strict mode. The
+same mismatch could send non-strict resolution to the configured workspace
+instead. Directory-name recognition now follows Windows case-insensitive
+spelling; POSIX recognition remains case-sensitive. Explicit flag and environment
+selection retain the caller's path. No project or configured workspace was used.
+
+The new native case and complete existing scope-filesystem test file pass with
+60 passed and 7 pending; the CLI TypeScript check passes. Pending cases and full
+scope-command/live-runtime acceptance remain open. Only root-resolution sections
+of the current helper were reviewed in this batch, not the complete module.
+
 ### File transfer, log worker and control-mode boundary review
 
 The current file-transfer entry and slow-operation recorder were read in full.
