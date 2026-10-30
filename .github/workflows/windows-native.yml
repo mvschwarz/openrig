@@ -75,7 +75,7 @@ jobs:
         run: npx vitest run test/operating-model-trunk-diff.test.ts --maxWorkers=1
       - name: Native test home and temporary-directory isolation
         working-directory: packages/daemon
-        run: npx vitest run test/fixture-home-cleanup.test.ts test/hermetic-env.test.ts test/test-app-hermeticity.test.ts --maxWorkers=1
+        run: npx vitest run test/fixture-home-cleanup.test.ts test/hermetic-env.test.ts test/test-app-hermeticity.test.ts test/hermetic-scaffold.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly

@@ -23,6 +23,7 @@ class Fixture {
     b.Append((char)92,slashes*2); b.Append((char)34); return b.ToString();
   }
   static int Main(string[] args) {
+    Console.InputEncoding=new UTF8Encoding(false);
     ${delayMs ? `System.Threading.Thread.Sleep(${delayMs});` : ""}
     var command=new StringBuilder(Quote(${JSON.stringify(script)}));
     foreach(string arg in args) command.Append(' ').Append(Quote(arg));
