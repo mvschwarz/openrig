@@ -224,19 +224,23 @@ function inert(text: string): string {
 
 /** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. The line is
  *  escaped first, so it holds no raw `<` or `>`, and `<n>` can mark a code span or link set aside
- *  without colliding with input. A link becomes `<url|text>` only for a safe https URL without
- *  `<`, `>` or `|` and a label (code included) without `|`; otherwise it stays escaped text. */
+ *  without colliding with input. A Markdown `[text](url)` or a Slack `<url|text>` / `<url>` becomes
+ *  a live link only for a safe https URL without `<`, `>` or `|` and a label (code included)
+ *  without `|`; otherwise it stays escaped text. */
 function inlineMarkdownToMrkdwn(line: string): string {
   const held: string[] = [];
   const hold = (rendered: string) => `<${held.push(rendered) - 1}>`;
   const restore = (s: string) => s.replace(/<(\d+)>/g, (_, i: string) => held[Number(i)] ?? "");
+  const link = (original: string, url: string, label?: string) => {
+    const text = label === undefined ? undefined : restore(label);
+    const raw = url.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+    if (!isSafeHttpsUrl(raw) || /[<>|]/.test(raw) || text?.includes("|")) return original;
+    return hold(text === undefined ? `<${url}>` : `<${url}|${text}>`);
+  };
   return restore(escapeSlackText(line)
     .replace(/`[^`\n]+`/g, hold)
-    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (link, label: string, url: string) => {
-      const text = restore(label);
-      const raw = url.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
-      return isSafeHttpsUrl(raw) && !/[<>|]/.test(raw) && !text.includes("|") ? hold(`<${url}|${text}>`) : link;
-    })
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => link(m, url, label))
+    .replace(/&lt;(https:\/\/[^\s|]+?)(?:\|(.+?))?&gt;/g, (m, url: string, label?: string) => link(m, url, label))
     .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
     .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*"));
 }
@@ -258,10 +262,11 @@ function convertMarkdown(text: string, openFence: string): { text: string; openF
     }
     const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
     if (heading) return heading[1] ? `*${inlineMarkdownToMrkdwn(heading[1])}*` : "";
+    // Section mrkdwn has no list syntax; a plain "- " reads better than a typed bullet character.
     const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
     if (item) {
       const [, indent = "", rest = ""] = item;
-      return `${indent}${indent ? "◦" : "•"} ${inlineMarkdownToMrkdwn(rest)}`;
+      return `${indent}- ${inlineMarkdownToMrkdwn(rest)}`;
     }
     return inlineMarkdownToMrkdwn(line);
   });
@@ -270,9 +275,9 @@ function convertMarkdown(text: string, openFence: string): { text: string; openF
 
 /** Agent-written Markdown as Slack mrkdwn, through the same inert pipeline as every other
  *  queue-controlled field (secrets redacted, then &, <, > escaped). `**b**`/`__b__` become
- *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `•` (indented: `◦`), and safe https
- *  `[text](url)` links `<url|text>`. A list marker needs a following space, so `*bold*` is not
- *  a list item. Code spans and ``` or ~~~ fenced blocks are only escaped. `openFence` is the
+ *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `- ` (indent kept), and safe https
+ *  `[text](url)` and `<url|text>` links live links. A list marker needs a following space, so
+ *  `*bold*` is not a list item. Code spans and ``` or ~~~ fenced blocks are only escaped. `openFence` is the
  *  fence a split brief's earlier part left open (see openFenceAfter). */
 export function markdownToSlackMrkdwn(text: string, openFence = ""): string {
   return convertMarkdown(text, openFence).text;

@@ -28,12 +28,12 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
     expect(md("[a|b](https://example.com)")).toBe("[a|b](https://example.com)");
   });
 
-  it("turns -, * and + list items into bullets, and indented items into ◦", () => {
-    expect(md("- one\n* two\n+ three\n  - nested\n    * deeper")).toBe("• one\n• two\n• three\n  ◦ nested\n    ◦ deeper");
+  it("writes -, * and + list items as \"- \", keeping indentation", () => {
+    expect(md("- one\n* two\n+ three\n  - nested\n    * deeper")).toBe("- one\n- two\n- three\n  - nested\n    - deeper");
   });
 
   it("does not read a *bold* line as a list item", () => {
-    expect(md("*bold* start\n* item")).toBe("*bold* start\n• item");
+    expect(md("*bold* start\n* item")).toBe("*bold* start\n- item");
   });
 
   it("keeps numbered lists as text", () => {
@@ -43,7 +43,7 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
   it("leaves code spans and fenced blocks untouched apart from escaping", () => {
     expect(md("run `**x** [a](https://e.com)` here")).toBe("run `**x** [a](https://e.com)` here");
     expect(md("```\n# not a heading\n- not a list\n**x** <y>\n```\n- a list")).toBe(
-      "```\n# not a heading\n- not a list\n**x** &lt;y&gt;\n```\n• a list",
+      "```\n# not a heading\n- not a list\n**x** &lt;y&gt;\n```\n- a list",
     );
   });
 
@@ -56,13 +56,13 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
     expect(md("[a](https://example.com/<!here>)")).toBe("[a](https://example.com/&lt;!here&gt;)");
     const out = md("- token xoxb-EXAMPLE-000000000000-doNotUseFake\n[hook](https://hooks.slack.com/services/T00/B00/xyz)");
     expect(containsSecret(out)).toBe(false);
-    expect(out).toContain("• token [redacted-secret]");
+    expect(out).toContain("- token [redacted-secret]");
     expect(out).not.toContain("<");
   });
 
   it("is applied to the body section and the fallback text of a posted message", () => {
     const m = buildOutboundMessage({ qitemId: "q", summary: "s", body: "## Plan\n- **ship** [it](https://example.com)" }, { sourceLabel: "host" });
-    const expected = "*Plan*\n• *ship* <https://example.com|it>";
+    const expected = "*Plan*\n- *ship* <https://example.com|it>";
     expect(m.text).toContain(expected);
     expect(JSON.stringify(m.blocks)).toContain(JSON.stringify(expected).slice(1, -1));
   });
@@ -111,9 +111,19 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
       expect(await deliver(decision)).toEqual({ ok: true });
       expect(posts.length).toBeGreaterThan(1);
       const last = posts.at(-1)!.blocks.map((b) => b.text?.text ?? "").join("\n");
-      expect(last).toContain("# literal\n- literal\n**literal**\n```\n*Next*\n• item");
+      expect(last).toContain("# literal\n- literal\n**literal**\n```\n*Next*\n- item");
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("keeps a Slack-format link written by hand live, under the same checks", () => {
+    expect(md("- <https://github.com/o/r/pull/1|PR #1> and <https://example.com/a?b=1&c=2>")).toBe(
+      "- <https://github.com/o/r/pull/1|PR #1> and <https://example.com/a?b=1&amp;c=2>",
+    );
+    expect(md("<http://example.com|x> <https://user:pw@example.com|x> <!channel> <@U1> <https://e.com|a|b>")).toBe(
+      "&lt;http://example.com|x&gt; &lt;https://user:pw@example.com|x&gt; &lt;!channel&gt; &lt;@U1&gt; &lt;https://e.com|a|b&gt;",
+    );
+    expect(md("`<https://example.com|x>`")).toBe("`&lt;https://example.com|x&gt;`");
   });
 });
