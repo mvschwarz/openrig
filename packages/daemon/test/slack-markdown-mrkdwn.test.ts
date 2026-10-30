@@ -2,12 +2,18 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildOutboundMessage, containsSecret, escapeSlackText, markdownToSlackMrkdwn, openFenceAfter, splitForSlack } from "../src/domain/gateway/slack/message.js";
+import { buildBodyBlocks, buildOutboundMessage, containsSecret, escapeSlackText, markdownToSlackMrkdwn, openFenceAfter, splitForSlack } from "../src/domain/gateway/slack/message.js";
 import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
 import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 
 const md = markdownToSlackMrkdwn;
+type Item = Array<Record<string, unknown>>;
+const list = (lists: Array<{ style: string; indent: number; items: Item[] }>) => ({
+  type: "rich_text",
+  elements: lists.map(({ style, indent, items }) => ({ type: "rich_text_list", style, indent, elements: items.map((elements) => ({ type: "rich_text_section", elements })) })),
+});
+const t = (text: string, style?: Record<string, boolean>) => (style ? { type: "text", text, style } : { type: "text", text });
 
 describe("Markdown in a row body renders as Slack mrkdwn", () => {
   it("turns **bold** and __bold__ into *bold*", () => {
@@ -62,9 +68,9 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
 
   it("is applied to the body section and the fallback text of a posted message", () => {
     const m = buildOutboundMessage({ qitemId: "q", summary: "s", body: "## Plan\n- **ship** [it](https://example.com)" }, { sourceLabel: "host" });
-    const expected = "*Plan*\n- *ship* <https://example.com|it>";
-    expect(m.text).toContain(expected);
-    expect(JSON.stringify(m.blocks)).toContain(JSON.stringify(expected).slice(1, -1));
+    expect(m.text).toContain("*Plan*\n- *ship* <https://example.com|it>");
+    expect(m.blocks).toContainEqual({ type: "section", text: { type: "mrkdwn", text: "*Plan*" } });
+    expect(m.blocks).toContainEqual(list([{ style: "bullet", indent: 0, items: [[{ type: "text", text: "ship", style: { bold: true } }, { type: "text", text: " " }, { type: "link", url: "https://example.com", text: "it" }]] }]));
   });
 
   it("keeps input that looks like an internal marker literal, without growing the body", () => {
@@ -110,8 +116,9 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
         payload: { qitemId: "q-d", summary: "s", body, sourceSession: "a@rig", destinationSession: "h@external" } };
       expect(await deliver(decision)).toEqual({ ok: true });
       expect(posts.length).toBeGreaterThan(1);
-      const last = posts.at(-1)!.blocks.map((b) => b.text?.text ?? "").join("\n");
-      expect(last).toContain("# literal\n- literal\n**literal**\n```\n*Next*\n- item");
+      const last = posts.at(-1)!.blocks;
+      expect(last.map((b) => b.text?.text ?? "").join("\n")).toContain("# literal\n- literal\n**literal**\n```\n*Next*");
+      expect(last).toContainEqual(list([{ style: "bullet", indent: 0, items: [[{ type: "text", text: "item" }]] }]));
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -125,5 +132,52 @@ describe("Markdown in a row body renders as Slack mrkdwn", () => {
       "&lt;http://example.com|x&gt; &lt;https://user:pw@example.com|x&gt; &lt;!channel&gt; &lt;@U1&gt; &lt;https://e.com|a|b&gt;",
     );
     expect(md("`<https://example.com|x>`")).toBe("`&lt;https://example.com|x&gt;`");
+  });
+});
+
+describe("list items in a row body render as native Slack lists", () => {
+  it("groups items into rich_text lists, nested by indent, bullet or ordered", () => {
+    expect(buildBodyBlocks("Intro\n- one\n* two\n  + nested\n- three\n1. first\n2) second\nOutro")).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "Intro" } },
+      list([
+        { style: "bullet", indent: 0, items: [[t("one")], [t("two")]] },
+        { style: "bullet", indent: 1, items: [[t("nested")]] },
+        { style: "bullet", indent: 0, items: [[t("three")]] },
+        { style: "ordered", indent: 0, items: [[t("first")], [t("second")]] },
+      ]),
+      { type: "section", text: { type: "mrkdwn", text: "Outro" } },
+    ]);
+  });
+
+  it("styles bold and code, and links only safe https URLs", () => {
+    const [block] = buildBodyBlocks("- **a** __b__ *c* `**d**` [e](https://e.com) <https://f.com|f> <https://g.com> [h](http://h.com) <https://u:p@i.com|i>") as Array<{ elements: Array<{ elements: Array<{ elements: unknown[] }> }> }>;
+    expect(block!.elements[0]!.elements[0]!.elements).toEqual([
+      t("a", { bold: true }), t(" "), t("b", { bold: true }), t(" "), t("c", { bold: true }), t(" "), t("**d**", { code: true }), t(" "),
+      { type: "link", url: "https://e.com", text: "e" }, t(" "), { type: "link", url: "https://f.com", text: "f" }, t(" "),
+      { type: "link", url: "https://g.com" }, t(" [h](http://h.com) <https://u:p@i.com|i>"),
+    ]);
+  });
+
+  it("keeps mentions as literal text, redacts secrets, and never emits empty text", () => {
+    const json = JSON.stringify(buildBodyBlocks("- <!channel> <@U1> xoxb-EXAMPLE-000000000000-doNotUseFake\n- "));
+    expect(json).toContain('"text":"<!channel> <@U1> [redacted-secret]"');
+    expect(containsSecret(json)).toBe(false);
+    expect(json).not.toContain('"text":""');
+  });
+
+  it("leaves list lines inside a code fence in the mrkdwn section", () => {
+    expect(buildBodyBlocks("```\n- not a list\n```\n- a list")).toEqual([
+      { type: "section", text: { type: "mrkdwn", text: "```\n- not a list\n```" } },
+      list([{ style: "bullet", indent: 0, items: [[t("a list")]] }]),
+    ]);
+    expect(buildBodyBlocks("- still code\n```", "```")[0]).toEqual({ type: "section", text: { type: "mrkdwn", text: "- still code\n```" } });
+  });
+
+  it("falls back to one mrkdwn section when list runs would pass 50 blocks", () => {
+    const body = Array.from({ length: 30 }, (_, i) => `text ${i}\n- item ${i}`).join("\n");
+    const m = buildOutboundMessage({ qitemId: "q", summary: "s", body }, { sourceLabel: "host" });
+    expect(m.blocks.length).toBeLessThanOrEqual(50);
+    expect(m.blocks.some((b) => (b as { type: string }).type === "rich_text")).toBe(false);
+    expect(m.text).toContain("text 29\n- item 29");
   });
 });

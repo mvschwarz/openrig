@@ -288,6 +288,84 @@ export function openFenceAfter(text: string, openFence = ""): string {
   return convertMarkdown(text, openFence).openFence;
 }
 
+type RichInline =
+  | { type: "text"; text: string; style?: { bold?: boolean; code?: boolean } }
+  | { type: "link"; url: string; text?: string };
+
+// Code spans, Markdown links, Slack links, then **bold**, __bold__ and *bold*.
+const RICH_INLINE = /`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|<(https:\/\/[^\s|>]+)(?:\|([^>\n]+))?>|\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__|\*(?=\S)([^*\n]+?)(?<=\S)\*/g;
+
+/** One already-redacted list item as rich text elements. Rich text is never parsed for
+ *  mentions or links, so plain text needs no escaping; a link element is emitted only for a
+ *  URL that passes the same checks as a mrkdwn link. */
+function richInline(text: string): RichInline[] {
+  const out: RichInline[] = [];
+  const plain = (t: string) => {
+    const last = out.at(-1);
+    if (last?.type === "text" && !last.style) last.text += t;
+    else if (t) out.push({ type: "text", text: t });
+  };
+  let at = 0;
+  for (const m of text.matchAll(RICH_INLINE)) {
+    plain(text.slice(at, m.index));
+    const [all, code, mdLabel, mdUrl, slackUrl, slackLabel, b1, b2, b3] = m;
+    const url = mdUrl ?? slackUrl;
+    const label = mdLabel ?? slackLabel;
+    if (code !== undefined) out.push({ type: "text", text: code, style: { code: true } });
+    else if (url === undefined) out.push({ type: "text", text: b1 ?? b2 ?? b3 ?? all, style: { bold: true } });
+    else if (isSafeHttpsUrl(url) && !/[<>|]/.test(url)) out.push(label ? { type: "link", url, text: label } : { type: "link", url });
+    else plain(all);
+    at = m.index + all.length;
+  }
+  plain(text.slice(at));
+  return out.length ? out : [{ type: "text", text: " " }];
+}
+
+const LIST_ITEM = /^(\s*)(?:([-*+])|\d{1,9}[.)])\s+(.*)$/;
+// ponytail: Slack documents no indent maximum; 4 covers real briefs and keeps clear of invalid_blocks.
+const MAX_LIST_INDENT = 4;
+
+/** The body as blocks: runs of list items (outside code fences) become one native `rich_text`
+ *  list block each; everything else stays mrkdwn sections. Nesting is two spaces per level. */
+export function buildBodyBlocks(text: string, openFence = ""): unknown[] {
+  type List = { type: "rich_text_list"; style: "bullet" | "ordered"; indent: number; elements: unknown[] };
+  const blocks: unknown[] = [];
+  let fence = openFence;
+  let runFence = openFence;
+  let run: string[] = [];
+  let lists: List[] = [];
+  const flushText = () => {
+    const joined = run.join("\n");
+    if (joined.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(markdownToSlackMrkdwn(joined, runFence), SLACK_SECTION_CAP, "body") } });
+    run = [];
+  };
+  const flushLists = () => {
+    if (lists.length) blocks.push({ type: "rich_text", elements: lists });
+    lists = [];
+  };
+  for (const line of redactSecrets(text).split("\n")) {
+    const item = fence ? null : LIST_ITEM.exec(line);
+    if (item) {
+      flushText();
+      const [, lead = "", bullet, rest = ""] = item;
+      const style = bullet ? "bullet" : "ordered";
+      const indent = Math.min(MAX_LIST_INDENT, Math.floor(lead.replaceAll("\t", "  ").length / 2));
+      const section = { type: "rich_text_section", elements: richInline(rest) };
+      const last = lists.at(-1);
+      if (last && last.style === style && last.indent === indent) last.elements.push(section);
+      else lists.push({ type: "rich_text_list", style, indent, elements: [section] });
+      continue;
+    }
+    flushLists();
+    if (!run.length) runFence = fence;
+    run.push(line);
+    fence = openFenceAfter(line, fence);
+  }
+  flushText();
+  flushLists();
+  return blocks;
+}
+
 function isSafeHttpsUrl(url: string): boolean {
   if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) return false;
   try {
@@ -487,11 +565,16 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const repeatBlock = shownRepeat ? { type: "context", elements: [{ type: "mrkdwn", text: shownRepeat }] } : null;
   if (repeatBlock) blocks.push(repeatBlock);
   if (shownContext) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: shownContext }] });
-  if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
+  const bodySection = { type: "section", text: { type: "mrkdwn", text: body } };
+  const bodyBlocks = !body.trim() ? [] : humanGate ? [bodySection] : buildBodyBlocks(String(q.body || ""), q.bodyOpenFence ?? "");
+  const bodyAt = blocks.length;
+  blocks.push(...bodyBlocks);
   if (questionParts) blocks.push(...questionParts.blocks);
   if (replyHint) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: replyHint }] });
   blocks.push(...imageBlocks);
   if (evidence) blocks.push(evidence.block);
+  // A body split into many list and text runs falls back to one mrkdwn section rather than refusing the message.
+  if (blocks.length > 50 && bodyBlocks.length > 1) blocks.splice(bodyAt, bodyBlocks.length, bodySection);
   if (repeatBlock && blocks.length > 50) blocks.splice(blocks.indexOf(repeatBlock), 1);
   if (blocks.length > 50) throw new HumanMessageShapeError("Message exceeds 50 Slack blocks. Reduce attachments before sending.");
   return { text, blocks };
