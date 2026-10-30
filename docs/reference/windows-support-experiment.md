@@ -2,6 +2,26 @@
 
 ## Current review status (2026-10-30)
 
+### Native prepublish entry and fresh-prefix installation
+
+The CLI's `prepublishOnly` lifecycle previously invoked bare `bash`, bypassing
+the native Git Bash selector. An owned npm lifecycle fixture with no bash on PATH
+reproduced the command-not-found failure. It now calls the paired Node build
+runner. Three focused cases pass, including actual npm lifecycle forwarding to
+an owned stand-in build tool and the existing native build-runner cases; no
+publish command was executed.
+
+The single target-native install gate also passes for
+`ee373ab14affc2219cc5169b381b663d115e20f2` (80 seconds). It rebuilt and packed the
+CLI, installed 32 dependencies into a fresh owned prefix, explicitly checked the
+installed SQLite ABI using an in-memory database, then executed the npm-generated
+`rig.cmd` through PowerShell against an isolated home. Its synthetic local human
+fragment was written as expected; no connector delivery occurred. Owned install,
+home and tarball fixtures were removed after completion. The build stamp remains
+dirty=true. This is one native host/install flow, not clean-release, installed-TUI,
+provider, fleet or full test-suite acceptance. No global installation or runtime
+deployment was changed.
+
 ### Current package build and assembled-entry readback
 
 The complete native Windows package build passed for implementation head
