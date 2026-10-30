@@ -55,8 +55,10 @@ function respond(cmd: string, failing: string[], composer = false): string {
 }
 
 /** A shell-path adapter whose every run() call records its caller line, its argv and the string exec received. */
-function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean } = {}): TmuxAdapter {
+function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; readOnlyClientOnce?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
+  // tmux 3.8 with only a read-only client attached refuses the first named key; the literal retry is accepted.
+  let readOnlyPending = opts.readOnlyClientOnce === true;
   const fileOps: TmuxFileOps = {
     writeFile: async () => {},
     unlink: async () => {},
@@ -65,6 +67,10 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
   };
   const adapter = new TmuxAdapter(async (cmd) => {
     execs.push(cmd);
+    if (readOnlyPending && cmd.split(" ")[1] === "send-keys") {
+      readOnlyPending = false;
+      throw new Error(`Command failed: ${cmd}\nclient is read-only`);
+    }
     return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps);
   if (opts.guard) {
@@ -162,6 +168,8 @@ async function driveEveryMethod(): Promise<RunCall[]> {
   // A failed paste deletes the loaded buffer; the guarded kill reads the session id first.
   await recordingAdapter(calls, { failing: ["paste-buffer"] }).sendText(SESSION, "hello");
   await recordingAdapter(calls, { guard: true }).killSession(SESSION);
+  // A submit refused by a read-only client is retried as the literal carriage return.
+  await recordingAdapter(calls, { readOnlyClientOnce: true }).sendKeys(SESSION, ["Enter"]);
   await recordingAdapter(calls, { composer: true }).captureComposerSnapshot("%1");
   const scoped = recordingAdapter(calls);
   scoped.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { PATH: "/a b:$HOME", PRIVATE_SYNTHETIC: "it's a\nvalue" } });

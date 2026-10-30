@@ -524,6 +524,43 @@ describe("TmuxAdapter", () => {
       expect(result).toEqual({ ok: true });
     });
 
+    it("retries a refused submit key as a literal carriage return while the only attached client is read-only", async () => {
+      const exec = vi.fn<ExecFn>()
+        .mockRejectedValueOnce(new Error("client is read-only"))
+        .mockResolvedValueOnce("");
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.sendKeys("r01-dev1-impl", ["Enter"]);
+
+      expect(result).toEqual({ ok: true });
+      expect(exec).toHaveBeenCalledTimes(2);
+      expect(exec.mock.calls[0]![0]).toBe("tmux send-keys -t 'r01-dev1-impl' 'Enter'");
+      expect(exec.mock.calls[1]![0]).toBe("tmux send-keys -t 'r01-dev1-impl' -l '\r'");
+    });
+
+    it("does not retry a refused non-submit key as a literal", async () => {
+      const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("client is read-only"));
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.sendKeys("r01-dev1-impl", ["C-c"]);
+
+      expect(result.ok).toBe(false);
+      expect(exec).toHaveBeenCalledOnce();
+    });
+
+    it("reports the retry's own failure when the literal carriage return is refused too", async () => {
+      const exec = vi.fn<ExecFn>()
+        .mockRejectedValueOnce(new Error("client is read-only"))
+        .mockRejectedValueOnce(new Error("can't find session: r01-dev1-impl"));
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.sendKeys("r01-dev1-impl", ["Enter"]);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("session_not_found");
+      expect(exec).toHaveBeenCalledTimes(2);
+    });
+
     it("returns { ok: false, code: 'session_not_found' } on missing target", async () => {
       const err = new Error("can't find session: r01-dev1-impl");
       const adapter = new TmuxAdapter(mockExec({ "send-keys": { error: err } }));

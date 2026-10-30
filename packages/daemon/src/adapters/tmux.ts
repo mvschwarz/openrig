@@ -241,6 +241,16 @@ function classifyWriteError(err: unknown): TmuxResult {
   return { ok: false, code: "unknown", message: err.message };
 }
 
+/** A named key tmux refused because its only attached client is read-only (tmux 3.8: "client is read-only"). */
+function isReadOnlyClientRefusal(err: unknown): boolean {
+  return err instanceof Error && /client is read-only/i.test(err.message);
+}
+
+/** The key names that submit the staged input; both reach the pane as a carriage return. */
+function isSubmitKey(key: string): boolean {
+  return key === "Enter" || key === "C-m";
+}
+
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -1050,6 +1060,18 @@ export class TmuxAdapter {
         `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
       return { ok: true };
     } catch (err) {
+      // While the server's only attached client is read-only (`tmux attach -r`), tmux 3.8 refuses every named key
+      // server-wide with "client is read-only", but still writes literal bytes to the pane. A lone submit key is
+      // retried as the literal carriage return it stands for, so a watcher's read-only attach cannot block delivery.
+      if (isReadOnlyClientRefusal(err) && keys.length > 0 && keys.every(isSubmitKey)) {
+        try {
+          await this.run(["tmux", "send-keys", "-t", target, "-l", "\r"],
+            `tmux send-keys -t ${shellQuote(target)} -l ${shellQuote("\r")}`);
+          return { ok: true };
+        } catch (retryErr) {
+          return classifyWriteError(retryErr);
+        }
+      }
       return classifyWriteError(err);
     }
   }
