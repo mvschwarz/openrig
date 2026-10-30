@@ -106,6 +106,20 @@ describe("PluginDiscoveryService", () => {
       expect(service.listPlugins()).toEqual([]);
     });
 
+    it("migrates an obsolete hook registry with a valid long filename", () => {
+      const lab = join(dirs.openrigPluginsDir, "openrig-lab");
+      const name = "h".repeat(230) + ".json";
+      writeClaudePluginManifest(lab, { name: "openrig-lab", version: "0.1.0", hooks: `./${name}` });
+      writeFileSync(join(lab, name), JSON.stringify({ hooks: { Stop: [{ hooks: [
+        { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/refocus.cjs"' },
+      ] }] } }));
+      const service = new PluginDiscoveryService({ openrigPluginsDir: dirs.openrigPluginsDir,
+        claudeCacheDir: dirs.claudeCacheDir, codexCacheDir: dirs.codexCacheDir, specLibraryDir: dirs.specLibraryDir });
+      expect(service.listPlugins().map(plugin => plugin.id)).toEqual(["openrig-lab"]);
+      expect(readJson(join(lab, name))).toEqual({ hooks: {} });
+      expect(readJson(join(lab, ".claude-plugin", "plugin.json"))).not.toHaveProperty("hooks");
+    });
+
     it("retires historical openrig-lab refocus registrations before duplicate validation", () => {
       const core = join(dirs.openrigPluginsDir, "openrig-core");
       const lab = join(dirs.openrigPluginsDir, "openrig-lab");

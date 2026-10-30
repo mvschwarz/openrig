@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Plugin migration long registry filenames (2026-10-30)
+
+An owned obsolete-lab plugin whose hook registry has a valid 235-character
+filename failed during migration: the writer appended its migration suffix to
+the full registry filename. Migration staging now uses a short unique UUID
+name in the same directory, retaining the existing private-file creation and
+native metadata-preserving replacement paths.
+
+The new case failed before repair and now removes the obsolete registration
+and its empty manifest reference. The complete plugin-discovery test file and
+daemon TypeScript checking pass. Only synthetic plugin roots were used; no
+installed plugin, live hook, credential or seat was changed. Other full-path
+and filesystem limits are not established by this component-length case.
+
 ### Project catalog cwd inference (2026-10-30)
 
 The catalog reader had the same DOS-short/long path disagreement as registration:
