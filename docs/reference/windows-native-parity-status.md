@@ -18,7 +18,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 
 | Workflow | Implemented scope and evidence entry | Still unverified |
 | --- | --- | --- |
-| Initial-shell environment policy | The POSIX scoped launcher implements `terminal.inherit_tmux_environment=false`. Current Windows code explicitly returns the existing fallback warning and retains the prior environment. This is distinct from later runtime-child environment preparation. | Native initial-shell implementation remains missing; cold/warm creation, respawn, private value transport and shell/default-command preservation require coverage. |
+| Initial-shell environment policy | Native private bootstrap for PowerShell/pwsh/cmd, selected environment and fresh pane identity; [native scoped launch](../../packages/daemon/test/windows-scoped-launch.test.ts). Stock 3.4.0 empty-server startup, first session and dead-pane respawn pass in an isolated namespace. | Live provider/fleet acceptance, pwsh execution and unsupported shell semantics. Stock psmux's separate `-e` argv visibility limitation remains. |
 | Pi and OMP | Native executable/npm dispatch and argv-aware protocol fixtures; [native dispatch](../../packages/daemon/test/pi-omp-native-dispatch.test.ts). Earlier reconciliation covered 59 protocol/dispatch cases. | Actual provider conversations, compaction and complete restore. |
 | Community harnesses | Metadata reaches the child; standard npm entries resolve against the seat cwd, including relative PATH and command paths; [native environment](../../packages/daemon/test/community-harness-native-environment.test.ts). Combined protocol/activity run passed 70 cases. | Arbitrary batch launchers are deliberately not translated; installed third-party providers and real restore remain unverified. |
 | ACP | Native command selection and bounded owned process handling; [selection](../../packages/cli/test/acp-native-command-selection.test.ts), [process handling](../../packages/cli/test/windows-acp-process.test.ts). | Live agent/queue acceptance; previously unresolved companion cleanup behavior. |
@@ -49,7 +49,7 @@ interactive installed-TUI checks, live provider continuity and visible
 terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
-# Native scoped-shell implementation checkpoint (2026-10-30)
+## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured
 PowerShell, pwsh and cmd shells instead of unconditionally rejecting Windows.
@@ -58,9 +58,18 @@ case-insensitive precedence, and takes terminal identity from the fresh pane.
 The bootstrap argv contains its private file path rather than environment values.
 Startup supplies the native system/profile/temp roots needed by these children.
 
-Two focused Windows tests pass, including an actual PowerShell child with synthetic
+Four focused Windows tests pass, including an actual PowerShell child with synthetic
 multiline Unicode values, unrelated inherited-variable removal, fresh pane identity,
-working-directory preservation and bootstrap-file removal. Daemon TypeScript passes.
-This is not psmux cold-server or end-to-end seat acceptance: those paths remain open,
-as do unsupported configured shell semantics (which retain the diagnostic fallback).
+working-directory preservation and bootstrap-file removal, and a cmd command with
+quoted output path. The stock psmux fixture covers held empty-server startup, its
+first actual seat, and dead-pane respawn with a new explicit environment override.
+The native adapter uses a direct `--` command boundary. Stock 3.4.0 aliases
+`default-command` to `default-shell`, so native initial launch preserves shell words
+instead of executing that same value as a nested command. Native empty-server
+startup uses psmux's queued `exit-empty off` operation, followed by option readback.
+
+Together with credential transport fixtures, 15 tests pass and three POSIX-only
+integration cases remain skipped; daemon TypeScript passes. This is not live
+provider, fleet or deployment acceptance. Unsupported configured shell semantics
+retain the diagnostic fallback. No candidate psmux protocol binary was substituted.
 

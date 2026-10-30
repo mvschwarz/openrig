@@ -416,6 +416,10 @@ export class TmuxAdapter {
       if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
       if (!shell) throw new Error("Default shell unavailable");
       if (command === undefined) {
+        // Stock psmux aliases default-command to default-shell, which already
+        // carries its startup arguments. Preserve upstream tmux decoding on POSIX.
+        if (process.platform === "win32") command = "";
+        else {
         command = (await this.run(["tmux", "show-options", "-gv", "default-command"])).replace(/\r?\n$/, "");
         // The server, not the connecting client, formats option output. If its version is unavailable,
         // retain the readback unchanged rather than guessing about a user's command.
@@ -423,6 +427,7 @@ export class TmuxAdapter {
           const serverVersion = await this.run(["tmux", "display-message", "-p", "#{version}"]);
           command = decodeTmux34Option(command, serverVersion);
         } catch { /* unknown version: keep the original readback */ }
+        }
       }
       // tmux normally copies these client values from the daemon on new-session.
       // Read its configured names, but never reuse values stored on the server.
@@ -437,7 +442,7 @@ export class TmuxAdapter {
         const file = this.fileOps.tmpName();
         const launch = windowsScopedLaunch(shell, command ?? "", selected, file);
         await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
-        return launch.argv;
+        return ["--", ...launch.argv];
       }
       const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL"].includes(entry[0]))
@@ -707,6 +712,15 @@ export class TmuxAdapter {
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
     try {
+      if (process.platform === "win32") {
+        if (await this.getDefaultShell()) return { ok: true };
+        // psmux hides its warm standby unless exit-empty is disabled there.
+        // A queued command is routed to that standby before it has a session.
+        await this.run(["tmux", "start-server", ";", "set-option", "-g", "exit-empty", "off"]);
+        return await this.getDefaultShell()
+          ? { ok: true }
+          : { ok: false, code: "tmux_unavailable", message: "The native terminal server did not become available." };
+      }
       if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
       // tmux -D keeps an empty server alive. Stays on the shell-string path
       // deliberately: detach + stdio redirection have no argv equivalent,

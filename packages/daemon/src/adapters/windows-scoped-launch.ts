@@ -10,7 +10,11 @@ export function windowsScopedLaunch(shell: string, command: string, selected: Re
   if (!executable) throw new Error("Default shell unavailable");
   const kind = win32.basename(executable).toLowerCase().replace(/\.exe$/, "");
   if (!["powershell", "pwsh", "cmd"].includes(kind)) throw new Error("Unsupported native scoped shell");
-  if (command) words.push(kind === "cmd" ? "/c" : "-Command", command);
+  // cmd parses its /c tail as shell syntax, not as a CRT argv word. /s
+  // removes the enclosing pair while preserving the command's own quotes.
+  const args = kind === "cmd" && command
+    ? `${windowsArguments(words)} /s /c "${command}"`
+    : windowsArguments(command ? [...words, "-Command", command] : words);
   const env = new Map<string, [string, string]>();
   for (const [key, value] of Object.entries(selected)) {
     if (!key || /[=\0]/.test(key) || value?.includes("\0")) throw new Error("Invalid environment entry");
@@ -19,7 +23,7 @@ export function windowsScopedLaunch(shell: string, command: string, selected: Re
   }
   const paneKeys = ["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL", "PSMUX_SESSION", "PSMUX_SOCKET_NAME", "PSMUX_TARGET_SESSION", "PSMUX_SOCKET_PATH"];
   for (const key of paneKeys) env.delete(key);
-  const content = `$ErrorActionPreference='Stop'\n$p=New-Object Diagnostics.ProcessStartInfo\n$p.UseShellExecute=$false\n$p.FileName=${q(executable)}\n$p.Arguments=${q(windowsArguments(words))}\n$p.WorkingDirectory=(Get-Location).ProviderPath\n$p.EnvironmentVariables.Clear()\n`
+  const content = `$ErrorActionPreference='Stop'\n$p=New-Object Diagnostics.ProcessStartInfo\n$p.UseShellExecute=$false\n$p.FileName=${q(executable)}\n$p.Arguments=${q(args)}\n$p.WorkingDirectory=(Get-Location).ProviderPath\n$p.EnvironmentVariables.Clear()\n`
     + [...env.values()].map(([key, value]) => `$p.EnvironmentVariables[${q(key)}]=${q(value)}\n`).join("")
     + paneKeys.map(key => `$v=[Environment]::GetEnvironmentVariable(${q(key)},'Process'); if ($null -ne $v) {$p.EnvironmentVariables[${q(key)}]=$v}\n`).join("")
     + `$child=[Diagnostics.Process]::Start($p)\ntry {$child.WaitForExit(); exit $child.ExitCode} finally {$child.Dispose()}\n`;
