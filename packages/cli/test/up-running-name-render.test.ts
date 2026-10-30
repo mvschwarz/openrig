@@ -2,7 +2,8 @@
 // locked teaching refusal for rig_name_running verbatim, not the generic
 // "Up failed: unknown error ... validate your spec" fallback. The stub serves
 // the daemon's post-fix 409 shape; the pin is on the CLI's rendering.
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import * as http from "node:http";
 import { Command } from "commander";
 import { upCommand } from "../src/commands/up.js";
@@ -63,11 +64,12 @@ describe("rig up rendering — rig_name_running teaching refusal (S5b F1)", () =
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
     port = (server.address() as { port: number }).port;
   });
 
-  afterAll(() => { server.close(); });
+  beforeEach(() => { allowFetchTarget(`http://127.0.0.1:${port}`); });
+  afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
 
   it("renders the teaching refusal verbatim — no unknown-error fallback, no spec-validate hint", async () => {
     const captured: string[] = [];

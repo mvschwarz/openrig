@@ -57,6 +57,14 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+Current [package command](../../packages/cli/test/package.test.ts) and
+[running-name refusal](../../packages/cli/test/up-running-name-render.test.ts)
+fixtures reproduced two failures: a POSIX cwd expectation and a missing owned
+HTTP origin registration. Native cwd expectations and loopback-only registered
+listeners restore all 19 cases. The running-name teaching refusal remains verbatim,
+including no-created/no-launched wording; there is no real package installation,
+publication or rig action in these fixtures.
+
 The remaining parked and activity-filter CLI fixtures also needed exact owned
 HTTP origin registration on Windows. Their source reproductions failed before
 registration; [parked](../../packages/cli/test/parked-verb.test.ts) and
