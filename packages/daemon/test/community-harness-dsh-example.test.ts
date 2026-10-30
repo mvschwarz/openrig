@@ -62,7 +62,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "broken" | "permitted" | "answer" | "saidno" | "pending" | "lost";
+type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "saidno" | "unknown" | "pending" | "lost";
 interface Hook { auth: string | undefined; body: Record<string, unknown> }
 
 const cleanups: Array<() => void> = [];
@@ -86,6 +86,7 @@ async function fakeOpenRig(permissions: Permissions) {
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
+        if (permissions === "revoked") return json(401, { ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was asked." });
         if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
         return json(200, { ok: true, askId: "ask-1", created: true });
       }
@@ -94,6 +95,7 @@ async function fakeOpenRig(permissions: Permissions) {
       if (req.method === "GET" && url.pathname === "/api/activity/permission-requests/ask-1") {
         if (permissions === "answer") return json(200, { ok: true, state: "answered", optionId: "allow" });
         if (permissions === "saidno") return json(200, { ok: true, state: "refused", reason: "said_no" });
+        if (permissions === "unknown") return json(200, { ok: true, state: "deferred" });
         if (permissions === "lost") return json(404, { ok: false, code: "not_found", error: "No permission request ask-1 for this seat." });
         setTimeout(() => json(200, { ok: true, state: "pending" }), 100);
         return;
@@ -235,6 +237,8 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
   it.each([
     ["OpenRig can't be reached", "absent", { OPENRIG_URL: "http://127.0.0.1:1" }],
     ["the submit is answered with a status the contract doesn't list", "broken", {}],
+    ["the submit's grant was revoked, which can happen to the live occupant", "revoked", {}],
+    ["reading the answer gets a state the contract doesn't list", "unknown", {}],
     ["reading the answer gets an unexpected reply", "lost", {}],
   ] as const)("permits with the agent's own allow when %s, since nobody can be asked", async (_case, permissions, env) => {
     const openrig = await fakeOpenRig(permissions);
