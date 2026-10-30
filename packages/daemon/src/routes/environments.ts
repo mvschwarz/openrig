@@ -36,11 +36,6 @@ environmentRoutes.get("/:bindingId", async c => {
       lifecycle: { closeViewer: "explicit effect", stopNative: "owned exact-native effect", stopCompute: "owned exact-compute effect", deleteEnvironment: "owned effect with independent local engine inventory", nativeRestore: "verified checkpoint and explicitly recreated same-host compute" } });
   } catch (error) { return failure(c, error); }
 });
-environmentRoutes.post("/:bindingId/project", async c => {
-  const identity = requireSenderIdentity(c, { verb: "environment project" }); if (!identity.ok) return identity.response;
-  try { return c.json(await platform(c).project(c.req.param("bindingId"), await c.req.json())); }
-  catch (error) { return failure(c, error); }
-});
 environmentRoutes.post("/:bindingId/validate", async c => {
   try {
     const body = await c.req.json<{ generation: string }>();

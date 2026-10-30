@@ -15,6 +15,7 @@ import re
 import sys
 import subprocess
 import signal
+import stat
 import time
 import uuid
 
@@ -53,14 +54,32 @@ def safe(root, raw):
 
 def regular(root, raw, limit=LIMIT):
     path = safe(root, raw)
-    if not path.exists():
+    parts = path.relative_to(root).parts
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in (*Path(root).parts[1:], *parts[:-1]):
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+                raise Refused("environment_file_invalid")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                data = stream.read(limit + 1)
+            after = os.fstat(fd)
+            if len(data) > limit or len(data) != before.st_size or after.st_size != before.st_size or after.st_mtime_ns != before.st_mtime_ns:
+                raise Refused("environment_file_invalid")
+            return data
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
         raise Refused("environment_file_missing")
-    if not path.is_file() or path.stat().st_size > limit:
+    except OSError:
         raise Refused("environment_file_invalid")
-    data = path.read_bytes()
-    if len(data) > limit:
-        raise Refused("environment_file_invalid")
-    return data
+    finally:
+        os.close(directory)
 
 
 def atomic(root, raw, data):

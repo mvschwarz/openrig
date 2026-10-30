@@ -55,6 +55,10 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     return this.deps.environmentStartup;
   }
 
+  async preflightEnvironmentStartup(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void> {
+    await this.contained()?.preflight(binding, opts);
+  }
+
   async prepareEnvironmentStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
     const contained = this.contained();
     if (!contained) return { delivered: 0, failed: files.map(file => ({ path: file.path, error: "Environment startup projection is unsupported" })) };

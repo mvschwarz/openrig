@@ -65,6 +65,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["skill", async () => (await import("./commands/skill.js")).skillCommand()],
   ["agent-image", async () => (await import("./commands/agent-image.js")).agentImageCommand()],
   ["community-harness", async () => (await import("./commands/community-harness.js")).communityHarnessCommand()],
+  ["environment", async () => (await import("./commands/environment.js")).environmentCommand()],
   ["fork", async () => (await import("./commands/fork.js")).forkCommand()],
   ["workspace", async () => (await import("./commands/workspace.js")).workspaceCommand()],
   ["mode", async () => (await import("./commands/rig-mode.js")).rigModeCommand()],

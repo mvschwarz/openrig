@@ -14,18 +14,32 @@ export type EnvironmentActivity = (input: { nodeId: string; generation: string; 
 
 /** One maintained consumer of RuntimeAdapter's optional environment operations; no host fallback when selected. */
 export class EnvironmentStartup {
-  constructor(readonly platform: EnvironmentPlatform, private readonly stageRoot: string, private readonly activity: EnvironmentActivity) {}
+  constructor(readonly platform: EnvironmentPlatform, private readonly stageRoot: string, private readonly activity: EnvironmentActivity, private readonly checkActivityEndpoint?: (origin: string) => void) {}
   private selected(binding: NodeBinding) {
     const selected = this.platform.forNode(binding.nodeId, binding.tmuxSession ?? undefined);
     if (!selected || !selected.resource) throw new EnvironmentError("environment_binding_missing", "Select create or attach for this seat before starting its contained runtime");
     if (selected.nodeId && selected.nodeId !== binding.nodeId || selected.seat !== binding.tmuxSession)
       throw new EnvironmentError("environment_seat_changed", "The selected environment belongs to a different stable seat");
     if (!binding.launchGeneration) throw new EnvironmentError("environment_generation_missing", "An environment launch requires a reserved occupant generation");
-    if (!selected.nodeId) {
+    return { ...selected, nodeId: binding.nodeId };
+  }
+  async preflight(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown } = {}): Promise<void> {
+    if (opts.forkSource) throw new EnvironmentError("environment_restore_unsupported", "Environment fork is unsupported; no guest input was replaced");
+    this.projectionFence(binding, false);
+    const checkpoint = this.retainedResume(binding, opts.resumeToken ? opts : undefined, false);
+    if (checkpoint && !opts.resumeToken) throw new EnvironmentError("environment_exact_resume_required", "Select the retained native type and id through normal restore; a fresh start is not a restore");
+    this.preparation(binding);
+  }
+  private preparation(binding: NodeBinding) {
+    const selected = this.selected(binding);
+    this.projectionFence(binding);
+    this.checkActivityEndpoint?.(selected.guestBaseUrl);
+    const saved = this.platform.get(selected.bindingId)!;
+    if (!saved.nodeId) {
       const claimed = this.platform.db.prepare("UPDATE environment_bindings SET node_id = ? WHERE binding_id = ? AND node_id IS NULL").run(binding.nodeId, selected.bindingId);
       if (!claimed.changes) throw new EnvironmentError("environment_selection_changed", "The stable seat reservation changed before projection");
     }
-    return { ...selected, nodeId: binding.nodeId };
+    return selected;
   }
   private stage() { mkdirSync(this.stageRoot, { recursive: true, mode: 0o700 }); return mkdtempSync(join(this.stageRoot, "projection-")); }
   private walk(source: string, destination: string, required: boolean, out: ProjectionFile[]): void {
@@ -38,7 +52,7 @@ export class EnvironmentStartup {
       out.push({ source, path: destination, sha256: sha256(bytes), required });
     }
   }
-  private retainedResume(binding: NodeBinding, resume?: { resumeToken?: string; resumeType?: string }): EnvironmentCheckpoint | null {
+  private retainedResume(binding: NodeBinding, resume?: { resumeToken?: string; resumeType?: string }, claimGeneration = true): EnvironmentCheckpoint | null {
     const selected = this.selected(binding);
     const row = this.platform.db.prepare("SELECT operation_id, receipt_json FROM environment_operations WHERE binding_id=? AND kind='recreate' AND state='confirmed' ORDER BY rowid DESC LIMIT 1").get(selected.bindingId) as { operation_id: string; receipt_json: string } | undefined;
     if (!row) {
@@ -61,23 +75,22 @@ export class EnvironmentStartup {
     if (resume && (resume.resumeToken !== checkpoint.nativeId || resume.resumeType !== checkpoint.nativeType))
       throw new EnvironmentError("environment_checkpoint_identity_mismatch", "Restore must request the exact retained native type and id; no fresh fallback exists");
     lifecycle.verifyCheckpoint(checkpoint);
-    if (!recreated.successorGeneration) {
+    if (claimGeneration && !recreated.successorGeneration) {
       const claimed = this.platform.db.prepare("UPDATE environment_operations SET receipt_json=? WHERE operation_id=? AND receipt_json=?")
         .run(JSON.stringify({ ...recreated, successorGeneration: binding.launchGeneration }), row.operation_id, row.receipt_json);
       if (!claimed.changes) throw new EnvironmentError("environment_selection_changed", "The successor launch generation was already claimed");
     }
     return checkpoint;
   }
-  private projectionFence(binding: NodeBinding): void {
+  private projectionFence(binding: NodeBinding, claimGeneration = true): void {
     const selected = this.selected(binding);
     const executions = this.platform.db.prepare("SELECT request_json FROM environment_operations WHERE binding_id=? AND kind='launch' AND state IN ('intent','requested','confirmed')").all(selected.bindingId) as Array<{ request_json: string }>;
     if (executions.some(row => JSON.parse(row.request_json).resourceId === selected.resource!.id))
-      throw new EnvironmentError("environment_execution_preserved", "An existing execution on this compute must be reconciled before projection; no running inputs were overwritten");
-    this.retainedResume(binding);
+      throw new EnvironmentError("environment_prior_execution_unconfirmed", "An existing execution on this compute must be reconciled before projection; no running inputs were overwritten");
+    this.retainedResume(binding, undefined, claimGeneration);
   }
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
-    this.projectionFence(binding);
-    const selected = this.selected(binding), files: ProjectionFile[] = [];
+    const selected = this.preparation(binding), files: ProjectionFile[] = [];
     const stage = this.stage();
     try {
       const guidance: string[] = [];
@@ -102,8 +115,7 @@ export class EnvironmentStartup {
     } finally { rmSync(stage, { recursive: true }); }
   }
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
-    this.projectionFence(binding);
-    const selected = this.selected(binding), stage = this.stage();
+    const selected = this.preparation(binding), stage = this.stage();
     try {
       const row = this.platform.db.prepare("SELECT projection_json FROM environment_bindings WHERE binding_id = ?").get(selected.bindingId) as { projection_json: string | null };
       const previous = row.projection_json ? JSON.parse(row.projection_json) : { files: [] };
@@ -121,9 +133,7 @@ export class EnvironmentStartup {
         + [...destinations].sort().map(path => `Read ${posix.join(selected.guestRoot, path)}.`).join("\n") + "\n";
       const index = join(stage, "CLAUDE.md"); writeFileSync(index, guidance, { mode: 0o600 });
       staged.push({ source: index, path: "work/CLAUDE.md", sha256: sha256(guidance), required: true, transient: true });
-      const delivered = await this.platform.project(selected.bindingId, { operationId: `startup-${binding.launchGeneration}`, generation: binding.launchGeneration!, files: staged });
-      const merged = { ...delivered, files: [...previous.files.filter((file: ProjectionReceipt) => !delivered.files.some(next => next.path === file.path)), ...delivered.files] };
-      this.platform.db.prepare("UPDATE environment_bindings SET projection_json = ? WHERE binding_id = ?").run(JSON.stringify(merged), selected.bindingId);
+      await this.platform.project(selected.bindingId, { operationId: `startup-${binding.launchGeneration}`, generation: binding.launchGeneration!, files: staged });
       return { delivered: files.length, failed: [] };
     } finally { rmSync(stage, { recursive: true }); }
   }
@@ -131,7 +141,6 @@ export class EnvironmentStartup {
     if (opts.forkSource) return { ok: false, recovery: "attention_required", error: "Environment fork is unsupported; no fresh conversation was started." };
     const checkpoint = this.retainedResume(binding, opts);
     const selected = this.selected(binding), generation = binding.launchGeneration!;
-    await this.platform.validate(selected.bindingId, generation);
     const operationId = `launch-${generation}`;
     const prior = this.platform.db.prepare("SELECT binding_id, kind, state, request_json, receipt_json FROM environment_operations WHERE operation_id = ?").get(operationId) as { binding_id: string; kind: string; state: string; request_json: string; receipt_json: string | null } | undefined;
     if (prior) {
@@ -150,6 +159,7 @@ export class EnvironmentStartup {
     }
     const older = this.platform.db.prepare("SELECT operation_id FROM environment_operations WHERE binding_id = ? AND kind = 'launch' AND operation_id <> ? AND state IN ('requested','confirmed')").get(selected.bindingId, operationId);
     if (older && !checkpoint) throw new EnvironmentError("environment_prior_execution_unconfirmed", "A prior native execution must be reconciled through lifecycle/restore before another launch");
+    await this.platform.validate(selected.bindingId, generation);
     if (!selected.coordinationRef) throw new EnvironmentError("environment_coordination_missing", "Configure this binding's scoped MCP work connection before native launch");
     const connection = JSON.parse(regularBytes(selected.coordinationRef).toString("utf8")) as { version?: number; mcpUrl?: string; seat?: string; token?: string };
     if (connection.version !== 1 || connection.seat !== selected.seat || typeof connection.token !== "string" || !connection.token || typeof connection.mcpUrl !== "string")

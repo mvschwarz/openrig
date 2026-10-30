@@ -1,3 +1,6 @@
+import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
+import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -7,9 +10,11 @@ import { serve } from "@hono/node-server";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createFullTestDb, createTestApp } from "../../daemon/test/helpers/test-app.js";
+import { createTestApp } from "../../daemon/test/helpers/test-app.js";
 import { EnvironmentPlatform } from "../../daemon/src/domain/environment-platform.js";
 import { createDb } from "../../daemon/src/db/connection.js";
+import { migrate } from "../../daemon/src/db/migrate.js";
+import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 import { addGrant, revokeGrant, startMcpHttpServer } from "../src/mcp-http.js";
 
@@ -20,7 +25,7 @@ const hash = (data: string) => createHash("sha256").update(data).digest("hex");
 it("returns real artifact bytes under the authenticated work grant, refusing wrong seat and revoked credentials", async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "environment-http-")));
   cleanup.push(() => rmSync(root, { recursive: true, force: true }));
-  const db = createFullTestDb(); cleanup.push(() => db.close());
+  const db = createDb(":memory:"); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
   const identity = join(root, "identity.sqlite"), idDb = createDb(identity);
   idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
   idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'environment-test-host')").run(); idDb.close();
@@ -32,17 +37,18 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   const driver = { version: 1 as const, list: async () => ({ complete: true, resources: [] }), create: async (input: { operationId: string }) => { resource.operationId = input.operationId; return resource; },
     inspect: async () => resource, upload: async () => {}, read: async () => Buffer.alloc(0),
     download: async (_binding: unknown, _source: string, destination: string) => { downloads++; writeFileSync(destination, artifact); } };
-  const fixture = createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts") } as never });
+  const queue = new QueueRepository(db, new EventBus(db)); queue.attachOutbox(new OutboxHandler(db));
+  const fixture = createTestApp(db, { appDeps: { queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "artifacts") } as never });
   const rig = fixture.rigRepo.createRig("team"), node = fixture.rigRepo.addNode(rig.id, "team.worker", { runtime: "openshell-claude", cwd: root });
   fixture.sessionRegistry.registerSession(node.id, "worker@team");
   const policy = join(root, "policy.yaml"); writeFileSync(policy, "version: 1\n");
   const platform = new EnvironmentPlatform(db, driver);
-  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "worker@team", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7433",
+  await platform.create({ version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id, seat: "worker@team", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://guest.test:7782",
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider", policy } });
   await platform.project("binding-one", { operationId: "projection-one", generation: "generation-one", files: [] });
   // This is the existing queue writer, not a separate guest task store.
   const created = await fixture.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@team" }, body: JSON.stringify({ qitemId: "export-task", destinationSession: "worker@team", body: "Return the selected report" }) });
-  expect(created.status).toBeLessThan(300);
+  expect(created.status, JSON.stringify(await created.clone().json())).toBeLessThan(300);
   const daemon = await new Promise<ReturnType<typeof serve>>(resolve => {
     const server = serve({ fetch: fixture.app.fetch, hostname: "127.0.0.1", port: 0 }, () => resolve(server));
   });

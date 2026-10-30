@@ -1,9 +1,12 @@
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EnvironmentError } from "../src/domain/environment-platform.js";
+import { EnvironmentError, EnvironmentPlatform } from "../src/domain/environment-platform.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 const cleanup: Array<() => void> = [];
@@ -35,7 +38,8 @@ function fixture() {
     async read(_binding: unknown, destination: string) { if (!files.has(destination)) throw new EnvironmentError("environment_file_missing", "Guest file is missing"); return Buffer.from(files.get(destination)!); },
     async download(_binding: unknown, source: string, destination: string) { downloads++; if (!files.has(source)) throw new Error("guest unavailable"); writeFileSync(destination, files.get(source)!); },
   };
-  const build = () => createTestApp(db, { appDeps: { environmentDriver: driver, environmentArtifactRoot: join(root, "exports") } as never });
+  const queue = new QueueRepository(db, new EventBus(db)); queue.attachOutbox(new OutboxHandler(db));
+  const build = () => createTestApp(db, { appDeps: { queueRepo: queue, environmentDriver: driver, environmentArtifactRoot: join(root, "exports") } as never });
   let f = build();
   const rig = f.rigRepo.createRig("environment-fixture");
   const node = f.rigRepo.addNode(rig.id, "worker", { runtime: "openshell-claude", cwd: root });
@@ -46,16 +50,20 @@ function fixture() {
     return { status: res.status, body: await res.json() as Record<string, any> };
   };
   const input = { version: 1, bindingId: "binding-one", operationId: "create-one", nodeId: node.id,
-    seat: "worker@environment-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://host.test:7433",
+    seat: "worker@environment-fixture", baseRuntime: "claude-code", guestRoot: "/sandbox/openrig", guestBaseUrl: "http://host.test:7782",
     placement: { gateway: "gateway", workspace: "workspace", name: "worker-one", image: `image@sha256:${"a".repeat(64)}`, provider: "provider-ref", policy: join(root, "policy.yaml") } };
   writeFileSync(input.placement.policy, "version: 1\n"); mkdirSync(join(root, "exports"));
+  const project = async (body: any) => {
+    try { return { status: 200, body: await new EnvironmentPlatform(db, driver as never).project("binding-one", body) }; }
+    catch (error) { return { status: error instanceof EnvironmentError ? error.status : 503, body: {} }; }
+  };
   const create = () => request("/create", input);
   const task = async () => {
     const response = await f.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@environment-fixture" },
       body: JSON.stringify({ qitemId: "task-one", destinationSession: "worker@environment-fixture", body: "Produce the selected artifact" }) });
-    expect(response.status).toBeLessThan(300);
+    expect(response.status, JSON.stringify(await response.clone().json())).toBeLessThan(300);
   };
-  return { root, db, resources, files, driver, input, request, create, task, health: () => f.app.request("/healthz"),
+  return { root, db, resources, files, driver, input, request, create, task, project, health: () => f.app.request("/healthz"),
     counts: () => ({ creates, downloads }), loseCreate: () => { loseCreate = true; }, restart: () => { f = build(); } };
 }
 
@@ -114,7 +122,7 @@ describe("maintained environment binding and projection", () => {
     expect(result.status).toBe(201);
     expect(result.body).toMatchObject({ ownership: "attached", resource: { id: "external-id" } });
     expect(f.counts().creates).toBe(0);
-    expect((await f.request("/binding-one/effect", { effect: "delete_environment" })).status).toBe(409);
+    expect((await f.request("/binding-one/effect", { effect: "delete_environment" })).status).toBe(404);
     expect(f.resources[0].id).toBe("external-id");
   });
 
@@ -127,7 +135,7 @@ describe("maintained environment binding and projection", () => {
   it("verifies explicit destination bytes and refuses a changed required projection", async () => {
     const f = fixture(); expect((await f.create()).status).toBe(201);
     const local = join(f.root, "role.md"); writeFileSync(local, "current guidance");
-    const result = await f.request("/binding-one/project", { operationId: "projection-one", generation: "generation-one",
+    const result = await f.project({ operationId: "projection-one", generation: "generation-one",
       files: [{ source: local, path: "work/CLAUDE.md", sha256: hash("current guidance"), required: true }] });
     expect(result.status).toBe(200);
     f.files.set("/sandbox/openrig/work/CLAUDE.md", "changed after projection");
@@ -138,7 +146,7 @@ describe("maintained environment binding and projection", () => {
     const f = fixture(); expect((await f.create()).status).toBe(201);
     const local = join(f.root, "role.md"); writeFileSync(local, "current guidance");
     f.files.set("/sandbox/openrig/work/CLAUDE.md", "owner content");
-    expect((await f.request("/binding-one/project", { operationId: "projection-one", generation: "generation-one",
+    expect((await f.project({ operationId: "projection-one", generation: "generation-one",
       files: [{ source: local, path: "work/CLAUDE.md", sha256: hash("current guidance"), required: true }] })).status).toBe(409);
     expect(f.files.get("/sandbox/openrig/work/CLAUDE.md")).toBe("owner content");
   });
@@ -146,7 +154,7 @@ describe("maintained environment binding and projection", () => {
   it("rejects projection traversal before a provider write", async () => {
     const f = fixture(); expect((await f.create()).status).toBe(201);
     const local = join(f.root, "role.md"); writeFileSync(local, "current guidance");
-    expect((await f.request("/binding-one/project", { operationId: "projection-one", generation: "generation-one",
+    expect((await f.project({ operationId: "projection-one", generation: "generation-one",
       files: [{ source: local, path: "../outside", sha256: hash("current guidance"), required: true }] })).status).toBe(400);
     expect(f.files.size).toBe(0);
   });
@@ -160,7 +168,7 @@ describe("maintained environment binding and projection", () => {
 describe("managed environment artifact return", () => {
   async function prepared() {
     const f = fixture(); expect((await f.create()).status).toBe(201); await f.task();
-    expect((await f.request("/binding-one/project", { operationId: "projection-one", generation: "generation-one", files: [] })).status).toBe(200);
+    expect((await f.project({ operationId: "projection-one", generation: "generation-one", files: [] })).status).toBe(200);
     const body = JSON.stringify({ task: "task-one", revision: 2, report: "actual artifact bytes" });
     f.files.set("/sandbox/openrig/work/artifacts/report.json", body);
     const input = { operationId: "export-one", taskId: "task-one", generation: "generation-one", path: "report.json", sha256: hash(body), bytes: Buffer.byteLength(body),
@@ -210,4 +218,22 @@ describe("managed environment artifact return", () => {
     const f = await prepared(); f.exportInput.path = "../../native/history.jsonl";
     expect((await f.export()).status).toBe(400); expect(f.counts().downloads).toBe(0);
   });
+});
+
+it("allows a corrected attach after a refused immutable identity", async () => {
+  const f = fixture(); f.resources.push({ id: "correct-id", name: "worker-one", workspace: "workspace", phase: "Ready" });
+  expect((await f.request("/attach", { ...f.input, operationId: "bad-attach", resourceId: "wrong-id" })).status).toBe(409);
+  const result = await f.request("/attach", { ...f.input, operationId: "correct-attach", resourceId: "correct-id" });
+  expect(result.status).toBe(201); expect(result.body.resource.id).toBe("correct-id");
+});
+it("allows a corrected create when the old binding has never requested a provider effect", async () => {
+  const f = fixture(); f.resources.push({ id: "foreign", name: "worker-one", workspace: "workspace", phase: "Ready" });
+  expect((await f.create()).status).toBe(409);
+  const result = await f.request("/create", { ...f.input, operationId: "correct-create", placement: { ...f.input.placement, name: "worker-two" } });
+  expect(result.status).toBe(201); expect(f.counts().creates).toBe(1);
+});
+it("reports an already-bound seat as a typed conflict", async () => {
+  const f = fixture(); expect((await f.create()).status).toBe(201);
+  const result = await f.request("/create", { ...f.input, bindingId: "other-binding", operationId: "other-create" });
+  expect(result.status).toBe(409); expect(result.body.code).toBe("environment_seat_bound");
 });

@@ -8,7 +8,7 @@ const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 export function envCommand(depsOverride?: StatusDeps): Command {
   const cmd = new Command("env")
-    .description("Inspect and control rig environment services for service-backed rigs and managed apps")
+    .description("Inspect and control rig services; for execution placement use rig environment")
     .addHelpText("after", `
 Examples:
   rig env status secrets-manager

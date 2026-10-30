@@ -57,7 +57,7 @@ async function prepareWork(home: string, input: { bindingId: string; seat: strin
 }
 
 export function environmentCommand(override?: EnvironmentCommandDeps): Command {
-  const cmd = new Command("environment").description("Explicit OpenShell placement, validated projection and actual artifact return (driver protocol 1)");
+  const cmd = new Command("environment").description("Explicit OpenShell execution placement and verified artifact return; not rig env (services)");
   const deps = (): EnvironmentCommandDeps => override ?? { lifecycleDeps: realDeps(), clientFactory: url => new DaemonClient(url) };
   const client = async () => { const d = deps(), status = await getDaemonStatus(d.lifecycleDeps); if (!daemonStatusGuard(status)) throw new Error("A reachable daemon is required"); return d.clientFactory(getDaemonUrl(status)); };
   const home = () => deps().home ?? getOpenRigHome();
@@ -69,7 +69,7 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
     .requiredOption("--directory <path>", "New or matching example directory")
     .option("--binding <id>", "Prepare this binding's normal scoped MCP work connection")
     .option("--seat <address>").option("--rig <name>").option("--mcp-url <url>", "Existing authenticated MCP HTTP listener, as reached by the guest")
-    .option("--guest-base-url <origin>", "Guest-reachable activity daemon origin; required with work authority")
+    .option("--guest-base-url <origin>", "Guest-only activity listener origin (not the main daemon API); required with work authority")
     .option("--artifact-root <path>", "Host returned-artifact root, bound to this environment")
     .option("--json", "JSON receipt; never credential values")
     .action(action(async (opts: { directory: string; binding?: string; seat?: string; rig?: string; mcpUrl?: string; guestBaseUrl?: string; artifactRoot?: string }) => {
@@ -83,6 +83,9 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
           const mcp = new URL(opts.mcpUrl), activity = new URL(opts.guestBaseUrl);
           if (![mcp, activity].every(url => ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash)
             || activity.pathname !== "/") throw new Error("Explicit guest endpoints without embedded credentials are required");
+          const mainPort = Number(process.env.OPENRIG_PORT ?? "7433");
+          const ports = [mcp, activity].map(url => Number(url.port || (url.protocol === "https:" ? 443 : 80)));
+          if (ports.includes(mainPort) || ports[0] === ports[1]) throw new Error("Select separate MCP and guest-only activity ports, never the daemon main port");
           const policy = parseYaml(data.toString("utf8"));
           for (const [name, url] of [["openrig_mcp", mcp], ["openrig_activity", activity]] as const) {
             policy.network_policies[name].endpoints[0].host = url.hostname;
@@ -121,7 +124,7 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
       report({ ...checked(res), operationId: body.operationId, effect: res.status === 202 ? "unconfirmed; reconcile this same operation" : "binding-confirmed; native launch not requested" });
     }));
   }
-  cmd.command("inspect").argument("<binding>").option("--live", "Observe the exact provider resource; unavailable is not absence").option("--json")
+  cmd.command("inspect").description("Read stored binding receipts or inspect the exact live resource").argument("<binding>").option("--live", "Observe the exact provider resource; unavailable is not absence").option("--json")
     .action(action(async (binding: string, opts: { live?: boolean }) => report(checked(await (await client()).get<Record<string, any>>(`/api/environments/${encodeURIComponent(binding)}${opts.live ? "?live=true" : ""}`)))));
   cmd.command("connect").argument("<binding>").requiredOption("--generation <id>").description("Open only the bound execution's viewer; closing it does not prove native or compute stopped")
     .action(action(async (id: string, opts: { generation: string }) => {

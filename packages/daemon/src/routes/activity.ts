@@ -115,7 +115,12 @@ export const activityRoutes = new Hono();
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
 function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>):
   { body: Record<string, unknown> } | { refused: Response } {
-  const refuse = (status: 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
+  const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
+  // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the
+  // write, so this is the grant's state when the post takes effect.
+  if (new ActivityGrantStore(store.db).get(grant.grantId)?.revokedAt !== null) {
+    return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
+  }
   const claimedNode = stringOrNull(body.nodeId);
   const claimedSession = stringOrNull(body.sessionName);
   if ((claimedNode && claimedNode !== grant.nodeId)
@@ -220,11 +225,13 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
   return c.json({ ok: true, ...result, rejected: charges.length - valid.length });
 });
 
-activityRoutes.post("/hooks", async (c) => {
+/** The hook ingress. The main routes accept the install-wide token or a seat activity grant; the guest router accepts a
+ *  grant only (`installTokenAccepted` false), so a guest-only listener never takes the token that speaks for every seat. */
+async function postHook(c: Context, installTokenAccepted: boolean): Promise<Response> {
   const store = c.get("agentActivityStore" as never) as AgentActivityStore | undefined;
-  const expectedToken = c.get("activityHookToken" as never) as string | undefined;
+  const expectedToken = installTokenAccepted ? c.get("activityHookToken" as never) as string | undefined : undefined;
 
-  if (!store || !expectedToken) {
+  if (!store || (installTokenAccepted && !expectedToken)) {
     return c.json({
       ok: false,
       code: "activity_hook_unconfigured",
@@ -238,7 +245,7 @@ activityRoutes.post("/hooks", async (c) => {
   // The principal comes first. The install-wide token speaks for every seat, as before. A seat activity grant speaks
   // only for its own seat and launch generation, which bindToGrant checks before anything the post claims is accepted.
   let grant: ActivityGrant | null = null;
-  if (bearerToken !== expectedToken && headerToken !== expectedToken) {
+  if (!expectedToken || (bearerToken !== expectedToken && headerToken !== expectedToken)) {
     const grants = new ActivityGrantStore(store.db);
     grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
     if (!grant) {
@@ -434,6 +441,11 @@ activityRoutes.post("/hooks", async (c) => {
           listProcesses: c.get("listProcesses" as never) as NativeProcessLister | undefined });
       }
     }
+    // A grant's post is decided again after that wait, as it was after the body arrived.
+    if (grant) {
+      const still = bindToGrant(c, store, grant, body);
+      if ("refused" in still) return still.refused;
+    }
     // #1524 (a), Codex only, synchronous with the write below (no await between them):
     // - a known earlier occupant's hook (its generation is registered for this node and isn't the current one)
     //   neither writes nor publishes. An absent or unregistered generation, no current tenure, or an unreadable
@@ -623,7 +635,15 @@ activityRoutes.post("/hooks", async (c) => {
   }
 
   return c.json({ ok: true, activity: result.activity });
-});
+}
+
+activityRoutes.post("/hooks", (c) => postHook(c, true));
+
+/** The guest-facing activity ingress: the hook post alone, for a seat activity grant alone. A guest-only listener mounts
+ *  this, never activityRoutes, whose other routes (events, parked, Pi usage) don't check a grant, and never the daemon's
+ *  main listener, whose other routes trust any caller. */
+export const guestActivityRoutes = new Hono();
+guestActivityRoutes.post("/hooks", (c) => postHook(c, false));
 
 // ── S19 AM-R18 — the push substrate: GET /api/activity/events (SSE) ──
 // Desk-accepted shape (ruling row): CHANGE NOTIFICATIONS ONLY —

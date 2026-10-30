@@ -28,3 +28,26 @@ it("rejects traversal and symlink reads instead of copying native or owner files
   expect(await command(root, "--read", join(root, "work", "link"))).toMatchObject({ ok: false, code: "environment_symlink" });
   expect(await command(root, "--read", root + "/../outside")).toMatchObject({ ok: false });
 });
+
+it("caps a file that grows after descriptor stat without reading its full content", async () => {
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"openshell-helper-"))); roots.push(root);
+  mkdirSync(join(root,"work")); const file=join(root,"work","report.json"); writeFileSync(file,"{}");
+  const script=`import importlib.util,os,sys
+spec=importlib.util.spec_from_file_location("guest",sys.argv[1]); g=importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+original=os.fstat
+changed=False
+def race(fd):
+ global changed
+ value=original(fd)
+ if not changed:
+  changed=True
+  with open(sys.argv[3],"ab") as stream: stream.write(b"x"*(g.LIMIT+1))
+ return value
+os.fstat=race
+try:
+ g.regular(sys.argv[2],sys.argv[3]); print("unexpected-success")
+except g.Refused as error: print(str(error))
+`;
+  const result=await run("python3",["-c",script,helper,root,file],{timeout:5000});
+  expect(result.stdout.trim()).toBe("environment_file_invalid");
+});

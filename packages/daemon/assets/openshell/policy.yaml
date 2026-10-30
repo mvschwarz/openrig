@@ -16,7 +16,7 @@ network_policies:
   openrig_activity:
     endpoints:
       - host: host.openshell.internal
-        port: 7433
+        port: 7782
         protocol: rest
         access: read-write
         enforcement: enforce
