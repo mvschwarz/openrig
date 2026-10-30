@@ -452,7 +452,8 @@ export class StartupOrchestrator {
     // so the operator's trust-precedence ordering is preserved when the post-launch
     // delivery loop walks the array. Rebuild artifacts are tagged
     // appliesOn: ["fresh_start"] by the resolver, which matches the rebuild context.
-    const sourceFiles = input.rebuildArtifacts && input.rebuildArtifacts.length > 0
+    const restoreEnvironmentContext = !!input.adapter.environment && !!input.binding.environmentRestore && !!input.preserveStartupContext;
+    const sourceFiles = restoreEnvironmentContext ? [] : input.rebuildArtifacts && input.rebuildArtifacts.length > 0
       ? [...input.rebuildArtifacts, ...input.resolvedStartupFiles]
       : input.resolvedStartupFiles;
     // OPR.0.7.0.13 (router, R1.1): the one-line bootstrap is delivered on its own (below), only with a yes, and never
@@ -465,7 +466,7 @@ export class StartupOrchestrator {
     if (input.adapter.environment) {
       try {
         if (!input.adapter.prepareEnvironmentStartup) throw new Error("Selected environment does not support required startup projection");
-        const prepared = await input.adapter.prepareEnvironmentStartup(applicableFiles, input.binding);
+        const prepared = await input.adapter.prepareEnvironmentStartup(restoreEnvironmentContext ? input.resolvedStartupFiles : applicableFiles, input.binding);
         if (prepared.failed.length) return this.fail(input, "failed", prepared.failed.map(file => `Required environment startup input ${file.path}: ${file.error}`), undefined, false, undefined, false, "pre_launch_files", true);
       } catch (error) { return this.fail(input, "failed", [`Environment startup preparation: ${(error as Error).message}`], undefined, false, undefined, false, "pre_launch_files", true); }
     }

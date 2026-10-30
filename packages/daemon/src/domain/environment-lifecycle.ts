@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { EnvironmentPlatform, EnvironmentError, identifier, regularBytes, relativeGuestPath, sha256, type EnvironmentBinding, type EnvironmentDriver, type Placement } from "./environment-platform.js";
+import { EnvironmentPlatform, EnvironmentError, identifier, regularBytes, relativeGuestPath, sha256, type EnvironmentBinding, type EnvironmentDriver, type Placement, type ProjectionReceipt } from "./environment-platform.js";
 import type { PodmanCleanupSelection } from "../adapters/openshell-podman-observer.js";
 import type { QueueRepository } from "./queue-repository.js";
 
@@ -10,8 +10,8 @@ export type NativeObservation = { nativeId: string; generation: string; running:
 export type DependentObservation = { workload: boolean; supervisor: boolean; volumes: boolean };
 export type EnvironmentLifecycleDriver = EnvironmentDriver & {
   nativeIdentity?(binding: EnvironmentBinding): Promise<NativeObservation>;
-  stopNative?(binding: EnvironmentBinding, native: NativeObservation, operationId: string): Promise<void>;
-  stopCompute?(binding: EnvironmentBinding, operationId: string): Promise<void>;
+  stopNative?(binding: EnvironmentBinding, native: NativeObservation, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
+  stopCompute?(binding: EnvironmentBinding, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
   deleteEnvironment?(binding: EnvironmentBinding, operationId: string): Promise<void>;
   captureCleanup?(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection>;
   cleanupState?(binding: EnvironmentBinding, selection?: PodmanCleanupSelection): Promise<DependentObservation>;
@@ -20,6 +20,7 @@ export type EnvironmentLifecycleDriver = EnvironmentDriver & {
 export type EnvironmentCheckpoint = {
   version: 1; checkpointId: string; bindingId: string; nodeId: string; seat: string; generation: string;
   nativeType: "community:openshell-claude"; nativeId: string; predecessorResourceId: string;
+  context?: ProjectionReceipt[];
   destinationCwd: string; nativeState: string; artifacts: Array<{ path: string; source: string; sha256: string; bytes: number; taskId: string }>; files: Array<{ path: string; source: string; sha256: string; bytes: number }>;
 };
 export type EffectReceipt = { version: 1; operationId: string; bindingId: string; generation: string; resourceId: string;
@@ -73,15 +74,30 @@ export class EnvironmentLifecycle {
     if (!native || native.nativeType !== "community:openshell-claude" || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(native.nativeId)) refuse("environment_native_unconfirmed", "The selected compute has no confirmed exact native identity");
     return native;
   }
-  async effect(id: string, input: { operationId: string; generation: string; effect: EnvironmentEffect; engineSocket?: string }): Promise<EffectReceipt> {
+  async effect(id: string, input: { operationId: string; generation: string; effect: EnvironmentEffect; engineSocket?: string; requestedBy?: string }, beforeDispatch?: () => boolean): Promise<EffectReceipt> {
     if (!["close-viewer", "stop-native", "stop-compute", "delete-owned"].includes(input.effect)) refuse("environment_effect_unsupported", "Select close-viewer, stop-native, stop-compute or delete-owned", 400);
     const binding = this.selected(id, input.generation);
     if (input.effect !== "close-viewer" && binding.ownership !== "owned") refuse("environment_attached_preserved", "Attached native, storage and compute are preserved; close only this consumer's viewer");
     const request = { ...input, resourceId: binding.resource!.id }, op = this.intent(binding, input.operationId, "effect", request);
     if (op.receipt_json) return JSON.parse(op.receipt_json);
-    const base = { version: 1 as const, operationId: input.operationId, bindingId: id, generation: input.generation, resourceId: binding.resource!.id, effect: input.effect };
+    const base = { version: 1 as const, operationId: input.operationId, bindingId: id, generation: input.generation, resourceId: binding.resource!.id, effect: input.effect, ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}) };
     const result = (state: EffectReceipt["state"], extra: Partial<EffectReceipt> = {}): EffectReceipt => ({ ...base, state, ...extra });
     const confirm = (extra: Partial<EffectReceipt> = {}) => { const receipt = result("confirmed", extra); this.save(input.operationId, receipt); return receipt; };
+    // Re-check at Core's call boundary AND inside the driver's final identity await.
+    // Only a known pre-dispatch refusal releases the claim; transport uncertainty never does.
+    const dispatch = async (run: (allowed: () => boolean) => Promise<void>): Promise<boolean> => {
+      if (!this.claim(input.operationId)) return true;
+      let refused = false;
+      const allowed = () => {
+        const current = this.platform.get(id);
+        const eligible = current?.generation === input.generation && current.resource?.id === binding.resource!.id && (!beforeDispatch || beforeDispatch());
+        if (!eligible) refused = true;
+        return eligible;
+      };
+      try { if (!allowed()) throw new Error("selection changed"); await run(allowed); }
+      catch { if (refused) { this.platform.db.prepare("UPDATE environment_operations SET state='intent' WHERE operation_id=? AND state='requested'").run(input.operationId); return false; } }
+      return true;
+    };
     try {
       if (input.effect === "close-viewer") {
         if (!this.viewer) refuse("environment_effect_unsupported", "This daemon has no managed viewer close operation", 501);
@@ -119,7 +135,7 @@ export class EnvironmentLifecycle {
         if (actual.resource!.phase === "Stopped") return confirm();
         // current() checks identity but retains stored phase; observe the fresh phase explicitly.
         if ((await this.driver.inspect(binding)).phase === "Stopped") return confirm();
-        if (this.claim(input.operationId)) { try { await this.driver.stopCompute(binding, op.effect_id!); } catch { /* reconcile below */ } }
+        if (!await dispatch(allowed => this.driver.stopCompute!(binding, op.effect_id!, allowed))) return result("pending", { detail: "The selection changed before dispatch; no stop was sent" });
         const after = await this.driver.inspect(binding); this.platform.assertResource(binding, after);
         return after.phase === "Stopped" ? confirm() : result("pending", { detail: "Compute stop was requested; Stopped is not yet observed" });
       }
@@ -127,7 +143,7 @@ export class EnvironmentLifecycle {
       const native = this.native(binding), before = await this.driver.nativeIdentity(binding);
       if (before.nativeId !== native.nativeId || before.generation !== input.generation) refuse("environment_native_changed", "The observed native execution differs; no signal was sent");
       if (!before.running) return confirm();
-      if (this.claim(input.operationId)) { try { await this.driver.stopNative(binding, before, op.effect_id!); } catch { /* reconcile same execution */ } }
+      if (!await dispatch(allowed => this.driver.stopNative!(binding, before, op.effect_id!, allowed))) return result("pending", { detail: "The selection changed before dispatch; no stop was sent" });
       const after = await this.driver.nativeIdentity(binding);
       if (after.nativeId !== native.nativeId || after.generation !== input.generation) return result("unconfirmed", { detail: "The native observation changed during stop" });
       return !after.running ? confirm() : result("pending", { detail: "Native TERM requested; execution is still present" });
@@ -140,6 +156,12 @@ export class EnvironmentLifecycle {
     const row = this.operation(id); return row?.kind === "checkpoint" && row.receipt_json ? JSON.parse(row.receipt_json) : null;
   }
   verifyCheckpoint(checkpoint: EnvironmentCheckpoint): void {
+    if ((checkpoint.context?.length ?? 0) > 4096 || (checkpoint.context ?? []).reduce((bytes, file) => bytes + file.bytes, 0) > 32 * 1024 * 1024) refuse("environment_checkpoint_invalid", "Retained destination context exceeds its file cap");
+    for (const file of checkpoint.context ?? []) {
+      relativeGuestPath(file.path);
+      if (!file.sourceFile || !file.sourceSha256 || sha256(regularBytes(file.sourceFile)) !== file.sourceSha256)
+        refuse("environment_checkpoint_changed", "A retained context source is missing or changed; no substitute was staged");
+    }
     if ((checkpoint.artifacts?.length ?? 0) > 128 || (checkpoint.artifacts ?? []).reduce((sum, file) => sum + file.bytes, 0) > 32 * 1024 * 1024)
       refuse("environment_checkpoint_invalid", "Retained artifacts exceed 128 files or 32 MiB");
     for (const artifact of checkpoint.artifacts ?? []) {
@@ -187,10 +209,12 @@ export class EnvironmentLifecycle {
       selection = this.platform.db.transaction(() => {
         const op = this.intent(binding, selectionId, "checkpoint-selection", { checkpointId: input.operationId, generation: input.generation, resourceId: binding.resource!.id, nativeId: native.nativeId });
         if (op.receipt_json) return op.receipt_json;
-        const selected = { files, artifacts }; this.save(selectionId, selected); return JSON.stringify(selected);
+        const projection = this.platform.db.prepare("SELECT projection_json FROM environment_bindings WHERE binding_id=?").get(id) as { projection_json: string | null };
+        const context = (projection.projection_json ? JSON.parse(projection.projection_json).files : []).filter((file: ProjectionReceipt) => file.sourceFile);
+        const selected = { files, artifacts, context }; this.save(selectionId, selected); return JSON.stringify(selected);
       })();
     }
-    const selected = JSON.parse(selection) as { files: Array<{ path: string; sha256: string; bytes: number }>; artifacts: EnvironmentCheckpoint["artifacts"] };
+    const selected = JSON.parse(selection) as { files: Array<{ path: string; sha256: string; bytes: number }>; artifacts: EnvironmentCheckpoint["artifacts"]; context?: ProjectionReceipt[] };
     const directory = join(resolve(this.stateRoot), id, input.operationId); privateDirectory(directory);
     const stage = mkdtempSync(join(directory, ".capture-"));
     try {
@@ -208,7 +232,7 @@ export class EnvironmentLifecycle {
       }
       const checkpoint: EnvironmentCheckpoint = { version: 1, checkpointId: input.operationId, bindingId: id, nodeId: binding.nodeId!, seat: binding.seat,
         generation: input.generation, nativeType: native.nativeType, nativeId: native.nativeId, predecessorResourceId: binding.resource!.id,
-        destinationCwd: posix.join(binding.guestRoot, "work"), nativeState: posix.join(binding.guestRoot, "native"), artifacts: selected.artifacts, files };
+        destinationCwd: posix.join(binding.guestRoot, "work"), nativeState: posix.join(binding.guestRoot, "native"), artifacts: selected.artifacts, context: selected.context ?? [], files };
       this.verifyCheckpoint(checkpoint); this.selected(id, input.generation); syncFile(directory); this.save(input.operationId, checkpoint); return checkpoint;
     } finally { rmSync(stage, { recursive: true }); }
   }
@@ -261,29 +285,48 @@ export class EnvironmentLifecycle {
     })();
     return receipt;
   }
-  selectCompletion(id: string, input: { operationId: string; generation: string; taskId: string; exportOperationId: string; effect: "stop-native" | "stop-compute" }): Record<string, unknown> {
+  selectCompletion(id: string, input: { operationId: string; generation: string; taskId: string; exportOperationId: string; effect: "stop-native" | "stop-compute"; requestedBy?: string }): Record<string, unknown> {
     const binding = this.selected(id, input.generation);
     identifier(input.taskId, "taskId"); identifier(input.exportOperationId, "exportOperationId");
     if (binding.ownership !== "owned" || !["stop-native", "stop-compute"].includes(input.effect)) refuse("environment_completion_invalid", "Finite completion needs one owned execution and a selected native or compute stop");
     const task = this.queue?.getById(input.taskId);
     if (!task || task.destinationSession !== binding.seat) refuse("environment_task_changed", "Finite completion selects work owned by this exact seat");
     const op = this.intent(binding, input.operationId, "completion", { ...input, resourceId: binding.resource!.id });
-    return { state: op.receipt_json ? "confirmed" : "pending", ...input };
+    return { ...input, state: op.state === "confirmed" ? "confirmed" : "pending", ...(op.receipt_json ? { lastAttempt: JSON.parse(op.receipt_json) } : {}) };
+  }
+  private completionEligible(id: string, input: { taskId: string; generation: string; resourceId: string; exportOperationId: string }): boolean {
+    const task = this.queue?.getById(input.taskId), binding = this.platform.get(id);
+    if (!task || task.state !== "done" || task.closureReason !== "no-follow-on" || task.destinationSession !== binding?.seat || binding.generation !== input.generation || binding.resource?.id !== input.resourceId) return false;
+    const exported = this.operation(input.exportOperationId);
+    if (!exported || exported.binding_id !== id || exported.kind !== "export" || exported.state !== "confirmed" || !exported.receipt_json) return false;
+    try {
+      const receipt = JSON.parse(exported.receipt_json);
+      if (receipt.bindingId !== id || receipt.generation !== input.generation || receipt.taskId !== input.taskId) return false;
+      const bytes = regularBytes(receipt.path);
+      return bytes.length === receipt.bytes && sha256(bytes) === receipt.sha256;
+    } catch { return false; }
   }
   async checkCompletions(): Promise<void> {
-    const rows = this.platform.db.prepare("SELECT operation_id, binding_id, request_json FROM environment_operations WHERE kind='completion' AND state <> 'confirmed'").all() as Array<{ operation_id: string; binding_id: string; request_json: string }>;
+    const rows = this.platform.db.prepare("SELECT operation_id, binding_id, request_json, receipt_json FROM environment_operations WHERE kind='completion' AND state IN ('intent','requested')").all() as Array<{ operation_id: string; binding_id: string; request_json: string; receipt_json: string | null }>;
     for (const row of rows) {
-      const input = JSON.parse(row.request_json), task = this.queue?.getById(input.taskId), binding = this.platform.get(row.binding_id);
-      if (!task || task.state !== "done" || task.closureReason !== "no-follow-on" || task.destinationSession !== binding?.seat || binding.generation !== input.generation || binding.resource?.id !== input.resourceId) continue;
-      const exported = this.operation(input.exportOperationId);
-      if (!exported || exported.kind !== "export" || exported.state !== "confirmed" || !exported.receipt_json) continue;
-      const receipt = JSON.parse(exported.receipt_json);
-      if (receipt.bindingId !== row.binding_id || receipt.generation !== input.generation || receipt.taskId !== input.taskId) continue;
+      const input = JSON.parse(row.request_json), now = Date.now(), previous = row.receipt_json ? JSON.parse(row.receipt_json) : undefined;
+      // Queue traffic is not a provider polling loop. A manual/boot/event check observes at most once per minute.
+      if (previous?.lastAttemptAt !== undefined && now - previous.lastAttemptAt < 60_000) continue;
+      if (!this.completionEligible(row.binding_id, input)) continue;
+      const attempt = { state: "pending", lastAttemptAt: now, taskId: input.taskId, exportOperationId: input.exportOperationId, detail: "Checking the selected stop" };
+      const claimed = this.platform.db.prepare("UPDATE environment_operations SET state='requested',receipt_json=? WHERE operation_id=? AND state IN ('intent','requested') AND receipt_json IS ?")
+        .run(JSON.stringify(attempt), row.operation_id, row.receipt_json);
+      if (!claimed.changes) continue;
       try {
-        const bytes = regularBytes(receipt.path); if (bytes.length !== receipt.bytes || sha256(bytes) !== receipt.sha256) continue;
-        const effect = await this.effect(row.binding_id, { operationId: `completion-stop-${sha256(row.operation_id).slice(0, 48)}`, generation: input.generation, effect: input.effect });
-        if (effect.state === "confirmed") this.save(row.operation_id, { ...effect, taskId: input.taskId, exportOperationId: input.exportOperationId });
-      } catch { /* retained selected completion remains inspectable; no unrelated task/queue emptiness fallback */ }
+        const effect = await this.effect(row.binding_id, { operationId: `completion-stop-${sha256(row.operation_id).slice(0, 48)}`, generation: input.generation, effect: input.effect, requestedBy: input.requestedBy },
+          () => this.completionEligible(row.binding_id, input));
+        const receipt = { ...effect, lastAttemptAt: now, taskId: input.taskId, exportOperationId: input.exportOperationId };
+        if (effect.state === "confirmed") this.save(row.operation_id, receipt);
+        else this.platform.db.prepare("UPDATE environment_operations SET receipt_json=? WHERE operation_id=? AND state='requested'").run(JSON.stringify(receipt), row.operation_id);
+      } catch (error) {
+        this.platform.db.prepare("UPDATE environment_operations SET receipt_json=? WHERE operation_id=? AND state='requested'")
+          .run(JSON.stringify({ ...attempt, state: "unconfirmed", detail: "Selected completion remains unconfirmed; no unrelated work was selected", ...(error instanceof EnvironmentError ? { code: error.code } : {}) }), row.operation_id);
+      }
     }
   }
 }

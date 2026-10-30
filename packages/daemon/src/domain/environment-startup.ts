@@ -167,6 +167,10 @@ export class EnvironmentStartup {
     const coordination = Buffer.from(JSON.stringify({ mcpServers: { openrig: { type: "http", url: connection.mcpUrl, headers: { Authorization: `Bearer ${connection.token}` } } } }));
     const row = this.platform.db.prepare("SELECT projection_json FROM environment_bindings WHERE binding_id = ?").get(selected.bindingId) as { projection_json: string };
     const files = JSON.parse(row.projection_json).files as ProjectionReceipt[];
+    for (const required of checkpoint?.context ?? []) {
+      if (!files.some(file => file.path === required.path && file.sha256 === required.sha256 && file.bytes === required.bytes))
+        throw new EnvironmentError("environment_projection_missing", "The recreated destination is missing its verified retained context");
+    }
     const nativeId = checkpoint?.nativeId ?? randomUUID();
     const request = { version: 1, bindingId: selected.bindingId, nodeId: binding.nodeId, generation, resourceId: selected.resource!.id, nativeId };
     this.platform.db.prepare("INSERT OR IGNORE INTO environment_operations(operation_id,binding_id,kind,request_json,state) VALUES (?,?,'launch',?,'intent')")

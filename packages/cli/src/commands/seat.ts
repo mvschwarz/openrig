@@ -1319,10 +1319,12 @@ Examples:
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
 Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
-session is refused (use rig unclaim). Stopping closes the managed pane. A community harness's native processes or compute may outlive it; inspect their own lifecycle receipts. Check
+session is refused (use rig unclaim). Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
 own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
 a fresh occupant there; it does not resume the stopped conversation.
+A community harness stop closes its managed pane; its native processes or compute
+may outlive it. Inspect their own lifecycle receipts.
 An intentionally stopped seat does not degrade an otherwise running rig.
 Running counts still exclude the stopped seat; stopping every seat leaves the
 rig stopped. Examples:

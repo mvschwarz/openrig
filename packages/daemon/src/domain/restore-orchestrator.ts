@@ -1743,6 +1743,8 @@ export class RestoreOrchestrator {
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
+    // New compute has no retained context filesystem. Restore the saved file selection, never conversation actions.
+    const restoreEnvironmentContext = replayContained && !!startupAdapter?.environment && !!data.environmentBindingsByNode?.[node.id];
 
     // A new pod-aware agent needs a startup context to run StartupOrchestrator.
     // Do not report a healthy fresh-primed result when that context or adapter
@@ -1809,9 +1811,9 @@ export class RestoreOrchestrator {
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
+          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {

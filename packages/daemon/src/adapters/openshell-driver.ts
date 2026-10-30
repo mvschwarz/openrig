@@ -51,8 +51,9 @@ export class OpenShellDriver implements EnvironmentDriver {
       || saved.fingerprint && actual.fingerprint !== saved.fingerprint) throw new EnvironmentError("environment_identity_changed", "The live OpenShell resource does not match the saved binding");
     if (ready && actual.phase !== "Ready") throw new EnvironmentError("environment_not_ready", "The bound OpenShell resource is not Ready");
   }
-  async guest(binding: EnvironmentBinding, args: string[]): Promise<Record<string, any>> {
+  async guest(binding: EnvironmentBinding, args: string[], beforeDispatch?: () => boolean): Promise<Record<string, any>> {
     await this.checked(binding);
+    if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected stop is no longer eligible; no command was dispatched");
     const result = JSON.parse(await this.command([...this.prefix(binding.placement), "exec", binding.placement.name,
       "--no-login-shell", "--timeout", "20", "--", "python3", "/opt/openrig/guest.py", "--root", binding.guestRoot, ...args]));
     if (!result || result.ok !== true) throw new EnvironmentError(result?.code ?? "environment_guest_refused", "The guest operation was not confirmed");
@@ -92,16 +93,17 @@ export class OpenShellDriver implements EnvironmentDriver {
       throw new EnvironmentError("environment_native_unconfirmed", "The exact native execution is not observed");
     return observed as NativeObservation;
   }
-  async stopNative(binding: EnvironmentBinding, native: NativeObservation, _operationId: string): Promise<void> {
-    await this.guest(binding, ["--stop-native", native.nativeId, "--generation", native.generation]);
+  async stopNative(binding: EnvironmentBinding, native: NativeObservation, _operationId: string, beforeDispatch?: () => boolean): Promise<void> {
+    await this.guest(binding, ["--stop-native", native.nativeId, "--generation", native.generation], beforeDispatch);
   }
   async checkpointFiles(binding: EnvironmentBinding, _native: NativeObservation): Promise<Array<{ path: string; sha256: string; bytes: number }>> {
     const result = await this.guest(binding, ["--checkpoint-files"]);
     if (!Array.isArray(result.files) || result.files.length !== 1) throw new EnvironmentError("environment_checkpoint_invalid", "The guest did not return one exact history contract");
     return result.files;
   }
-  async stopCompute(binding: EnvironmentBinding, _operationId: string): Promise<void> {
-    await this.checked(binding);
+  async stopCompute(binding: EnvironmentBinding, _operationId: string, beforeDispatch?: () => boolean): Promise<void> {
+    await this.checked(binding, false);
+    if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected stop is no longer eligible; no command was dispatched");
     await this.command([...this.prefix(binding.placement), "stop", binding.placement.name]);
   }
   async deleteEnvironment(binding: EnvironmentBinding, _operationId: string): Promise<void> {

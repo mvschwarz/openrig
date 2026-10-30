@@ -52,14 +52,15 @@ environmentRoutes.post("/:bindingId/export", async c => {
   } catch (error) { return failure(c, error); }
 });
 environmentRoutes.post("/:bindingId/effect", async c => {
-  try { const body = await c.req.json<{ effect: string }>(); return c.json(await (c.get("environmentLifecycle" as never) as EnvironmentLifecycle).effect(c.req.param("bindingId"), body as never)); }
+  const identity = requireSenderIdentity(c, { verb: "environment effect" }); if (!identity.ok) return identity.response;
+  try { const body = { ...await c.req.json<{ effect: string }>(), requestedBy: identity.session }; return c.json(await (c.get("environmentLifecycle" as never) as EnvironmentLifecycle).effect(c.req.param("bindingId"), body as never)); }
   catch (error) { return failure(c, error); }
 });
 
 for (const operation of ["checkpoint", "recreate", "completion"] as const) environmentRoutes.post(`/:bindingId/${operation}`, async c => {
   const identity = requireSenderIdentity(c, { verb: `environment ${operation}` }); if (!identity.ok) return identity.response;
   try {
-    const service = c.get("environmentLifecycle" as never) as EnvironmentLifecycle, input = await c.req.json();
+    const service = c.get("environmentLifecycle" as never) as EnvironmentLifecycle, input = { ...await c.req.json(), requestedBy: identity.session };
     const result = operation === "checkpoint" ? await service.checkpoint(c.req.param("bindingId"), input)
       : operation === "recreate" ? await service.recreate(c.req.param("bindingId"), input) : service.selectCompletion(c.req.param("bindingId"), input);
     if (operation === "completion") await service.checkCompletions();
