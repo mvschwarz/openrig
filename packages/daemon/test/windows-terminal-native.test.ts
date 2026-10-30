@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { pathToFileURL } from "node:url";
-import { verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
+import { verifyPaneIdleShell, verifyCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 import { verifyWindowsPaneReceiver } from "../src/domain/windows-pane-receiver.js";
 
 const execFileAsync = promisify(execFile);
@@ -35,6 +35,35 @@ function ownedInvoker(dir: string) {
 }
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
+  it("verifies the stock pane label and lineage of an owned native provider stub", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-provider-"));
+    const session = `owned-provider-${randomUUID()}`;
+    const invoke = ownedInvoker(dir);
+    const adapter = new TmuxAdapter(async () => { throw Error("No POSIX transport"); }, undefined, invoke, "psmux");
+    const windows = process.env.SystemRoot ?? "C:\\Windows";
+    const compiler = ["Framework64", "Framework"].map(folder => path.join(windows, "Microsoft.NET", folder, "v4.0.30319", "csc.exe")).find(existsSync);
+    const source = path.join(dir, "owned.cs"), executable = path.join(dir, "codex.exe"), ready = path.join(dir, "ready");
+    const token = randomUUID();
+    writeFileSync(source, 'using System; using System.IO; using System.Threading; class Owned { static void Main() { File.WriteAllText(Environment.GetEnvironmentVariable("OPENRIG_TEST_READY"), "owned"); Thread.Sleep(60000); } }');
+    try {
+      expect(compiler).toBeDefined();
+      execFileSync(compiler!, ["/nologo", "/target:exe", "/out:" + executable, source], { windowsHide: true, stdio: "pipe" });
+      expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
+      const pane = (await adapter.listPanes(session))[0]!;
+      const q = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+      expect(await adapter.sendShellCommand(pane.id, renderWindowsLaunch([executable, "resume", token].map(q).join(" "), { OPENRIG_TEST_READY: ready }))).toEqual({ ok: true });
+      await expect.poll(() => existsSync(ready), { timeout: 5000 }).toBe(true);
+      // The child can publish readiness before psmux refreshes its foreground label.
+      await expect.poll(() => adapter.getPaneCommand(pane.id), { timeout: 8000, interval: 200 }).toBe("codex");
+      const observation = await verifyCodexPaneProcess({ target: pane.id, tmux: adapter, expectedToken: token, requireResume: true, requireArgv: true });
+      expect(observation?.process.pid).toBeGreaterThan(0);
+      expect(observation?.process.executablePath?.replaceAll("\\", "/").toLowerCase()).toBe(executable.replaceAll("\\", "/").toLowerCase());
+      expect(await verifyPaneIdleShell({ target: pane.id, tmux: adapter })).toBe(false);
+    } finally {
+      await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  }, 30000);
   it("witnesses an idle stock pane and refuses it after an owned receiver starts", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-idle-"));
     const session = `owned-idle-${randomUUID()}`;

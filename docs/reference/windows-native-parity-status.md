@@ -617,3 +617,19 @@ a persistent shell-host label is not foreground proof. Terminal seats and other
 runtime policies are unchanged. No actual queue, watchdog or provider is used.
 The shared session-transport suite also passes 279/279 at this source change;
 daemon TypeScript, docs guard and whitespace checks pass.
+
+A stock psmux 3.4.0 follow-up compiles an owned native `codex.exe` stub with no
+provider dependency, starts it beneath an isolated non-profile PowerShell pane,
+and verifies the OS executable path plus exact resume argv through the real
+native process reader. Its pane is not an idle shell. The one selected case
+passes (three unrelated cases filtered), with the test namespace and files
+removed afterwards; daemon TypeScript also passes.
+
+This check exposed a test timing assumption rather than a missing launch
+implementation: the stub's ready file can precede psmux's foreground-label
+refresh. An immediate `codex` label assertion failed once with `powershell`;
+the final case waits at most eight seconds for `codex`, then requires strict
+process/resume proof. Delivery remains unverified during the shell-label
+transition. The stub only waits after writing readiness: this is process and
+foreground observation evidence, not Codex provider, conversation or input
+acceptance, and it does not exercise an existing seat or deployment.
