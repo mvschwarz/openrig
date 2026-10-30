@@ -9,9 +9,9 @@ import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 
 const md = markdownToSlackMrkdwn;
 type Item = Array<Record<string, unknown>>;
-const list = (lists: Array<{ style: string; indent: number; items: Item[] }>) => ({
+const list = (lists: Array<{ style: string; indent: number; offset?: number; items: Item[] }>) => ({
   type: "rich_text",
-  elements: lists.map(({ style, indent, items }) => ({ type: "rich_text_list", style, indent, elements: items.map((elements) => ({ type: "rich_text_section", elements })) })),
+  elements: lists.map(({ style, indent, offset, items }) => ({ type: "rich_text_list", style, indent, ...(offset ? { offset } : {}), elements: items.map((elements) => ({ type: "rich_text_section", elements })) })),
 });
 const t = (text: string, style?: Record<string, boolean>) => (style ? { type: "text", text, style } : { type: "text", text });
 
@@ -179,5 +179,20 @@ describe("list items in a row body render as native Slack lists", () => {
     expect(m.blocks.length).toBeLessThanOrEqual(50);
     expect(m.blocks.some((b) => (b as { type: string }).type === "rich_text")).toBe(false);
     expect(m.text).toContain("text 29\n- item 29");
+  });
+
+  it("never emits an empty section around a list", () => {
+    for (const body of ["# \n- item", "- item\n# ", "\n# \n- item\n  \n"]) {
+      expect(buildBodyBlocks(body)).toEqual([list([{ style: "bullet", indent: 0, items: [[t("item")]] }])]);
+    }
+  });
+
+  it("keeps ordered numbering when a list starts later or resumes after nesting", () => {
+    expect(buildBodyBlocks("5. five\n6. six")).toEqual([list([{ style: "ordered", indent: 0, offset: 4, items: [[t("five")], [t("six")]] }])]);
+    expect(buildBodyBlocks("1. one\n   - sub\n2. two")).toEqual([list([
+      { style: "ordered", indent: 0, items: [[t("one")]] },
+      { style: "bullet", indent: 1, items: [[t("sub")]] },
+      { style: "ordered", indent: 0, offset: 1, items: [[t("two")]] },
+    ])]);
   });
 });

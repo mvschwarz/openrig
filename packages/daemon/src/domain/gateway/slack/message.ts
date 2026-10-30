@@ -321,22 +321,22 @@ function richInline(text: string): RichInline[] {
   return out.length ? out : [{ type: "text", text: " " }];
 }
 
-const LIST_ITEM = /^(\s*)(?:([-*+])|\d{1,9}[.)])\s+(.*)$/;
+const LIST_ITEM = /^(\s*)(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/;
 // ponytail: Slack documents no indent maximum; 4 covers real briefs and keeps clear of invalid_blocks.
 const MAX_LIST_INDENT = 4;
 
 /** The body as blocks: runs of list items (outside code fences) become one native `rich_text`
  *  list block each; everything else stays mrkdwn sections. Nesting is two spaces per level. */
 export function buildBodyBlocks(text: string, openFence = ""): unknown[] {
-  type List = { type: "rich_text_list"; style: "bullet" | "ordered"; indent: number; elements: unknown[] };
+  type List = { type: "rich_text_list"; style: "bullet" | "ordered"; indent: number; offset?: number; elements: unknown[] };
   const blocks: unknown[] = [];
   let fence = openFence;
   let runFence = openFence;
   let run: string[] = [];
   let lists: List[] = [];
   const flushText = () => {
-    const joined = run.join("\n");
-    if (joined.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(markdownToSlackMrkdwn(joined, runFence), SLACK_SECTION_CAP, "body") } });
+    const converted = markdownToSlackMrkdwn(run.join("\n"), runFence);
+    if (converted.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(converted, SLACK_SECTION_CAP, "body") } });
     run = [];
   };
   const flushLists = () => {
@@ -347,12 +347,14 @@ export function buildBodyBlocks(text: string, openFence = ""): unknown[] {
     const item = fence ? null : LIST_ITEM.exec(line);
     if (item) {
       flushText();
-      const [, lead = "", bullet, rest = ""] = item;
+      const [, lead = "", bullet, number, rest = ""] = item;
       const style = bullet ? "bullet" : "ordered";
       const indent = Math.min(MAX_LIST_INDENT, Math.floor(lead.replaceAll("\t", "  ").length / 2));
       const section = { type: "rich_text_section", elements: richInline(rest) };
       const last = lists.at(-1);
       if (last && last.style === style && last.indent === indent) last.elements.push(section);
+      // An ordered run keeps its own numbering (a list starting at 5, or resuming after a nested list or a split).
+      else if (number && Number(number) > 1) lists.push({ type: "rich_text_list", style, indent, offset: Number(number) - 1, elements: [section] });
       else lists.push({ type: "rich_text_list", style, indent, elements: [section] });
       continue;
     }
