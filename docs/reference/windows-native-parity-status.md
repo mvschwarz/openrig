@@ -985,3 +985,20 @@ brackets and an apostrophe. All three load the same base and exact absolute
 imported spec through JSON-encoded YAML. Import versions/collisions and refusal
 cases remain covered by the other resolver cases. This does not access a network
 share, install a package or start a runtime. Daemon TypeScript passes.
+
+The historical exact-name reconciliation refreshed at `2fede10` finds 690 of
+the original 1,638 failed daemon cases in later fully passing scoped reports;
+948 lack such a match. The bounded report selection now also includes completed
+`-full` reports. Renamed cases and passes in reports with unrelated failures are
+still not credited. These are historical evidence counts across revisions, not
+948 reproduced current failures or a current full-suite result.
+
+The complete seat set-cwd and plugin-vendor files pass 60/60 on native Windows.
+Set-cwd's destination-refusal tests now look for JSON-escaped native paths in
+serialized results, preserving their existing file/custody/no-event assertions.
+The vendor mock resolves virtual paths consistently for reads, writes, directory
+walks, removals and direct test inspection, including mutable installed content.
+Tests retain newer/same-version installed authority and vendored/fetch-fallback
+behavior. No product code changed; daemon TypeScript passes. Set-cwd uses owned
+temporary files, in-memory state and no real terminal input; vendoring/fetch
+dependencies remain fixtures, not a deployed plugin refresh or remote fetch.
