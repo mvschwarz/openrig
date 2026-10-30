@@ -10,3 +10,4 @@ packages/daemon/assets/guidance/openrig-start.md text eol=lf
 packages/daemon/assets/guidance/openrig-seat-skills.md text eol=lf
 # Keep the shebang at the script start for native Vite/Node import consumers.
 packages/cli/scripts/check-abi.mjs text eol=lf
+packages/daemon/scripts/gen-control-plane-json.mjs text eol=lf
