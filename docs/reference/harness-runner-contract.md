@@ -130,9 +130,14 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
   - a post claiming another generation, or from an occupant that has since been replaced, is refused with
     `409 activity_grant_stale`;
   - a post before the launch has registered its occupant is refused with `409 activity_grant_pending`;
-  - a post with a revoked grant is refused with `401 activity_grant_revoked`.
+  - a post with a revoked grant is refused with `401 activity_grant_revoked`, including a post whose grant was revoked
+    while its body was arriving.
 
   A refused post records nothing, so the seat's activity stays as it was, or unknown.
+
+  **The guest's boundary is its listener, not the grant.** A guest reaches OpenRig only through a guest-only listener that
+  serves this one route and accepts only a grant. It must never reach the daemon's main port. The grant scopes activity
+  posts only, and the main port's other routes don't check it.
 
 ## 5. Input: one submitted message is one prompt
 
