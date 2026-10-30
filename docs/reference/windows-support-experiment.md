@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### Native settings creation and legacy separator matching (2026-10-30)
+
+An owned settings file with a valid 235-character name failed on first creation
+because its temporary suffix was appended to the full filename. The writer now
+uses a short UUID sibling name, keeping the existing replacement and metadata
+paths. Creation, update, fresh readback and staging cleanup pass.
+
+A separate owned native case reproduced the daemon treating a persisted legacy
+default written with forward separators as an explicit override. It now matches
+normalized Windows separators, as the CLI twin already does; POSIX comparison
+remains exact. Both dedicated cases pass after repair.
+
+The earlier broader settings run, after the staging repair but before the
+separator repair, reported 75 passed and six failed of 81. Those broader failures
+remain recorded; no current whole-file green result is claimed. Daemon TypeScript
+checking passed after the staging change. Only explicit synthetic settings files
+were written, not the operator's real settings or running daemon configuration.
+
 ### Plugin migration long registry filenames (2026-10-30)
 
 An owned obsolete-lab plugin whose hook registry has a valid 235-character
