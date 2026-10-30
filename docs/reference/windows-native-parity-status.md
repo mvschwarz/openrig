@@ -1075,3 +1075,7 @@ and generation writes 57 packs with the native entry declared and byte-identical
 to its source. Daemon TypeScript, Node syntax, docs and workflow YAML checks pass.
 Windows CI includes the file but has not run. All CLI/state are owned fixtures;
 this does not validate an installed tarball, real daemon or POSIX-host execution.
+
+### Permission-policy discovery fixture follow-up
+
+The Windows scoped run initially passed 42 tests and failed 14 across permission-policy discovery and seat-skill ownership. Eleven failures came from POSIX-only mock path predicates; those predicates and the negative cross-root read assertion now normalize native separators. The complete permission-policy discovery file passes 12/12 (permission-discovery-69ff15c-final.json); daemon TypeScript checking exits 0. No production policy behavior changed. Three ownership tests still fail while creating file symlinks with EPERM; those cases remain unverified, and directory junction coverage does not replace them.

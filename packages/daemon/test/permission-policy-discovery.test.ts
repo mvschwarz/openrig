@@ -13,6 +13,7 @@ const RIG_ROOT = "/project/rigs/policy-discovery";
 const ORIGINAL_RIG_ROOT = "/original/rig";
 const OTHER_OPERATION_ROOT = "/different/operation-root";
 const CUSTOM_POLICY_REF = "policies/operator-full.md";
+const fixturePath = (file: string) => file.replaceAll("\\", "/");
 const AGENT_YAML = `name: impl
 version: "1.0.0"
 resources:
@@ -56,10 +57,10 @@ launch_posture: full_bypass
 
 function fsOps(): AgentResolverFsOps {
   return {
-    exists: (path) => path.includes("agents/impl") || path.endsWith("policies/operator-full.md"),
+    exists: (path) => fixturePath(path).includes("agents/impl") || fixturePath(path).endsWith("policies/operator-full.md"),
     readFile: (path) => {
-      if (path.includes("agents/impl")) return AGENT_YAML;
-      if (path.endsWith("policies/operator-full.md")) return CUSTOM_POLICY;
+      if (fixturePath(path).includes("agents/impl")) return AGENT_YAML;
+      if (fixturePath(path).endsWith("policies/operator-full.md")) return CUSTOM_POLICY;
       throw new Error(`Not found: ${path}`);
     },
   };
@@ -67,10 +68,10 @@ function fsOps(): AgentResolverFsOps {
 
 function collisionFsOps(): AgentResolverFsOps {
   return {
-    exists: (path) => path.includes("agents/impl") || path.includes("agents/lib"),
+    exists: (path) => fixturePath(path).includes("agents/impl") || fixturePath(path).includes("agents/lib"),
     readFile: (path) => {
-      if (path.includes("agents/impl")) return COLLIDING_AGENT_YAML;
-      if (path.includes("agents/lib")) return COLLIDING_IMPORT_YAML;
+      if (fixturePath(path).includes("agents/impl")) return COLLIDING_AGENT_YAML;
+      if (fixturePath(path).includes("agents/lib")) return COLLIDING_IMPORT_YAML;
       throw new Error(`Not found: ${path}`);
     },
   };
@@ -263,9 +264,9 @@ describe("Seam C permission-policy discovery", () => {
       checkReady: async () => ({ ready: true }),
     } as RuntimeAdapter;
     const agentOnlyFsOps: AgentResolverFsOps = {
-      exists: (path) => path.includes("agents/impl"),
+      exists: (path) => fixturePath(path).includes("agents/impl"),
       readFile: (path) => {
-        if (path.includes("agents/impl")) return AGENT_YAML;
+        if (fixturePath(path).includes("agents/impl")) return AGENT_YAML;
         throw new Error(`Not found: ${path}`);
       },
     };
@@ -335,10 +336,10 @@ describe("Seam C permission-policy discovery", () => {
   it("carries persisted target policy discovery through the public YAML materialize route", async () => {
     const policyReads: string[] = [];
     const agentOnlyFsOps: AgentResolverFsOps = {
-      exists: (path) => path.includes("agents/impl"),
+      exists: (path) => fixturePath(path).includes("agents/impl"),
       readFile: (path) => {
-        if (path.includes("agents/impl")) return AGENT_YAML;
-        policyReads.push(path);
+        if (fixturePath(path).includes("agents/impl")) return AGENT_YAML;
+        policyReads.push(fixturePath(path));
         throw new Error(`Not found: ${path}`);
       },
     };
@@ -395,9 +396,9 @@ describe("Seam C permission-policy discovery", () => {
       checkReady: async () => ({ ready: true }),
     } as RuntimeAdapter;
     const agentOnlyFsOps: AgentResolverFsOps = {
-      exists: (path) => path.includes("agents/impl"),
+      exists: (path) => fixturePath(path).includes("agents/impl"),
       readFile: (path) => {
-        if (path.includes("agents/impl")) return AGENT_YAML;
+        if (fixturePath(path).includes("agents/impl")) return AGENT_YAML;
         throw new Error(`Not found: ${path}`);
       },
     };
