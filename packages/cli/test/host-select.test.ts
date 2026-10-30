@@ -6,6 +6,7 @@
 // (FR-1 ACs) as regressions.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -43,10 +44,11 @@ describe("rig host select (OPR.0.4.6.MH1 FR-1 command path)", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     port = (server.address() as { port: number }).port;
     process.env.OPENRIG_URL = `http://127.0.0.1:${port}`;
+    allowFetchTarget(process.env.OPENRIG_URL);
   });
 
-  afterEach(() => {
-    server.close();
+  afterEach(async () => {
+    await new Promise<void>(resolve => server.close(() => resolve()));
     fs.rmSync(dir, { recursive: true, force: true });
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];

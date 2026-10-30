@@ -57,6 +57,14 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+Current [host selection](../../packages/cli/test/host-select.test.ts) and
+[home/move dispatch](../../packages/cli/test/move-commands-host.test.ts) reproduction
+found three fixture failures: an unregistered owned HTTP origin and a POSIX-mode
+file that was not private under Windows ACL assessment. Exact origin registration,
+native private-file creation and explicit injected login status make all 18 cases
+pass. The fixture server is awaited on close; no actual host selection, remote
+execution, real credential read or provider invocation is performed.
+
 Bundle author checking and configuration staging also now apply their existing
 dependency/metadata exclusions case-insensitively on Windows. Two owned-directory
 reproductions failed before this change: dependency case variants entered the copy

@@ -9,6 +9,8 @@ import { authCommand } from "../src/commands/auth.js";
 import { seatCommand } from "../src/commands/seat.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
 import type { HostEntry } from "../src/host-registry.js";
+import { createPrivateTextFile } from "../../daemon/src/domain/private-text-file.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 // This machine's persisted identity, as `rig send --host` reads it (the real reader opens the local store).
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "host-local" }));
@@ -70,8 +72,9 @@ describe("rig auth --codex-home", () => {
   it("acts on the named home instead of CODEX_HOME", async () => {
     const other = path.join(home, "seat-home");
     fs.mkdirSync(other, { recursive: true });
-    fs.writeFileSync(path.join(other, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }), { mode: 0o600 });
-    const saved = await capture(() => authCommand({ env: { CODEX_HOME: other, HOME: home } }).parseAsync(["save", "codex-2"], { from: "user" }));
+    createPrivateTextFile(path.join(other, "auth.json"), JSON.stringify({ auth_mode: "chatgpt" }));
+    expectPrivateFile(path.join(other, "auth.json"));
+    const saved = await capture(() => authCommand({ env: { CODEX_HOME: other, HOME: home }, loginStatus: () => "unavailable" }).parseAsync(["save", "codex-2"], { from: "user" }));
     expect(saved.code).toBeUndefined();
 
     expect((await auth(["status", "--codex-home", other])).out).toContain(`codex_home: ${other}`);
