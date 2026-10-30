@@ -50,7 +50,7 @@ describe("rig context work-install", () => {
   let savedSessionName: string | undefined;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), "openrig-context-work-install-")));
     catalogRoot = join(root, "catalog");
     alphaRoot = join(root, "alpha-root");
     betaRoot = join(root, "unrelated-beta-tree");
