@@ -194,6 +194,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
+      "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
       // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.

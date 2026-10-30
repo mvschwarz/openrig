@@ -380,6 +380,8 @@ export async function startServer(port?: number) {
         retentionTimer = startQueueRetentionScheduler(deps);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
+        // Issue #1856: stream intake for the queue worker.
+        deps.streamIntakeCoordinator?.start();
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
         // then escalates through recorded rungs; never a silent park.
         wakeLadderScheduler = startWakeLadderScheduler(deps);
@@ -420,6 +422,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["stream-intake", () => deps.streamIntakeCoordinator?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
