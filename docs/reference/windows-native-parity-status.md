@@ -438,3 +438,13 @@ A positive harness-child witness behind a shell host still needs implementation
 and acceptance; this correction prevents a false ready result rather than claiming
 complete community-harness Windows readiness. No real harness was launched.
 
+The positive process-only witness behind a native shell host is now implemented:
+two stable process/console samples must identify one non-shell leaf receiver,
+with every console member accounted for in the pane's descendant lineage and
+consistent executable/start-time evidence. Idle, inaccessible, unrelated,
+ambiguous or changing observations stay unverified. Fifteen selected helper and
+adapter regressions pass; daemon TypeScript passes. An isolated stock psmux
+3.4.0 test additionally confirms no receiver at the idle shell and a receiver
+after its owned Node process starts. This is community process-only readiness,
+not proof of harness identity, conversation recovery or actual provider work.
+

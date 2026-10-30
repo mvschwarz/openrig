@@ -22,10 +22,11 @@ import type { CommunityHarnessPreset } from "../domain/community-harness-presets
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
+import { verifyWindowsPaneReceiver } from "../domain/windows-pane-receiver.js";
 
 interface CommunityHarnessAdapterDeps {
   environmentStartup?: EnvironmentStartup;
-  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "isNativeWindows">>;
+  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "isNativeWindows" | "getPanePid">>;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command">;
   presetsDir?: () => string;
   /** Where launch-result records go (tests); defaults to $OPENRIG_HOME/state/launch-results. */
@@ -221,6 +222,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     if (contained) return contained.checkReady(binding);
     const command = await this.deps.tmux.getPaneCommand(session);
     if ((this.deps.tmux.isNativeWindows || process.platform === "win32") && command && isWindowsShellHost(command)) {
+      if (this.deps.tmux.getPanePid && await verifyWindowsPaneReceiver({ target: binding.tmuxPane ?? session,
+        getPanePid: target => this.deps.tmux.getPanePid!(target) })) return { ready: true };
       return { ready: false, reason: `Community harness "${this.runtime}" readiness is unverified: a Windows shell host is not evidence of a running harness.`, code: "native_lineage_unverified" };
     }
     if (!command || isShellForeground(command)) {

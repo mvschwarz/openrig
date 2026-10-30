@@ -9,6 +9,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { pathToFileURL } from "node:url";
 import { verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
+import { verifyWindowsPaneReceiver } from "../src/domain/windows-pane-receiver.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
@@ -46,10 +47,12 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       const pane = (await adapter.listPanes(session))[0]!;
       const input = { target: pane.id, tmux: adapter };
       await expect.poll(() => verifyPaneIdleShell(input), { timeout: 8000, interval: 200 }).toBe(true);
+      expect(await verifyWindowsPaneReceiver({ target: pane.id, getPanePid: target => adapter.getPanePid(target) })).toBe(false);
       const q = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
       expect(await adapter.sendShellCommand(pane.id, renderWindowsLaunch([process.execPath, script].map(q).join(" ")))).toEqual({ ok: true });
       await expect.poll(() => existsSync(ready), { timeout: 5000 }).toBe(true);
       expect(await verifyPaneIdleShell(input)).toBe(false);
+      expect(await verifyWindowsPaneReceiver({ target: pane.id, getPanePid: target => adapter.getPanePid(target) })).toBe(true);
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
