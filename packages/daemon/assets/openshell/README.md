@@ -67,11 +67,11 @@ rig environment completion worker-one --request completion.json --json
 rig environment checkpoint worker-one --generation YOUR_OCCUPANT_GENERATION --operation native-checkpoint-one --json
 ```
 
-A selected task must be successfully closed by its owner, with its required host export still matching the verified bytes. Only then does the selected native/compute stop run. Failed work, another row closing, an empty queue, a closed viewer, a stale generation and a pending/changed export do not count. The task, seat and native identity remain. Receipt and pending-effect state are visible in `inspect`. Repeating the same completion request reconciles it without a second provider mutation.
+A selected task must be successfully settled under the existing queue closure contract, with its required host export still matching the verified bytes. Only then does the selected native/compute stop run. Failed work, another row closing, an empty queue, a closed viewer, a stale generation and a pending/changed export do not count. The task, seat and native identity remain. Receipt and pending-effect state are visible in `inspect`. Repeating the same completion request reconciles it without a second provider mutation.
 
 Checkpoint while the guest is accessible. Export the useful result first, then capture the exact newline-terminated native history prefix and prior verified artifact references. A later native append does not rewrite that checkpoint. This first native-store mapping supports one history file of at most 1 MiB at the fixed Claude project path, not arbitrary native-store portability. Retained prior artifacts are bounded to 128 files and 32 MiB combined. Private history bytes stay under the daemon's private state root; snapshots carry only binding/checkpoint/native/compute/state-location references. Missing, changed or mismatched state refuses resume, never starts fresh.
 
-The guest supervisor retains control/file access for up to30minutes after native exit. Its native PID and process-start identity are distinct from the supervisor and compute identity. An idle supervisor is not an idle model claim. Native TERM has its own bounded observation; it does not delete compute. Collect the checkpoint before stopping compute.
+The guest supervisor retains control/file access for up to 30 minutes after native exit. Its native PID and process-start identity are distinct from the supervisor and compute identity. An idle supervisor is not an idle model claim. Native TERM has its own bounded observation; it does not delete compute. Collect the checkpoint before stopping compute.
 
 ## Distinct selected effects
 

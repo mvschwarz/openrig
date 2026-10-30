@@ -113,9 +113,15 @@ def descriptor(root, pending=False):
         if value.get("nativeType") != "community:openshell-claude" or value["resumeToken"] != value["nativeId"]:
             raise Refused("environment_native_identity_invalid")
         checkpoint = value.get("checkpoint", {})
+        files = checkpoint.get("files", []) if isinstance(checkpoint, dict) else []
+        if not isinstance(files, list) or not 1 <= len(files) <= 129:
+            raise Refused("environment_checkpoint_invalid")
+        history = [file for file in files if file.get("path", "").startswith("native/projects/")]
+        if len(history) != 1 or not history[0]["path"].endswith("/" + value["nativeId"] + ".jsonl"):
+            raise Refused("environment_checkpoint_identity_mismatch")
         if checkpoint.get("nativeId") != value["nativeId"] or checkpoint.get("nativeType") != value["nativeType"]:
             raise Refused("environment_checkpoint_identity_mismatch")
-        for file in checkpoint.get("files", []):
+        for file in files:
             data = regular(root, file["path"])
             if digest(data) != file["sha256"] or len(data) != file["bytes"]:
                 raise Refused("environment_checkpoint_changed")
