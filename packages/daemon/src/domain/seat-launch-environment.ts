@@ -113,15 +113,21 @@ export class SeatLaunchEnvironment {
     if (!statSync(cli).isFile() || !instanceHome) throw new Error("Paired CLI or instance home unavailable");
     // Separate aliases for concurrent installed versions; never retarget another
     // daemon's link. Only rig is exposed, not the other tools in a shared bin.
-    const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", createHash("sha256").update(cli).digest("hex"));
+    // New shim content gets a new directory; keep existing daemons' immutable
+    // aliases intact instead of refusing or overwriting their older scripts.
+    const identity = createHash("sha256").update(cli);
+    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v2");
+    const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", identity.digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {
       // PowerShell, native cmd and Git Bash each need their own argument-preserving entry.
-      // Reject batch metacharacters in fixed executable paths rather than interpreting them.
-      if (/[\r\n"%]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
+      // Batch files double literal percent signs. Disable inherited delayed
+      // expansion so exclamation marks in fixed paths remain literal too.
+      if (/[\r\n"]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
+      const batchPath = (value: string) => value.replaceAll("%", "%%");
       const shims: Record<string, string> = {
         "rig.ps1": `& ${powershellQuote(process.execPath)} ${powershellQuote(cli)} @args\nexit $LASTEXITCODE\n`,
-        "rig.cmd": `@echo off\r\n"${process.execPath}" "${cli}" %*\r\n`,
+        "rig.cmd": `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${batchPath(process.execPath)}" "${batchPath(cli)}" %*\r\n`,
         rig: `#!/bin/sh\nexec ${shellQuote(process.execPath.replace(/\\/g, "/"))} ${shellQuote(cli.replace(/\\/g, "/"))} "$@"\n`,
       };
       for (const [name, content] of Object.entries(shims)) {

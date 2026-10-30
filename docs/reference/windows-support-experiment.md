@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Paired seat CLI paths containing percent and exclamation marks
+
+The Windows seat-bin shim now doubles literal percent signs in its fixed Node/CLI
+paths and disables inherited cmd delayed expansion. Previously a percent-bearing
+paired CLI path was explicitly refused, preventing preparation of the managed seat
+launch environment. A real owned cmd subprocess, with delayed expansion enabled
+and a decoy variable defined, now invokes the exact synthetic paired CLI from a
+directory containing both `%VARIABLE%` and `!VARIABLE!`. The existing native seat
+launch fixtures also pass (3 checks total); daemon TypeScript checking passes.
+
+The changed Windows shim has a versioned directory identity, so an older immutable
+seat-bin directory is retained byte-for-byte rather than overwritten or rejected.
+The fixture checks that preservation too. No live terminal, installed CLI, provider,
+seat, or runtime deployment was changed. This does not establish arbitrary cmd
+argument transport or live provider acceptance.
+
 ### MCP grant publication staging path
 
 Grant-file updates now use a short UUID sibling staging name instead of appending
