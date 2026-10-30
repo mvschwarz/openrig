@@ -37,6 +37,15 @@ function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   };
 }
 
+it.each(["win32", "linux"])("setup capture uses its selected %s configuration platform", async platform => {
+  const base = makeDeps({ platform });
+  const commands: string[] = [];
+  await runSetup({ ...base, exec: (cmd, opts) => { commands.push(cmd); return base.exec(cmd, opts); } }, { herdr: false, ghostty: false });
+  const probe = commands.filter(cmd => cmd.includes("openrig-check-"));
+  expect(probe).toHaveLength(3);
+  expect(probe.every(cmd => cmd.includes(platform === "win32" ? "-f NUL " : "-f /dev/null "))).toBe(true);
+});
+
 it.each(["primary", "rc", "fallback", "explicit", "tilde", "disabled", "empty"])("native setup targets the selected psmux configuration (%s)", async selection => {
   const home = "C:/synthetic-psmux-home";
   const files = new Map<string, string>([

@@ -541,7 +541,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     });
   } else {
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
-    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts), undefined, platform);
     if (capture.status === "fail") {
       const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
       steps.push({ id: "tmux_install", status: "fail", message: failure.message, reason: failure.reason, fixHint: failure.fix });

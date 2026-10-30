@@ -33,6 +33,14 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
 }
 
 describe("runDoctorChecks", () => {
+  it.each(["win32", "linux"] as const)("uses the selected %s platform for isolated capture configuration", platform => {
+    const base = makeDeps({ platform });
+    const commands: string[] = [];
+    runDoctorChecks({ ...base, exec: (cmd, opts) => { commands.push(cmd); return base.exec(cmd, opts); } }, []);
+    const probe = commands.filter(cmd => cmd.includes("openrig-check-"));
+    expect(probe).toHaveLength(3);
+    expect(probe.every(cmd => cmd.includes(platform === "win32" ? "-f NUL " : "-f /dev/null "))).toBe(true);
+  });
   it("monorepo command-dir base resolves via the same daemon root seam as daemon start", () => {
     const deps = makeDeps({
       baseDir: "/Users/example/code/openrig/packages/cli/src/commands",

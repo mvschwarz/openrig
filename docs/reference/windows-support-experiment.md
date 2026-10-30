@@ -26,6 +26,19 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Setup/doctor capture platform propagation (2026-10-30)
+
+Setup and doctor selected a platform for their checks but omitted it when
+calling the isolated capture probe, which then used the test host's platform.
+Both consumers now pass their selected platform, so native checks consistently
+use NUL and POSIX checks /dev/null. The doctor platform check fails before the
+correction; all four selected setup/doctor cases pass afterward, with other
+cases filtered. CLI typecheck passes. Commands are injected, not executed.
+The isolation contract is retained: [psmux 3.4.0 main](https://raw.githubusercontent.com/psmux/psmux/v3.4.0/src/main.rs)
+implements -L as a namespace and scopes kill-server to it. This source review
+is not new native multiplexer startup/capture acceptance; no real server was
+started, queried or stopped for these consumer checks.
+
 ## Native bin-wrapper selection checks (2026-10-30)
 
 The bin-wrapper file originally reported three file-symlink creation failures
