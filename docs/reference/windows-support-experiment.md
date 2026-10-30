@@ -2,6 +2,18 @@
 
 ## Current review status (2026-10-30)
 
+### Host identity sidecar staging filenames
+
+The CLI host-binding writer now uses a short unique sibling staging filename instead
+of appending a suffix to the destination filename. An owned native-Windows fixture
+reproduced a first-observation failure for a valid 250-character sidecar basename;
+the destination plus its lock name fit, but the old staging name exceeded the
+filesystem component limit. The repaired case persists the original identity and
+a later conflicting identity without replacing the original binding or leaving
+staging files behind. The two host-binding test files pass 35/35 checks and CLI
+type checking passes. This is local synthetic file evidence, without host probes,
+live registries, credentials, or fleet activation; it is not complete Windows parity.
+
 ### Native local terminal recovery commands (2026-10-30)
 
 The composed Windows tile already carried native argv, but its human-facing
