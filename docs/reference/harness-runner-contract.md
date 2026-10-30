@@ -122,6 +122,17 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
 - **The generation attributes a post; it isn't authentication.**
   - A post carrying an earlier occupant's generation never counts for the live seat.
   - The hook token is one local token, so any process holding it can post for any seat.
+- **A seat activity grant** is what a runner in another environment, such as a sandbox guest, receives instead of the
+  local token. It arrives in the same `OPENRIG_ACTIVITY_HOOK_TOKEN`, with an `OPENRIG_URL` the guest can reach, and it
+  speaks only for its own seat and launch generation:
+  - with a grant, the generation is authenticated, and you may leave out `nodeId` and `generation`;
+  - a post for another seat is refused with `403 activity_grant_wrong_seat`;
+  - a post claiming another generation, or from an occupant that has since been replaced, is refused with
+    `409 activity_grant_stale`;
+  - a post before the launch has registered its occupant is refused with `409 activity_grant_pending`;
+  - a post with a revoked grant is refused with `401 activity_grant_revoked`.
+
+  A refused post records nothing, so the seat's activity stays as it was, or unknown.
 
 ## 5. Input: one submitted message is one prompt
 
