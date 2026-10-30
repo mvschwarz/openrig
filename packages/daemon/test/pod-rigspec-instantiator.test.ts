@@ -140,6 +140,23 @@ describe("PodRigInstantiator", () => {
     } finally { db.close(); }
   });
 
+  it("#1631 bootstrap instantiate preserves action-only pod startup for export", async () => {
+    const root = nodePath.resolve(RIG_ROOT);
+    const { db, rigRepo, sessionRegistry, inst } = setup({ [nodePath.resolve(root, "agents/impl/agent.yaml")]: agentYaml("impl") });
+    try {
+      const spec = makeRigSpec();
+      spec.pods[0]!.startup = { files: [], actions: [{ type: "send_text", value: "orient pod", phase: "after_ready", idempotent: true, appliesOn: ["fresh_start"] }] };
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), root);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+      const exporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) });
+      const exported = exporter.exportRig(result.result.rigId) as RigSpec;
+      expect(exported.pods[0]!.startup).toEqual(spec.pods[0]!.startup);
+      expect(rigRepo.getRigStartupLayers(result.result.rigId)?.root).toBe(root);
+    } finally { db.close(); }
+  });
+
   // T2: resolved spec identity persisted
   it("persists resolved spec identity on node", async () => {
     const { db, rigRepo, inst } = setup();

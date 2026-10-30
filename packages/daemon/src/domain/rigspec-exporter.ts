@@ -229,8 +229,9 @@ export class RigSpecExporter {
       };
       if (pod.summary) podSpec.summary = pod.summary;
       const podFiles = startupLayers?.podStartupFiles?.[pod.namespace];
-      if (Array.isArray(podFiles) && podFiles.length > 0) {
-        podSpec.startup = { files: podFiles, actions: [] };
+      const podActions = startupLayers?.podStartupActions?.[pod.namespace];
+      if ((Array.isArray(podFiles) && podFiles.length > 0) || (Array.isArray(podActions) && podActions.length > 0)) {
+        podSpec.startup = { files: Array.isArray(podFiles) ? podFiles : [], actions: Array.isArray(podActions) ? podActions : [] };
       }
       if (pod.continuityPolicyJson) {
         try {

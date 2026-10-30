@@ -999,19 +999,20 @@ the modified topology, run `rig snapshot <rig-id>` and use its returned ID with
 
 Startup blocks can appear at three levels: rig, pod, and member. They are merged additively via the startup layering model (see [the layering model](agent-startup-guide.md#the-layering-model)). The rig's `culture_file` joins as a required file with the `auto` hint in the culture layer, on both fresh start and restore.
 
-`rig export` includes the rig's saved culture file and startup block, and now also
-writes each pod's saved startup files under that pod. The file order, delivery
-hints, required flags, orientation and `applies_on` selections are retained.
-Previously the saved pod file lists were omitted. Pods without a recorded file
-list, including older rigs, keep their existing export behavior; the exporter
-does not reconstruct declarations from a member's combined startup context.
+`rig export` includes the rig's saved culture file and startup block, and writes
+saved pod startup files and actions under their pod. The file and action order,
+delivery hints, required flags, orientation and `applies_on` selections are retained.
+Pod actions are saved for export when a new rig is created; older rigs and pods
+added from a separate expansion may not have those declarations recorded. Export
+does not reconstruct them from a member's combined startup context; keep the source
+spec when those declarations are needed. This does not change which startup actions
+are inherited when a seat is added later.
 
 File paths remain relative to the exported spec's folder. When exporting to a
 different folder, supply the referenced startup files there or import with the
 original `--rig-root`. The CLI warns once per missing required rig or pod file;
-missing optional files do not trigger that warning. Pod startup actions and
-member startup blocks remain outside this export; keep the source spec when you
-need those declarations.
+missing optional files do not trigger that warning. Member startup blocks remain
+outside this export; keep the source spec when you need those declarations.
 
 ### Files
 
