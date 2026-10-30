@@ -16,7 +16,7 @@ function makeProbe(overrides: Partial<ProbeResult> & { name: string; status: Pro
 }
 
 describe("ExternalInstallPlanner", () => {
-  it.each(["constructor", "__proto__", "toString", "git; echo unexpected", "Git.Git"])("keeps unmapped Windows tool %s manual-only", name => {
+  it.each(["constructor", "__proto__", "toString", "git; echo unexpected", "Git.Git", "GitHub.cli", "ripgrep", "C:\\other\\jq.exe", "jq.exe.exe"])("keeps unmapped Windows tool %s manual-only", name => {
     const plan = new ExternalInstallPlanner({ platform: "win32" }).planInstalls([makeProbe({ name, status: "missing" })]);
     expect(plan.actions[0]).toMatchObject({ classification: "manual_only", commandPreview: null, provider: null });
     expect(plan.actions[0]).not.toHaveProperty("commandArgv");

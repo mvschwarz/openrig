@@ -30,7 +30,10 @@ interface PlannerOptions {
   platform?: string;
 }
 
-const WINDOWS_TOOL_IDS = new Map([["git", "Git.Git"], ["pwsh", "Microsoft.PowerShell"]]);
+const WINDOWS_TOOL_IDS = new Map([
+  ["git", "Git.Git"], ["pwsh", "Microsoft.PowerShell"],
+  ["jq", "jqlang.jq"], ["rg", "BurntSushi.ripgrep.MSVC"], ["gh", "GitHub.cli"],
+]);
 
 /**
  * Maps missing requirements to trusted provider install actions.
@@ -100,7 +103,7 @@ export class ExternalInstallPlanner {
     // status === "missing" — try to map to a trusted provider
     if (this.platform === "win32" && probe.kind === "cli_tool") {
       // Explicit catalog identities; never treat arbitrary tool names or hints as package IDs.
-      const id = WINDOWS_TOOL_IDS.get(probe.name);
+      const id = WINDOWS_TOOL_IDS.get(probe.name.replace(/\.exe$/i, "").toLowerCase());
       if (id) {
         const args = ["install", "--id", id, "--exact", "--source", "winget", "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"];
         return { requirementName: probe.name, kind: probe.kind, provider: "winget",

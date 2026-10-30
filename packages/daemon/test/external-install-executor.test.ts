@@ -49,25 +49,25 @@ describe("ExternalInstallExecutor", () => {
     const localDb = createDb(); migrate(localDb, ALL_MIGRATIONS);
     try {
       seedBootstrapRun(localDb, "native-plan");
-      const probes = ["git", "pwsh", "unmapped;tool"].map(name => ({ name, kind: "cli_tool" as const,
+      const probes = ["git", "pwsh", "JQ.EXE", "rg", "GH.EXE", "unmapped;tool"].map(name => ({ name, kind: "cli_tool" as const,
         status: "missing" as const, version: null, detectedPath: null, provider: null, command: null,
         installHints: { win32: "echo NEVER_EXECUTE" }, error: null }));
       const plan = new ExternalInstallPlanner({ platform: "win32" }).planInstalls(probes);
-      expect(plan.reviewRequired.map(a => a.requirementName)).toEqual(["git", "pwsh"]);
+      expect(plan.reviewRequired.map(a => a.requirementName)).toEqual(["git", "pwsh", "JQ.EXE", "rg", "GH.EXE"]);
       expect(plan.manualOnly.map(a => a.requirementName)).toEqual(["unmapped;tool"]);
       const exec = vi.fn(async () => { throw Error("Shell execution forbidden"); });
-      const execArgv = vi.fn().mockRejectedValueOnce(Error("agreement required")).mockResolvedValueOnce("installed");
+      const execArgv = vi.fn().mockRejectedValueOnce(Error("agreement required")).mockResolvedValue("installed");
       const executor = new ExternalInstallExecutor({ db: localDb, exec, execArgv });
       const unapproved = await executor.execute("native-plan", [{ action: plan.actions[0]!, approved: false }]);
       expect(unapproved.skipped).toHaveLength(1);
       expect(execArgv).not.toHaveBeenCalled();
       const result = await executor.execute("native-plan", plan.actions.map(action => ({ action, approved: true })), 2);
-      expect(result.failed).toHaveLength(1); expect(result.completed).toHaveLength(1); expect(result.skipped).toHaveLength(1);
+      expect(result.failed).toHaveLength(1); expect(result.completed).toHaveLength(4); expect(result.skipped).toHaveLength(1);
       expect(exec).not.toHaveBeenCalled();
-      expect(execArgv.mock.calls).toEqual(["Git.Git", "Microsoft.PowerShell"].map(id => ["winget.exe",
+      expect(execArgv.mock.calls).toEqual(["Git.Git", "Microsoft.PowerShell", "jqlang.jq", "BurntSushi.ripgrep.MSVC", "GitHub.cli"].map(id => ["winget.exe",
         ["install", "--id", id, "--exact", "--source", "winget", "--scope", "user", "--silent", "--disable-interactivity", "--no-upgrade"]]));
       const rows = localDb.prepare("SELECT status, detail_json FROM bootstrap_actions WHERE bootstrap_id = ? ORDER BY seq").all("native-plan") as Array<{ status: string; detail_json: string }>;
-      expect(rows.map(row => row.status)).toEqual(["skipped", "failed", "completed", "skipped"]);
+      expect(rows.map(row => row.status)).toEqual(["skipped", "failed", "completed", "completed", "completed", "completed", "skipped"]);
       expect(JSON.parse(rows[1]!.detail_json).errorMessage).toBe("agreement required");
     } finally { localDb.close(); }
   });

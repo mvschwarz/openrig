@@ -49,7 +49,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Local recap handoff | [Recap write](../../packages/cli/test/context-recap-write.test.ts) passes nine cases. Actual Windows write denial on an owned directory triggers delegation to the fixture server; timeout remains unknown and a connection failure retains its cause. The fixture restores its temporary ACL rule in finally. A directory junction checks refusal through a linked namespace. | Actual daemon/seat permissions; file-symlink behavior is not established by the junction case. |
 | Bundle login-file diagnostics | [CLI](../../packages/cli/test/bundle-login-files.test.ts) and [daemon](../../packages/daemon/test/bundle-login-files.test.ts) pass 45 combined cases using synthetic login fixtures and real owned archives. Native local-path and archive-path diagnostics are both checked, including JSON escaping, explicit opt-in notices and absence of fixture content in diagnostics. | Actual operator credentials are never used; this is not authorization to publish login files or a full bundle-suite result. |
 | Local auth-file assessment | [Auth ops](../../packages/cli/test/codex-auth-ops.test.ts) passes six cases with owned synthetic files: private-file creation and assessment, refusal after a real extra read ACE, malformed JSON and result redaction. The fixture import was corrected and its unsafe-file setup now changes only the DACL through native icacls instead of requiring Set-Acl security privileges. | Login state is injected; actual provider sign-in, existing user credentials and profile switching are not exercised. |
-| External dependency installation | Windows missing CLI requirements `git` and `pwsh` map to explicit WinGet catalog IDs and literal argv, through the existing reviewed-action workflow. Planner/executor/native probe suites pass 38 cases. Manifest hints remain display-only. | Actual WinGet installation, agreement state and package availability are unverified. Unmapped tools and system packages remain manual-only; no elevation, agreement auto-acceptance or reboot is requested. |
+| External dependency installation | Windows missing CLI requirements `git`, `pwsh`, `jq`, `rg` and `gh` map to explicit WinGet catalog IDs and literal argv, through the existing reviewed-action workflow. CLI name case and `.exe` spelling are recognized. Current planner/executor/native probe suites pass 34 cases, with nine selected bootstrap cases. Manifest hints remain display-only. | Actual WinGet installation, agreement state, portable alias creation and package/architecture availability are unverified. Unmapped tools and system packages remain manual-only; no elevation, agreement auto-acceptance or reboot is requested. |
 | Compose services | [Native Compose checks](../../packages/daemon/test/windows-compose-services.test.ts) pass five cases: literal Docker argv through an owned Node receiver, HTTP status/redirect/deadline handling, numeric TCP probes and Windows services-file name parsing. | No Docker daemon, containers, actual Compose installation or checkpoint import/export is exercised. |
 
 ## Completion boundary
@@ -715,3 +715,25 @@ real delete-sharing lock refuses replacement. No new production defect was
 reproduced in this scope. Native access-policy evidence does not turn POSIX mode
 bits or unavailable file-symlink checks into passes; exact-name reconciliation
 remains 58 later passes and 36 unmatched historical cases.
+
+The dependency-install review adds three feasible native CLI mappings: `jq` to
+`jqlang.jq`, `rg` to `BurntSushi.ripgrep.MSVC`, and `gh` to `GitHub.cli`.
+Microsoft's catalog records portable [jq 1.8.1](https://github.com/microsoft/winget-pkgs/blob/master/manifests/j/jqlang/jq/1.8.1/jqlang.jq.installer.yaml)
+and [rg 14.1.1](https://github.com/microsoft/winget-pkgs/blob/master/manifests/b/BurntSushi/ripgrep/MSVC/14.1.1/BurntSushi.ripgrep.MSVC.installer.yaml) entries, and the current checked
+[GitHub CLI 2.103.3 manifest](https://github.com/microsoft/winget-pkgs/blob/master/manifests/g/GitHub/cli/2.103.3/GitHub.cli.installer.yaml)
+adds portable ZIP entries alongside its machine MSI. The older 2.80.0 manifest
+had only machine installers, so the initial manual-only assessment was corrected
+after checking the current catalog. The checked [Git 2.56.0.4 manifest](https://github.com/microsoft/winget-pkgs/blob/master/manifests/g/Git/Git/2.56.0.4/Git.Git.installer.yaml)
+has user-scope entries and [PowerShell 7.6.9](https://github.com/microsoft/winget-pkgs/blob/master/manifests/m/Microsoft/PowerShell/7.6.9.0/Microsoft.PowerShell.installer.yaml)
+includes MSIX entries; the existing git/pwsh mappings remain. These checks do not
+pin the versions selected by a future WinGet invocation.
+
+Known CLI names accept Windows case and `.exe` aliases while arbitrary paths,
+catalog IDs, duplicate extensions, hints and unknown names remain unmapped.
+Approved execution retains literal argv, mandatory user scope and the existing
+post-install re-probe; no machine-scope retry is introduced. Planner/executor
+and native probe suites pass 34/34, and nine selected bootstrap cases pass
+(77 unrelated cases filtered), including uppercase `JQ.EXE`, rg and gh approval
+keys and post-install readiness. Daemon TypeScript passes. No real installation,
+agreement acceptance or host PATH change was performed; portable link creation
+and current-host installation acceptance remain unverified.
