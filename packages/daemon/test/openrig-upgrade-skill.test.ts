@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import { DEFAULT_SYSTEM_WORLD_MANIFEST } from "../src/domain/system-world.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -54,6 +55,13 @@ function runJsonFileResult(scriptPath: string, args: string[], env?: NodeJS.Proc
 }
 
 function writeRigInventory(root: string, entries: Array<Record<string, unknown>>): string {
+  if (process.platform === "win32") {
+    return writeWindowsNodeFixture(root, "rig", `
+if (JSON.stringify(process.argv.slice(2)) === JSON.stringify(["ps", "--nodes", "-A", "--json", "--full"])) {
+  console.log(${JSON.stringify(JSON.stringify({ entries, totalNodes: entries.length, truncated: false }))});
+} else { console.error("unexpected rig command: " + JSON.stringify(process.argv.slice(2))); process.exitCode = 7; }
+`);
+  }
   const fakeRig = path.join(root, "rig");
   fs.writeFileSync(fakeRig, `#!/bin/sh
 if [ "$*" = "ps --nodes -A --json --full" ]; then
@@ -482,8 +490,16 @@ describe("backup-sqlite helper", () => {
 describe("inspect-upgrade helper", () => {
   it("keeps all-rig node evidence and teaches the next probe when a surface is unavailable", () => {
     const root = temporaryRoot();
-    const fakeRig = path.join(root, "rig");
-    fs.writeFileSync(fakeRig, `#!/bin/sh
+    const fakeRig = process.platform === "win32" ? writeWindowsNodeFixture(root, "rig", `
+switch (JSON.stringify(process.argv.slice(2))) {
+  case '["--version"]': console.log("0.5.7 (abc12345)"); break;
+  case '["daemon","status"]': console.log("Daemon running (pid 42)"); break;
+  case '["ps","--nodes","-A","--json"]': console.log('[{"rigName":"demo","logicalId":"lead"},{"rigName":"other","logicalId":"worker"}]'); break;
+  case '["plugin","list","--json"]': console.error("plugin lookup unavailable"); process.exitCode = 9; break;
+  default: process.exitCode = 7;
+}
+`) : path.join(root, "rig");
+    if (process.platform !== "win32") fs.writeFileSync(fakeRig, `#!/bin/sh
 case "$*" in
   "--version") echo "0.5.7 (abc12345)" ;;
   "daemon status") echo 'Daemon running (pid 42)' ;;
@@ -510,6 +526,33 @@ esac
 
 describe("0.5.9 telemetry-state migration helper", () => {
   const helper = "migrate-telemetry-state-0.5.9.mjs";
+
+  it.each(["bytes", "read-only"])("preserves a prepared System World with %s drift", (drift) => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{ runtime: "claude-code", sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName, cwd: fixture.cwd }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before-drift");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    writeTelemetryPair(fixture, "state", new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString(), 31);
+    const artifact = path.join(fixture.home, "context", "system", "system-world.yaml");
+    const originalMode = fs.statSync(artifact).mode & 0o777;
+    expect(manifest.systemWorld.mode).toBe(originalMode);
+    try {
+      if (drift === "bytes") fs.appendFileSync(artifact, "\n# operator change\n");
+      else fs.chmodSync(artifact, 0o444);
+      const before = fs.readFileSync(artifact);
+      const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+      expect(result.status).toBe(1);
+      expect(result.body.issues).toContainEqual(expect.objectContaining({ code: "system_world_conflict", path: artifact }));
+      expect(fs.readFileSync(artifact)).toEqual(before);
+      if (drift === "read-only") expect(fs.statSync(artifact).mode & 0o222).toBe(0);
+    } finally {
+      fs.chmodSync(artifact, originalMode);
+    }
+  });
 
   it("prints help without inventorying and refuses unknown options before planning", () => {
     const root = temporaryRoot();

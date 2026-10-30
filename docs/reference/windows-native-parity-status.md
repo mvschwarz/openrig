@@ -785,3 +785,22 @@ not reproduced current failures. Reports cover different revisions and the
 filename selection is bounded, so these counts establish neither current full
 suite status nor comprehensive Windows feature parity. The two checks above
 add current scoped evidence without changing those historical snapshot counts.
+
+The upgrade-helper follow-up found a production migration defect after replacing
+POSIX-only test CLI fixtures with owned native executables. Preparation recorded
+the managed System World as mode `0644`; Windows reads the same writable artifact
+as `0666`, so verification rejected its own unchanged output as
+`system_world_conflict`. Both canonical and shipped migration helpers now record
+the native writable-file mode on Windows, retaining the POSIX expectation on
+other hosts. Hash, file-kind and native read-only drift checks remain active;
+this mode value makes no claim about Windows DACL privacy.
+
+Nine selected upgrade tests pass on native Windows (41 other cases filtered):
+CLI inspection and phase routing, helper mirror equality, prepare/finalize and
+bounded-tail rollback, legacy-byte and resumed-writer refusals, and two new
+System World byte/read-only drift refusals. The latter assert the operator's
+changed artifact remains untouched. These use owned temporary homes and native
+fake CLI executables, not the running daemon or installed telemetry. Daemon
+TypeScript passes. The earlier wider exploratory selection still contains
+file-symlink privilege failures and an unresolved planning expectation; neither
+is counted as passed by the narrower regression result.
