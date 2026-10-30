@@ -2,6 +2,16 @@
 
 ## Current review status (2026-10-30)
 
+### Activation lens long destination filenames
+
+ActiveLensStore now stages through a short UUID sibling instead of extending the
+destination basename. An owned 250-character filename reproduced first-save failure
+before the change. First save, replacement, reconstruction/readback and clearing now
+succeed, with no staging files left. The existing Windows metadata-preserving update
+branch remains in place. The full focused store files pass nine checks and daemon
+TypeScript checking passes. No live workflow selection or user file was changed;
+crash durability and full workflow activation acceptance are not established here.
+
 ### Shared private-file replacement staging names
 
 Both synchronous and asynchronous Windows private-text replacement now use a
