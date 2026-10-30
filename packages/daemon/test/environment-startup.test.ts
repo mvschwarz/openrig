@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -8,6 +8,7 @@ import { EnvironmentLifecycle } from "../src/domain/environment-lifecycle.js";
 import { EnvironmentStartup } from "../src/domain/environment-startup.js";
 import { OpenShellDriver } from "../src/adapters/openshell-driver.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
+import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harness-runtime-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
 const cleanup: Array<() => unknown> = [];
@@ -47,7 +48,7 @@ async function fixture() {
   const plan = { runtime: "openshell-claude", cwd: root, entries: [], conflicts: [], noOps: [], diagnostics: [], startup: { files: [], actions: [] } } as ProjectionPlan;
   const tmux = { sendShellCommand: vi.fn(async () => ({ ok: true as const })) };
   await startup.project(plan, binding);
-  return { root, db, files, resource, startup, platform, activity, guest, tmux, binding, losePrepare: () => { losePrepare = true; } };
+  return { root, db, app, node, rig, files, resource, startup, platform, activity, guest, tmux, binding, losePrepare: () => { losePrepare = true; } };
 }
 it("stages all resolved startup inputs before native dispatch and binds separate work/activity connections", async () => {
   const f = await fixture(), role = join(f.root, "role.md"); writeFileSync(role, "Current nonce and useful task guidance");
@@ -133,4 +134,67 @@ it("refuses startup input replacement before touching a saved execution", async 
   const before = [...f.files].map(([key,value]) => [key,value.toString("base64")]);
   await expect(f.startup.deliverStartup([], f.binding)).rejects.toMatchObject({ code: "environment_prior_execution_unconfirmed" });
   expect([...f.files].map(([key,value]) => [key,value.toString("base64")])).toEqual(before);
+});
+
+it.each(["unchanged", "missing", "changed"])("normal exact restore on recreated compute verifies destination context (%s) without conversation replay", async mode => {
+  const f = await fixture();
+  const role = join(f.root, "role.md"), skill = join(f.root, "skill"), plugin = join(f.root, "plugin"), startupFile = join(f.root, "startup.md");
+  mkdirSync(skill); mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+  writeFileSync(role, "Required restored role"); writeFileSync(join(skill, "SKILL.md"), "Required restored skill");
+  writeFileSync(join(plugin, ".claude-plugin/plugin.json"), '{"name":"restored-plugin","version":"1.0.0"}');
+  writeFileSync(startupFile, "Required filesystem startup, never conversation input");
+  const entries = [["guidance", "role", role], ["skill", "skill", skill], ["plugin", "plugin", plugin]].map(([category, effectiveId, absolutePath]) =>
+    ({ category, effectiveId, absolutePath, resourcePath: absolutePath, sourcePath: absolutePath, sourceSpec: "fixture", classification: "safe_projection", mergeStrategy: "managed_block" }));
+  const files = [{ path: "startup.md", absolutePath: startupFile, ownerRoot: f.root, required: true, deliveryHint: "send_text", appliesOn: ["fresh_start"] }];
+  const plan = { runtime: "openshell-claude", cwd: f.root, entries, conflicts: [], noOps: [], diagnostics: [], startup: { files, actions: [] } } as unknown as ProjectionPlan;
+  await f.startup.project(plan, f.binding);
+  await f.startup.deliverStartup(files as never, f.binding);
+  const first = await f.startup.launch(f.binding, {}, f.tmux);
+  const nativePath = `native/projects/-sandbox-openrig-work/${first.resumeToken}.jsonl`;
+  const history = Buffer.from(JSON.stringify({ sessionId: first.resumeToken, type: "user", message: { content: "unchanged retained history" } }) + "\n");
+  f.files.set(`/sandbox/openrig/${nativePath}`, history);
+  Object.assign(f.platform.driver, { checkpointFiles: async () => [{ path: nativePath, sha256: sha256(history), bytes: history.length }],
+    captureCleanup: async () => ({ version: 1, host: "fixture", uid: 1000, socket: "/owned/engine.sock", dev: 1, ino: 2 }),
+    cleanupState: async () => ({ workload: false, supervisor: false, volumes: false }) });
+  const lifecycle = new EnvironmentLifecycle(f.platform, undefined, join(f.root, "retained"));
+  const checkpoint = await lifecycle.checkpoint("binding-one", { operationId: "context-checkpoint", generation: "generation-one" });
+  f.db.prepare("INSERT INTO pods(id,rig_id,label) VALUES ('restore-pod',?,'Team')").run(f.rig.id);
+  f.db.prepare("UPDATE nodes SET pod_id='restore-pod' WHERE id=?").run(f.node.id);
+  const session = f.app.sessionRegistry.registerSession(f.node.id, f.binding.tmuxSession!);
+  f.app.sessionRegistry.updateStatus(session.id, "running");
+  f.app.sessionRegistry.updateResumeToken(session.id, "community:openshell-claude", first.resumeToken!);
+  f.db.prepare("UPDATE sessions SET community_harness='openshell-claude' WHERE id=?").run(session.id);
+  f.db.prepare("INSERT INTO node_startup_context(node_id,projection_entries_json,resolved_files_json,startup_actions_json,runtime) VALUES (?,?,?,?,?)")
+    .run(f.node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify([{ type: "send_text", text: "NEVER REPLAY", phase: "after_ready" }]), "openshell-claude");
+  const snapshot = f.app.snapshotCapture.captureSnapshot(f.rig.id, "manual");
+  f.resource.id = "successor-resource"; f.resource.name = "worker-successor";
+  await lifecycle.recreate("binding-one", { operationId: "context-recreate", generation: "generation-one", checkpointId: checkpoint.checkpointId,
+    resumeType: "community:openshell-claude", resumeToken: first.resumeToken!, placement: { ...f.platform.get("binding-one")!.placement, name: "worker-successor" } });
+  f.files.clear();
+  f.app.sessionRegistry.updateStatus(session.id, "exited"); f.app.sessionRegistry.clearBinding(f.node.id);
+  if (mode === "missing") rmSync(startupFile);
+  if (mode === "changed") writeFileSync(role, "Unexpected replacement role");
+  const nativePrepare = f.guest.getMockImplementation()!;
+  let restored = false;
+  f.guest.mockImplementation(async (binding, args) => {
+    if (args[0] === "--prepare") {
+      restored = true;
+      expect(f.files.get("/sandbox/openrig/work/.openrig/context/role")?.toString()).toBe("Required restored role");
+      expect(f.files.get("/sandbox/openrig/work/.claude/skills/skill/SKILL.md")?.toString()).toBe("Required restored skill");
+      expect(f.files.get("/sandbox/openrig/work/.claude/plugins/plugin/.claude-plugin/plugin.json")).toBeDefined();
+      expect(f.files.get("/sandbox/openrig/work/.openrig/startup/startup.md")?.toString()).toBe("Required filesystem startup, never conversation input");
+      expect(f.files.get(`/sandbox/openrig/${nativePath}`)).toEqual(history);
+      const descriptor = JSON.parse(f.files.get("/sandbox/openrig/control/launch.pending.json")!.toString());
+      expect(descriptor.resumeToken).toBe(first.resumeToken); expect(descriptor.plugins).toHaveLength(1);
+    }
+    return nativePrepare(binding, args);
+  });
+  vi.spyOn(f.app.tmuxAdapter, "sendShellCommand").mockResolvedValue({ ok: true });
+  const textInput = vi.spyOn(f.app.tmuxAdapter, "sendText");
+  const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux: f.app.tmuxAdapter, environmentStartup: f.startup });
+  vi.spyOn(adapter, "checkReady").mockResolvedValue({ ready: true });
+  const result = await f.app.restoreOrchestrator.restore(snapshot.id, { adapters: { "openshell-claude": adapter }, fsOps: { exists: existsSync } });
+  if (mode === "unchanged") { expect(result.launched?.[0]?.status, JSON.stringify(result)).toBe("resumed"); expect(restored).toBe(true); }
+  else { expect(restored).toBe(false); expect(result.launched?.[0]?.status).not.toBe("resumed"); }
+  expect(textInput).not.toHaveBeenCalled();
 });
