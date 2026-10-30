@@ -178,7 +178,7 @@ export class SeatLaunchEnvironment {
   }
 
   /** Build an identity-bound child command, scrubbing inherited credentials for a selected account home or refusing its launch. */
-  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
+  async command(session: string, command: string, target: { cwd?: string; codexCwd?: string; nodeId?: string; generation?: string; runtime?: string;
     /** The seat's own CODEX_HOME when it declares one; it wins over the daemon's. */
     codexHome?: string;
     accountHome?: string | null;
@@ -235,7 +235,7 @@ export class SeatLaunchEnvironment {
         env.PATH = `${binDir}${path.delimiter}${searchPath}`;
         const community = isCommunityHarnessRuntime(target.runtime) ? nativeCommunityCommand(command, env) : undefined;
         if (community) command = windowsCommunityCommand(parseLiteralLaunchWords(community.command), env.PATH,
-          readPlatformEnv(this.sessionEnv, "PATHEXT", "win32")).map(shellQuote).join(" ");
+          readPlatformEnv(this.sessionEnv, "PATHEXT", "win32"), target.cwd).map(shellQuote).join(" ");
         // Classic Claude emits only these command-scoped assignments. Decode
         // their literal words, without exporting the resume marker to the pane.
         if (target.runtime === "claude-code") {

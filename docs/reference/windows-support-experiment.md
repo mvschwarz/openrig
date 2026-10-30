@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Community npm entries relative to the seat directory
+
+Native community launch now passes the binding's cwd through both ordinary and
+named-conversation launch paths. The standard npm entry resolver uses that cwd
+for relative PATH entries and explicit relative commands, while preserving
+PATHEXT order and package/bin agreement checks. Without an absolute seat cwd it
+retains the unresolved command rather than guessing the daemon directory.
+
+Eleven owned native environment cases pass, including relative PATH and relative
+command launches from a seat directory distinct from the daemon directory.
+Daemon TypeScript checking passes. The combined community protocol run has 69
+passes and one unavailable real-multiplexer case (`spawn psmux ENOENT`); this is
+not a fully passing community suite or installed-provider acceptance.
+
 ### Native probe lifecycle review
 
 Five current owned native probe cases pass: cmd builtin execution, cleanup of a
@@ -83,8 +97,8 @@ Owned native fixtures reproduced standard global and project-local npm community
 launchers failing to run through their `.cmd` entry. Native community launch now
 recognizes a standard Node invocation whose script agrees with the package's bin
 declaration, then launches that script directly with the selected Node. PATH and
-PATHEXT precedence are retained; an earlier relative PATH entry is left unresolved
-rather than selecting a different installation. Unknown batch launchers are not
+PATHEXT precedence are retained; relative entries now use the explicitly supplied
+seat cwd as described above. Unknown batch launchers are not
 evaluated through a shell fallback.
 
 Eleven selected native cases pass: global and local npm entry launches, an earlier

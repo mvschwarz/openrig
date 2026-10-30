@@ -4,20 +4,24 @@ import path from "node:path";
 const regular = (file: string): boolean => { try { return fs.statSync(file).isFile(); } catch { return false; } };
 
 /** Select standard Node npm entries without evaluating a batch launcher.
- * Relative PATH entries depend on the pane's cwd, not the daemon's: leave
- * those commands unchanged rather than selecting a different installation. */
-export function windowsCommunityCommand(words: string[], searchPath: string, pathExt = ".COM;.EXE;.BAT;.CMD"): string[] {
+ * Relative entries are resolved only against the supplied seat directory,
+ * never implicitly against the daemon's directory. */
+export function windowsCommunityCommand(words: string[], searchPath: string, pathExt = ".COM;.EXE;.BAT;.CMD", cwd?: string): string[] {
   const [program, ...args] = words;
   if (!program) return words;
-  const directories = searchPath.split(path.delimiter).map(dir => dir.replace(/^"(.*)"$/, "$1"));
+  const seatCwd = cwd && path.win32.isAbsolute(cwd) ? cwd : undefined;
+  const directories = searchPath.split(path.delimiter).map(dir => dir.replace(/^"(.*)"$/, "$1"))
+    .map(dir => path.win32.isAbsolute(dir) || !seatCwd ? dir : path.resolve(seatCwd, dir));
   const configuredExtensions = pathExt.split(";").filter(Boolean);
   const extensionIsExplicit = [".exe", ".com", ".bat", ".cmd", ...configuredExtensions.map(ext => ext.toLowerCase())].includes(path.win32.extname(program).toLowerCase());
   const extensions = extensionIsExplicit ? [""] : ["", ...configuredExtensions];
   const candidates: string[] = [];
   if (path.win32.isAbsolute(program)) candidates.push(...extensions.map(ext => program + ext));
   else {
-    if (/[\\/]/.test(program)) return words;
-    for (const dir of directories) {
+    if (/[\\/]/.test(program)) {
+      if (!seatCwd) return words;
+      candidates.push(...extensions.map(ext => path.resolve(seatCwd, program + ext)));
+    } else for (const dir of directories) {
       if (!path.win32.isAbsolute(dir)) return words;
       candidates.push(...extensions.map(ext => path.join(dir, program + ext)));
       if (candidates.some(regular)) break;

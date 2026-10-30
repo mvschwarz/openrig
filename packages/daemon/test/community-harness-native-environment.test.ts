@@ -9,7 +9,7 @@ import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js"
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
-it.runIf(process.platform === "win32").each(["model-set", "model-cleared", "named", "resume", "record", "npm-global", "npm-local", "npm-invalid", "npm-exe-first"])("delivers native community launch environment for %s", async mode => {
+it.runIf(process.platform === "win32").each(["model-set", "model-cleared", "named", "resume", "record", "npm-global", "npm-local", "npm-relative-path", "npm-relative-command", "npm-invalid", "npm-exe-first"])("delivers native community launch environment for %s", async mode => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "community-native-")));
   try {
     const output = path.join(root, "output.json"), script = path.join(root, "owned.cjs"), cli = path.join(root, "rig.mjs");
@@ -18,7 +18,7 @@ it.runIf(process.platform === "win32").each(["model-set", "model-cleared", "name
     let program = [process.execPath, script].map(shellQuote).join(" ");
     let searchPath = path.dirname(process.execPath);
     if (mode.startsWith("npm-")) {
-      const local = mode === "npm-local";
+      const local = ["npm-local", "npm-relative-path", "npm-relative-command"].includes(mode);
       const bin = path.join(root, local ? "node_modules/.bin" : "npm bin");
       const pkg = path.join(root, local ? "node_modules/@owned/synth" : "npm bin/node_modules/@owned/synth");
       fs.mkdirSync(bin, { recursive: true }); fs.mkdirSync(path.join(pkg, "bin"), { recursive: true });
@@ -28,6 +28,8 @@ it.runIf(process.platform === "win32").each(["model-set", "model-cleared", "name
       if (!local) fs.writeFileSync(path.join(bin, "synth-launch.cmd"), '@echo off\r\n@setlocal\r\n@set "dp0=%~dp0"\r\n@if exist "%dp0%\\node.exe" (\r\n  @set "_prog=%dp0%\\node.exe"\r\n) else (\r\n  @set "_prog=node"\r\n)\r\n"%_prog%" "%dp0%\\node_modules\\@owned\\synth\\bin\\cli.cjs" %*\r\n');
       if (!local) fs.copyFileSync(process.execPath, path.join(bin, "node.exe"));
       searchPath = [bin, searchPath].join(path.delimiter); program = "synth-launch";
+      if (mode === "npm-relative-path") searchPath = ["node_modules/.bin", path.dirname(process.execPath)].join(path.delimiter);
+      if (mode === "npm-relative-command") program = shellQuote("./node_modules/.bin/synth-launch");
       if (mode === "npm-invalid") fs.writeFileSync(path.join(bin, "synth-launch.cmd"), "@echo off\r\nrem not a Node npm shim\r\n");
       if (mode === "npm-exe-first") {
         fs.copyFileSync(process.execPath, path.join(bin, "synth-launch.exe"));
@@ -42,18 +44,20 @@ it.runIf(process.platform === "win32").each(["model-set", "model-cleared", "name
     const identity: Record<string, string> = { OPENRIG_NODE_ID: "owned", OPENRIG_SESSION_NAME: "owned@fixture", OPENRIG_RUNTIME: "synth" };
     vi.spyOn(tmux, "getPaneCommand").mockResolvedValue("powershell");
     vi.spyOn(tmux, "getSessionEnv").mockImplementation(async (_session, key) => identity[key]);
-    const launch = new SeatLaunchEnvironment(tmux, { PATH: searchPath, PATHEXT: mode === "npm-exe-first" ? ".EXE;.CMD" : ".CMD;.EXE", OPENRIG_HOME: path.join(root, "instance") }, root, cli, undefined, "win32");
+    const daemonCwd = path.join(root, "unrelated daemon directory");
+    fs.mkdirSync(daemonCwd);
+    const launch = new SeatLaunchEnvironment(tmux, { PATH: searchPath, PATHEXT: mode === "npm-exe-first" ? ".EXE;.CMD" : ".CMD;.EXE", OPENRIG_HOME: path.join(root, "instance") }, daemonCwd, cli, undefined, "win32");
     const sendShellCommand = vi.fn(async (_session: string, command: string, beforeInput?: () => void) => {
       beforeInput?.();
       execFileSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
         ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")],
-        { encoding: "utf8", windowsHide: true, timeout: 10000, stdio: "pipe", env: { ...process.env, OPENRIG_MODEL: "inherited", OPENRIG_FIRST_INPUT: "inherited-do-not-read" } });
+        { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000, stdio: "pipe", env: { ...process.env, OPENRIG_MODEL: "inherited", OPENRIG_FIRST_INPUT: "inherited-do-not-read" } });
       return { ok: true as const };
     });
     const adapter = new CommunityHarnessRuntimeAdapter("synth", { tmux: { hasSession: async () => true, getPaneCommand: async () => "node", sendShellCommand }, seatLaunchEnvironment: launch,
       presetsDir: () => root, launchResultRoot: () => path.join(root, "launch-results"), launchResultWait: { timeoutMs: 100, intervalMs: 10 } });
     const model = "owned/model 'quote' $value & % !", first = "owned first input\n'quote' & % !";
-    const pending = adapter.launchHarness({ tmuxSession: "owned@fixture", ...(mode !== "model-cleared" ? { model } : {}) } as NodeBinding,
+    const pending = adapter.launchHarness({ cwd: root, tmuxSession: "owned@fixture", ...(mode !== "model-cleared" ? { model } : {}) } as NodeBinding,
       { name: "owned@fixture", ...(mode !== "model-cleared" ? { firstInputText: first } : {}), ...(mode === "resume" ? { resumeToken: "owned-resume", resumeType: "community:synth" } : {}) });
     if (mode === "npm-invalid") {
       await expect(pending).rejects.toThrow("no POSIX fallback was typed");
