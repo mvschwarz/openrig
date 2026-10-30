@@ -5,6 +5,19 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Installed npm TUI demo runs from an isolated prefix
+
+The opt-in `RUN_NATIVE_INSTALLED_TUI=1 node --test
+scripts/installed-tui-native.test.mjs` check packs the already assembled CLI,
+installs it into a fresh owned prefix, and calls the actual `openrig-tui.cmd`
+through PowerShell with a separate home and demo socket. It passes in 28 seconds:
+the installed TUI enters its alternate screen, processes quit, restores the
+screen and resolves the paired installed CLI. Its artifact is the cumulative
+`c778b2a52` build, with `dirty=true` retained. Owned installation materials are
+removed afterward; no workspace dependency junction is used. This proves the
+installed demo entry and dependency flow, not visible desktop behavior or
+interaction with real daemon/provider data.
+
 ### Cumulative native build and isolated CLI installation refreshed
 
 At `c778b2a52d4337dc6b2d4dcd1a49e3f00f07b9b7`, the target-native gate passes
