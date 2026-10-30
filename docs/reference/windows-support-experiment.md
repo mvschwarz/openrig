@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### CONFIG browser shows valid native named paths
+
+The resolver accepted native drive and UNC paths in named-path settings such as
+`files.allowlist`, but the passive CONFIG browser withheld them because its
+display grammar admitted only POSIX path forms. The browser now also recognizes
+native absolute path forms on Windows after the existing text/credential checks.
+Sensitive query-like components remain withheld. The owned reproduction failed
+before repair; the complete settings-browser file and daemon TypeScript check
+pass afterward. Synthetic UNC text is displayed without accessing that location
+or making external requests. This changes presentation, not file access authority.
+
 ### Agent-image reference discovery handles native filenames
 
 The image reference reader skipped uppercase/mixed-case YAML extensions on

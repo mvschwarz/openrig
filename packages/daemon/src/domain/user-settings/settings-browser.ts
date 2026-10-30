@@ -78,7 +78,11 @@ function safeValue(value: unknown, kind: Kind, redact: (v: unknown) => string | 
   if (kind === "path" && /[?#=]/.test(value)) return hidden("Potentially sensitive path components withheld.");
   if (kind === "identity" && !/^[A-Za-z0-9_.:@/+ -]*$/.test(value)) return hidden("Unexpected identity text withheld.");
   if (kind === "names" && !/^[A-Za-z0-9_.:@/, -]*$/.test(value)) return hidden("Unexpected name-list contents withheld.");
-  if (kind === "paths" && !value.split(",").every((p) => /^[A-Za-z0-9_.-]+:(?:\/|~\/|\.\/)[^?=#]*$/.test(p.trim()))) {
+  if (kind === "paths" && !value.split(",").every((p) => {
+    const pair = /^[A-Za-z0-9_.-]+:([^?=#]+)$/.exec(p.trim());
+    if (!pair) return false;
+    return /^(?:\/|~\/|\.\/)/.test(pair[1]!) || (process.platform === "win32" && isAbsolute(pair[1]!));
+  })) {
     return hidden("Unexpected named-path contents withheld.");
   }
   return { value, reason: null };
