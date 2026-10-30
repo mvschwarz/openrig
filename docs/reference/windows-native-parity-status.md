@@ -57,6 +57,13 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+At `1104674`, exact package-relative filename and full test-name reconciliation
+of the old `a2d903d` CLI/TUI report matches 25 of its 94 failed assertions to
+passes in 12 selected later scoped reports. The other 69 assertions have no match
+in that selected evidence set; they are unverified, not asserted still failing.
+Renamed tests need manual reconciliation, and this assertion-only comparison
+does not clear collection failures or establish feature completeness.
+
 The compact queue receipt had a second POSIX-only recovery command even after
 ordinary queue error guidance was repaired. It now uses the same native command
 renderer. Two real PowerShell receipt-command cases failed before that change;
