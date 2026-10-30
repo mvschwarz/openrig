@@ -140,10 +140,21 @@ describe("Attach CLI", () => {
     });
 
     expect(exitCode).toBeUndefined();
-    expect(logs).toEqual([
+    expect(logs).toEqual(process.platform === "win32" ? [
+      "$env:OPENRIG_NODE_ID = 'node-1'",
+      "$env:OPENRIG_SESSION_NAME = 'orch1-lead@rigged-buildout'",
+    ] : [
       "export OPENRIG_NODE_ID='node-1'",
       "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'",
     ]);
+  });
+
+  it("permits explicit POSIX shell output on every platform", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-1", "--node", "orch1.lead", "--print-env", "--shell", "sh"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(logs).toEqual(["export OPENRIG_NODE_ID='node-1'", "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'"]);
   });
 
   it("attach rejects missing --self", async () => {

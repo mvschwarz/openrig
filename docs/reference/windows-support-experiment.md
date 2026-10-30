@@ -26,6 +26,20 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native attach identity output (2026-10-30)
+
+The attach consumer emitted only POSIX export statements from --print-env,
+which cannot set identity in native PowerShell. It now defaults to PowerShell
+assignments on Windows and retains sh elsewhere, with explicit --shell sh or
+--shell powershell selection. Only the two existing identity variables are
+printed; JSON/credential behavior is unchanged. The human instruction names
+the selected shell rather than universally prescribing eval.
+Three selected checks pass: default command output, explicit sh compatibility
+and actual owned PowerShell application with Unicode/apostrophe/metacharacter
+values retained literally. CLI typecheck passes. Other attach cases were
+filtered; no real attachment, provider or queue was changed. The separate tmux
+context probe still needs native argv review and is not marked complete here.
+
 ## Setup/doctor capture platform propagation (2026-10-30)
 
 Setup and doctor selected a platform for their checks but omitted it when
