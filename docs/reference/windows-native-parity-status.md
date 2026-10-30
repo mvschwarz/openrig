@@ -1195,3 +1195,9 @@ Daemon TypeScript checking exits 0, and the Windows workflow uses its pinned psm
 ### Native rigspec preflight fixture follow-up
 
 The complete preflight file initially passed 27 and failed nine on Windows (preflight-a2bc468-current.json). Its in-memory file keys and lookups now resolve native paths consistently, and the file-as-cwd refusal uses an owned ordinary file instead of assuming /etc/hosts exists. Product validation was not relaxed. All 36 cases pass (preflight-a2bc468-native.json), covering resolvable agent refs, profile/restore-policy/runtime refusals, import collisions, builtin-install cwd refusal/explicit override, and existing preflight behavior. Daemon TypeScript checking exits 0. These use owned fixtures and mocked runtime probes; no seat was started.
+
+### Hosted wake fixture and bound-launch audit follow-up
+
+The hosted-member wake file initially passed one and failed nine because its owned low-port receiver was not registered with the test fetch guard. Registering only that exact fixture URL restores 10/10 passes (hosted-wake-4b2e7db-native.json). Tests retain wake-accepted versus delivered/claimed distinctions, timeout/error/redirect handling, credential redaction, and per-wake recovery/deduplication using SQLite, the real queue and an owned HTTP receiver. No actual hosted member or paused group was rung. Daemon TypeScript checking exits 0.
+
+The separate S03 bound-launch file currently passes 36 and fails 30 (bound-launch-4b2e7db-current.json). It explicitly constructs Linux managed-launch fixtures on this Windows host. Twenty-seven fail capability queries, two fail intended-PATH executable validation, and one fails the expected successful transition. These are recorded unresolved platform-fixture evidence, not counted as fixed native product failures or waived via name matching. Native managed-launch evidence remains separately scoped; this audit does not establish every S03 case natively.

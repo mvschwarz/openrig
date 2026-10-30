@@ -79,6 +79,9 @@ jobs:
       - name: Real isolated native psmux scaffold lifecycle
         working-directory: packages/daemon
         run: npx vitest run test/native-psmux-scaffold.test.ts --maxWorkers=1
+      - name: Hosted member wake outcomes and recovery
+        working-directory: packages/daemon
+        run: npx vitest run test/hosted-member-wake.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
       - name: Native package assembly
