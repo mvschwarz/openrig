@@ -448,3 +448,10 @@ adapter regressions pass; daemon TypeScript passes. An isolated stock psmux
 after its owned Node process starts. This is community process-only readiness,
 not proof of harness identity, conversation recovery or actual provider work.
 
+Community native receiver observation also rechecks the declared pane's membership
+in its session before reading its PID on each sample. A missing or unavailable
+pane listing cannot reuse another session's process evidence. Seventeen selected
+readiness/receiver cases and daemon TypeScript pass, including refusal before
+PID observation when the pane is unbound. This adds binding checks to the new
+native branch without changing the process-only readiness claim.
+

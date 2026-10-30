@@ -236,6 +236,16 @@ describe("the community harness adapter", () => {
     expect(tmux.sendShellCommand).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("does not observe a native receiver through an unbound pane (listing available=%s)", async available => {
+    const { tmux } = adapter(presets({ "synth.yaml": GOOD }));
+    tmux.getPaneCommand.mockResolvedValue("powershell.exe");
+    const getPanePid = vi.fn(async () => 123);
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux: { ...tmux, isNativeWindows: true, getPanePid,
+      ...(available ? { listPanes: vi.fn(async () => []) } : {}) } });
+    expect(await app.checkReady({ ...binding, tmuxPane: "%other-pane" })).toMatchObject({ ready: false, code: "native_lineage_unverified" });
+    expect(getPanePid).not.toHaveBeenCalled();
+  });
+
   it("places nothing and says so", async () => {
     const { app } = adapter(presets({ "synth.yaml": GOOD }));
     const plan = { entries: [{ effectiveId: "skill-a" }] } as never;
