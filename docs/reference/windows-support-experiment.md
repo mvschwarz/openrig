@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Author bundle vendoring accepts contained native aliases
+
+An owned API fixture reproduced bundle creation rejecting an internal plugin
+junction as outside the source root when its native target spelling differed.
+Author-bundle vendoring now uses native canonical paths consistently for the
+source root, declared source, nested link checks and source collection on Windows.
+Containment checks remain in place; POSIX path resolution is unchanged.
+
+Four owned API/archive cases pass: contained and outside targets, both directly
+declared and nested within a plugin directory. Successful archives were extracted
+only into fixture directories and checked for expected bytes and regular copied
+directories; outside targets remain refused and unchanged. The daemon TypeScript
+check passes. No bundle was published or installed, and no real project, plugin,
+runtime or credentials were used. Other bundle routes and file-symlink acceptance
+remain separate; this batch reviewed the author-vendoring path, not the full module.
+
 ### Standalone native TUI uses its paired CLI
 
 Without launcher-injected `OPENRIG_TUI_CLI_ENTRY`, the standalone Windows TUI
