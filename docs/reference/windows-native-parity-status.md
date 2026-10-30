@@ -1002,3 +1002,17 @@ Tests retain newer/same-version installed authority and vendored/fetch-fallback
 behavior. No product code changed; daemon TypeScript passes. Set-cwd uses owned
 temporary files, in-memory state and no real terminal input; vendoring/fetch
 dependencies remain fixtures, not a deployed plugin refresh or remote fetch.
+
+The asset-header fixture no longer creates a file symlink before every test;
+only its actual file-link case requests that privilege. Its existing 12 ordinary
+preview/type/range/allowlist cases pass on native Windows, while the file-link
+case still fails at creation with host `EPERM`. A separate new native junction
+case passes: an in-root target is served and an outside target is refused. It
+does not replace or waive file-symlink coverage.
+
+The complete files-routes, truncation and asset-range selection passes 35 cases
+with one existing POSIX executable-bit case skipped on Windows. Owned actual
+files exercise read/write conflict metadata, full-file hashes with truncated
+reads, exact bytes/ranges and render opt-in responses through in-process Hono
+requests. No live daemon, browser or network listener is used. No production
+code changed in this follow-up; daemon TypeScript passes.
