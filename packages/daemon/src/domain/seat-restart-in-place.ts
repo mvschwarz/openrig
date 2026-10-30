@@ -10,7 +10,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { HarnessLaunchResult, NodeBinding } from "./runtime-adapter.js";
 import type { PersistedEvent, RigEvent } from "./types.js";
 import {
-  codexProcessArgv, codexProcessResumeToken, listNativeProcesses, processArgv, verifyCodexPaneProcess,
+  codexProcessArgv, codexProcessResumeToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell,
   type NativeProcessLister, type NativeProcessRow,
 } from "./native-process-lineage.js";
 import { CodexThreadIdResolver, resolveCodexDbPaths, type CodexThreadEvidence } from "./codex-thread-id.js";
@@ -74,6 +74,8 @@ export interface ProcessFacts {
 }
 
 export interface InPlaceRestartIo {
+  /** Tests may supply an owned console witness; omitted uses the native OS reader. */
+  consoleProcesses?: (pid: number) => Promise<number[] | null>;
   readProcess(pid: number): Promise<ProcessFacts | null>;
   readThreadId(pid: number, startedAt: string, codexHome: string): Promise<string | undefined>;
   /** The same read as readThreadId, with whether it met no detected incompleteness (discovery, open, query). */
@@ -617,8 +619,19 @@ export class CodexInPlaceRestart {
         || (row.pid === native.pid && (row.startedAt ?? null) === native.startedAt))) return false;
       const command = await this.deps.tmux.getPaneCommand(pane);
       const root = rows.find((row) => row.pid === panePid);
-      return command !== null && !!root && (isShellForeground(command)
-        || (root.platform === "win32" && isWindowsShellHost(command) && isWindowsShellHost(executableBase(root))));
+      if (root?.platform === "win32") {
+        if (command === null || !isWindowsShellHost(command) || !isWindowsShellHost(executableBase(root))) return null;
+        const idle = await verifyPaneIdleShell({ target: pane,
+          tmux: { getPanePid: async target => (await this.deps.tmux.getPanePid(target)) === panePid ? panePid : null },
+          listProcesses: async () => {
+            const current = await this.listProcesses();
+            return current.find(row => row.pid === panePid)?.startedAt === root.startedAt ? current : [];
+          },
+          consoleProcesses: this.io.consoleProcesses,
+        });
+        return idle ? true : null;
+      }
+      return command !== null && !!root && isShellForeground(command);
     };
     const wait = async (): Promise<boolean | null> => {
       const polls = Math.max(1, Math.ceil(this.timing.timeoutMs / this.timing.pollMs));

@@ -588,3 +588,21 @@ reproduced and no directory-name remapping was added. The initial diagnostic
 failed only an unjustified expectation that such remapping already existed;
 that assertion was removed. This does not establish arbitrary Windows tool
 compatibility with those paths, file-symlink support or actual seat restoration.
+
+In-place Codex restart had another native shell-return gap: once the old
+provider disappeared, its Windows host label alone could authorize typing the
+resume command despite an additional console receiver or unavailable console
+evidence. Two injected regression cases reproduced the unwanted continuation.
+The Windows branch now uses the shared two-sample idle-shell witness, retaining
+the expected pane PID and shell creation identity across those samples. Another
+receiver, missing/failed/changing console observations or a changed pane leaves
+the result `native_unknown` without typing a resume or signaling that receiver.
+The proven idle-shell case still resumes exactly once; POSIX handling remains.
+
+Current in-place restart unit/route regressions pass 154 cases with one platform
+skip, and daemon TypeScript passes. These use synthetic native process/console
+observations and an in-memory database, not a real Codex conversation or deployed
+seat restart. Separately, three native tile/following cases pass: literal argv
+and identity-bound replacement following through an owned executable, unchanged
+POSIX SSH command rendering, and private selector persistence before injected
+provider effects. No actual desktop viewer or remote host is opened.

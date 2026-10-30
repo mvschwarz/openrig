@@ -41,6 +41,7 @@ const HOME = "/home/u/.codex";
 type Shape = "shell_backed" | "direct_native";
 
 interface WorldOptions {
+  consoleProcesses?: (pid: number) => Promise<number[] | null>;
   relaunchHome?: string;
   shape?: Shape;
   runningArgs?: string;
@@ -219,6 +220,7 @@ function world(options: WorldOptions = {}) {
   };
 
   const io: Partial<InPlaceRestartIo> = {
+    consoleProcesses: options.consoleProcesses ?? (async pid => [pid]),
     readProcess: async (pid) => {
       if (relaunched) maybeThrow("readProcessAfter");
       return options.facts && pid in options.facts ? options.facts[pid] ?? null : facts();
@@ -1529,6 +1531,31 @@ function nativeCandidateRows(host = 'powershell.exe', pid = 200, startedAt = LST
       argv, command: argv.join(' '), startedAt }];
 }
 describe('native Windows restart boundaries', () => {
+  it.each(['another receiver', 'unavailable console', 'changing console', 'failed console', 'changed pane'])('does not resume after exit with %s', async kind => {
+    let foreground = 'codex.exe';
+    let samples = 0;
+    const w = world({
+      replacementRows: () => nativeCandidateRows('powershell.exe', 300, LATER),
+      consoleProcesses: async () => {
+        if (kind === 'failed console') throw new Error('synthetic unavailable console');
+        if (kind === 'changing console') return ++samples % 2 ? [100] : [100, 999];
+        if (kind === 'changed pane') return [100];
+        return kind === 'another receiver' ? [100, 999] : null;
+      },
+    });
+    w.setRows(nativeCandidateRows());
+    w.tmux.getPaneCommand = async () => w.relaunched ? 'codex.exe' : foreground;
+    w.tmux.signalPid = async (pid, signal) => {
+      w.calls.push('signalPid ' + pid + ' ' + signal);
+      w.setRows(nativeCandidateRows().slice(0, 1)); foreground = 'powershell.exe';
+      if (kind === 'changed pane') w.tmux.getPanePid = async () => 101;
+      return { ok: true };
+    };
+    expect(await w.service.restartInPlace({ seatRef: SEAT, reason: 'synthetic native receiver refusal' }))
+      .toMatchObject({ ok: true, outcome: 'native_unknown' });
+    expect(w.launches).toEqual([]);
+    expect(w.calls.filter(x => x.startsWith('signalPid'))).toEqual(['signalPid 200 TERM']);
+  });
   it.each(['powershell.exe', 'pwsh.exe', 'cmd.exe'])('plans the verified provider below %s without input or signals', async host => {
     const w = world(); w.setRows(nativeCandidateRows(host));
     expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, paneShape: 'shell_backed' });
