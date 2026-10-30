@@ -12,7 +12,7 @@ import {
 } from "../src/domain/restore-check-service.js";
 import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 
-const RELAY_PATH = "/custom-instance/state/claude-activity-hooks/activity-relay.cjs";
+const RELAY_PATH = path.resolve("/custom-instance", "state", "claude-activity-hooks", "activity-relay.cjs");
 
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,

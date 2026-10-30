@@ -821,3 +821,19 @@ Both now report explicit skips. The final selected run has three passes and
 47 skips, including those two missing-tool skips and 45 filtered cases. File
 symlink creation and the full corrected file remain unverified; native mode
 coverage is not POSIX permission coverage or a DACL-preservation claim.
+
+The complete restore-check service file passes 118/118 on native Windows after
+normalizing its mock relay destination to an absolute native path. Before this
+test correction, 18 hook-readiness cases incorrectly reported an absent relay
+because their mock filesystem only recognized the POSIX spelling; production
+already resolved the instance-owned relay correctly. The passing cases include
+selected-event matchers, disabled/malformed and similarly named command caveats,
+plus the existing owned real-file check for Windows slash variants. Database,
+inventory and health dependencies remain isolated fixtures: this does not prove
+live-team recovery or provider continuity. Daemon TypeScript passes.
+
+The subsequent non-link upgrade selection passes all 34 executed cases;
+two SQLite-tool cases explicitly skip and 14 link-related cases are filtered.
+That selection validates the corrected planning and native attribute checks
+together with the migration regressions, without converting missing-link or
+missing-tool coverage into passes.
