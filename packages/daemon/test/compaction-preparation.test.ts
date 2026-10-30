@@ -298,7 +298,7 @@ it('automatic preparation gives the post-delivery ceiling without a fabricated p
  expect(prompt).toContain(f.e.getPreparationState(seat)!.marker);
 });
 
-for(const expiry of ['missing map','idle after completed map'])it(`route reports incomplete preparation on ${expiry} expiry`,async()=>{
+for(const expiry of ['missing map','idle after completed map'])it(`route distinguishes ${expiry} expiry`,async()=>{
  const f=fixture();
  if(expiry==='idle after completed map')f.onSleep(async()=>{stageMap(f);f.activity('busy');});
  vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
@@ -317,9 +317,9 @@ for(const expiry of ['missing map','idle after completed map'])it(`route reports
  });
  const body=await response.json();
  expect(response.status).toBe(409);
- expect(body.reason).toBe('preparation_incomplete');
- expect(body.error).toContain('Preparation (restore map and idle wait) did not finish in time');
- expect(body.error).not.toContain('restore map was not completed');
+ expect(body.reason).toBe(expiry==='missing map'?'preparation_incomplete':'map_complete_seat_never_idle');
+ expect(body.error).toContain(expiry==='missing map'?'restore map was not completed':'map complete, seat never idle');
+ expect(f.clock()).toBeLessThanOrEqual(11000);
  expect(body.error).toContain('managed compaction is disarmed');
  expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
  expect(compacts(f)).toHaveLength(0);
@@ -735,4 +735,18 @@ it('manual uncertain compact receipt never retries input',async()=>{
  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(false);
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(1);expect(f.e.getPreparationState(seat)?.compact).toBe('uncertain');
+});
+
+
+for (const end of ['cancel', 'disable', 'replacement'] as const) it(`automatic: completed map still stops on ${end} during idle grace`, async () => {
+ const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.e.reconcilePreparations();
+ expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
+ if(end==='cancel')f.e.cancelPreparation(seat);
+ if(end==='disable')f.policy.enabled=false;
+ if(end==='replacement')f.generation('generation-two');
+ f.e.reconcilePreparations();
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:
+  {cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
+ expect(compacts(f)).toHaveLength(0);
 });
