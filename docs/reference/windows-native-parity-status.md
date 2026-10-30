@@ -509,3 +509,11 @@ regressions pass, with no create/kill action in the native cases; daemon TypeScr
 passes. An initial test expected the wrong result collection and was corrected
 to the existing attention-required contract. No actual seat restore was run.
 
+Current TUI reading regression/native-path/journey/anchor and window-action
+suites pass 57 cases with 11 skipped. Reading resolves explicitly served native
+roots; window-action fixtures execute an owned paired CLI entry through Node
+and retain unknown-outcome/no-replay behavior. Source hashes, report digest and
+skipped names are indexed locally. No new implementation failure was reproduced;
+actual desktop opening, skipped viewer integrations and deployed interactive TUI
+acceptance remain outside this receipt.
+
