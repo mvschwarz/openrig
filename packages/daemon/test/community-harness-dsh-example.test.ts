@@ -51,6 +51,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" },
             { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
       }
+      if (text.includes("DENYHOLD")) {
+        waiting.set("perm-3", () => { held = () => end("cancelled"); });
+        return send({ id: "perm-3", method: "session/request_permission", params: { sessionId: session, toolCall: { toolCallId: "t4", title: "Edit c.txt", kind: "edit" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
+      }
       if (text.includes("ASKEND")) {
         send({ id: "perm-2", method: "session/request_permission", params: { sessionId: session, toolCall: { toolCallId: "t3", title: "Edit b.txt", kind: "edit" },
           options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
@@ -268,6 +273,20 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(answer.result).toEqual({ outcome: { outcome: "cancelled" } });
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+  });
+
+  it("keeps the seat's own refusal held through a cancel, so the cancelled turn reads needs input, not idle", async () => {
+    const openrig = await fakeOpenRig("deny");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("DENYHOLD an edit");
+    await waitFor(() => responseTo(seat.log(), "perm-3"), "the runner's answer to the permission request");
+    seat.type("/abort");
+    await waitFor(() => /turn end \(cancelled\)/.test(seat.out()), "the cancelled turn's end in the pane");
+    await new Promise((done) => setTimeout(done, 500));
+    const after = seen(openrig.hooks).slice(seen(openrig.hooks).indexOf("Notification/permission_prompt"));
+    expect(after[0]).toBe("Notification/permission_prompt");
+    expect(after.filter((event) => event.startsWith("Stop/"))).toEqual([]);
   });
 
   it("releases the hold when the turn ends with a person's ask still pending, and withdraws the ask", async () => {
