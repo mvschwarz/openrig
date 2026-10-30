@@ -271,3 +271,12 @@ and owned-archive fixtures. This is local Git execution, not a network fetch or
 complete bundle import acceptance. The scan is a bounded source audit rather than
 proof that every branch or workflow has been exercised.
 
+An attempted real PowerShell/Node managed-runner witness did not establish
+readiness: three owned-fixture attempts failed while removing their temporary
+directory with EPERM, masking any preceding assertion outcome. Adjusting exit
+ordering and supplying explicit temporary AppData paths did not resolve it.
+The attempted test is not shipped, and no real-process acceptance is claimed.
+The existing managed-runner synthetic process-table suite passed 22 cases in
+the combined attempts. The temporary-directory cleanup assumption remains
+unresolved; no shared process or ACL was changed to force the fixture through.
+
