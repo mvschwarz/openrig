@@ -222,7 +222,7 @@ export class RunnerPermissions {
     const asked = this.deps.queueRepo.getById(askId);
     const origin = asked ? runnerPermissionOrigin(asked) : null;
     if (!asked || !origin || (seat && origin.nodeId !== seat.nodeId)) return { ok: false, code: "not_found", message: `No permission request ${askId} for this seat.` };
-    const item = this.liveEnd(asked, origin);
+    const item = this.liveEnd(asked);
     const askIsCurrent = this.deps.currentGeneration(origin.nodeId) === origin.generation;
     const callerMatches = !seat?.generation || seat.generation === origin.generation;
     // Handed to someone this host can't follow (another host, or no row that carries the ask): still no answer, and the
@@ -244,7 +244,7 @@ export class RunnerPermissions {
     if (typeof answer === "string" && offered.includes(answer)) return { ok: true, state: "answered", optionId: answer };
     // A plain no in words, or a deny from the Feed, is the agent's reject, and never a grant; a plain yes is its allow.
     const allowId = tagValue(item, ALLOW_TAG), rejectId = tagValue(item, REJECT_TAG);
-    const said = item.closureReason === "denied" ? "no" : typedYesOrNo(answer);
+    const said = item.closureReason === "denied" || item.state === "denied" ? "no" : typedYesOrNo(answer);
     if (said === "no") return rejectId ? { ok: true, state: "answered", optionId: rejectId } : { ok: true, state: "refused", reason: "said_no" };
     if (said === "yes" && allowId) return { ok: true, state: "answered", optionId: allowId };
     // Closed without an option is no answer, so OpenRig's default applies: permit.
@@ -264,7 +264,7 @@ export class RunnerPermissions {
       const now = this.read(seat, askId);
       if (!now.ok || now.state !== "pending" || waitMs <= 0) return now;
       const asked = this.deps.queueRepo.getById(askId)!;
-      liveId = this.liveEnd(asked, runnerPermissionOrigin(asked)!)?.qitemId ?? askId;
+      liveId = this.liveEnd(asked)?.qitemId ?? askId;
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([changed, new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); })]);
       if (timer) clearTimeout(timer);
@@ -281,24 +281,21 @@ export class RunnerPermissions {
     const now = this.read(seat, askId);
     if (!now.ok || now.state !== "pending") return now;
     const asked = this.deps.queueRepo.getById(askId)!;
-    const live = this.liveEnd(asked, runnerPermissionOrigin(asked)!);
+    const live = this.liveEnd(asked);
     // A handoff this host can't follow leaves its rows as they are; the runner just stops waiting.
     if (live) this.close(live, WITHDRAWN_NOTE, reason);
     return { ok: true, state: "withdrawn" };
   }
 
   /** A person who routes or hands the ask to a colleague means the colleague decides: follow each handoff (a handed-off
-   *  row, or one completed with closure handed_off_to) to the colleague's own row, the earliest row to the handed-to
-   *  address that carries this ask and its seat's permission tags. Null when that can't be followed on this host. */
-  private liveEnd(item: QueueItem, origin: { nodeId: string; generation: string }): QueueItem | null {
+   *  row, or one completed with closure handed_off_to) along its own edge, to the row handed from it at the handed-to
+   *  address. A handoff closes its row, so there is one. Null when that can't be followed on this host. */
+  private liveEnd(item: QueueItem): QueueItem | null {
     let current = item;
     for (let hops = 0; current.state === "handed-off" || (current.state === "done" && current.closureReason === "handed_off_to"); hops++) {
       if (hops >= MAX_HANDOFF_HOPS || !current.handedOffTo) return null;
-      const next = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE destination_session = ? AND qitem_id != ?
-        AND (handed_off_from = ? OR (json_valid(chain_of_record) AND EXISTS (SELECT 1 FROM json_each(chain_of_record) WHERE value = ?)))
-        AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
-        ORDER BY ts_created ASC LIMIT 1`)
-        .get(current.handedOffTo, current.qitemId, current.qitemId, current.qitemId, `${NODE_TAG}${origin.nodeId}`, `${GENERATION_TAG}${origin.generation}`) as { qitem_id: string } | undefined;
+      const next = this.deps.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND handed_off_from = ? LIMIT 1")
+        .get(current.handedOffTo, current.qitemId) as { qitem_id: string } | undefined;
       const successor = next ? this.deps.queueRepo.getById(next.qitem_id) : null;
       if (!successor) return null;
       current = successor;

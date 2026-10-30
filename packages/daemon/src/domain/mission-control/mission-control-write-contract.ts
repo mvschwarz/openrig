@@ -211,7 +211,9 @@ export class MissionControlWriteContract {
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
             chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
-            // A runner's permission ask passed to a colleague: the colleague decides, so they get the agent's options.
+            // A runner's permission ask passed to a colleague: the colleague decides, so they get the agent's options, and
+            // the row records what it was handed from, as the queue's own handoff does, so the request follows it exactly.
+            ...(runnerPermissionOrigin(source) ? { handedOffFrom: input.qitemId } : {}),
             ...(runnerPermissionOrigin(source) && source.humanQuestions && this.queueRepo.isPersonAddress(input.destinationSession)
               ? { humanIntent: "decision" as const, humanAlert: true, humanQuestions: source.humanQuestions } : {}),
             // Default nudge handled post-commit per Phase D pattern.

@@ -2310,6 +2310,7 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
+      this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
@@ -2489,6 +2490,7 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
+      this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
@@ -4868,6 +4870,15 @@ export class QueueRepository {
    *  column) are unaffected; only writes when a value is present (NULL is the
    *  default and degrades in the Story consumer). Runs inside the caller's
    *  transaction (create / handoff / handoff-and-complete). */
+  /** A runner's permission ask handed to a person: that person decides, so their row carries the agent's options, as
+   *  Mission Control's route and handoff give it. Any other row is handed on unchanged. */
+  private carryPermissionQuestion(source: QueueItem, successorId: string, toSession: string): void {
+    if (!runnerPermissionOrigin(source) || !source.humanQuestions?.length || !this.hasHumanQuestionsColumn
+      || !this.hasHumanIntentColumn || !this.isPersonAddress(toSession)) return;
+    this.db.prepare("UPDATE queue_items SET human_questions = ?, human_intent = 'decision' WHERE qitem_id = ?")
+      .run(JSON.stringify(source.humanQuestions), successorId);
+  }
+
   private persistSummary(qitemId: string, summary: string | null): void {
     if (this.hasSummaryColumn && summary !== null) {
       this.db.prepare("UPDATE queue_items SET summary = ? WHERE qitem_id = ?").run(summary, qitemId);

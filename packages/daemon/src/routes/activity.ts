@@ -116,12 +116,13 @@ export const activityRoutes = new Hono();
 /** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
  *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
  *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
-function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>):
+function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>, permissionRoute = false):
   { body: Record<string, unknown> } | { refused: Response } {
   const refuse = (status: 401 | 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
   // Read the grant again: it may have been revoked or reissued while the body arrived. Nothing is awaited from here to the
   // write, so this is the grant's state when the post takes effect.
-  if (new ActivityGrantStore(store.db).get(grant.grantId)?.revokedAt !== null) {
+  const revoked = new ActivityGrantStore(store.db).get(grant.grantId)?.revokedAt !== null;
+  if (revoked && !permissionRoute) {
     return refuse(401, "activity_grant_revoked", "This activity grant was revoked; nothing was recorded.");
   }
   const claimedNode = stringOrNull(body.nodeId);
@@ -134,15 +135,16 @@ function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant
   if (claimedGeneration && claimedGeneration !== grant.generation) {
     return refuse(409, "activity_grant_stale", "This post claims a launch generation its grant wasn't issued for; nothing was recorded.");
   }
-  const standing = grantStandingRefusal(c, store, grant, "nothing was recorded.");
+  const standing = grantStandingRefusal(c, store, grant, "nothing was recorded.", revoked);
   if (standing) return { refused: standing };
   const sessionName = claimedSession ?? store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? null;
   return { body: { ...body, nodeId: grant.nodeId, generation: grant.generation, ...(sessionName ? { sessionName } : {}) } };
 }
 
 /** A grant speaks only while its launch generation occupies the seat: refused when its occupant was replaced (stale) or
- *  hasn't registered yet (pending). `outcome` says what the refusal left undone. */
-function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string): Response | null {
+ *  hasn't registered yet (pending). A `revoked` grant whose occupant wasn't replaced reads revoked: it was reissued for
+ *  the same launch. `outcome` says what the refusal left undone. */
+function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: ActivityGrant, outcome: string, revoked = false): Response | null {
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   let standing: ReturnType<typeof grantGeneration>;
   try {
@@ -156,6 +158,8 @@ function grantStandingRefusal(c: Context, store: AgentActivityStore, grant: Acti
   if (standing === "stale") {
     return c.json({ ok: false, code: "activity_grant_stale", error: `This activity grant's launch generation no longer occupies the seat; ${outcome}` }, 409);
   }
+  // Revoked, while its own generation still occupies the seat or hasn't registered yet: reissued after a lost response.
+  if (revoked) return c.json({ ok: false, code: "activity_grant_revoked", error: `This activity grant was revoked; ${outcome}` }, 401);
   if (standing === "pending") {
     return c.json({ ok: false, code: "activity_grant_pending", error: `This activity grant's launch hasn't registered its occupant yet; ${outcome}` }, 409);
   }
@@ -239,7 +243,7 @@ activityRoutes.post("/pi-usage-charges", async (c) => {
 /** Who is posting, before anything the request claims is read. The install-wide token speaks for every seat (`grant`
  *  null); a seat activity grant speaks only for its own seat and launch generation, which bindToGrant checks once the
  *  body has arrived. Without `expectedToken` (the guest router), only a grant is accepted. */
-function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined): { grant: ActivityGrant | null } | { refused: Response } {
+function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken: string | undefined, permissionRoute = false): { grant: ActivityGrant | null } | { refused: Response } {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
@@ -253,7 +257,9 @@ function activityPrincipal(c: Context, store: AgentActivityStore, expectedToken:
       error: "Agent activity hook ingestion requires the configured local hook token.",
     }, 401) };
   }
-  if (grant.revokedAt) {
+  // The permission routes ask a revoked grant's generation first (grantStandingRefusal): a new launch's grant revokes
+  // the last one, so a replaced occupant's grant must read stale, not revoked.
+  if (grant.revokedAt && !permissionRoute) {
     return { refused: c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was recorded." }, 401) };
   }
   return { grant };
@@ -688,7 +694,7 @@ function permissionContext(c: Context, installTokenAccepted: boolean): Permissio
   if (!store || !queueRepo || !eventBus || (installTokenAccepted && !expectedToken)) {
     return { refused: c.json({ ok: false, code: "permission_requests_unconfigured", error: "This daemon doesn't take runner permission requests." }, 503) };
   }
-  const principal = activityPrincipal(c, store, expectedToken);
+  const principal = activityPrincipal(c, store, expectedToken, true);
   if ("refused" in principal) return principal;
   const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
   const rigRepo = (c.get("rigRepo" as never) as RigRepository | undefined) ?? new RigRepository(store.db);
@@ -719,7 +725,7 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(ctx.store.db, body.sessionName) };
   let seat: RunnerPermissionSeat;
   if (ctx.grant) {
-    const bound = bindToGrant(c, ctx.store, ctx.grant, body);
+    const bound = bindToGrant(c, ctx.store, ctx.grant, body, true);
     if ("refused" in bound) return bound.refused;
     body = bound.body;
     seat = { nodeId: ctx.grant.nodeId, sessionName: String(body.sessionName ?? ""), generation: ctx.grant.generation };
@@ -745,7 +751,7 @@ async function submitPermission(c: Context, installTokenAccepted: boolean): Prom
   // No one to ask: permitted at once with the agent's own allow. Nothing waits on a person, so nothing reads needs input.
   if ("state" in result) return c.json(result);
   // The seat now waits on a person, as when a runner refuses and holds attention. A grant revoked meanwhile records nothing more.
-  if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body)))) {
+  if (result.created && (!ctx.grant || !("refused" in bindToGrant(c, ctx.store, ctx.grant, body, true)))) {
     recordHookActivity(c, ctx.store, { runtime: ctx.store.resolveSession({ nodeId: seat.nodeId })?.runtime ?? stringOrNull(body.runtime),
       sessionName: seat.sessionName, nodeId: seat.nodeId, generation: seat.generation, hookEvent: "Notification",
       subtype: "permission_prompt", turnId: parsed.request.turnId, occurredAt: stringOrNull(body.occurredAt) ?? new Date().toISOString() });
@@ -775,10 +781,8 @@ const grantSeat = (ctx: PermissionContext) => ctx.grant ? { nodeId: ctx.grant.no
 /** A grant still speaks for its seat: it isn't revoked, and its launch generation still occupies the seat. */
 function grantStillSpeaks(c: Context, ctx: PermissionContext, outcome: string): Response | null {
   if (!ctx.grant) return null;
-  if (new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null) {
-    return c.json({ ok: false, code: "activity_grant_revoked", error: `This activity grant was revoked; ${outcome}` }, 401);
-  }
-  return grantStandingRefusal(c, ctx.store, ctx.grant, outcome);
+  const revoked = new ActivityGrantStore(ctx.store.db).get(ctx.grant.grantId)?.revokedAt !== null;
+  return grantStandingRefusal(c, ctx.store, ctx.grant, outcome, revoked);
 }
 
 /** Withdraw this seat's own request when its turn is cancelled or ends, or its agent exits: any later answer isn't sent. */

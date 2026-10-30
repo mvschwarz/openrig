@@ -216,7 +216,7 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | replies with just a yes ("yes", "ok", "allow", "go ahead" …) | the agent's allow (`allow_once`, else `allow_always`) |
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
 | routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
-| routes or hands it to an agent seat | that seat gets no options. The request waits until the seat closes it, which is no answer, so it's permitted, or until the agent's turn ends |
+| routes or hands it to an agent seat | that seat gets no options. The request waits until that row is closed, by the seat or a person. Closed as done without a choice, or as failed, is no answer, so it's permitted. Closed as denied (the Feed's deny, `--closure-reason denied`, or the state `denied`) is a no. Canceled cancels the request, and a further handoff is followed. Or the request waits until the agent's turn ends |
 | closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
 
@@ -274,7 +274,7 @@ answer. Only the seat's opt-in refuses and holds attention.
 | `stale_generation` | 409 | With the activity token: the post isn't from the seat's current occupant. | answers `cancelled` |
 | `activity_grant_wrong_seat` | 403 | The grant speaks for another seat. | answers `cancelled` |
 | `activity_grant_stale` | 409 | The grant's launch generation no longer occupies the seat. | answers `cancelled` |
-| `activity_grant_revoked` | 401 | The grant was revoked. A grant is reissued after a lost response, so this can still be the live occupant. | permits |
+| `activity_grant_revoked` | 401 | The grant was revoked while its launch still occupies the seat: it was reissued after a lost response, so this can still be the live request. (A replaced occupant's grant reads `activity_grant_stale`, even once revoked.) | permits |
 | `activity_grant_pending` | 409 | The grant's launch hasn't registered its occupant yet. | permits |
 | `duplicate_request` | 409 | This request id was already submitted in another turn; an agent may reuse an id. | permits |
 
