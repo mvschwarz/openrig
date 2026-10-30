@@ -17,7 +17,10 @@
 //   turns            one entry per `session/prompt`, in order (the last one repeats):
 //     holdMs         keep the turn open this long; `session/cancel` ends it early as "cancelled"
 //     ignoreCancel   on `session/cancel`, keep the turn open and end it with stopReason (default end_turn) anyway
-//     permission     ask `session/request_permission` first, then carry on whatever the answer
+//     permission     ask `session/request_permission` first, then carry on whatever the answer. As an object:
+//                      waitMs       stop waiting for the answer after this long, and end the turn
+//                      exitAfterMs  exit with status 3 this long after asking, while the request waits
+//                    A `session/cancel` while the request waits ends the turn "cancelled" once it's answered.
 //     error          answer the prompt with a JSON-RPC error
 //     exit           exit with status 3 instead of answering
 //     stopReason     the stop reason to return (default "end_turn")
@@ -49,8 +52,9 @@ let nextId = 1;
 const answers = new Map();
 let cancelTurn = null;
 
+// Numbers, as JSON-RPC agents commonly use: a runner that passes one on as a string id has to convert it.
 function ask(method, params) {
-  const id = `agent-${nextId++}`;
+  const id = 1000 + nextId++;
   send({ jsonrpc: "2.0", id, method, params });
   return new Promise((resolve) => answers.set(id, resolve));
 }
@@ -62,8 +66,10 @@ async function prompt(id, params) {
   if (spec.error) { fail(id, -32603, "fake agent: this turn fails"); return; }
   send({ jsonrpc: "2.0", method: "session/update",
     params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `turn ${turn}` } } } });
+  let stopReason = spec.stopReason ?? "end_turn";
   if (spec.permission) {
-    await ask("session/request_permission", {
+    const p = typeof spec.permission === "object" ? spec.permission : {};
+    const asked = ask("session/request_permission", {
       sessionId: params.sessionId,
       toolCall: { toolCallId: `call-${turn}`, title: "Edit notes.txt", kind: "edit" },
       options: [
@@ -71,8 +77,14 @@ async function prompt(id, params) {
         { optionId: "reject-once", name: "Reject", kind: "reject_once" },
       ],
     });
+    if (p.exitAfterMs) setTimeout(() => exit(3, "while a permission request waits"), p.exitAfterMs);
+    let cancelled = false;
+    cancelTurn = () => { cancelled = true; };
+    const answer = await (p.waitMs ? Promise.race([asked, sleep(p.waitMs).then(() => null)]) : asked);
+    cancelTurn = null;
+    if (!answer) log({ dir: "event", event: "permission-wait-ended" });
+    if (cancelled) { reply(id, { stopReason: "cancelled" }); return; }
   }
-  let stopReason = spec.stopReason ?? "end_turn";
   if (spec.holdMs) {
     const cancelled = await new Promise((resolve) => {
       const timer = setTimeout(() => { cancelTurn = null; resolve(false); }, spec.holdMs);

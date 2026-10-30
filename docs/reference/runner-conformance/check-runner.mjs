@@ -6,12 +6,13 @@
 //   - a small local endpoint stands in for OpenRig's activity route, and records what your runner posts;
 //   - input arrives the way `rig send` delivers it: one bracketed paste with raw newlines, then Enter.
 //
-//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input]
+//   node check-runner.mjs --runner '<command>' [--name <preset name>] [--resume] [--first-input] [--answered]
 //                         [--cases 1,2,4] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]
 //
 // `{agent}` in the command is replaced with the fake agent's path, an executable that takes any arguments your runner
 // adds. For example: --runner 'my-runner --agent-command {agent}'. --resume and --first-input say your preset declares
 // `resume: true` and `first_input: true`; without them those cases are skipped, since OpenRig wouldn't pass that input.
+// --answered says your runner implements section 7's answered path (0.7.7); without it case 4b is skipped.
 // The runner gets a clean environment: PATH, HOME, USER, SHELL, LANG and TMPDIR, the OpenRig variables, and any
 // --pass-env names. Exit status: 0 when nothing fails, 1 when a case fails, 2 for a usage or setup problem.
 //
@@ -27,10 +28,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
+const usage = "usage: node check-runner.mjs --runner '<command with {agent}>' [--name <preset>] [--resume] [--first-input] [--answered] [--cases 1,2] [--wait-ms 8000] [--pass-env NAME] [--json] [--keep]";
 
 function parseArgs(argv) {
-  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, json: false, keep: false, waitMs: 8000 };
+  const opts = { name: "runner", cases: undefined, passEnv: [], resume: false, firstInput: false, answered: false, json: false, keep: false, waitMs: 8000 };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     const value = () => { if (i + 1 >= argv.length) throw new Error(`${flag} needs a value`); return argv[++i]; };
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     else if (flag === "--wait-ms") opts.waitMs = Number(value());
     else if (flag === "--resume") opts.resume = true;
     else if (flag === "--first-input") opts.firstInput = true;
+    else if (flag === "--answered") opts.answered = true;
     else if (flag === "--json") opts.json = true;
     else if (flag === "--keep") opts.keep = true;
     else throw new Error(`unknown option ${flag}`);
@@ -72,27 +74,97 @@ async function waitFor(read, ms = opts.waitMs) {
   }
 }
 
-// The stand-in for OpenRig's activity route. Each launch has its own token; a post without one is refused, as OpenRig does.
+// The stand-in for OpenRig's activity route and, for a launch that scripts one, its answered permission routes (section 7).
+// Each launch has its own token; a request without one is refused, as OpenRig does.
 const posts = [];
-const tokens = new Set();
+const tokens = new Map();
+const OPTION_ID = /^[A-Za-z0-9_-]{1,40}$/;
+const ANSWERABLE = new Set(["allow_once", "reject_once", "reject_always"]);
+const text = (value) => typeof value === "string" && value.trim() ? value.trim() : null;
 const server = createServer((req, res) => {
-  let body = "";
-  req.on("data", (chunk) => { body += chunk; });
+  let raw = "";
+  req.on("data", (chunk) => { raw += chunk; });
   req.on("end", () => {
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
-    let parsed;
-    try { parsed = JSON.parse(body); } catch { parsed = undefined; }
-    posts.push({ at: Date.now(), path: req.url, token, body: parsed, raw: body });
-    const known = req.method === "POST" && req.url === "/api/activity/hooks";
-    const status = !known ? 404 : !tokens.has(token) ? 401 : parsed ? 200 : 400;
-    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify({ ok: status === 200 }));
+    let body;
+    try { body = raw ? JSON.parse(raw) : undefined; } catch { body = undefined; }
+    const url = new URL(req.url, "http://stand-in");
+    posts.push({ at: Date.now(), method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), token, body, raw });
+    const send = (status, payload) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(payload));
+    const h = tokens.get(token);
+    if (req.method === "POST" && url.pathname === "/api/activity/hooks") {
+      if (!h) return send(401, { ok: false });
+      return body ? send(200, { ok: true }) : send(400, { ok: false, code: "invalid_json" });
+    }
+    const ask = url.pathname.match(/^\/api\/activity\/permission-requests(?:\/([^/]+)(\/withdraw)?)?$/);
+    if (!ask) return send(404, { ok: false, code: "not_found" });
+    if (!h) return send(401, { ok: false });
+    // Without a scripted ask, the stand-in is an OpenRig that predates the answered path: 404, so the runner refuses as before.
+    if (!h.asks) return send(404, { ok: false, code: "not_found" });
+    if (req.method === "POST" && !ask[1]) return submitAsk(h, body, raw, send);
+    const entry = h.asks.byId.get(decodeURIComponent(ask[1] ?? ""));
+    if (!entry) return send(404, { ok: false, code: "not_found" });
+    if (req.method === "POST" && ask[2]) {
+      if (!["turn_cancelled", "turn_ended", "exited"].includes(body?.reason)) return send(400, { ok: false, code: "invalid_permission_request" });
+      entry.withdrawn = body.reason;
+      entry.wake();
+      return send(200, { ok: true, ...askState(h, entry) });
+    }
+    if (req.method === "GET" && !ask[2]) {
+      const waitMs = Math.min(Number(url.searchParams.get("waitSeconds") ?? 0), 25) * 1000;
+      const reply = () => send(200, { ok: true, ...askState(h, entry) });
+      if (askState(h, entry).state !== "pending" || !(waitMs > 0)) return reply();
+      const timer = setTimeout(() => { entry.waiters.delete(reply); reply(); }, waitMs);
+      entry.waiters.add(() => { clearTimeout(timer); reply(); });
+      return undefined;
+    }
+    return send(404, { ok: false, code: "not_found" });
   });
 });
+
+// What the scripted ask reads as now: an answer once its time has come, `withdrawn` after a withdraw, otherwise pending. A
+// `late` answer is what the stand-in reports after a withdraw, so a runner that keeps reading and delivers it is caught.
+function askState(h, entry) {
+  const script = h.asks.script;
+  if (entry.withdrawn) return script.late ?? { state: "withdrawn" };
+  if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) return script.answer.state === "answered"
+    ? { state: "answered", optionId: script.answer.optionId } : { state: script.answer.state };
+  return { state: "pending" };
+}
+
+// Submit, checked as OpenRig checks it: the seat and generation, the request's ids as strings, and 2-4 answerable options.
+function submitAsk(h, body, raw, send) {
+  const script = h.asks.script;
+  const problems = [];
+  if (!body) return send(400, { ok: false, code: "invalid_json" });
+  if (body.sessionName !== h.session) return send(404, { ok: false, code: "session_not_found" });
+  for (const key of ["nativeRef", "turnId", "requestId"]) if (!text(body[key])) problems.push(`${key} must be a non-empty string (got ${JSON.stringify(body[key])})`);
+  const options = Array.isArray(body.options) ? body.options : null;
+  if (!options) problems.push("options must be an array");
+  else if (options.some((o) => !text(o?.optionId) || !text(o?.name) || !text(o?.kind))) problems.push("each option needs optionId, name and kind");
+  h.asks.submitted.push({ body, problems });
+  if (problems.length) return send(400, { ok: false, code: "invalid_permission_request", error: problems.join("; ") });
+  if (body.generation !== h.generation) return send(409, { ok: false, code: "stale_generation" });
+  if (script.submit) return send(script.submit.status, { ok: false, code: script.submit.code });
+  const answerable = options.filter((o) => o.kind !== "allow_always");
+  if (answerable.length < 2 || answerable.length > 4 || new Set(answerable.map((o) => o.optionId)).size !== answerable.length
+    || answerable.some((o) => !OPTION_ID.test(o.optionId) || !ANSWERABLE.has(o.kind))) return send(422, { ok: false, code: "options_unsupported" });
+  const key = JSON.stringify([body.generation, body.nativeRef, body.requestId]);
+  const earlier = h.asks.byKey.get(key);
+  if (earlier) return send(200, { ok: true, askId: earlier.askId, created: false });
+  if ([...h.asks.byKey.values()].some((e) => e.requestId === body.requestId && e.turnId !== body.turnId)) return send(409, { ok: false, code: "duplicate_request" });
+  const entry = { askId: `ask-${h.label}-${h.asks.byKey.size + 1}`, requestId: body.requestId, turnId: body.turnId, created: Date.now(), waiters: new Set() };
+  entry.wake = () => { for (const w of [...entry.waiters]) w(); entry.waiters.clear(); };
+  if (script.answer) setTimeout(entry.wake, script.answer.afterMs ?? 0);
+  h.asks.byKey.set(key, entry);
+  h.asks.byId.set(entry.askId, entry);
+  return send(200, { ok: true, askId: entry.askId, created: true });
+}
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
 const launches = [];
-async function launch(label, { scenario = {}, env = {} } = {}) {
+async function launch(label, { scenario = {}, env = {}, asks } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `runner-check-${label}-`));
   const cwd = join(dir, "work");
   mkdirSync(cwd);
@@ -104,7 +176,8 @@ async function launch(label, { scenario = {}, env = {} } = {}) {
     generation: `gen-${id}`, attempt: `attempt-${id}`, recordPath: join(dir, "launch", "record.json"), agentLog: join(dir, "agent.jsonl"),
     target: `check-${label}`,
   };
-  tokens.add(h.token);
+  if (asks) h.asks = { script: asks, byKey: new Map(), byId: new Map(), submitted: [] };
+  tokens.set(h.token, h);
   writeFileSync(join(dir, "scenario.json"), JSON.stringify(scenario));
   const agent = join(dir, "agent");
   writeFileSync(agent, `#!/bin/sh\nexec ${sh(process.execPath)} ${sh(join(here, "fake-acp-agent.mjs"))} --scenario ${sh(join(dir, "scenario.json"))} --log ${sh(h.agentLog)} "$@"\n`);
@@ -131,7 +204,9 @@ async function launch(label, { scenario = {}, env = {} } = {}) {
     replyTo: (entry) => h.log().find((e) => e.dir === "out" && e.msg.id === entry.msg.id && !e.msg.method),
     events: (event) => h.log().filter((e) => e.dir === "event" && e.event === event),
     prompts: () => h.received("session/prompt").map((e) => (e.msg.params?.prompt ?? []).filter((b) => b.type === "text").map((b) => b.text).join("")),
-    posts: () => posts.filter((p) => p.token === h.token || p.body?.sessionName === h.session),
+    posts: () => posts.filter((p) => p.path === "/api/activity/hooks" && (p.token === h.token || p.body?.sessionName === h.session)),
+    permissionCalls: (method, suffix = "") => posts.filter((p) => p.token === h.token && p.method === method
+      && p.path.startsWith("/api/activity/permission-requests") && p.path.endsWith(suffix)),
     hooks: (event, subtype) => h.posts().filter((p) => p.body?.hookEvent === event && (subtype === undefined || p.body?.subtype === subtype)),
     record: () => { if (!existsSync(h.recordPath)) return undefined; try { return JSON.parse(readFileSync(h.recordPath, "utf8")); } catch { return { unreadable: true }; } },
     paste: (text) => {
@@ -293,6 +368,116 @@ const cases = {
     return r;
   },
 
+  // Section 7's answered path (0.7.7): the runner submits the live request, reads the chosen person's answer, delivers it
+  // once while that request is live, and withdraws it when the turn or the agent ends. Any refusal is a refusal.
+  async "4b"() {
+    const r = result("4b", "Answered permissions: the chosen person's answer reaches the live request, and nothing else does");
+    if (!opts.answered) return r.skip("the runner doesn't claim section 7's answered path (--answered)");
+    const options = ["allow-once", "reject-once"];
+    const submits = (h) => h.permissionCalls("POST").filter((p) => p.path === "/api/activity/permission-requests");
+    const withdraws = (h) => h.permissionCalls("POST", "/withdraw");
+    const answers = (h) => { const asked = h.sent("session/request_permission")[0];
+      return asked ? h.log().filter((e) => e.dir === "in" && e.msg.id === asked.msg.id && !e.msg.method) : []; };
+    const outcome = (h) => answers(h)[0]?.msg.result?.outcome;
+    const open = async (label, asks, turns = [{ permission: true }, {}]) => {
+      const h = await launch(`4b-${label}`, { scenario: { turns }, asks });
+      if (!await ready(h)) { r.check(`${label}: the runner opens its conversation`, false, "no launch record"); return undefined; }
+      h.paste(message(h, "edit the notes"));
+      await waitFor(() => h.sent("session/request_permission")[0]);
+      return h;
+    };
+
+    // An answer from the chosen person: the offered option, once, and the turn then reports as usual.
+    for (const [label, optionId] of [["allow", "allow-once"], ["deny", "reject-once"]]) {
+      const h = await open(label, { answer: { afterMs: 400, state: "answered", optionId } });
+      if (!h) continue;
+      const submitted = await waitFor(() => submits(h)[0], scale(3000));
+      if (!r.check(`${label}: the request is submitted to /api/activity/permission-requests`, submitted, "no submit")) continue;
+      const asked = h.sent("session/request_permission")[0];
+      const accepted = h.hooks("UserPromptSubmit", "accepted")[0];
+      const sent = submitted.body ?? {};
+      if (label === "allow") {
+        r.check("the submit passes OpenRig's checks", h.asks.submitted[0]?.problems.length === 0, h.asks.submitted[0]?.problems.join("; "));
+        r.check("it uses the hook token", submitted.token === h.token, "no bearer token");
+        r.check("requestId is the agent's JSON-RPC id, as a string", sent.requestId === String(asked?.msg.id), `requestId=${JSON.stringify(sent.requestId)}`);
+        r.check("turnId is the accepted prompt's", accepted && sent.turnId === String(accepted.body.turnId), `turnId=${JSON.stringify(sent.turnId)}`);
+        r.check("nativeRef and generation name this conversation and occupant", sent.nativeRef === h.record()?.nativeRef && sent.generation === h.generation,
+          `nativeRef=${sent.nativeRef} generation=${sent.generation}`);
+        r.check("the agent's options are passed on as offered", JSON.stringify((sent.options ?? []).map((o) => o.optionId)) === JSON.stringify(options),
+          JSON.stringify(sent.options));
+      }
+      const delivered = await waitFor(() => outcome(h), scale(4000));
+      r.check(`${label}: the agent gets the chosen option`, delivered?.outcome === "selected" && delivered.optionId === optionId, `got ${JSON.stringify(delivered)}`);
+      await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(3000));
+      await sleep(scale(300));
+      r.check(`${label}: it's delivered once`, answers(h).length === 1, `${answers(h).length} answers`);
+      if (label === "allow") {
+        r.check("OpenRig records the prompt; the runner doesn't post permission_prompt itself", h.hooks("Notification", "permission_prompt").length === 0,
+          "the runner posted permission_prompt for a created ask");
+        const reads = h.permissionCalls("GET");
+        r.check("each read waits at most 25 s", reads.length > 0 && reads.every((p) => Number(p.query.waitSeconds) >= 1 && Number(p.query.waitSeconds) <= 25),
+          reads.map((p) => p.query.waitSeconds).join(", "));
+        r.check("after the answer, the turn's end is reported as usual", h.hooks("Stop", "end_turn").length > 0, "no Stop/end_turn after delivery");
+      }
+    }
+
+    // Anything but an offered answer is a refusal, and attention is held: an option the request didn't offer, a refused,
+    // stale or withdrawn ask, or a refusal at submit.
+    const refusals = [
+      ["unoffered option", { answer: { afterMs: 300, state: "answered", optionId: "allow-always" } }, false],
+      ["refused ask", { answer: { afterMs: 300, state: "refused" } }, false],
+      ["stale ask", { answer: { afterMs: 300, state: "stale" } }, false],
+      ["withdrawn ask", { answer: { afterMs: 300, state: "withdrawn" } }, false],
+      ["route_unsupported", { submit: { status: 409, code: "route_unsupported" } }, true],
+      ["options_unsupported", { submit: { status: 422, code: "options_unsupported" } }, true],
+      ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, true],
+      ["stale_generation", { submit: { status: 409, code: "stale_generation" } }, true],
+    ];
+    await Promise.all(refusals.map(async ([label, asks, atSubmit]) => {
+      const h = await open(label.replace(/[^a-z]+/g, "-"), asks, [{ permission: true, holdMs: 800 }, {}]);
+      if (!h) return;
+      const got = await waitFor(() => outcome(h), scale(4000));
+      r.check(`${label}: the agent gets cancelled, never an allow option`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
+      if (atSubmit) r.check(`${label}: the runner posts permission_prompt itself`, await waitFor(() => h.hooks("Notification", "permission_prompt")[0], scale(3000)),
+        "no permission_prompt after a refusal at submit");
+      await waitFor(() => h.log().some((e) => e.dir === "out" && e.msg.result?.stopReason), scale(3000));
+      await sleep(scale(600));
+      r.check(`${label}: no idle Stop while attention is held`, nonExitStops(h, got?.at ?? 0).length === 0,
+        nonExitStops(h, got?.at ?? 0).map((p) => `Stop/${p.body.subtype}`).join(", "));
+    }));
+
+    // No answer: the request stays pending and visible, a pasted message isn't an answer, and /abort withdraws it, after
+    // which a late answer isn't delivered.
+    {
+      const h = await open("pending", { late: { state: "answered", optionId: "allow-once" } });
+      if (h) {
+        await sleep(scale(1500));
+        r.check("pending: the runner keeps reading the ask", h.permissionCalls("GET").length >= 1, "no read of the ask");
+        r.check("pending: nothing is delivered while no one has answered", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
+        r.check("pending: no idle Stop while it waits", nonExitStops(h).length === 0, nonExitStops(h).map((p) => p.body.subtype).join(", "));
+        h.paste(message(h, "allow it"));
+        await sleep(scale(800));
+        r.check("pending: a pasted message isn't an answer", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
+        h.paste("/abort");
+        const withdrawn = await waitFor(() => withdraws(h)[0], scale(3000));
+        r.check("pending: /abort withdraws the ask with turn_cancelled", withdrawn?.body?.reason === "turn_cancelled", `withdraw: ${JSON.stringify(withdrawn?.body)}`);
+        r.check("pending: the agent's request is answered cancelled", (await waitFor(() => outcome(h), scale(3000)))?.outcome === "cancelled",
+          `got ${JSON.stringify(outcome(h))}`);
+        await sleep(scale(1200));
+        r.check("pending: an answer after the withdraw isn't delivered", answers(h).every((a) => a.msg.result?.outcome?.outcome !== "selected"),
+          `answers: ${JSON.stringify(answers(h).map((a) => a.msg.result))}`);
+      }
+    }
+    // The turn ending, or the agent exiting, while the ask waits also withdraws it.
+    for (const [label, permission, reason] of [["turn end", { waitMs: scale(1500) }, "turn_ended"], ["agent exit", { exitAfterMs: scale(1500) }, "exited"]]) {
+      const h = await open(label.replace(/[^a-z]+/g, "-"), {}, [{ permission }, {}]);
+      if (!h) continue;
+      const withdrawn = await waitFor(() => withdraws(h)[0], scale(4000));
+      r.check(`${label}: the ask is withdrawn with ${reason}`, withdrawn?.body?.reason === reason, `withdraw: ${JSON.stringify(withdrawn?.body)}`);
+    }
+    return r;
+  },
+
   async "5"() {
     const r = result("5", "Generation: every post carries the launch's occupant generation");
     const h = await launch("5");
@@ -406,7 +591,7 @@ const cases = {
   },
 };
 
-const order = ["1", "1b", "2", "3", "4", "5", "6", "7", "7b", "7c", "8", "9"];
+const order = ["1", "1b", "2", "3", "4", "4b", "5", "6", "7", "7b", "7c", "8", "9"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }
