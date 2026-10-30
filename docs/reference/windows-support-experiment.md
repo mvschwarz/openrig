@@ -38,6 +38,15 @@ attempted synthetic fixture did not independently establish EOF, and its
 uncommitted implementation changes were withdrawn rather than counted as a
 verified repair. Full ACP provider/detach lifecycle acceptance remains separate.
 
+Six selected connector checks also pass: actual owned offline npm agent runs
+through global/local and explicit/PATH layouts with exact arguments, unrelated
+batch refusal, and missing-program failure/exit registration (15 checks
+filtered). The complete connector file reports 20/21: its surviving-companion
+case fails during owned cwd cleanup with EPERM. An exited-PID wait and bounded
+deletion retries did not resolve that failure; its cause remains unknown and
+the attempted cleanup changes were withdrawn. Full connector acceptance is
+therefore incomplete; no real queue, provider or external process was changed.
+
 ## Native local-copy physical overlap (2026-10-30)
 
 An owned junction-parent dry-run reproduced a missing overlap refusal: lexical
