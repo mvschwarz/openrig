@@ -2,6 +2,22 @@
 
 ## Current review status (2026-10-30)
 
+### Status, registry, readiness and native process-facts review
+
+The current CLI status and host-registry modules, Pi readiness metadata reader,
+Herdr viewer and native process-facts helper were read in full, including the
+helper's PowerShell/C# implementation. This pass did not establish another native
+implementation defect. Herdr ensure-viewer remains deliberately qualified only
+for Linux 0.9.5/protocol 22; its existing refusal is not native support.
+
+Three selected process-facts tests pass, with one marker-search test filtered.
+Actual owned Node children verify cwd/argv, whitelisted homes, empty-HOME profile
+fallback, batch observation, invalid PIDs and absence after exit. The batch also
+observes the test-runner process. No all-machine marker search or console-member
+census was run; no real registry, bearer, provider profile, remote endpoint,
+running seat or daemon was accessed. Live fleet, console and timeout-lifecycle
+acceptance remain separate from these checks and the source-only reviews.
+
 ### Bundle source preparation with native checkout aliases
 
 The complete bundle-source module was reviewed. An owned injected-Git fixture
