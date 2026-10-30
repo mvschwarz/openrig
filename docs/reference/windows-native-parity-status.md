@@ -82,6 +82,9 @@ targeted reproduction still found missing owned-loopback registrations in
 agent-image and browser-boundary CLI fixtures. Registering their exact bound
 origins per test (and explicitly binding agent-image to loopback) makes those
 five cases pass without changing the fetch guard. This is not CLI-wide acceptance.
+The separate frozen CLI attempt at `e36cef0` is explicitly marked canceled after
+missing CLI/TUI compiled inputs were found; its JSON report is absent. Its stable
+source metadata supplies no usable test totals and is excluded from acceptance.
 
 The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
 512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
