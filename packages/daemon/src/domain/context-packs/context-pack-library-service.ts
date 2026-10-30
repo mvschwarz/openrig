@@ -131,7 +131,7 @@ export class ContextPackLibraryService {
         // second ref or shadow a different pack already using that ref.
         let physicalPackDir = resolve(packDir);
         try {
-          physicalPackDir = realpathSync(packDir);
+          physicalPackDir = process.platform === "win32" ? realpathSync.native(packDir) : realpathSync(packDir);
         } catch {
           // Keep the ordinary read/error path below if a discovered pack
           // disappears or becomes unreadable while this scan is running.

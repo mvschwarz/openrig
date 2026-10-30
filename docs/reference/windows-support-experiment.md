@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Context pack discovery preserves custody across native case aliases
+
+Overlapping context-store roots spelled with different case indexed the same
+physical Windows pack twice. Its second ref could also shadow a distinct
+top-level pack. Discovery now uses native canonical paths for its existing
+physical-pack ownership set on Windows. Both owned reproductions failed before
+the repair and pass afterward: the system pack keeps its first ref, and removing
+a distinct top-level pack leaves the system pack intact. Daemon TypeScript
+checking passes. These are two selected native cases, not a full context-store
+suite; no real context library was read or changed.
+
 ### Native spec rename handles storage limits and case-only changes
 
 Renaming a user spec to a long valid name failed at file creation on Windows;
