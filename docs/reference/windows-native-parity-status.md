@@ -570,3 +570,11 @@ and community runtime adapter. This supersedes the earlier five-row drift count;
 unchanged hashes do not refresh historical acceptance, and new files outside that
 inventory are not counted as coverage. Current source and report digests are
 retained locally; overlapping scoped test counts are not a total suite result.
+
+The next source review found two Pi diagnostics still recommending the POSIX
+`command -v pi` in native Windows panes. Version-baseline and rejected-managed-
+flag diagnostics now share the preflight lookup selector: `where.exe pi` on
+Windows and `command -v pi` elsewhere. Readiness/capability suites pass 41/41,
+including both platform variants of the version notice; daemon TypeScript also
+passes. This repairs actionable guidance only, without changing launch admission,
+probing an actual provider or claiming the selected executable is compatible.

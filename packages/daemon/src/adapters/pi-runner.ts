@@ -29,7 +29,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { resolveRunnerHome } from "./runner-home.js";
-import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
+import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, piExecutableLookup, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
@@ -1201,6 +1201,7 @@ export function piLaunchCapabilityError(
   trust: "approve" | "no-approve",
   line: string,
   readVersion: () => string,
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   const diagnostic = stripVTControlCharacters(line);
   if (!/unknown options?:/i.test(diagnostic) || !/--(?:name|approve|no-approve)(?=[\s,.:]|$)/.test(diagnostic)) return;
@@ -1209,7 +1210,7 @@ export function piLaunchCapabilityError(
     const value = stripVTControlCharacters(readVersion()).trim();
     if (/^[0-9][A-Za-z0-9.+_-]{0,63}$/.test(value)) version = `version ${value}`;
   } catch { /* diagnostics only; never changes the child's outcome */ }
-  return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
+  return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check '${piExecutableLookup(platform)}' in this pane; an older Pi installation may be shadowing it.`;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
