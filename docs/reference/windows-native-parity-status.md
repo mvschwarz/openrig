@@ -517,3 +517,10 @@ skipped names are indexed locally. No new implementation failure was reproduced;
 actual desktop opening, skipped viewer integrations and deployed interactive TUI
 acceptance remain outside this receipt.
 
+The TUI local reader now hides its helper process window on Windows. A real
+owned Node child under a spaced/Unicode paired-CLI directory preserves the full
+JSON request, does not execute the CLI main, and reports malformed output and
+nonzero exit as errors; a missing CLI retains the unavailable result. Together
+with local-selection regressions, six tests and TUI TypeScript pass. The helper
+is synthetic, so this does not replace installed reader/content-access acceptance.
+
