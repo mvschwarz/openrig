@@ -217,6 +217,11 @@ it.each(["unchanged", "missing-source", "changed", "added", "removed", "stale-de
     }
     return nativePrepare(binding, args);
   });
+  // The host viewer is a rig process, not evidence of the guest's native conversation.
+  Object.assign(f.app.tmuxAdapter, {
+    listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: f.root, width: 80, height: 24, active: true }]),
+    getPanePid: vi.fn(async () => 7001), getPaneCommand: vi.fn(async () => "rig"),
+  });
   vi.spyOn(f.app.tmuxAdapter, "sendShellCommand").mockResolvedValue({ ok: true });
   const textInput = vi.spyOn(f.app.tmuxAdapter, "sendText");
   const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { tmux: f.app.tmuxAdapter, environmentStartup: f.startup });
