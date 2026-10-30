@@ -2,6 +2,19 @@
 
 ## Current review status (2026-10-30)
 
+### Attach context argv (2026-10-30)
+
+The default `attach` context probe now invokes `tmux` with an argument array,
+rather than sending POSIX-quoted text through the host shell. In particular,
+Windows no longer passes literal single quotes around the pane target and
+format. The existing injected string executor remains available for callers
+that provide their own tmux socket routing.
+
+Five selected context tests passed (nine other tests were filtered out), and
+the CLI TypeScript check passed. This establishes argument construction and
+response parsing, not an actual stock-psmux attachment or multi-session routing
+result. Those native integration cases remain open.
+
 This table is a navigation map for the continuing parity review, not a claim
 that every feature or source file has been assessed. The detailed receipts
 below retain their own head, scope and limitations. Public source changes do

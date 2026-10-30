@@ -1,5 +1,5 @@
 import { Command, Option } from "commander";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -16,14 +16,16 @@ export function attachEnvironmentLines(nodeId: string, sessionName: string, shel
     shell === "powershell" ? `$env:${key} = '${value.replace(/'/g, "''")}'` : `export ${key}=${shellQuote(value)}`);
 }
 
-const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).replace(/\r?\n$/, "");
+type TmuxFileExecFn = (file: string, args: string[]) => string;
+const defaultTmuxFileExec: TmuxFileExecFn = (file, args) =>
+  execFileSync(file, args, { encoding: "utf-8", windowsHide: true }).replace(/\r?\n$/, "");
 
 // tmux writes a control character in its output as "_", so a newline between fields can't separate them, and a
 // session name may hold spaces or underscores. Ask for the two fixed-shape ids first; the rest of the line is the name.
 const TMUX_CONTEXT_FORMAT = "#{pane_id} #{window_id} #{session_name}";
 const TMUX_CONTEXT_LINE = /^(%\d+) (@\d+) (.+)$/;
 
-export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
+export function resolveAttachContext(tmuxExec?: TmuxExecFn, fileExec: TmuxFileExecFn = defaultTmuxFileExec):
   | { attachmentType: "external_cli" }
   | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string; tmuxSocketPath?: string } {
   const tmuxPane = process.env["TMUX_PANE"];
@@ -32,7 +34,9 @@ export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
   }
 
   try {
-    const output = tmuxExec(`tmux display-message -p -t ${shellQuote(tmuxPane)} ${shellQuote(TMUX_CONTEXT_FORMAT)}`);
+    const output = tmuxExec
+      ? tmuxExec(`tmux display-message -p -t ${shellQuote(tmuxPane)} ${shellQuote(TMUX_CONTEXT_FORMAT)}`)
+      : fileExec("tmux", ["display-message", "-p", "-t", tmuxPane, TMUX_CONTEXT_FORMAT]);
     const match = TMUX_CONTEXT_LINE.exec(output.trim());
     if (match) {
       const [, resolvedPane, tmuxWindow, tmuxSession] = match;

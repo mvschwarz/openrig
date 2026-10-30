@@ -201,6 +201,14 @@ describe("Attach CLI", () => {
     expect(result).toMatchObject({ attachmentType: "tmux", tmuxSocketPath: "/private/socket name ", tmuxSession: "team_1 rig_b @7 %9" });
   });
 
+  it("resolveAttachContext passes native context arguments without shell quoting", () => {
+    const execute = vi.fn(() => "%42 @12 owned session");
+    expect(withTmuxPane("%42", () => resolveAttachContext(undefined, execute))).toEqual({
+      attachmentType: "tmux", tmuxSession: "owned session", tmuxWindow: "@12", tmuxPane: "%42",
+    });
+    expect(execute).toHaveBeenCalledWith("tmux", ["display-message", "-p", "-t", "%42", "#{pane_id} #{window_id} #{session_name}"]);
+  });
+
   // Real tmux rewrote the newlines of a combined format as "_" ("unrelated-shell_@2_%2"), and the session fell back to
   // external_cli, so replies to the self-attached member had no transport.
   it.each([
