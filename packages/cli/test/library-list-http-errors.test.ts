@@ -6,6 +6,7 @@ import { contextCommand } from "../src/commands/context.js";
 import { specsCommand } from "../src/commands/specs.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE } from "../src/daemon-lifecycle.js";
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 
 let server: http.Server | undefined;
 afterEach(async () => {
@@ -23,6 +24,7 @@ it.each(Object.keys(libraries) as Array<keyof typeof libraries>)("%s inventory r
   const requests: string[] = [];
   server = http.createServer((req, res) => { requests.push(req.url!); res.writeHead(status, { "Content-Type": "application/json" }); res.end("[]"); });
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+  allowOwnedHttpFixture(server);
   const port = (server.address() as { port: number }).port;
   const deps = { clientFactory: (base: string) => new DaemonClient(base), lifecycleDeps: {
     exists: (p: string) => p === STATE_FILE, readFile: () => JSON.stringify({ pid: process.pid, port, db: "fixture.sqlite", startedAt: new Date().toISOString() }),

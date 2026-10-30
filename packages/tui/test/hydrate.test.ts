@@ -758,6 +758,21 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     });
   });
 
+  it.each([
+    [String.raw`local:..\..\agents\development\implementer` + "\\", "implementer"],
+    [String.raw`path:C:\团队\agents\implementer.yaml`, "implementer"],
+    [String.raw`path:C:\团队\agents\unavailable.yaml`, String.raw`path:C:\团队\agents\unavailable.yaml`],
+  ])("joins served native agent ref %s without inventing an unavailable spec", async (ref, expected) => {
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      "/api/specs/library/a1/review": {
+        ...(FIXTURES["/api/specs/library/a1/review"] as Record<string, unknown>),
+        pods: [{ id: "dev", label: "Development", members: [{ id: "impl", agentRef: ref, runtime: "codex", profile: "default" }], edges: [] }],
+      },
+    }));
+    expect(snap.specs.find(s => s.name === "myrig")?.agentRefs).toEqual([expected]);
+    if (expected === "implementer") expect(snap.specs.find(s => s.name === "implementer")?.usedByRigs).toEqual(["myrig"]);
+  });
+
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.specs.find((s) => s.name === "myrig")?.agentRefs).toEqual(["implementer", "qa-agent"]);

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createServer } from "node:http";
 import { DaemonClient } from "../src/daemon-client.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
 
 describe("activity stream response ownership", () => {
   for (const [status, contentType] of [[401, "text/event-stream"], [200, "application/json"]] as const) {
@@ -12,8 +13,7 @@ describe("activity stream response ownership", () => {
         res.on("close", () => { closed = true; });
       });
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address() as { port: number };
-      const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+      const client = new DaemonClient({ baseUrl: httpFixtureOrigin(server) });
       try {
         expect(await client.openActivityEvents()).toBeNull();
         await vi.waitFor(() => expect(closed).toBe(true), { timeout: 1_000 });

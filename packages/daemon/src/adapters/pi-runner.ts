@@ -19,18 +19,21 @@
 // entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
+import { readPlatformEnv } from "../domain/platform-env.js";
 import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { resolveRunnerHome } from "./runner-home.js";
 import { credentialTaint, judgeChargeProvenance, piCredentialEvidence, piCredentialNotice, type PiCredentialEvidence } from "./pi-readiness.js";
 import { extractPiUsageFacts, parsePiSessionHeader, tiesPiForkHeader, type PiSessionBoundary, type PiUsageFact } from "../domain/pi-usage-facts.js";
 import { OpenRouterChargeLookup, openRouterGenerationFetcher, type ChargeProvenance } from "./pi-openrouter-charge.js";
 import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-rpc-frame.js";
+import { resolveWindowsPiCommand } from "./windows-pi-command.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -992,7 +995,7 @@ function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; tok
   }
   if (!baseUrl || !token) {
     try {
-      const home = env.OPENRIG_HOME?.trim() || nodePath.join(process.env.HOME ?? "", ".openrig");
+      const home = resolveRunnerHome(env);
       const parsed = JSON.parse(fs.readFileSync(nodePath.join(home, "activity-endpoint.json"), "utf8"));
       if (!baseUrl && typeof parsed.baseUrl === "string") baseUrl = parsed.baseUrl;
       if (!token && typeof parsed.token === "string") token = parsed.token;
@@ -1070,19 +1073,31 @@ export function resolveRuntimeExecutable(
   name: string,
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
+  platform: NodeJS.Platform = process.platform,
+  cwd = process.cwd(),
 ): { ok: true; path: string } | { ok: false; error: string } {
-  const onPath = (env.PATH ?? "").split(nodePath.delimiter)
-    .filter((dir) => nodePath.isAbsolute(dir))
-    .map((dir) => nodePath.join(dir, name))
+  const paths = platform === "win32" ? nodePath.win32 : nodePath.posix;
+  // Native spawn does not execute npm .cmd/.ps1 shims. OMP ships an .exe;
+  // resolve that file before the isolated seat HOME is applied.
+  const names = platform === "win32" && !paths.extname(name)
+    ? (readPlatformEnv(env, "PATHEXT", platform) ?? ".COM;.EXE;.BAT;.CMD").split(";")
+      .map(ext => ext.toLowerCase()).filter(ext => ext === ".exe" || ext === ".com").map(ext => name + ext)
+    : [name];
+  const searchPath = readPlatformEnv(env, "PATH", platform) ?? "";
+  const onPath = searchPath.split(paths.delimiter)
+    .map(dir => platform === "win32" ? paths.resolve(cwd, dir.replace(/^"(.*)"$/, "$1")) : dir)
+    .filter((dir) => paths.isAbsolute(dir))
+    .flatMap((dir) => names.map(filename => paths.join(dir, filename)))
     .find((candidate) => ops.isExecutable(candidate));
-  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
+  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${searchPath})` };
   let real: string;
   try {
     real = ops.realpath(onPath);
   } catch (err) {
     return { ok: false, error: `could not resolve ${onPath}: ${(err as Error).message}` };
   }
-  if (nodePath.basename(real) !== "mise") return { ok: true, path: real };
+  const binaryName = paths.basename(real);
+  if (platform === "win32" ? !/^mise(?:\.exe)?$/i.test(binaryName) : binaryName !== "mise") return { ok: true, path: real };
   // A mise shim is a symlink to mise itself; ask mise for the tool it maps to.
   let target: string;
   try {
@@ -1090,7 +1105,7 @@ export function resolveRuntimeExecutable(
   } catch (err) {
     return { ok: false, error: `${onPath} is a mise shim and 'mise which ${name}' failed: ${(err as Error).message}` };
   }
-  if (!nodePath.isAbsolute(target) || !ops.isExecutable(target)) {
+  if (!paths.isAbsolute(target) || !ops.isExecutable(target)) {
     return { ok: false, error: `${onPath} is a mise shim but 'mise which ${name}' returned no executable (${target || "empty"})` };
   }
   try {
@@ -1184,7 +1199,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // with the runner's own environment.
   let command: string = runtime;
   if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+    const resolved = resolveRuntimeExecutable("omp", process.env, undefined, process.platform, args.cwd);
     if (!resolved.ok) {
       console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
@@ -1222,7 +1237,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // (or was added after it, and is then seen by the next one).
   const launchCredentialEvidence = args.openRouterCharge === true && runtime === "pi" ? credentialEvidence() : undefined;
 
-  const child = spawn(command, childArgs, {
+  let prefix: string[] = [];
+  if (runtime === "pi" && process.platform === "win32") {
+    try {
+      const resolved = resolveWindowsPiCommand(readPlatformEnv(process.env, "PATH") ?? "", process.execPath, args.cwd, readPlatformEnv(process.env, "PATHEXT"));
+      command = resolved.command;
+      prefix = resolved.prefix;
+    } catch {
+      console.error("[pi-runner] ERROR Windows Pi requires a native executable or a recognized @earendil-works npm installation on the runner PATH.");
+      const at = new Date().toISOString();
+        let prior: PiRunnerState | null = null;
+        try { prior = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8")); } catch { /* unavailable cursor */ }
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ ready: false, launchId: args.launchId, updatedAt: at,
+          ...(prior?.lastEntryId ? { lastEntryId: prior.lastEntryId } : {}), exited: { code: 127, at } }));
+      process.exitCode = 127;
+      return;
+    }
+  }
+  const child = spawn(command, [...prefix, ...childArgs], {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -1436,7 +1468,9 @@ const invokedDirectly = (() => {
     if (!entry) return false;
     // pathToFileURL handles percent-encoding (spaces etc.) the way
     // import.meta.url does — a hand-built `file://${path}` string does not.
-    return import.meta.url === pathToFileURL(nodePath.resolve(entry)).href;
+    return process.platform === "win32"
+      ? fs.realpathSync.native(fileURLToPath(import.meta.url)) === fs.realpathSync.native(entry)
+      : import.meta.url === pathToFileURL(nodePath.resolve(entry)).href;
   } catch {
     return false;
   }

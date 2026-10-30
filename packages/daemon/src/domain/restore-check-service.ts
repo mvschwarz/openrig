@@ -2,7 +2,8 @@ import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.j
 import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { checkWindowsDirectoryWriteAccess } from "./windows-owned-text.js";
+import { isAbsolute, join, normalize, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
@@ -509,14 +510,16 @@ export class RestoreCheckService {
     const stateDir = getCompatibleOpenRigPath("");
     try {
       // Non-mutating permission probe — no file creation/deletion.
-      // accessSync throws if the directory is not writable.
-      accessSync(stateDir, constants.W_OK);
+      if (process.platform === "win32") checkWindowsDirectoryWriteAccess(stateDir);
+      else accessSync(stateDir, constants.W_OK);
       return { check: "host.state-dir-writable", status: "green", evidence: `${stateDir} is writable`, remediation: "" };
     } catch {
       return {
         check: "host.state-dir-writable", status: "red",
         evidence: `${stateDir} is not writable`,
-        remediation: `Fix permissions: chmod u+w ${stateDir}`,
+        remediation: process.platform === "win32"
+          ? `Inspect the directory permissions in Windows Security properties: ${stateDir}`
+          : `Fix permissions: chmod u+w ${stateDir}`,
       remediationSafe: false,
       };
     }
@@ -1222,14 +1225,14 @@ export class RestoreCheckService {
       return entry["hooks"].some((hook) => {
         if (!isRecord(hook) || hook["type"] !== "command" || typeof hook["command"] !== "string") return false;
         const parsed = parseManagedClaudeNodeCommand(hook["command"]);
-        return parsed?.args.length === 1 && parsed.args[0] === relayPath;
+        return parsed?.args.length === 1 && normalize(parsed.args[0]!) === normalize(relayPath);
       });
     }));
   }
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
     // OPR.0.3.2.14 — subpath scrubbed (internal-team layout → generic placeholder).
-    const substrateRoot = this.deps.substrateRoot ?? join(process.env["HOME"] ?? "~", ".openrig", "shared-docs");
+    const substrateRoot = this.deps.substrateRoot ?? getCompatibleOpenRigPath("shared-docs");
     const rigRoot = join(substrateRoot, "rigs", rig.name);
     const rigYaml = join(rigRoot, "rig.yaml");
 

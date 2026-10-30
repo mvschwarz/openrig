@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { createPrivateTextFile } from "./private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./windows-owned-text.js";
 import { join } from "node:path";
 
 export const HEALTH_DETECTORS = ["process.ceremony-amplification", "process.review-carousel", "process.redundant-wake-storm", "governance.stale-directive", "governance.scope-admission-drift", "context.pressure"] as const;
@@ -78,8 +80,15 @@ export class HealthPolicyStore {
     // Retain the proposed bytes and predecessor before atomically replacing the live policy.
     writeFileSync(join(dir, "policy-history", `${id}.json`), JSON.stringify({ actor, at: new Date().toISOString(), previous, policy }, null, 2), { flag: "wx" });
     const temporary = join(dir, `policy-${id}.tmp`);
-    writeFileSync(temporary, JSON.stringify(policy, null, 2) + "\n");
-    renameSync(temporary, this.path);
+    const content = JSON.stringify(policy, null, 2) + "\n";
+    if (process.platform === "win32" && existsSync(this.path) && lstatSync(this.path).isFile()) {
+      createPrivateTextFile(temporary, content);
+      try { replaceWindowsFilePreservingMetadata(this.path, temporary); }
+      finally { try { unlinkSync(temporary); } catch { /* Published or retained private staging. */ } }
+    } else {
+      writeFileSync(temporary, content);
+      renameSync(temporary, this.path);
+    }
     return this.read();
   }
 }

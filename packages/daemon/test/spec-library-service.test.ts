@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SpecLibraryService } from "../src/domain/spec-library-service.js";
@@ -61,6 +61,19 @@ describe("SpecLibraryService", () => {
       specReviewService,
     });
   }
+
+  it.runIf(process.platform === "win32").each(["CON", "x".repeat(251), "ORIGINAL"])("renames a native user spec to a valid display name %s", name => {
+    writeFileSync(join(tmpDir, "original.yaml"), VALID_AGENT_YAML);
+    const lib = createLibrary(); lib.scan();
+    const result = lib.rename(lib.list()[0]!.id, name);
+    expect(result).toMatchObject({ ok: true, entry: { name } });
+    if (!result.ok) throw new Error(result.error);
+    if (name === "CON" || name.length > 250) expect(result.entry.sourcePath).toContain(".openrig-spec-");
+    if (name === "ORIGINAL") expect(result.entry.sourcePath).toBe(join(tmpDir, "original.yaml"));
+    expect(existsSync(result.entry.sourcePath)).toBe(true);
+    expect(readFileSync(result.entry.sourcePath, "utf8")).toContain(`name: ${name}`);
+    expect(lib.list()).toHaveLength(1);
+  });
 
   it("scan discovers rig specs validated by SpecReviewService", () => {
     writeFileSync(join(tmpDir, "my-rig.yaml"), VALID_RIG_YAML);
@@ -147,7 +160,7 @@ describe("SpecLibraryService", () => {
     const entries = lib.list({ kind: "agent" });
     expect(entries).toHaveLength(1);
     expect(entries[0]!.name).toBe("test-agent");
-    expect(entries[0]!.relativePath).toBe("agents/development/implementer/agent.yaml");
+    expect(entries[0]!.relativePath).toBe(join("agents", "development", "implementer", "agent.yaml"));
 
     lib.scan();
     expect(lib.list({ kind: "agent" })[0]!.id).toBe(entries[0]!.id);
@@ -167,7 +180,7 @@ describe("SpecLibraryService", () => {
 
     const rigs = lib.list({ kind: "rig" });
     expect(rigs).toHaveLength(1);
-    expect(rigs[0]!.relativePath).toBe("rigs/launch/demo/rig.yaml");
+    expect(rigs[0]!.relativePath).toBe(join("rigs", "launch", "demo", "rig.yaml"));
   });
 
   // OPR.0.3.2.22 Bug 4 — walkYamlFiles now skips noise directories

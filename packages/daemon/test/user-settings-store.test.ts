@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   SettingsStore,
@@ -21,7 +21,7 @@ import {
 const DEFAULT_PRE_COMPACT_INSTRUCTION_FRAGMENT = "Read the claude-compaction-restore skill";
 const DEFAULT_RESTORE_INSTRUCTION_FRAGMENT = "Read the claude-compaction-restore skill";
 const DEFAULT_AUDIT_INSTRUCTION_FRAGMENT = "Required Read-Depth Audit";
-const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = "compaction/post-compact-extra.md";
+const DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX = join("compaction", "post-compact-extra.md");
 
 function clearEnv(): () => void {
   const keys = [
@@ -560,11 +560,11 @@ describe("SettingsStore (User Settings v0)", () => {
     store.set("skills.root", join(tmpDir, "skills"));
     const cfg = store.resolveConfig();
     expect(cfg.workspaceRoot).toBe("/custom/ws");
-    expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/missions");
-    expect(cfg.workspaceSteeringPath).toBe("/custom/ws/STEERING.md");
-    expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
-    expect(cfg.workspaceProjectsRoot).toBe("/custom/ws/projects");
-    expect(cfg.workspaceCatalogPath).toBe("/custom/ws/workspace.yaml");
+    expect(cfg.workspaceSlicesRoot).toBe(join("/custom/ws", "missions"));
+    expect(cfg.workspaceSteeringPath).toBe(join("/custom/ws", "STEERING.md"));
+    expect(cfg.workspaceSpecsRoot).toBe(join("/custom/ws", "specs"));
+    expect(cfg.workspaceProjectsRoot).toBe(join("/custom/ws", "projects"));
+    expect(cfg.workspaceCatalogPath).toBe(join("/custom/ws", "workspace.yaml"));
     expect(cfg.skillsRoot).toBe(join(tmpDir, "skills"));
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
     expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
@@ -591,15 +591,15 @@ describe("SettingsStore (User Settings v0)", () => {
     const cfg = store.resolveConfig();
     expect(cfg.workspaceSlicesRoot).toBe("/custom/slices");
     // Other subdirs still cascade from workspace.root:
-    expect(cfg.workspaceProjectsRoot).toBe("/ws/projects");
-    expect(cfg.workspaceCatalogPath).toBe("/ws/workspace.yaml");
+    expect(cfg.workspaceProjectsRoot).toBe(join("/ws", "projects"));
+    expect(cfg.workspaceCatalogPath).toBe(join("/ws", "workspace.yaml"));
   });
 
   it("workspace project paths default from workspace.root and support env overrides", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/custom/ws");
-    expect(store.resolveConfig().workspaceProjectsRoot).toBe("/custom/ws/projects");
-    expect(store.resolveConfig().workspaceCatalogPath).toBe("/custom/ws/workspace.yaml");
+    expect(store.resolveConfig().workspaceProjectsRoot).toBe(join("/custom/ws", "projects"));
+    expect(store.resolveConfig().workspaceCatalogPath).toBe(join("/custom/ws", "workspace.yaml"));
 
     store.set("workspace.projects_root", "/configured/projects");
     store.set("workspace.catalog_path", "/configured/workspace.yaml");
@@ -628,8 +628,8 @@ describe("SettingsStore (User Settings v0)", () => {
     const store = new SettingsStore(configPath);
     const slices = store.resolveOne("workspace.slices_root");
     const steering = store.resolveOne("workspace.steering_path");
-    expect(slices).toMatchObject({ value: "/ws/missions", source: "default" });
-    expect(steering).toMatchObject({ value: "/ws/STEERING.md", source: "default" });
+    expect(slices).toMatchObject({ value: join("/ws", "missions"), source: "default" });
+    expect(steering).toMatchObject({ value: join("/ws", "STEERING.md"), source: "default" });
   });
 
   it("UEP env-var graduation: OPENRIG_FILES_ALLOWLIST resolves files.allowlist", () => {
@@ -685,7 +685,7 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(policy.preCompactInstruction).toContain(DEFAULT_PRE_COMPACT_INSTRUCTION_FRAGMENT);
     expect(policy.compactInstruction).toBe("");
     expect(policy.messageInline).toContain(DEFAULT_RESTORE_INSTRUCTION_FRAGMENT);
-    expect(policy.messageFilePath).toMatch(/^\//);
+    expect(isAbsolute(policy.messageFilePath)).toBe(true);
     expect(policy.messageFilePath.endsWith(DEFAULT_EXTRA_INSTRUCTION_FILE_SUFFIX)).toBe(true);
     expect(policy.postRestoreAuditInstruction).toContain(DEFAULT_AUDIT_INSTRUCTION_FRAGMENT);
   });

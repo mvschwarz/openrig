@@ -51,9 +51,10 @@ function mockAdapter(runtime = "claude-code"): RuntimeAdapter {
 }
 
 function mockFs(files: Record<string, string>): AgentResolverFsOps {
+  files = Object.fromEntries(Object.entries(files).map(([p, value]) => [nodePath.resolve(p), value]));
   return {
-    readFile: (p: string) => { if (p in files) return files[p]!; throw new Error(`Not found: ${p}`); },
-    exists: (p: string) => p in files,
+    readFile: (p: string) => { const key = nodePath.resolve(p); if (key in files) return files[key]!; throw new Error(`Not found: ${p}`); },
+    exists: (p: string) => nodePath.resolve(p) in files,
   };
 }
 
@@ -261,11 +262,11 @@ describe("PodRigInstantiator", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       const rig = rigRepo.getRig(result.result.rigId)!;
-      expect(rig.nodes[0]!.cwd).toBe("/workspace/project");
+      expect(rig.nodes[0]!.cwd).toBe(nodePath.resolve("/workspace/project"));
       const sessions = sessionRegistry.getSessionsForRig(result.result.rigId);
       expect(sessions[0]!.startupStatus).toBe("ready");
       const planArg = (adapter.project as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
-      expect(planArg.cwd).toBe("/workspace/project");
+      expect(planArg.cwd).toBe(nodePath.resolve("/workspace/project"));
     }
     db.close();
   });
@@ -423,7 +424,7 @@ profiles:
       expect(vi.mocked(seatAdapter.project).mock.calls[0]![1].seatSkillsRoot).toBe(landed);
       const adapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
       const plan = vi.mocked(adapter.project).mock.calls[0]![0];
-      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/agents/impl/skills/shared");
+      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain(nodePath.join("installed", "agents", "impl", "skills", "shared"));
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -436,7 +437,7 @@ profiles:
       const moved = nodePath.join(root, "moved-seats");
       fs.mkdirSync(nodePath.join(home, "state"), { recursive: true });
       fs.mkdirSync(moved);
-      fs.symlinkSync(moved, nodePath.join(home, "state", "seats"));
+      fs.symlinkSync(moved, nodePath.join(home, "state", "seats"), process.platform === "win32" ? "junction" : "dir");
       process.env["OPENRIG_HOME"] = home;
       const installed = nodePath.join(root, "installed");
       const project = nodePath.join(root, "project");
@@ -477,7 +478,7 @@ profiles:
       const moved = nodePath.join(root, "moved-seats");
       fs.mkdirSync(nodePath.join(home, "state"), { recursive: true });
       fs.mkdirSync(moved);
-      fs.symlinkSync(moved, nodePath.join(home, "state", "seats"));
+      fs.symlinkSync(moved, nodePath.join(home, "state", "seats"), process.platform === "win32" ? "junction" : "dir");
       process.env["OPENRIG_HOME"] = home;
       const installed = nodePath.join(root, "installed");
       const project = nodePath.join(root, "project");
@@ -504,7 +505,7 @@ profiles:
       for (const ref of ["claude/reviewer.md", "claude/house.md", "claude/plugins/review"]) {
         expect(JSON.stringify(result)).toContain(`seat_launch_addition_not_delivered: ${ref}: `);
       }
-      expect(result.result.nodes.find((n) => n.logicalId === "dev.qa")).toMatchObject({ status: "failed", error: expect.stringMatching(/addition_missing: .*claude\/missing\.md/) });
+      expect(result.result.nodes.find((n) => n.logicalId === "dev.qa")).toMatchObject({ status: "failed", error: expect.stringMatching(/addition_missing: .*claude[\\/]+missing\.md/) });
       expect(listTree(moved)).toEqual([]);
       expect(listTree(project)).toEqual([]);
     } finally {
@@ -543,7 +544,7 @@ profiles:
       expect(additions).toMatchObject({ agent: "openrig:reviewer", pluginDirs: [expect.stringContaining("review")] });
       expect(fs.readFileSync(additions!.appendSystemPromptFile!, "utf8")).toBe("House rules.\n"); // the seat's own copy
       const qa = result.result.nodes.find((n) => n.logicalId === "dev.qa");
-      expect(JSON.stringify(qa)).toMatch(/addition_missing: .*claude\/missing\.md/);
+      expect(JSON.stringify(qa)).toMatch(/addition_missing: .*claude[\\/]+missing\.md/);
       expect(JSON.stringify(qa)).not.toContain("addition_missing: addition_missing");
     } finally {
       if (savedHome === undefined) delete process.env["OPENRIG_HOME"]; else process.env["OPENRIG_HOME"] = savedHome;
@@ -578,7 +579,7 @@ profiles:
           // The seat's runtime storage (made by the launch just before this) moved out, and a link left in its place.
           const runtimeRoot = nodePath.dirname(nodePath.dirname(input.location.targetRoot));
           fs.renameSync(runtimeRoot, moved);
-          fs.symlinkSync(moved, runtimeRoot);
+          fs.symlinkSync(moved, runtimeRoot, process.platform === "win32" ? "junction" : "dir");
           movedBefore = listTree(moved);
         }
         return reconcileSkillLoadout(input);

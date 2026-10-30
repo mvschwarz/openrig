@@ -1,4 +1,5 @@
 import { isEscalationTargetRef } from "./escalation-target-ref.js";
+import { isAbsolute as nativeIsAbsolute } from "node:path";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
 import { specClaudeTokenRef } from "./claude-seat-token.js";
 import { validateClaudeMcp } from "./claude-mcp.js";
@@ -644,11 +645,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     } else if (ref.startsWith("local:")) {
       const path = ref.slice("local:".length);
       if (!path) errors.push(`${prefix}.agent_ref: local: ref must have a path`);
-      else if (path.startsWith("/")) errors.push(`${prefix}.agent_ref: local: ref must be a relative path (got "${ref}")`);
+      else if (nativeIsAbsolute(path)) errors.push(`${prefix}.agent_ref: local: ref must be a relative path (got "${ref}")`);
     } else if (ref.startsWith("path:")) {
       const path = ref.slice("path:".length);
       if (!path) errors.push(`${prefix}.agent_ref: path: ref must have a path`);
-      else if (!path.startsWith("/")) errors.push(`${prefix}.agent_ref: path: ref must be an absolute path (got "${ref}")`);
+      else if (!nativeIsAbsolute(path)) errors.push(`${prefix}.agent_ref: path: ref must be an absolute path (got "${ref}")`);
     }
   }
 

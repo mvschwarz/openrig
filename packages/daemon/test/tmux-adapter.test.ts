@@ -1454,6 +1454,19 @@ describe("TmuxAdapter", () => {
   });
 
   describe("signalPaneProcess", () => {
+    it.skipIf(process.platform !== "win32")("uses taskkill for a native psmux process and preserves failure", async () => {
+      const exec = vi.fn<ExecFn>(async () => "");
+      const adapter = new TmuxAdapter(exec, undefined, undefined, "psmux");
+      expect((await adapter.signalPid(4242, "TERM")).ok).toBe(true);
+      expect(exec).toHaveBeenLastCalledWith("taskkill /PID 4242 /T");
+      expect((await adapter.signalPid(4242, "KILL")).ok).toBe(true);
+      expect(exec).toHaveBeenLastCalledWith("taskkill /PID 4242 /T /F");
+      exec.mockRejectedValueOnce(new Error("Access is denied"));
+      expect((await adapter.signalPid(4242, "KILL")).ok).toBe(false);
+      exec.mockClear();
+      expect((await adapter.signalPid(0, "KILL")).ok).toBe(false);
+      expect(exec).not.toHaveBeenCalled();
+    });
     it("sends the given signal to the pane's foreground pid (graceful TERM / fallback KILL)", async () => {
       const calls: string[] = [];
       const exec = vi.fn<ExecFn>(async (cmd: string) => { calls.push(cmd); return cmd.includes("pane_pid") ? "4242\n" : ""; });

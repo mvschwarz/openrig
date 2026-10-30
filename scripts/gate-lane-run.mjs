@@ -72,11 +72,12 @@ export async function runLegs(exec) {
  * tsc) — never the gate's own pid — plus loadavg. Injected reader (loadavg, processes) for testability.
  */
 export function observeForeignLoad({ loadavg, processes }) {
-  const foreign = processes.filter((p) => p.pid !== process.pid && /\b(node|vitest|tsc)\b/.test(p.command));
+  const foreign = processes?.filter((p) => p.pid !== process.pid && /\b(node|vitest|tsc)\b/i.test(p.command));
   const advisory = [];
-  if (foreign.length > 0) advisory.push(`${foreign.length} foreign node/vitest/tsc process(es) running during the gate`);
-  advisory.push(`loadavg ${loadavg.map((n) => n.toFixed(2)).join(" ")}`);
-  return { advisory, foreignProcessCount: foreign.length, loadavg };
+  if (!foreign) advisory.push("process census unavailable; foreign toolchain process count unknown");
+  else if (foreign.length > 0) advisory.push(`${foreign.length} foreign node/vitest/tsc process(es) running during the gate`);
+  advisory.push(loadavg ? `loadavg ${loadavg.map((n) => n.toFixed(2)).join(" ")}` : "loadavg unavailable on this platform");
+  return { advisory, foreignProcessCount: foreign?.length ?? null, loadavg, processObservation: foreign ? "available" : "unavailable" };
 }
 
 /**

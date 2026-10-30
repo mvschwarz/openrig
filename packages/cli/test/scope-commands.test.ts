@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import YAML from "yaml";
+import { denyFixtureFile } from "./helpers/file-permissions.js";
 
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
@@ -146,7 +147,7 @@ describe("rig scope resolve-notes", () => {
     fs.mkdirSync(node, { recursive: true });
     if (current) fs.writeFileSync(currentPath, "current\n", "utf8");
     if (legacy) fs.writeFileSync(legacyPath, "legacy\n", "utf8");
-    if (unreadableCurrent) fs.chmodSync(currentPath, 0o000);
+    const restore = unreadableCurrent ? denyFixtureFile(currentPath, "read") : () => {};
 
     try {
       const result = await run(["resolve-notes", node, "--json"], root);
@@ -157,7 +158,7 @@ describe("rig scope resolve-notes", () => {
         resolution: expected ? { path: path.join(node, expected), name: expected } : null,
       });
     } finally {
-      if (unreadableCurrent) fs.chmodSync(currentPath, 0o600);
+      restore();
     }
   });
 });
@@ -368,20 +369,19 @@ describe("rig scope slice rollback snapshots", () => {
     const sourceNodeBefore = fs.readFileSync(sourceNode, "utf8");
     const targetNodeBefore = fs.readFileSync(targetNode, "utf8");
     const deniedPath = unreadable === "source" ? sourceNode : targetNode;
-    const originalMode = fs.statSync(deniedPath).mode;
     const args = operation === "close"
       ? ["slice", "close", "01-debt-foo", "--reason", "wontfix"]
       : ["slice", operation, "01-debt-foo", "release-0.3.2"];
     let result: CaptureResult;
-    fs.chmodSync(deniedPath, 0o000);
+    const restore = denyFixtureFile(deniedPath, "read");
     try {
       result = await run([...args, "--mission", "backlog", "--json"], env.missionsRoot);
     } finally {
-      fs.chmodSync(deniedPath, originalMode);
+      restore();
     }
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout + result.stderr).toContain("EACCES");
+    expect(result.stdout + result.stderr).toMatch(process.platform === "win32" ? /EPERM|EACCES/ : /EACCES/);
     expect(fs.readFileSync(sourceManifest, "utf8")).toBe(sourceBefore);
     expect(fs.readFileSync(targetManifest, "utf8")).toBe(targetBefore);
     expect(fs.readFileSync(sourceNode, "utf8")).toBe(sourceNodeBefore);
@@ -646,18 +646,18 @@ describe("rig scope slice moves in a dash-prefixed workspace", () => {
     env = seedSubstrate("-docs");
     const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo", "README.md");
     const original = fs.readFileSync(source, "utf8");
-    fs.chmodSync(source, 0o444);
+    const restore = denyFixtureFile(source, "write");
     try {
       const result = await run([
         "slice", "close", "01-debt-foo", "--reason", "wontfix", "--mission", "backlog", "--json",
       ], env.missionsRoot);
       expect(result.exitCode).toBe(1);
-      expect(result.stdout + result.stderr).toContain("EACCES");
+      expect(result.stdout + result.stderr).toMatch(process.platform === "win32" ? /EPERM|EACCES/ : /EACCES/);
       expect(fs.readFileSync(source, "utf8")).toBe(original);
       expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo"))).toBe(false);
       expect(execFileSync("git", ["-C", env.root, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
     } finally {
-      if (fs.existsSync(source)) fs.chmodSync(source, 0o644);
+      if (fs.existsSync(source)) restore();
     }
   });
 });
@@ -1372,12 +1372,15 @@ describe("rig scope audit ordinal naming", () => {
   async function publicScope(args: string[]): Promise<CaptureResult> {
     const home = path.join(root, "owned-cli-home");
     fs.mkdirSync(home, { recursive: true });
+    const gitConfig = path.join(home, "empty.gitconfig");
+    fs.writeFileSync(gitConfig, "");
     const command = [fileURLToPath(new URL("../dist/index.js", import.meta.url)), "scope", ...args,
       "--workspace", path.join(root, "workspace"), "--json"];
     const options = { encoding: "utf8" as const, timeout: 15000, env: {
       PATH: process.env.PATH, HOME: home, TMPDIR: root,
+      ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot, USERPROFILE: home, TEMP: root, TMP: root } : {}),
       OPENRIG_HOME: path.join(home, ".openrig"), CODEX_HOME: path.join(home, "codex"),
-      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull,
+      CLAUDE_CONFIG_DIR: path.join(home, "claude"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: gitConfig,
     } };
     try {
       const result = await promisify(execFile)(process.execPath, command, options);
@@ -1398,7 +1401,7 @@ describe("rig scope audit ordinal naming", () => {
     expect(payload.slice.name).toBe(`${String(previous + 1).padStart(2, "0")}-next`);
     expect(payload.slice.id).toBe(`OPR.99.0.1.${previous + 1}`);
     const audited = await publicScope(["audit", "--mission", "backlog"]);
-    expect(audited.exitCode).toBe(0);
+    expect(audited.exitCode, audited.stdout + audited.stderr).toBe(0);
     const audit = JSON.parse(audited.stdout);
     expect(audit.ok).toBe(true);
     expect(audit.slices).toHaveLength(1);

@@ -14,6 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { setImmediate as yieldToLoop } from "node:timers/promises";
 import { CAPTURE_BATCH, type TmuxAdapter } from "../adapters/tmux.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -409,9 +410,25 @@ export function startTranscriptRotation(
       }
 
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-      const tmpPath = `${outputPath}.tmp.${process.pid}`;
-      fs.writeFileSync(tmpPath, payload);
-      fs.renameSync(tmpPath, outputPath);
+      // A legal transcript leaf may already approach NTFS's component limit.
+      // Keep native staging independent of the session's filename.
+      const tmpPath = process.platform === "win32"
+        ? path.join(path.dirname(outputPath), `.transcript-${randomUUID()}.tmp`)
+        : `${outputPath}.tmp.${process.pid}`;
+      let staged = false;
+      try {
+        if (process.platform === "win32") {
+          const fd = fs.openSync(tmpPath, "wx");
+          staged = true;
+          try { fs.writeFileSync(fd, payload); } finally { fs.closeSync(fd); }
+        } else {
+          fs.writeFileSync(tmpPath, payload);
+          staged = true;
+        }
+        fs.renameSync(tmpPath, outputPath);
+      } finally {
+        if (staged) try { fs.unlinkSync(tmpPath); } catch { /* renamed, or retained after cleanup refusal */ }
+      }
       // Persistence succeeded — only NOW is the tick healthy, so record liveness.
       // A throw above jumps to the catch and never reaches here, so a failed
       // required write leaves liveness un-advanced and getIngestHealth reads the

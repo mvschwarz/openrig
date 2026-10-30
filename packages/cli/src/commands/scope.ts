@@ -419,8 +419,8 @@ function buildSliceCreateCommand(): Command {
           const readmeOnly = Boolean(opts.readmeOnly);
           if (readmeOnly) {
             const markerBody = body.replace(
-              /^(---\n)/,
-              `---\nprogress_rail: readme-only\n`,
+              /^(---)(\r?\n)/,
+              (_match, delimiter: string, newline: string) => `${delimiter}${newline}progress_rail: readme-only${newline}`,
             );
             fs.writeFileSync(readmePath, markerBody, "utf8");
           } else {
@@ -1309,7 +1309,7 @@ function buildAuditCommand(): Command {
 
 function extractFrontmatterRaw(content: string): string | null {
   if (!content.startsWith("---")) return null;
-  const match = /^---\s*\n([\s\S]*?)\n---/.exec(content);
+  const match = /^---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n---/.exec(content);
   return match ? match[1]! : null;
 }
 

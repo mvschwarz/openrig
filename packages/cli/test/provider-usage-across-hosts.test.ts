@@ -3,6 +3,7 @@
 // The human view prints every served fact verbatim; --json prints the served body; a refresh across hosts reports
 // each failed leg and keeps the view.
 import fs from "node:fs";
+import { allowFetchTarget } from "./fetch-guard.js";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +50,7 @@ async function run(args: string[], hub: UsageHost): Promise<{ out: string; err: 
 const open: UsageHost[] = [];
 async function host(id: string, opts: UsageHostOptions = {}): Promise<UsageHost> {
   const h = await UsageHost.start(id, { now: () => NOW, routes: { usageAcrossHosts: { now: () => NOW } }, ...opts });
+  allowFetchTarget(h.url);
   open.push(h);
   return h;
 }
@@ -69,6 +71,7 @@ describe("rig provider status --all-hosts", () => {
     const c = await host("c", { codex: { email: "other@example.com" } });
     const off = await host("off", { usageWindows: false });
     const down = await closedPortUrl();
+    allowFetchTarget(down);
     // d's reading is older than its failed refresh: its windows carry a freshness reason; it serves a seats value too.
     const d = await host("d", { codex: { accountId: "acct-d" }, rewrite: (p, body) => p === "/api/provider/status"
       ? { ...(body as object), usage: ((body as { usage: Array<Record<string, unknown>> }).usage).map((r) => ({ ...r, seats: "configured on 2 seats" })) } : body });

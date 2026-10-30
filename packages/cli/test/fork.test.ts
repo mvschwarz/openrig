@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.4.3.05 — `rig fork` verb tests. Proves the CLI composes the daemon
 // fork composer, surfaces honest errors, reports the successor + kept image,
 // and never prints a native resume id (kept daemon-local by the route).
@@ -94,6 +95,7 @@ describe("rig fork", () => {
       }
     });
     await new Promise<void>((r) => { server.listen(0, r); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

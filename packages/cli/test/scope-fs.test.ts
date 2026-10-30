@@ -661,7 +661,7 @@ describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG
     // follows the move via --follow.
     const linkParent = mktemp();
     const linkRoot = path.join(linkParent, "linked-substrate");
-    fs.symlinkSync(root, linkRoot);
+    fs.symlinkSync(root, linkRoot, process.platform === "win32" ? "junction" : "dir");
     // Sanity: the symlinked tree resolves to a different absolute path
     // than the real tree (covers the /var↔/private/var class on macOS
     // and any other path-resolving symlink class on other OSes).
@@ -670,7 +670,7 @@ describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG
     const dest = path.join(linkRoot, "missions", "release-0.3.2", "slices", "01-foo");
     const result = moveSlice(src, dest);
     expect(result.usedGit).toBe(true);
-    expect(result.repoRoot).toBe(fs.realpathSync(root)); // git returned the realpath
+    expect(result.repoRoot).toBe(process.platform === "win32" ? fs.realpathSync.native(root) : fs.realpathSync(root));
     // git mv staged a rename; history follows.
     execFileSync("git", ["-C", root, "commit", "-m", "ship-via-symlink", "-q"], { stdio: "ignore" });
     const log = execFileSync("git", [

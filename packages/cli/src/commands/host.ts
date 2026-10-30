@@ -1,3 +1,5 @@
+import { openPrivateTextFile } from "../lib/private-text-file.js";
+import { closeSync } from "node:fs";
 // OPR.0.4.4.13 — the host-registry verbs (add / list / doctor — arch
 // R13-2a: no edit/remove/tunnel/bootstrap verbs; hand-editing hosts.yaml
 // remains the path for exotica; the bootstrap ships as script + runbook).
@@ -828,7 +830,9 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       // changed since preflight).
       try {
         mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-        writeFileSync(tokenPath, `${outcome.token}\n`, { mode: 0o600, flag: "wx" });
+        const tokenFd = openPrivateTextFile(tokenPath);
+        try { writeFileSync(tokenFd, `${outcome.token}\n`); }
+        finally { closeSync(tokenFd); }
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "EEXIST") {
           console.error(`a credential file appeared at ${tokenPath} during pairing — refusing to overwrite it. Nothing was persisted by this request.`);

@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import { providerCommand } from "../src/commands/provider.js";
@@ -80,6 +81,7 @@ describe("rig provider status — usage windows", () => {
       });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));

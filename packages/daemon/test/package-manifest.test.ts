@@ -34,6 +34,18 @@ function validRaw() {
 }
 
 describe("PackageManifest", () => {
+  it("derives consistent export names from both path separator forms", () => {
+    const raw = validRaw() as Record<string, unknown>;
+    const exports = raw.exports as Record<string, unknown>;
+    exports.guidance = [{ source: String.raw`guidance\AGENTS.md`, kind: "agents_md", merge_strategy: "managed_block" }];
+    raw.roles = [{ name: "reviewer", guidance: ["AGENTS.md"] }];
+    expect(validateManifest(raw).errors).toEqual([]);
+    expect(normalizeManifest(raw).exports.guidance![0]!.name).toBe("AGENTS.md");
+    (exports.guidance as unknown[]).push({ source: "other/AGENTS.md", kind: "agents_md", merge_strategy: "managed_block" });
+    expect(validateManifest(raw).errors).toContain("Duplicate guidance name: 'AGENTS.md'");
+    exports.agents = [{ source: String.raw`agents\reviewer.yaml` }, { source: "other/reviewer.yaml" }];
+    expect(validateManifest(raw).errors).toContain("Duplicate agent name: 'reviewer'");
+  });
   it("accepts a deferred role hook absent from exports without a warning", () => {
     const raw = validRaw() as Record<string, unknown>;
     const exports = raw.exports as Record<string, unknown>;

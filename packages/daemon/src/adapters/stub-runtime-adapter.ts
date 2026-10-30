@@ -15,6 +15,9 @@
 
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
+import { shellQuote } from "./shell-quote.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
+import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
 import { yoloEnabled, type ResolvedLaunchPosture } from "./yolo-mode.js";
 import type {
@@ -41,6 +44,10 @@ export interface StubAdapterFsOps {
 }
 
 export interface StubRuntimeAdapterDeps {
+  /** Observation platform for hermetic fixtures; production uses the host. */
+  platform?: NodeJS.Platform;
+  /** Production shares its existing census across readiness/model readers. */
+  listProcesses?: WindowsRunnerEvidence["listProcesses"];
   tmux: TmuxAdapter;
   /** Real filesystem operations. Absent in minimal/hermetic test constructions —
    *  the adapter then falls back to an in-memory launch record for readiness and
@@ -67,6 +74,8 @@ interface StubLaunchRecord {
 }
 
 export class StubRuntimeAdapter implements RuntimeAdapter {
+  private platform: NodeJS.Platform;
+  private listProcesses?: WindowsRunnerEvidence["listProcesses"];
   readonly runtime: string;
   private tmux: TmuxAdapter;
   private fsOps?: StubAdapterFsOps;
@@ -76,6 +85,8 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
   private readonly launchRecords = new Map<string, StubLaunchRecord>();
 
   constructor(deps: StubRuntimeAdapterDeps) {
+    this.platform = deps.platform ?? process.platform;
+    this.listProcesses = deps.listProcesses;
     this.tmux = deps.tmux;
     this.fsOps = deps.fsOps;
     this.runtime = deps.runtime ?? "stub";
@@ -190,9 +201,12 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
         posture,
         resumeToken: opts.resumeToken,
       });
-      const textResult = await this.tmux.sendText(sessionName, cmd);
+      const native = this.platform === "win32";
+      const textResult = native
+        ? await this.tmux.sendShellCommand(sessionName, renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}))
+        : await this.tmux.sendText(sessionName, cmd);
       if (!textResult.ok) return { ok: false, error: `Failed to send stub launch command: ${textResult.message}` };
-      const enterResult = await this.tmux.sendKeys(sessionName, ["Enter"]);
+      const enterResult = native ? { ok: true as const } : await this.tmux.sendKeys(sessionName, ["Enter"]);
       if (!enterResult.ok) return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
 
       const ready = await this.waitForRunnerReady(binding, launchId);
@@ -236,12 +250,19 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       }
       if (typeof this.tmux?.getPaneCommand === "function") {
         const paneCommand = (await this.tmux.getPaneCommand(sessionName)) ?? "";
-        if (SHELL_COMMANDS.has(paneCommand)) {
+        if (SHELL_COMMANDS.has(paneCommand) && this.platform !== "win32") {
           return { ready: false, reason: "stub readiness is stale; the pane is back at a shell", code: "runner_exited" };
         }
       }
     }
 
+    if (this.fsOps && this.platform === "win32") {
+      const verified = await verifyWindowsManagedRunner({ runtime: "stub", sessionName, entryPath: this.runnerEntryPath,
+        cwd: binding.cwd, launchId: state.launchId,
+        getPanePid: async () => typeof this.tmux.getPanePid === "function" ? this.tmux.getPanePid(binding.tmuxPane ?? sessionName) : null,
+        listProcesses: this.listProcesses });
+      if (!verified) return { ready: false, code: "awaiting_runtime", reason: "stub-runner live identity is not established" };
+    }
     return { ready: true };
   }
 

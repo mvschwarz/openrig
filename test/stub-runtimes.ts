@@ -11,6 +11,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 
 const STUBS = {
   codex: {
@@ -26,6 +28,32 @@ const STUBS = {
 } as const;
 
 const STUB_NAME = ".openrig-test-runtime-stubs";
+
+function writeWindowsRuntimeStubs(dir: string): void {
+  const source = `using System;
+using System.IO;
+public static class OpenRigTestRuntime {
+  public static int Main(string[] args) {
+    bool codex=Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0]).Equals("codex",StringComparison.OrdinalIgnoreCase);
+    if(args.Length>0 && args[0]=="--version")Console.WriteLine(codex?${JSON.stringify(STUBS.codex.version)}:${JSON.stringify(STUBS.claude.version)});
+    else if(args.Length>0 && args[0]=="--help")Console.Write(codex?${JSON.stringify(STUBS.codex.help.join("\n") + "\n")}:${JSON.stringify(STUBS.claude.help.join("\n") + "\n")});
+    return 0;
+  }
+}`;
+  const hash = createHash("sha256").update(source).digest("hex");
+  const stamp = path.join(dir, ".native-source-sha256");
+  const files = ["codex", "claude"].map(name => path.join(dir, `${name}.exe`));
+  if (files.every(file => fs.existsSync(file)) && fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8") === hash) return;
+  const temporary = path.join(dir, `.native-${randomUUID()}.exe`);
+  const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'\nAdd-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly $env:OPENRIG_TEST_STUB_ASSEMBLY -OutputType ConsoleApplication`;
+  try {
+    execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { env: { ...process.env, OPENRIG_TEST_STUB_ASSEMBLY: temporary }, windowsHide: true, timeout: 15_000, stdio: "pipe" });
+    for (const file of files) fs.copyFileSync(temporary, file);
+    fs.writeFileSync(stamp, hash);
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
 
 const REAL_CODEX_TESTS = [
   "seat-handover-model-fidelity-e2e.test.ts",
@@ -67,5 +95,8 @@ export function writeRuntimeStubs(parent: string): string {
       { mode: 0o755 },
     );
   }
+  // Native Windows lookup ignores extensionless Unix scripts. Missing or
+  // failed preparation must abort setup, never fall through to a host provider.
+  if (process.platform === "win32") writeWindowsRuntimeStubs(dir);
   return dir;
 }

@@ -60,13 +60,13 @@ function run(source, out, args = []) {
   });
 }
 
-function runProduction(out, args = []) {
+function runProduction(out, args = [], overrides = {}) {
   const env = { ...process.env };
   delete env.OPENRIG_SKILLS_SOURCE;
   delete env.OPENRIG_STATIC_PACKS_SOURCE;
   return execFileSync("node", [GEN, ...args], {
     encoding: "utf8",
-    env: { ...env, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
+    env: { ...env, ...overrides, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
   });
 }
 
@@ -122,6 +122,41 @@ test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instru
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("production reference links project document bytes, including a Windows placeholder checkout", () => {
+  const { out, base } = scratch();
+  try {
+    runProduction(out);
+    for (const [projected, document] of [
+      ["help/help.md", "help.md"],
+      ["reference/acp-agents.md", "acp-agents.md"],
+      ["reference/getting-started.md", "getting-started.md"],
+      ["reference/instance-layout.md", "instance-layout.md"],
+      ["reference/rig-spec.md", "rig-spec.md"],
+      ["reference/whats-new.md", "whats-new.md"],
+    ]) {
+      const actual = join(out, projected);
+      assert.equal(lstatSync(actual).isSymbolicLink(), false);
+      assert.deepEqual(readFileSync(actual), readFileSync(join(REPO, "docs/reference", document)), projected);
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("resolved Git reference content is leak-scanned before output is replaced", () => {
+  const { out, base } = scratch();
+  try {
+    mkdirSync(out, { recursive: true }); writeFileSync(join(out, "canary"), "preserve old output");
+    const heading = readFileSync(join(REPO, "docs/reference/whats-new.md"), "utf8").split(/\r?\n/)[0];
+    const rules = join(base, "reference-rules.json");
+    writeFileSync(rules, JSON.stringify({ ...JSON.parse(readFileSync(LEAK_RULES, "utf8")), charged_terms: [heading] }));
+    assert.throws(() => runProduction(out, [], { OPENRIG_LEAK_GUARD_RULES: rules }), error => {
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /reference\/whats-new\.md: line 1/);
+      return true;
+    });
+    assert.equal(readFileSync(join(out, "canary"), "utf8"), "preserve old output");
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test("MALFORMED PROJECTION FAILS THE BUILD — a '..' content path is rejected at package time, non-zero exit", () => {

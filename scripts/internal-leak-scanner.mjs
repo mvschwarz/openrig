@@ -27,7 +27,7 @@ export function scanInternalLeaks({ path, bytes, rules }) {
   const allowed = rules.allowed_context_substrings ?? [];
   const allowedLines = new Set(rules.allowed_context_lines ?? []);
   const findings = [];
-  const lines = Buffer.from(bytes).toString("utf8").split("\n");
+  const lines = Buffer.from(bytes).toString("utf8").split(/\r?\n/);
 
   for (const [index, line] of lines.entries()) {
     // Exact allowances must not exempt concrete substitutions or appended text.

@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import os from "node:os";
 import fs from "node:fs";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
@@ -25,25 +26,29 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; stdout: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const stdout: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origWarn = console.warn;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); stdout.push(line); };
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    // The drift banner goes to stderr via console.warn — stdout stays clean for piping. Capture it
-    // here or a test asserting the operator SEES the warning would pass on an empty transcript.
-    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; console.warn = origWarn; }
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; stdout: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const stdout: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); stdout.push(line); };
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  // The drift banner goes to stderr via console.warn — stdout stays clean for piping. Capture it
+  // here or a test asserting the operator SEES the warning would pass on an empty transcript.
+  console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, stdout, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    console.warn = origWarn;
     process.exitCode = origExitCode;
-    resolve({ logs, stdout, exitCode });
-  });
+  }
 }
 
 function runningDeps(port: number): StatusDeps {
@@ -171,6 +176,7 @@ describe("Bundle CLI", () => {
       }
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 
@@ -452,7 +458,7 @@ describe("Bundle CLI", () => {
     const body = capturedInstallBodies.at(-1)!;
     expect(body["plan"]).toBe(true);
     expect(body["targetRoot"]).toBeUndefined();
-    expect(body["bundlePath"]).toBe("/tmp/test.rigbundle");
+    expect(body["bundlePath"]).toBe(nodePath.resolve("/tmp/test.rigbundle"));
   });
 
   // T6: bundle create --rig-root passes rigRoot in request body
@@ -467,7 +473,7 @@ describe("Bundle CLI", () => {
     });
     const createBody = capturedCreateBodies[capturedCreateBodies.length - 1];
     expect(createBody).toBeTruthy();
-    expect(createBody!["rigRoot"]).toMatch(/\/my\/project/);
+    expect(createBody!["rigRoot"]).toBe(nodePath.resolve("/my/project"));
   });
 
   // Item 1 / slice-05: --notes flag is captured into provenance in the request body

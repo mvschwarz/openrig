@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import path from "node:path";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
@@ -33,12 +34,21 @@ function makeDeps(overrides?: Partial<DoctorDeps>): DoctorDeps {
 }
 
 describe("runDoctorChecks", () => {
+  it.each(["win32", "linux"] as const)("uses the selected %s platform for isolated capture configuration", platform => {
+    const base = makeDeps({ platform });
+    const commands: string[] = [];
+    runDoctorChecks({ ...base, exec: (cmd, opts) => { commands.push(cmd); return base.exec(cmd, opts); } }, []);
+    const probe = commands.filter(cmd => cmd.includes("openrig-check-"));
+    expect(probe).toHaveLength(3);
+    expect(probe.every(cmd => cmd.includes(platform === "win32" ? "-f NUL " : "-f /dev/null "))).toBe(true);
+  });
   it("monorepo command-dir base resolves via the same daemon root seam as daemon start", () => {
+    const root = path.resolve("/Users/example/code/openrig");
     const deps = makeDeps({
-      baseDir: "/Users/example/code/openrig/packages/cli/src/commands",
+      baseDir: path.join(root, "packages/cli/src/commands"),
       exists: (p) =>
-        p === "/Users/example/code/openrig/packages/daemon/dist/index.js"
-        || p === "/Users/example/code/openrig/packages/ui/dist/index.html",
+        p === path.join(root, "packages/daemon/dist/index.js")
+        || p === path.join(root, "packages/ui/dist/index.html"),
     });
 
     const { checks } = runDoctorChecks(deps);
@@ -47,7 +57,7 @@ describe("runDoctorChecks", () => {
   });
 
   it("daemon dist found -> pass", () => {
-    const deps = makeDeps({ exists: (p) => p.endsWith("dist/index.js") || p.endsWith("index.html") });
+    const deps = makeDeps({ exists: (p) => p.endsWith(path.join("dist", "index.js")) || p.endsWith("index.html") });
     const { checks } = runDoctorChecks(deps);
     const daemonCheck = checks.find((c) => c.name === "daemon_dist");
     expect(daemonCheck?.status).toBe("pass");
@@ -167,8 +177,9 @@ describe("runDoctorChecks", () => {
     expect(mouseCheck?.fix).toContain("tmux source-file ~/.tmux.conf");
   });
 
-  it("tmux missing -> fail with guidance", () => {
+  it.each(["darwin", "win32"])("tmux missing -> fail with guidance (%s)", platform => {
     const deps = makeDeps({
+      platform,
       exec: (cmd: string) => {
         if (cmd === "tmux -V") throw new Error("not found");
         return "";
@@ -177,7 +188,7 @@ describe("runDoctorChecks", () => {
     const { checks } = runDoctorChecks(deps);
     const tmuxCheck = checks.find((c) => c.name === "tmux");
     expect(tmuxCheck?.status).toBe("fail");
-    expect(tmuxCheck?.fix).toContain("brew");
+    expect(tmuxCheck?.fix).toContain(platform === "win32" ? "psmux" : "brew");
   });
 
   it("tmux mouse check is omitted on non-macOS hosts", () => {

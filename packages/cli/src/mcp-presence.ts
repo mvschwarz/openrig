@@ -2,6 +2,8 @@
 // reads it. It's presence, a fact about the member, never pickup (a claim on a row) and never "idle".
 import fs from "node:fs";
 import nodePath from "node:path";
+import { randomUUID } from "node:crypto";
+import { createPrivateTextFile } from "./lib/private-text-file.js";
 import { getOpenRigHome } from "./openrig-compat.js";
 
 /** The file, beside the token file and never in it (that stays auth config, as rig mcp token writes it). */
@@ -41,8 +43,8 @@ export function presenceRecorder(file: string, intervalMs = 60_000, now: () => n
     try {
       const seats = readPresence(file);
       seats[seat] = { grant, lastCallAt: new Date(at).toISOString() };
-      const temp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(temp, `${JSON.stringify({ version: 1, seats }, null, 2)}\n`, { mode: 0o600 });
+      const temp = `${file}.${randomUUID()}.tmp`;
+      createPrivateTextFile(temp, `${JSON.stringify({ version: 1, seats }, null, 2)}\n`);
       fs.renameSync(temp, file);
     } catch (err) {
       console.error(`rig mcp serve --http: couldn't record ${seat}'s call: ${(err as Error).message}`);

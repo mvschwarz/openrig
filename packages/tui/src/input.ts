@@ -108,8 +108,8 @@ function parseText(text: string, final: boolean, skipLF = false): { events: Inpu
 export interface InputDecoder {
   write(bytes: string | Buffer): InputEvent[];
   flush(): InputEvent[];
-  /** true while a split escape sequence (or a lone Esc) is being held for more bytes —
-   * the caller flushes after a short quiet gap so a bare Esc keypress is delivered. */
+  /** true only for an ambiguous lone Esc: the caller's short key timer must
+   * not flush an already recognized, incomplete terminal sequence. */
   hasPending(): boolean;
 }
 
@@ -134,8 +134,10 @@ export function createInputDecoder(): InputDecoder {
       return parsed.events;
     },
     hasPending() {
-      // Bracketed paste may pause across chunks; only an escape prefix needs the short key timer.
-      return pending.length > 0 && !pending.startsWith("\x1b[200~");
+      // Once CSI/SS3 has started, a quiet gap is not an Escape keypress.
+      // Flushing it would leak mouse coordinates or key parameters into the
+      // command bar when a terminal transport delivers delayed chunks.
+      return pending === "\x1b";
     },
   };
 }

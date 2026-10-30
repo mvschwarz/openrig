@@ -20,7 +20,7 @@ import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/clau
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { basename, dirname, resolve as pathResolve } from "node:path";
+import { basename, dirname, join, sep, resolve as pathResolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
@@ -31,11 +31,11 @@ const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
 const MANIFEST_SRC = "/assets/plugins/openrig-core/hooks/claude.json";
 const STATE_DIR = "/custom-instance/O'Brien";
-const RELAY_DEST = `${STATE_DIR}/state/claude-activity-hooks/activity-relay.cjs`;
-const SETTINGS = "/project/.claude/settings.local.json";
+const RELAY_DEST = pathResolve(STATE_DIR, "state", "claude-activity-hooks", "activity-relay.cjs");
+const SETTINGS = pathResolve(CWD, ".claude", "settings.local.json");
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
 const OWNED_CMD = `${shellQuote(process.execPath)} ${shellQuote(RELAY_DEST)}`;
-const OWNED_MARKER = "state/claude-activity-hooks/activity-relay.cjs";
+const OWNED_MARKER = join("state", "claude-activity-hooks", "activity-relay.cjs");
 const EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"] as const;
 
 // A faithful subset of the canonical claude.json: the 4 relay events (unscoped
@@ -61,15 +61,22 @@ type Store = Record<string, string>;
 type Modes = Record<string, number>;
 
 function mockFs(files?: Store, modes?: Modes): ClaudeAdapterFsOps & { _store: Store; _modes: Modes } {
-  const store: Store = { ...files };
-  const modeMap: Modes = { ...modes };
+  const nativeStore = <T>(initial?: Record<string, T>): Record<string, T> => new Proxy(
+    Object.fromEntries(Object.entries(initial ?? {}).map(([p, value]) => [pathResolve(p), value])), {
+      get: (store, key) => Reflect.get(store, typeof key === "string" ? pathResolve(key) : key),
+      set: (store, key, value) => Reflect.set(store, typeof key === "string" ? pathResolve(key) : key, value),
+      has: (store, key) => Reflect.has(store, typeof key === "string" ? pathResolve(key) : key),
+      deleteProperty: (store, key) => Reflect.deleteProperty(store, typeof key === "string" ? pathResolve(key) : key),
+    });
+  const store = nativeStore(files);
+  const modeMap = nativeStore(modes);
   return {
     readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
     writeFile: (p: string, c: string) => { store[p] = c; },
     exists: (p: string) => p in store,
     mkdirp: () => {},
     copyFile: (src: string, dest: string) => { store[dest] = store[src] ?? ""; if (src in modeMap) modeMap[dest] = modeMap[src]!; },
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(pathResolve(dir) + sep)).map((k) => k.slice(pathResolve(dir).length + 1)),
     statMode: (p: string) => (p in modeMap ? modeMap[p]! : 0o644),
     chmod: (p: string, m: number) => { modeMap[p] = m; },
     homedir: "/home/test",
@@ -151,7 +158,7 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
   it("the committed activity-relay.cjs asset is executable 0755 (so the preserved projection meets the contract)", () => {
     const assetPath = pathResolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs");
     const mode = statSync(assetPath).mode & 0o777;
-    expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
+    if (process.platform !== "win32") expect(mode & 0o111, `shipped relay mode is 0${mode.toString(8)}, expected executable`).not.toBe(0);
     // A git checkout's working-tree mode is the committed mode filtered by the checkout user's
     // umask (umask 002, the default for user-private-group accounts on many Linux distributions,
     // yields 0775). So in a git checkout the exact 0755 is asserted on the GIT INDEX entry, which
@@ -161,9 +168,12 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
     const indexMode = committedMode(assetPath);
     if (indexMode !== null) {
       expect(indexMode, "committed relay mode").toBe("100755");
-      expect(mode & 0o755, `checkout relay mode is 0${mode.toString(8)}, expected at least 0755`).toBe(0o755);
-      expect(mode & 0o002, `checkout relay mode is 0${mode.toString(8)}, world-writable`).toBe(0);
+      if (process.platform !== "win32") {
+        expect(mode & 0o755, `checkout relay mode is 0${mode.toString(8)}, expected at least 0755`).toBe(0o755);
+        expect(mode & 0o002, `checkout relay mode is 0${mode.toString(8)}, world-writable`).toBe(0);
+      }
     } else {
+      if (process.platform === "win32") throw new Error("Windows requires Git index or archive mode evidence for the Unix executable contract");
       expect(mode, `shipped relay mode is 0${mode.toString(8)}, expected 0755`).toBe(0o755);
     }
   });
@@ -378,7 +388,7 @@ describe("Claude activity-hook delivery — cwd at the filesystem root", () => {
 
   it("an unwritable root reports skipped and names the filesystem root as the reason", async () => {
     const fs = enableFs();
-    fs.mkdirp = (p: string) => { if (p === "/.claude") throw new Error(`ENOENT: no such file or directory, mkdir '${p}'`); };
+    fs.mkdirp = (p: string) => { if (pathResolve(p) === pathResolve("/.claude")) throw new Error(`ENOENT: no such file or directory, mkdir '${p}'`); };
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));

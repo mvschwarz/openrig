@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { providerCommand } from "../src/commands/provider.js";
@@ -224,6 +225,7 @@ describe("rig provider CLI grammar (daemon-backed)", () => {
       return send(500, { error: "not found" });
     });
     await new Promise<void>((r) => server.listen(0, r));
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => server.close());

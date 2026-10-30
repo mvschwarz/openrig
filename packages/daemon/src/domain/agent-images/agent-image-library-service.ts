@@ -12,9 +12,12 @@
 //
 // Storage filesystem-canonical at ~/.openrig/agent-images/<name>/ +
 // workspace-local .openrig/agent-images/<name>/. NO new SQLite tables.
+// Native Windows substitutes a stable directory key for names Win32 cannot
+// represent; the manifest and public image id retain the operator's name.
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, unlinkSync, rmSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
+import { createHash } from "node:crypto";
 import { parseAgentImageManifest } from "./manifest-parser.js";
 import {
   AgentImageError,
@@ -54,6 +57,18 @@ export function estimateTokensFromBytes(bytes: number): number {
 
 const PINNED_SENTINEL = ".pinned";
 const STATS_FILENAME = "stats.json";
+
+/** The manifest name is a display/identity string, not necessarily a Win32
+ * directory component. Reserve the generated prefix to avoid collisions with
+ * a literal name equal to another image's storage key. */
+function imageDirectoryName(name: string): string {
+  if (process.platform !== "win32") return name;
+  const prefix = ".openrig-image-";
+  const device = /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]|CONIN\$|CONOUT\$)(?:\.|$)/i;
+  if (!/[<>:"/\\|?*\x00-\x1f]/.test(name) && !/[. ]$/.test(name)
+    && name.length <= 255 && !device.test(name) && !name.toLowerCase().startsWith(prefix)) return name;
+  return prefix + createHash("sha256").update(name).digest("hex");
+}
 
 const DEFAULT_STATS: AgentImageStats = {
   forkCount: 0,
@@ -308,7 +323,7 @@ export class AgentImageLibraryService {
     manifest: AgentImageManifest,
     fileContents: Map<string, string>,
   ): string {
-    const targetDir = join(targetRootPath, manifest.name);
+    const targetDir = join(targetRootPath, imageDirectoryName(manifest.name));
     if (existsSync(targetDir)) {
       throw new AgentImageError(
         "image_referenced",

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { DaemonClient } from "./client.js";
+import { detachedTerminalEnvironment } from "./terminal-environment.js";
 
 interface SharedTuiClient {
   readonly baseUrl?: string;
@@ -33,8 +34,7 @@ export async function attachSharedTui(target: string): Promise<number> {
   // Attach a new client even inside tmux. switch-client would retarget somebody
   // else's client when invoked from an agent's child shell.
   return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.TMUX;
+    const env = detachedTerminalEnvironment();
     const child = spawn("tmux", ["attach-session", "-t", `=${target}`], { stdio: "inherit", env });
     child.once("error", reject);
     child.once("exit", (code) => resolve(code ?? 1));

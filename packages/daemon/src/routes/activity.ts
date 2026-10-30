@@ -1,6 +1,7 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
 import { SessionRegistry, physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
+import { sameSessionFile } from "../adapters/same-session-file.js";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
@@ -347,7 +348,7 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
       const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
       const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
       const ownFile = typeof omp?.readSessionFile === "function" ? omp.readSessionFile(resolved.sessionName) : null;
-      const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
+      const tokenPersisted = validation.ok && ownFile?.ok === true && sameSessionFile(ownFile.sessionFile, validation.token) && existsSync(validation.token)
         ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
           || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
         : false;

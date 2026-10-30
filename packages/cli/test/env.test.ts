@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
@@ -97,6 +98,7 @@ describe("rig env", () => {
       });
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

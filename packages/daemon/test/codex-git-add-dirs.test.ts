@@ -354,7 +354,20 @@ describe("resolveCodexGitAddDirs (issue #121)", () => {
   it("linked worktree: worktree git dir and common git dir, both existing directories", async () => {
     const { resolveCodexGitAddDirs } = await import("../src/domain/codex-git-add-dirs.js");
     const { repo, worktree, worktreeGitDir } = linkedWorktree();
-    expect(await resolveCodexGitAddDirs(worktree)).toEqual([worktreeGitDir, nodePath.join(repo, ".git")]);
+    const dirs = await resolveCodexGitAddDirs(worktree);
+    expect(dirs.map(dir => fs.realpathSync.native(dir))).toEqual(
+      [worktreeGitDir, nodePath.join(repo, ".git")].map(dir => fs.realpathSync.native(dir)));
+    for (const dir of dirs) expect(fs.statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it("separate metadata directory with spaces: returns the actual Git directory once", async () => {
+    const repo = nodePath.join(root, "separate repo");
+    const metadata = nodePath.join(root, "metadata with spaces");
+    fs.mkdirSync(repo);
+    git(repo, "init", "-q", "--separate-git-dir", metadata);
+    const dirs = await resolveCodexGitAddDirs(repo);
+    expect(dirs.map(dir => fs.realpathSync.native(dir))).toEqual([fs.realpathSync.native(metadata)]);
+    expect(fs.statSync(nodePath.join(repo, ".git")).isFile()).toBe(true);
   });
 
   it("malformed .git file (gitdir points nowhere): [], never the file", async () => {

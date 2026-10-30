@@ -12,6 +12,7 @@ import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "
 import { dirname, join } from "node:path";
 import { getOpenRigHome } from "../../openrig-compat.js";
 import type { OutboundDecision } from "./protocol.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
 
 export function dispatchBufferPath(home: string = getOpenRigHome()): string {
   return join(home, "gateway", "dispatch-buffer.json");
@@ -37,6 +38,10 @@ function readState(path: string): BufferState {
 
 function writeState(path: string, state: BufferState): void {
   mkdirSync(dirname(path), { recursive: true });
+  if (process.platform === "win32") {
+    replaceWindowsPrivateTextFile(path, JSON.stringify(state, null, 0));
+    return;
+  }
   const tmp = `${path}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(state, null, 0), { mode: 0o600 });
   renameSync(tmp, path);

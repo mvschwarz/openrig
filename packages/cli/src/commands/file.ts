@@ -7,6 +7,7 @@
 // is the guard rail. The security wall lives in lib/file-transfer.ts.
 
 import { Command } from "commander";
+import { buildSftpArgv } from "../lib/native-sftp-copy.js";
 import {
   planFileCopy,
   buildRsyncArgv,
@@ -25,13 +26,13 @@ function operandLabel(side: CopyPlan["src"]): string {
 
 export function fileCommand(deps: FileCommandDeps = {}): Command {
   const file = new Command("file").description(
-    "Cross-host file movement over ssh/rsync (v0: one explicit verb — copy)",
+    "Copy files locally or over SSH (native SFTP on Windows, rsync on POSIX)",
   );
 
   file
     .command("copy <src> <dst>")
     .description(
-      "Copy one file. <hostId>:<absolute-path> = remote (ssh registry entry); bare path = local; local files with a colon need the ./ prefix. Valid shapes: local→remote, remote→local, local→local. An existing destination is OVERWRITTEN — preview with --dry-run.",
+      "Copy files or directories. <hostId>:<absolute-path> = remote (ssh registry entry); bare path = local. Windows drive and UNC paths are local; other local colon names need the ./ prefix. Valid shapes: local→remote, remote→local, local→local. An existing destination is OVERWRITTEN — preview with --dry-run.",
     )
     .option("--dry-run", "Print the exact planned transfer (src, dst, host, files/bytes) and move nothing")
     .option("--json", "JSON output for agents")
@@ -63,9 +64,11 @@ export function fileCommand(deps: FileCommandDeps = {}): Command {
             bytesTransferred: result.bytesTransferred ?? null,
             filesTransferred: result.filesTransferred ?? null,
             exitCode: result.exitCode,
-            error: result.ok ? null : result.stderr.trim() || `rsync failed (${result.failedStep})`,
+            error: result.ok ? null : result.stderr.trim() || `file copy failed (${result.failedStep})`,
             hint: result.hint ?? null,
-            rsyncArgv: buildRsyncArgv(plan), // transparency for agents; the builder is closed
+            transport: result.transport ?? "rsync",
+            rsyncArgv: result.transport && result.transport !== "rsync" ? null : buildRsyncArgv(plan),
+            ...(result.transport === "sftp" ? { sshArgv: buildSftpArgv(plan) } : {}),
           }),
         );
         if (!result.ok) process.exitCode = 1;

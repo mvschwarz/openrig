@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createWindowsPrivateDirectory } from "../src/domain/private-text-file.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
+import { grantDirectoryReadToOthers } from "./helpers/directory-permissions.js";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { configureShadowCapture, inventoryCaptureOptions, ShadowCapture, type ShadowConfig } from "../src/domain/shadow-capture.js";
@@ -13,7 +16,7 @@ import { projectsRoutes } from "../src/routes/projects.js";
 import { StreamClassificationWorker, type WorkerOptions, type ClassificationDecision } from "../src/domain/stream-classification-worker.js";
 import type { Observation } from "../src/domain/capture-observer.js";
 
-const config:ShadowConfig={destination:"/unused/private/shadow.jsonl",maxRecords:10,maxBytes:100_000,capacity:10,maxQueuedBytes:100_000,maxObservationBytes:10_000};
+const config:ShadowConfig={destination:path.resolve("/unused/private/shadow.jsonl"),maxRecords:10,maxBytes:100_000,capacity:10,maxQueuedBytes:100_000,maxObservationBytes:10_000};
 function terminal(capture?:ShadowCapture) {
   let pane="%7", occupant="old", probes=0, captures=0, pastes=0, enters=0, verify=0;
   let hook:()=>void=()=>{};
@@ -123,20 +126,23 @@ describe("disabled-by-default production observer ports",()=>{
     expect(await(await disabled.request("/shadow")).json()).toEqual({enabled:false,error:null});
   });
   it("private sink writes only synthetic observations and refuses existing or nonprivate destinations",async()=>{
-    const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),"shadow-private-")));
+    const dir=process.platform === "win32" ? createWindowsPrivateDirectory(fs.realpathSync.native(os.tmpdir())) : fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),"shadow-private-")));
+    try {
     const destination=path.join(dir,"new.jsonl");
     const capture=new ShadowCapture({...config,destination,maxRecords:1});
     await terminal(capture).transport.send("seat@rig","hello world",{verify:true});await capture.drain();
-    expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
+    expectPrivateFile(destination);
     const bytes=fs.readFileSync(destination,"utf8");expect(bytes.trim().split("\n")).toHaveLength(1);
     expect(capture.status().sink).toMatchObject({reservedRecords:1,completedRecords:1,dropped:1,stopped:true});
     const existing=new ShadowCapture({...config,destination});
     await terminal(existing).transport.send("seat@rig","hello world",{verify:true});await existing.drain();
     expect(existing.status().sink.errors).toBe(1);expect(fs.readFileSync(destination,"utf8")).toBe(bytes);
     const shared=path.join(dir,"shared");fs.mkdirSync(shared,{mode:0o755});
+    grantDirectoryReadToOthers(shared);
     const rejected=new ShadowCapture({...config,destination:path.join(shared,"no.jsonl")});
     await terminal(rejected).transport.send("seat@rig","hello world",{verify:true});await rejected.drain();
     expect(rejected.status().sink.errors).toBe(1);expect(fs.existsSync(path.join(shared,"no.jsonl"))).toBe(false);
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); }
   });
 });
 

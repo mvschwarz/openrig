@@ -6,6 +6,45 @@ import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { piSeatPaths, PI_RUNNER_READY_MARKER } from "../src/adapters/pi-runner-protocol.js";
 
+it.runIf(process.platform === "win32")("resolves relative npm PATH from the actual Pi child cwd through the runner handshake", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-win-path-"));
+  const cwd = path.join(temp, "seat"), modules = path.join(cwd, "node_modules");
+  const bin = path.join(modules, ".bin"), pkg = path.join(modules, "@earendil-works", "pi-coding-agent");
+  fs.mkdirSync(bin, { recursive: true }); fs.mkdirSync(pkg, { recursive: true });
+  const observed = path.join(temp, "observed.json"), session = path.join(temp, "session.jsonl");
+  fs.writeFileSync(session, "synthetic session\n");
+  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "entry.cjs" } }));
+  fs.writeFileSync(path.join(bin, "pi.cmd"), '"%dp0%\\..\\@earendil-works\\pi-coding-agent\\entry.cjs" %*');
+  fs.writeFileSync(path.join(bin, "pi.exe"), "selection decoy; never execute with CMD-first PATHEXT");
+  fs.writeFileSync(path.join(pkg, "entry.cjs"), `
+require('node:fs').writeFileSync(${JSON.stringify(observed)},JSON.stringify({cwd:process.cwd(),argv:process.argv.slice(2)}));
+setTimeout(()=>process.exit(0),3000);
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const c=JSON.parse(line); if(c.type==='get_state') { console.log(JSON.stringify({type:'response',id:c.id,success:true,data:{sessionFile:${JSON.stringify(session)},sessionId:'offline'}})); setTimeout(()=>process.exit(0),250); }
+});`);
+  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
+    "--session-name", "fixture", "--state-root", path.join(temp, "state"), "--cwd", cwd, "--launch-id", "native-path-attempt", "--no-approve"], {
+    env: { PATH: path.relative(cwd, bin), PATHEXT: ".CMD;.EXE", HOME: temp, USERPROFILE: temp, SystemRoot: process.env.SystemRoot,
+      TEMP: temp, TMP: temp, OPENRIG_HOME: path.join(temp, "home") },
+    windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+  });
+  let output = "", timedOut = false;
+  child.stdout.on("data", data => { output += data; }); child.stderr.on("data", data => { output += data; });
+  const closed = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+  const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 10_000);
+  try {
+    await closed;
+    expect(timedOut, output).toBe(false);
+    expect(child.exitCode, output).toBe(0);
+    expect(output).toContain(PI_RUNNER_READY_MARKER);
+    expect(JSON.parse(fs.readFileSync(observed, "utf8"))).toMatchObject({ cwd, argv: expect.arrayContaining(["--mode", "rpc"]) });
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; }
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}, 15_000);
+
 // Real runner and offline children: no installed provider, account or model call.
 describe.skipIf(process.platform === "win32")("Pi native PATH semantics", () => {
   it.each(["argv0", "fallback", "mise", "relative", "empty", "stubborn-version"])(

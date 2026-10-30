@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The MCP server's operation table against the daemon itself: every registered tool named once, each tool's hints matching
 // its effect, every route the table names mounted in the daemon's app, and the newest reads answering through their real
 // routes with the shared error shape. The health, slice, mission and context reads also run through their real routes, so
@@ -58,6 +59,7 @@ describe("MCP operation table against the daemon", () => {
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
+    allowOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 

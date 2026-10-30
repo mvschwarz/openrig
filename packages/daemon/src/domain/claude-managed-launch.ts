@@ -4,6 +4,10 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
+import { readPlatformEnv } from "./platform-env.js";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
+import { recognizedWindowsClaudeScript, resolveWindowsProviderCommand } from "./windows-provider-command.js";
+import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
 import { CLAUDE_PLUGIN_DIRS_ENV, SEAT_NODE_ENV, SEAT_PROJECT_DIR_ENV, seatCorePluginDir } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
@@ -20,6 +24,8 @@ import { isolatedClaudeAccountProblem, OUTRANKING_TOKEN_ENV, projectRootForLocal
 export interface ClaudeLaunchTarget {
   /** A running seat's verified executable, carried through its in-place continuation. */
   executable?: string;
+  /** The verified npm entry paired with the running seat's Node executable. */
+  script?: string;
   nodeId: string;
   cwd?: string;
   session?: string;
@@ -89,7 +95,8 @@ export class ClaudeManagedLaunch {
     /** Reads one variable from a seat's tmux session environment (the daemon's tmux adapter). */
     private readonly readSessionEnv?: (session: string, key: string) => Promise<string | undefined>,
     /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
-    private readonly pluginsDir?: string) {}
+    private readonly pluginsDir?: string,
+    private readonly platform: NodeJS.Platform = process.platform) {}
 
   /** Names the seat's rig and member declare in `env:`, plus any one-off `rig up --env` names the
    *  launch recorded on the tmux session. Their values are already in the pane shell, which is
@@ -150,7 +157,7 @@ export class ClaudeManagedLaunch {
         if (found.conflicts.length || found.notChecked) throw new Error("Claude credential settings could override the selected API key or could not be checked; no Claude process started.");
       }
     }
-    return { ref, step: claudeSeatTokenStep(ref, shellQuote, { ...opts, required }), warnings: Object.freeze(problem ? [required ? "The selected account token is unusable; no agent will start."
+    return { ref, step: claudeSeatTokenStep(ref, shellQuote, { ...opts, required, platform: this.platform }), warnings: Object.freeze(problem ? [required ? "The selected account token is unusable; no agent will start."
       : this.tokenNotApplied(nodeId, ref, problem)] : []) };
   }
 
@@ -195,7 +202,7 @@ export class ClaudeManagedLaunch {
     const names = opts.apiKey || opts.settingsOnly ? [] : opts.storedLogin ? [...OUTRANKING_TOKEN_ENV, "CLAUDE_CODE_OAUTH_TOKEN"] : OUTRANKING_TOKEN_ENV;
     const found = (name: string) => name === "CLAUDE_CODE_OAUTH_TOKEN" ? instead : conflicts;
     for (const name of names) {
-      if (this.sessionEnv[name]) {
+      if (readPlatformEnv(this.sessionEnv, name, this.platform)) {
         found(name).push({ name, source: "the daemon's environment, which every managed Claude launch receives",
           remedy: `unset ${name} where the daemon starts, or take it out of recovery.provider_auth_env_allowlist; either reaches every seat` });
       }
@@ -250,7 +257,7 @@ export class ClaudeManagedLaunch {
 
   /** The config dir a seat's Claude selects: its own home from its member or rig `env:`, else the daemon's. */
   private selectedConfigDir(nodeId: string | undefined, ignoreAccountHome = false): string | undefined {
-    return effectiveRuntimeHome(this.db, nodeId, "claude-code", this.sessionEnv.CLAUDE_CONFIG_DIR, ignoreAccountHome);
+    return effectiveRuntimeHome(this.db, nodeId, "claude-code", readPlatformEnv(this.sessionEnv, "CLAUDE_CONFIG_DIR", this.platform), ignoreAccountHome);
   }
 
   /** Bootstrap and the launched child must use the same native selection.
@@ -258,7 +265,7 @@ export class ClaudeManagedLaunch {
    * directory selects <configDir>/.claude.json instead (#154/#225).
    */
   configPaths(cwd: string, nodeId?: string, accountHome?: string | null): { configDir: string; statePath: string } {
-    const { HOME } = this.sessionEnv;
+    const HOME = readPlatformEnv(this.sessionEnv, "HOME", this.platform);
     const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: absolute HOME is required.");
     const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
@@ -273,25 +280,53 @@ export class ClaudeManagedLaunch {
     return (accountHome === null ? selected !== undefined : !!selected) ? this.configPaths(cwd, nodeId, accountHome).statePath : undefined;
   }
 
-  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string) {
-    const { PATH, HOME } = this.sessionEnv;
+  private context(cwd: string, nodeId: string, accountHome?: string | null, selectedExecutable?: string, selectedScript?: string) {
+    const PATH = readPlatformEnv(this.sessionEnv, "PATH", this.platform), HOME = readPlatformEnv(this.sessionEnv, "HOME", this.platform);
     const CLAUDE_CONFIG_DIR = accountHome ?? this.selectedConfigDir(nodeId, accountHome === null);
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
-    const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
+    const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, this.platform === "win32" ? p.replace(/^"(.*)"$/, "$1") : p));
     const { configDir } = this.configPaths(cwd, nodeId, accountHome);
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
+    if (this.platform === "win32") {
+      const pathExt = readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform);
+      if (pathExt !== undefined) env.PATHEXT = pathExt;
+      for (const key of ["SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA"]) {
+        const entry = Object.entries(process.env).find(([name]) => name.toUpperCase() === key);
+        if (entry?.[1]) env[key] = entry[1];
+      }
+    }
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
-    const candidates = selectedExecutable ? [selectedExecutable] : search.map(dir => path.join(dir, "claude"));
+    let prefix: string[] = [];
+    if (selectedScript) {
+      const script = this.platform === "win32" ? recognizedWindowsClaudeScript(selectedScript) : null;
+      if (!selectedExecutable || !/^node\.(exe|com)$/i.test(path.basename(selectedExecutable)) || !script) {
+        throw new Error("Claude managed continuation has no verified Node/script selection; no fallback was selected.");
+      }
+      prefix = [script];
+    }
+    const names = this.platform === "win32"
+      ? (readPlatformEnv(this.sessionEnv, "PATHEXT", this.platform) ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => "claude" + ext.toLowerCase())
+      : ["claude"];
+    let candidates = selectedExecutable ? [selectedExecutable] : search.flatMap(dir => names.map(name => path.join(dir, name)));
+    if (this.platform === "win32" && !selectedExecutable) {
+      try {
+        const launch = resolveWindowsProviderCommand("claude", env, cwd, this.platform);
+        candidates = [launch.command]; prefix = launch.prefix;
+      } catch { throw new Error("Claude managed launch executable is unavailable on the intended PATH; a native executable or recognized npm installation is required. No fallback was selected."); }
+    }
     for (const candidate of candidates) {
       if (!path.isAbsolute(candidate)) continue;
       try { accessSync(candidate, constants.X_OK); if (!statSync(candidate).isFile()) continue; }
       catch { continue; }
+      if (this.platform === "win32" && !selectedExecutable && !/\.(exe|com)$/i.test(candidate)) {
+        throw new Error("Claude managed launch requires a native executable on the intended PATH; no batch fallback was selected.");
+      }
       executable = realpathSync(candidate); break;
     }
     if (!executable) throw new Error("Claude managed launch executable is unavailable on the intended PATH; no fallback was selected.");
@@ -299,12 +334,12 @@ export class ClaudeManagedLaunch {
       const s = statSync(file);
       return [realpathSync(file), s.dev, s.ino, s.mode, s.size, s.mtimeMs, s.ctimeMs];
     };
-    return Object.freeze({ env: Object.freeze(env), configDir, executable, executableIsScript: fileStartsWithShebang(executable),
-      fileIdentity: Object.freeze(identity(executable)), cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
+    return Object.freeze({ env: Object.freeze(env), configDir, executable, prefix: Object.freeze(prefix), executableIsScript: fileStartsWithShebang(executable),
+      fileIdentity: Object.freeze(identity(executable)), scriptIdentity: prefix[0] ? Object.freeze(identity(prefix[0])) : null, cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
   }
 
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
-    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean;
+    assertCurrent: () => void; command: (args: readonly string[], launchEnv?: Readonly<Record<string, string>>) => string; configDir: string; executable: string; executableIsScript: boolean; selectedScript?: string;
     /** Launch notes for the person, such as a seat token that won't apply. */
     warnings: readonly string[];
   }> {
@@ -328,33 +363,44 @@ export class ClaudeManagedLaunch {
     const accountHome = target.accountHome !== undefined ? target.accountHome : seatAccountHome(this.db, target.nodeId, "claude-code");
     if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
     const credentialKeys: readonly string[] = accountHome ? ACCOUNT_HOME_PROVIDER_ENV : [];
-    const context = this.context(cwd, target.nodeId, accountHome, target.executable);
+    const isCredentialKey = (key: string) => credentialKeys.includes(this.platform === "win32" ? key.toUpperCase() : key);
+    const context = this.context(cwd, target.nodeId, accountHome, target.executable, target.script);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
-    const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-      && !MANAGED_LAUNCH_KEYS.includes(key) && !credentialKeys.includes(key));
-    if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
+    const nativeName = (key: string) => this.platform === "win32" ? key.toUpperCase() : key;
+    const inheritedKeys = () => Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
+      && !MANAGED_LAUNCH_KEYS.includes(nativeName(key)) && !(this.platform === "win32" && nativeName(key) === "PATHEXT") && !isCredentialKey(key));
+    const inherited = inheritedKeys();
+    if (inherited.some(key => this.platform === "win32"
+      ? !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && nativeName(key) !== "PROGRAMFILES(X86)"
+      : !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
       if (accountHome) this.assertAccountHome(target.nodeId, accountHome, target.accountHome ? target.accountToken ?? null : undefined);
       if (JSON.stringify(this.target(target.nodeId, switching?.fromRuntime)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable)) !== JSON.stringify(context)
-        || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
-          && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key) && !credentialKeys.includes(key))) !== JSON.stringify(inherited)) {
+        || JSON.stringify(this.context(cwd, target.nodeId, accountHome, target.executable, target.script)) !== JSON.stringify(context)
+        || JSON.stringify(inheritedKeys()) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }
     };
-    const help = await new Promise<string>((resolve, reject) => {
-      execFile(context.executable, ["--help"], { cwd, env: context.env, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 },
-        (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
-    });
+    const helpArgs = [...context.prefix, "--help"];
+    const probe = this.platform === "win32" ? prepareWindowsJobProcess(context.executable, helpArgs, { cwd, env: context.env }) : undefined;
+    let help: string;
+    try {
+      help = await new Promise<string>((resolve, reject) => {
+        execFile(probe?.file ?? context.executable, probe?.args ?? helpArgs,
+          { cwd, env: context.env, ...probe?.options, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024,
+            ...(probe ? { killSignal: "SIGKILL" as const } : {}) },
+          (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
+      });
+    } finally { probe?.dispose(); }
     assertCurrent();
     validateNativePermissionSelection("claude-code", mode, parseClaudePermissionModes(help));
     const generation = target.generation ?? before.generation;
     const identity: Record<string, string> = { OPENRIG_NODE_ID: target.nodeId, OPENRIG_RUNTIME: "claude-code",
       ...(before.session ? { OPENRIG_SESSION_NAME: before.session } : {}),
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
-    const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !credentialKeys.includes(key));
-    const publicEnv = publicSeatEnvironment(this.sessionEnv);
+    const seatKeys = (await this.seatEnvKeys(target.nodeId, before.session ?? undefined)).filter(key => !isCredentialKey(key));
+    const publicEnv = publicSeatEnvironment(this.sessionEnv, this.platform);
     const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
     const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `export ${key}="\${${key}-}"`);
     // A declared name is forwarded only when the pane shell has it set, so a one-off name recorded on
@@ -395,9 +441,17 @@ export class ClaudeManagedLaunch {
       ...(target.accountHome !== undefined ? { ref: target.accountHome === null ? target.accountToken : target.accountToken ?? null, required: !!target.accountHome } : {}) });
     const tokenStep = token ? `${token.step} && ` : "";
     const warnings = Object.freeze([...(token?.warnings ?? []), ...(token ? await this.tokenPrecedenceWarnings(target.nodeId, token.ref) : [])]);
-    return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
+    return Object.freeze({ assertCurrent, warnings, configDir: context.configDir, executable: context.executable, executableIsScript: context.executableIsScript, selectedScript: context.prefix[0], command: (args: readonly string[], launchEnv: Readonly<Record<string, string>> = {}) => {
       assertCurrent();
       if (token?.ref.kind === "api-key") this.seatTokenLaunch(target.nodeId, { ref: token.ref, accountHome: target.accountHome });
+      if (this.platform === "win32") {
+        const boundNames = new Set([...Object.keys(identity), ...Object.keys(publicEnv), "PATHEXT"].map(nativeName));
+        const forwardedNames = [...inherited, ...seatKeys.filter(key => !inherited.includes(key))]
+          .filter(key => !boundNames.has(nativeName(key)));
+        const terminalNames = [...PANE_TERMINAL_KEYS, "EDITOR", "VISUAL"];
+        const allowedLaunchEnv = Object.fromEntries(Object.entries(launchEnv).filter(([key]) => !isCredentialKey(key)));
+        return renderWindowsManagedLaunch(context.executable, [...context.prefix, ...args], cwd, { ...context.env, ...publicEnv, ...identity, ...allowedLaunchEnv }, [...forwardedNames, ...terminalNames, ...(loadsCorePlugin ? [SEAT_PROJECT_DIR_ENV, SEAT_NODE_ENV] : [])], token?.step);
+      }
       const launch = Object.entries(launchEnv).filter(([key]) => !credentialKeys.includes(key)).map(([key, value]) => `export ${shellQuote(`${key}=${value}`)}`);
       const keep = [...selectedKeys, ...terminalKeys, "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
         ...Object.keys(launchEnv).filter(key => !credentialKeys.includes(key)), ...(token ? [token.ref.kind === "api-key" ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"] : [])];

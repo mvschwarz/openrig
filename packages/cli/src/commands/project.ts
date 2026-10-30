@@ -5,6 +5,7 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { experimentStatus, setExperiment, readBounded, JevRun, streamDecision, classifyCapture } from "./project-jev.js";
+import { openPrivateTextFile } from "../lib/private-text-file.js";
 import { DecisionRun, decisionsStatus, readDecisionsSettings, type DecisionsSettings } from "../decisions/decisions.js";
 import { recoverEffects, runDecideWake } from "../decisions/stream-consumer.js";
 import fs from "node:fs";
@@ -87,7 +88,7 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
         if (!status.enabled) { printResult(true, status, 200); return; }
         run = new JevRun(opts.config, deps.workerRead, deps.experimentEnv, deps.experimentFetch);
         const rows = readBounded(opts.input, 8 * 1024 * 1024).split("\n").filter(Boolean);
-        fd = fs.openSync(opts.output, "wx", 0o600);
+        fd = openPrivateTextFile(opts.output);
         process.once("SIGINT", run.stop); process.once("SIGTERM", run.stop);
         let inspected = 0, unavailable = 0;
         for (const line of rows.slice(0, run.config.maxRequests)) {

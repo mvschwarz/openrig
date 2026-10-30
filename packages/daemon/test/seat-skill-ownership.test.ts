@@ -38,6 +38,9 @@ import {
 import { reconcileSkillLoadout, resolveSkillLoadout } from "../src/domain/skill-catalog.js";
 
 const roots: string[] = [];
+// Exercise native directory reparse-point boundaries without requiring the
+// separate Windows file-symlink privilege. File-link cases stay file links.
+const directoryLink = (target: string, link: string) => symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
 const scratch = (name: string) => { const dir = mkdtempSync(join(tmpdir(), name)); roots.push(dir); return dir; };
 let savedHome: string | undefined;
 let home: string;
@@ -82,7 +85,7 @@ describe("F1: cleanup and repair don't act through a link found on the way out o
     const { paths, target } = claudeSeat();
     const moved = join(scratch("seat-own-moved-"), "queue-handoff");
     renameSync(target, moved);
-    symlinkSync(moved, target);
+    directoryLink(moved, target);
     const out = cleanSeatSkills(paths);
     expect(readFileSync(join(moved, "SKILL.md"), "utf8")).toBe("skill\n");
     expect(readFileSync(join(moved, "scripts/helper.sh"), "utf8")).toContain("echo hi");
@@ -94,7 +97,7 @@ describe("F1: cleanup and repair don't act through a link found on the way out o
     const { paths } = claudeSeat();
     const elsewhere = join(scratch("seat-own-plugin-"), "plugin");
     renameSync(paths.pluginDir, elsewhere);
-    symlinkSync(elsewhere, paths.pluginDir);
+    directoryLink(elsewhere, paths.pluginDir);
     const out = cleanSeatSkills(paths);
     expect(existsSync(join(elsewhere, "skills", "queue-handoff", "SKILL.md"))).toBe(true);
     expect(existsSync(join(elsewhere, ".claude-plugin", "plugin.json"))).toBe(true);
@@ -105,7 +108,7 @@ describe("F1: cleanup and repair don't act through a link found on the way out o
     const { paths, target } = claudeSeat();
     const outside = scratch("seat-own-outside-");
     rmSync(target, { recursive: true });
-    symlinkSync(outside, target);
+    directoryLink(outside, target);
     const linked = rehydrateSeatSkills(paths);
     expect(linked.restored).toEqual([]);
     expect(linked.refused.sort()).toEqual([join(target, "SKILL.md"), join(target, "scripts/helper.sh")]);
@@ -125,7 +128,7 @@ describe("F1: cleanup and repair don't act through a link found on the way out o
     const { paths, target } = claudeSeat({ "SKILL.md": "skill\n" });
     const outside = scratch("seat-own-outside-");
     rmSync(target, { recursive: true });
-    symlinkSync(outside, target);
+    directoryLink(outside, target);
     const src = join(scratch("seat-own-startup-"), "queue-handoff", "SKILL.md");
     mkdirSync(dirname(src), { recursive: true });
     writeFileSync(src, "startup skill\n");
@@ -277,7 +280,8 @@ describe("F4: a restore puts back a helper with its executable mode", () => {
     cleanSeatSkills(paths);
     expect(existsSync(join(target, "scripts/helper.sh"))).toBe(false);
     expect(rehydrateSeatSkills(paths).restored).toContain(join(target, "scripts/helper.sh"));
-    expect(statSync(join(target, "scripts/helper.sh")).mode & 0o777).toBe(0o755);
+    expect(statSync(join(target, "scripts/helper.sh")).mode & 0o777)
+      .toBe(statSync(join(source, "scripts/helper.sh")).mode & 0o777);
     expect(statSync(join(target, "SKILL.md")).mode & 0o111).toBe(0);
   });
 });
@@ -531,7 +535,7 @@ describe("F1, round 3: no cleanup, repair or projection through a linked anchor,
   const moveAndLink = (dir: string): string => {
     const moved = join(scratch("seat-own-moved-"), "moved");
     renameSync(dir, moved);
-    symlinkSync(moved, dir);
+    directoryLink(moved, dir);
     return moved;
   };
   const recorded = (paths: SeatSkillPaths) => [join(paths.skillsRoot, "queue-handoff", "SKILL.md"), join(paths.skillsRoot, "queue-handoff", "scripts", "helper.sh")];
@@ -591,16 +595,17 @@ describe("F1, round 3: no cleanup, repair or projection through a linked anchor,
         const external = scratch("seat-own-external-");
         writeFileSync(join(external, "run.sh"), "the person's own\n");
         chmodSync(join(external, "run.sh"), 0o644);
+        const externalMode = statSync(join(external, "run.sh")).mode & 0o777;
         const target = join(paths.skillsRoot, "review");
         mkdirSync(target, { recursive: true });
-        if (link === "helper folder") symlinkSync(external, join(target, "scripts"));
+        if (link === "helper folder") directoryLink(external, join(target, "scripts"));
         else { mkdirSync(join(target, "scripts")); symlinkSync(join(external, "run.sh"), join(target, "scripts", "run.sh")); }
         const project = scratch("seat-own-project-");
         const adapter = runtime === "codex" ? new CodexRuntimeAdapter({ tmux: {} as never, fsOps: realFs as never }) : new ClaudeCodeAdapter({ tmux: {} as never, fsOps: realFs });
         const result = await adapter.project({ runtime, cwd: project, entries: [{ effectiveId: "review", category: "skill", absolutePath: source, classification: "safe_projection" }],
           startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] } as never, { ...binding(project), seatSkillsRoot: paths.skillsRoot });
         expect(readFileSync(join(external, "run.sh"), "utf8")).toBe("the person's own\n");
-        expect(statSync(join(external, "run.sh")).mode & 0o777).toBe(0o644);
+        expect(statSync(join(external, "run.sh")).mode & 0o777).toBe(externalMode);
         expect(JSON.stringify(result.warnings ?? [])).toContain("not inside this seat's storage");
         // Partial projection is reported as such: the skill is skipped, not projected, and the warning says it's incomplete.
         expect(result.projected).not.toContain("review");
@@ -657,7 +662,7 @@ describe("F1, round 4: the skill-loadout reconciler changes nothing in a seat's 
     const f = seatWithSelection();
     const moved = join(scratch("seat-own-r4-moved-"), "codex");
     renameSync(f.paths.root, moved);
-    symlinkSync(moved, f.paths.root);
+    directoryLink(moved, f.paths.root);
     const before = tree(moved);
     f.write("Use when handing work to another seat, with its row.");
     const sends: string[] = [];
@@ -676,7 +681,8 @@ describe("F1, round 4: the skill-loadout reconciler changes nothing in a seat's 
     const out = await applySeatSkills({ db, seat: f.seat, occupant: "gen-1", catalogRoot: f.catalog, sender: { send: async () => ({ ok: true, outcome: "delivered" }) } });
     expect(out.disk.ok).toBe(true);
     expect(readFileSync(join(f.paths.skillsRoot, "queue-handoff", "SKILL.md"), "utf8")).toContain("with its row.");
-    expect(statSync(join(f.paths.skillsRoot, "queue-handoff", "scripts", "run.sh")).mode & 0o777).toBe(0o755);
+    expect(statSync(join(f.paths.skillsRoot, "queue-handoff", "scripts", "run.sh")).mode & 0o777)
+      .toBe(statSync(join(f.catalog, "queue-handoff", "scripts", "run.sh")).mode & 0o777);
   });
 });
 

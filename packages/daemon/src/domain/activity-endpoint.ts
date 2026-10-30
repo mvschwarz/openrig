@@ -18,13 +18,33 @@
 
 import fs from "node:fs";
 import nodePath from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { createPrivateTextFile } from "./private-text-file.js";
 
 const TOKEN_FILE = "activity-hook-token";
 const ENDPOINT_FILE = "activity-endpoint.json";
 const DEFAULT_DAEMON_PORT = "7433";
+
+function persistActivityFile(file: string, content: string): void {
+  if (process.platform !== "win32") {
+    fs.writeFileSync(file, content, { mode: 0o600 });
+    fs.chmodSync(file, 0o600);
+    return;
+  }
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  let created = false;
+  try {
+    createPrivateTextFile(temporary, content);
+    created = true;
+    fs.renameSync(temporary, file);
+  } finally {
+    if (created) {
+      try { fs.unlinkSync(temporary); } catch { /* published, or retain the private owned staging on cleanup failure */ }
+    }
+  }
+}
 
 /** OPR.0.4.3.28 B2 — derive the activity ingest URL the daemon injects into seats
  *  from its OWN bound host+port, so the seat's relay posts to an address the
@@ -48,15 +68,19 @@ export function ensureActivityHookToken(stateDir: string): string {
   const tokenPath = nodePath.join(stateDir, TOKEN_FILE);
   try {
     const existing = fs.readFileSync(tokenPath, "utf-8").trim();
-    if (existing.length > 0) return existing;
+    if (existing.length > 0) {
+      if (process.platform === "win32") {
+        try { persistActivityFile(tokenPath, existing); } catch { /* keep the existing identity when persistence is unavailable */ }
+      }
+      return existing;
+    }
   } catch {
     // not present yet — generate below
   }
   const token = randomBytes(32).toString("hex");
   try {
     fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(tokenPath, token, { mode: 0o600 });
-    fs.chmodSync(tokenPath, 0o600); // enforce mode even if the file pre-existed
+    persistActivityFile(tokenPath, token);
   } catch {
     // best-effort persist — an in-memory token still works for this daemon run,
     // it just won't survive a restart (falls back to regenerate).
@@ -70,8 +94,7 @@ export function writeActivityEndpointFile(stateDir: string, endpoint: { baseUrl:
   const endpointPath = nodePath.join(stateDir, ENDPOINT_FILE);
   try {
     fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(endpointPath, JSON.stringify({ baseUrl: endpoint.baseUrl, token: endpoint.token }), { mode: 0o600 });
-    fs.chmodSync(endpointPath, 0o600);
+    persistActivityFile(endpointPath, JSON.stringify({ baseUrl: endpoint.baseUrl, token: endpoint.token }));
   } catch {
     // best-effort — reconcile/restored seats simply won't get file-discovery.
   }

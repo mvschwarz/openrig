@@ -1,3 +1,6 @@
+import { expectPrivateFile } from "./helpers/private-file.js";
+import { createPrivateTextFile } from "../src/domain/private-text-file.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 // OPR.0.4.6.MH1 FR-5/FR-6 — the narrow named host add/pair route family
 // (arch pins P1–P4) + the daemon writer twin.
 //
@@ -14,7 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import http from "node:http";
 import net from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -445,6 +448,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
     });
     await new Promise<void>((resolve) => target.listen(0, resolve));
     targetPort = (target.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${targetPort}`);
   });
   afterEach(() => {
     db.close();
@@ -516,7 +520,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
 
     const tokenPath = join(home, "secrets", "host-vps-paired.token");
     expect(readFileSync(tokenPath, "utf8")).toBe("remote-bearer-value\n");
-    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
     const yaml = readFileSync(join(home, "hosts.yaml"), "utf8");
     expect(yaml).toContain("vps-paired");
     expect(yaml).toContain(`bearer_file: ${tokenPath}`);
@@ -545,7 +549,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
     const secretsDir = join(home, "secrets");
     const tokenPath = join(secretsDir, "host-vps-paired.token");
     mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-    writeFileSync(tokenPath, "live-credential\n", { mode: 0o600 });
+    createPrivateTextFile(tokenPath, "live-credential\n");
     expect(daemonAddHostEntry({ id: "vps-paired", transport: "http", url: "http://old-target:7433", bearer_file: tokenPath }).ok).toBe(true);
     const yamlBefore = readFileSync(join(home, "hosts.yaml"), "utf8");
 
@@ -562,14 +566,14 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
     expect(targetRequests).toBe(0);
     expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe(yamlBefore);
     expect(readFileSync(tokenPath, "utf8")).toBe("live-credential\n");
-    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
   });
 
   it("B1: a pre-existing token file at the derived path rejects the pair before target contact — file untouched", async () => {
     const secretsDir = join(home, "secrets");
     const tokenPath = join(secretsDir, "host-127-0-0-1.token");
     mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-    writeFileSync(tokenPath, "stale-but-not-ours-to-delete\n", { mode: 0o600 });
+    createPrivateTextFile(tokenPath, "stale-but-not-ours-to-delete\n");
 
     const res = await app.request("/api/hosts/pair", {
       method: "POST",
@@ -581,7 +585,7 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
 
     expect(targetRequests).toBe(0);
     expect(readFileSync(tokenPath, "utf8")).toBe("stale-but-not-ours-to-delete\n");
-    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
     expect(existsSync(join(home, "hosts.yaml"))).toBe(false);
   });
 
@@ -612,14 +616,14 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
 
     const tokenPath = join(home, "secrets", "host-vps-mid.token");
     mkdirSync(join(home, "secrets"), { recursive: true, mode: 0o700 });
-    writeFileSync(tokenPath, "winner-credential\n", { mode: 0o600 });
+    createPrivateTextFile(tokenPath, "winner-credential\n");
 
     targetState = { status: "approved", token: "issued-bearer" };
     const done = await app.request(`/api/hosts/pair/${pairId}`, { headers: auth });
     expect(done.status).toBe(409);
     expect(((await done.json()) as { error: string }).error).toBe("pair_token_path_exists");
     expect(readFileSync(tokenPath, "utf8")).toBe("winner-credential\n");
-    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
     expect(existsSync(join(home, "hosts.yaml"))).toBe(false);
   });
 

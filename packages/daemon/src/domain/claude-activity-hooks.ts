@@ -93,7 +93,8 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * Shell expansion/operators and wrappers remain user-owned, never managed commands. */
 export function parseManagedClaudeNodeCommand(command: string): { executable: string; args: string[] } | null {
   if (/[\r\n]/.test(command)) return null;
-  const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
+  const literal = process.platform === "win32" ? /[-A-Za-z0-9_./:@%+=,][-A-Za-z0-9_./:@%+=,~]*/.source : /[-A-Za-z0-9_./:@%+=,]+/.source;
+  const token = `'(?:[^']|'"'"')*'|${literal}`;
   const text = command.trim();
   if (!new RegExp(`^(?:${token})(?:[ \t]+(?:${token}))+$`).test(text)) return null;
   const tokens = text.match(new RegExp(token, "g"))!;

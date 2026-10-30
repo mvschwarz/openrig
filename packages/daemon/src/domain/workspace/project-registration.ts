@@ -2,6 +2,8 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { Document, isMap, isScalar, isSeq, parse as parseYaml, parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
 import { projectManifestId } from "../bundle-carried-project.js";
+import { createWindowsPrivateDirectory } from "../private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "../windows-owned-text.js";
 
 /**
  * Registers a bundle's project in the workspace catalog and records which rig
@@ -59,22 +61,32 @@ const CATALOG_HEADER = "schema: openrig.workspace/v0alpha1\n";
 function writeCatalog(catalogPath: string, text: string): void {
   // Replace the file a symlinked catalog points at, so the link survives.
   const target = fs.existsSync(catalogPath) ? fs.realpathSync(catalogPath) : catalogPath;
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  const existing = fs.existsSync(target);
+  let stagingDirectory: string | undefined;
+  let temp = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
+    if (existing && process.platform === "win32") {
+      stagingDirectory = createWindowsPrivateDirectory(nodePath.dirname(target));
+      temp = nodePath.join(stagingDirectory, "catalog.tmp");
+    }
     fs.writeFileSync(temp, text);
     // Keep an existing catalog's permission bits (ownership is the writing user's, as with any edit).
-    if (fs.existsSync(target)) fs.chmodSync(temp, fs.statSync(target).mode & 0o7777);
-    fs.renameSync(temp, target);
+    if (existing) fs.chmodSync(temp, fs.statSync(target).mode & 0o7777);
+    if (existing && process.platform === "win32") replaceWindowsFilePreservingMetadata(target, temp);
+    else fs.renameSync(temp, target);
   } catch (err) {
     try { fs.rmSync(temp, { force: true }); } catch { /* best effort */ }
     throw err;
+  } finally {
+    if (stagingDirectory) try { fs.rmdirSync(stagingDirectory); } catch { /* Retain owned staging when cleanup is unavailable. */ }
   }
 }
 
 /** The real path, or, for a folder not created yet, its real parent plus its name. */
 function canonical(p: string): string {
-  try { return fs.realpathSync(p); } catch { /* not created yet */ }
-  try { return nodePath.join(fs.realpathSync(nodePath.dirname(p)), nodePath.basename(p)); } catch { return nodePath.resolve(p); }
+  const realpath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+  try { return realpath(p); } catch { /* not created yet */ }
+  try { return nodePath.join(realpath(nodePath.dirname(p)), nodePath.basename(p)); } catch { return nodePath.resolve(p); }
 }
 
 function listFiles(dir: string, prefix = ""): string[] {
@@ -226,7 +238,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
   const projectCanonical = canonical(projectRoot);
   const sameRoot = entries.find((entry) => {
     const root = entryString(entry, "root");
-    return root !== undefined && canonical(nodePath.resolve(catalogDir, root)) === projectCanonical;
+    return root !== undefined && nodePath.relative(canonical(nodePath.resolve(catalogDir, root)), projectCanonical) === "";
   });
   const sameId = entries.find((entry) => entryString(entry, "id") === input.projectId);
   const target = sameRoot ?? sameId;

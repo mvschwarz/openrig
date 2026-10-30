@@ -133,6 +133,10 @@ if (!realCodexTest) {
   const userHome = `${fixtureHome}-user-home`;
   fs.mkdirSync(userHome, { recursive: true });
   Object.assign(process.env, fixtureUserHomeEnv(userHome));
+  if (process.platform === "win32") {
+    process.env["APPDATA"] = path.join(userHome, "AppData", "Roaming");
+    process.env["LOCALAPPDATA"] = path.join(userHome, "AppData", "Local");
+  }
   delete process.env["CODEX_HOME"];
   for (const [key, suffix] of Object.entries({
     XDG_CONFIG_HOME: ".config", XDG_STATE_HOME: ".local/state",

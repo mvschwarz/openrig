@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { parseLinuxProcessArguments } from "./native-process-arguments.js";
+import { readWindowsProcessesStrict } from "./windows-process-table.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -9,8 +10,11 @@ const execFileAsync = promisify(execFile);
 export interface ProcessTableRow {
   pid: number;
   ppid: number;
-  pgid: number;
-  tpgid: number;
+  /** POSIX-only; absent on Windows. Never use a synthetic foreground group. */
+  pgid?: number;
+  tpgid?: number;
+  platform?: "win32";
+  executablePath?: string;
   executableName: string;
   /** lstart, in local time: the identity half of pid + start time. */
   startedAt: string;
@@ -29,7 +33,8 @@ let procRoot = "/proc";
  * read.
  */
 export function readProcessTable(): Promise<ProcessTableRow[]> {
-  inFlight ??= (process.platform === "linux" ? readProcTable(procRoot) : readPsTable()).finally(() => { inFlight = null; });
+  inFlight ??= (process.platform === "win32" ? readWindowsProcessesStrict()
+    : process.platform === "linux" ? readProcTable(procRoot) : readPsTable()).finally(() => { inFlight = null; });
   return inFlight;
 }
 

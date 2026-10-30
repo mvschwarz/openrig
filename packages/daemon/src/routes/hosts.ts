@@ -1,3 +1,5 @@
+import { openPrivateTextFile } from "../domain/private-text-file.js";
+import { closeSync } from "node:fs";
 // OPR.0.4.6.MH1 FR-5/FR-6 — THE narrow named host add/pair route family
 // (arch B1 ruling, pin P1: host add + the pair handshake ONLY — no
 // generic registry-write route exists, remove/edit stay out of scope;
@@ -404,7 +406,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     const tokenPath = join(secretsDir, `host-${rec.hostId}.token`);
     try {
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-      writeFileSync(tokenPath, `${remote.token}\n`, { mode: 0o600, flag: "wx" });
+      const tokenFd = openPrivateTextFile(tokenPath);
+        try { writeFileSync(tokenFd, `${remote.token}\n`); }
+        finally { closeSync(tokenFd); }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") {
         clientPairs.delete(c.req.param("pairId"));

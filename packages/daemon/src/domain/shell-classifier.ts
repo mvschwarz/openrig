@@ -14,6 +14,13 @@ export const SHELL_FOREGROUND_BASENAMES: ReadonlySet<string> = new Set([
   "bash", "zsh", "sh", "fish", "nu", "dash", "ksh", "tcsh", "csh",
 ]);
 
+/** A Windows shell host may still have a live provider child. This names the
+ * host only; callers must inspect native lineage, not infer an idle shell. */
+export function isWindowsShellHost(command: string): boolean {
+  const name = nodePath.win32.basename(command.trim()).toLowerCase().replace(/\.exe$/, "");
+  return name === "powershell" || name === "pwsh" || name === "cmd";
+}
+
 /**
  * Does `paneCommand` (tmux `pane_current_command`) read as a bare shell?
  *

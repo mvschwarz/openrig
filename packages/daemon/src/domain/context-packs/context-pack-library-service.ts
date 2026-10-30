@@ -131,7 +131,7 @@ export class ContextPackLibraryService {
         // second ref or shadow a different pack already using that ref.
         let physicalPackDir = resolve(packDir);
         try {
-          physicalPackDir = realpathSync(packDir);
+          physicalPackDir = process.platform === "win32" ? realpathSync.native(packDir) : realpathSync(packDir);
         } catch {
           // Keep the ordinary read/error path below if a discovered pack
           // disappears or becomes unreadable while this scan is running.
@@ -430,7 +430,7 @@ export class ContextPackLibraryService {
       );
     }
     const abs = join(packEntry.sourcePath, relPath);
-    if (!abs.startsWith(packEntry.sourcePath + "/") && abs !== packEntry.sourcePath) {
+    if (!abs.startsWith(packEntry.sourcePath + sep) && abs !== packEntry.sourcePath) {
       throw new ContextPackError(
         "file_outside_pack",
         `resolved path '${abs}' falls outside pack '${packEntry.sourcePath}'`,

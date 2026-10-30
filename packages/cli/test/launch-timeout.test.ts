@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -60,6 +61,7 @@ describe("local launch request deadlines", () => {
       res.on("close", () => clearTimeout(timer));
     });
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(server);
     const client = new DaemonClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     await launchCommand(deps(client)).parseAsync(["node", "rig", "rig-1", "--seats", "dev.driver", "--json"]);
     expect(process.exitCode).toBeUndefined();
@@ -80,6 +82,7 @@ describe("local launch request deadlines", () => {
       res.on("close", () => clearTimeout(timer));
     });
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(server);
     const client = new DaemonClient(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     await launchCommand(deps(client)).parseAsync(["node", "rig", "rig-1", "dev.driver", "--json"]);
     expect(process.exitCode).toBeUndefined();

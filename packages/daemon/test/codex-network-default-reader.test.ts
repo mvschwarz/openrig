@@ -57,13 +57,18 @@ afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 function fakeCodex(mode: Record<string, unknown>) {
   const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "or275-"));
   cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
-  const bin = nodePath.join(root, "bin");
+  const launcher = nodePath.join(root, "bin");
+  const bin = process.platform === "win32" ? nodePath.join(launcher, "node_modules", "@openai", "codex", "bin") : launcher;
   const cwd = nodePath.join(root, "seat dir");
   const home = nodePath.join(root, "home");
-  fs.mkdirSync(bin); fs.mkdirSync(cwd); fs.mkdirSync(home);
-  fs.writeFileSync(nodePath.join(bin, "codex"), FAKE_CODEX, { mode: 0o755 });
+  fs.mkdirSync(bin, { recursive: true }); fs.mkdirSync(cwd); fs.mkdirSync(home);
+  fs.writeFileSync(nodePath.join(bin, process.platform === "win32" ? "codex.js" : "codex"), FAKE_CODEX, { mode: 0o755 });
+  if (process.platform === "win32") {
+    fs.writeFileSync(nodePath.join(bin, "..", "package.json"), JSON.stringify({ name: "@openai/codex", bin: { codex: "bin/codex.js" } }));
+    fs.writeFileSync(nodePath.join(launcher, "codex.cmd"), '@echo off\r\n"node" "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n');
+  }
   fs.writeFileSync(nodePath.join(bin, "mode.json"), JSON.stringify({ config: FLOOR_CONFIG, requirements: { requirements: null }, ...mode }));
-  const launchPath = `${bin}:${process.env.PATH}`;
+  const launchPath = [launcher, nodePath.dirname(process.execPath)].join(nodePath.delimiter);
   const read = (file: string) => JSON.parse(fs.readFileSync(nodePath.join(bin, file), "utf8"));
   return { bin, cwd, home, codexHome: nodePath.join(home, ".codex"), launchPath, read, exists: (file: string) => fs.existsSync(nodePath.join(bin, file)) };
 }

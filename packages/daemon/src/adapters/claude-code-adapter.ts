@@ -91,7 +91,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; selectedScript?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -291,7 +291,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try { this.claudeManagedLaunch!.assertAccountHome(binding.nodeId, accountHome, binding.accountHome ? binding.accountToken ?? null : undefined); }
       catch (error) { return { ok: false, error: (error as Error).message }; }
     }
-    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}` : "claude";
+    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}${binding.claudeScript ? ` ${shellQuote(binding.claudeScript)}` : ""}` : "claude";
     this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
@@ -311,6 +311,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
           ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
+          ...(binding.claudeScript ? { script: binding.claudeScript } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
           ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
           ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
@@ -440,9 +441,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const launch = { binding, token: opts.resumeToken ?? generatedSessionId!,
-      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable,
-      scriptLaunch: managed?.executableIsScript } as
-      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
+      freshInPlace: opts.freshInPlace === true && !opts.resumeToken, executable: managed?.executable ?? binding.claudeExecutable,
+      scriptLaunch: managed?.executableIsScript, selectedScript: managed?.selectedScript ?? binding.claudeScript } as
+      { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; selectedScript?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess };
     this.autoLaunches.set(binding.nodeId, launch);
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
@@ -580,7 +581,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
       const observation = { target: binding.tmuxPane, tmux: this.tmux,
         listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable,
-        scriptLaunch: launch.scriptLaunch };
+        scriptLaunch: launch.scriptLaunch, selectedScript: launch.selectedScript };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
       // Pin the first exact process for this launch; retries cannot adopt a replacement. It is also
@@ -628,7 +629,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    *  Claude is gone. With a bound pane, the process tree must show the pane's shell holding the terminal with
    *  nothing under it; Claude, or a launch script about to start it, is a slow resume. */
   private async paneReturnedToShell(binding: NodeBinding, paneCommand: string | null): Promise<boolean> {
-    if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) return false;
+    if (!paneCommand) return false;
+    const windowsShell = /^(?:powershell|pwsh|cmd)(?:\.exe)?$/i.test(paneCommand);
+    if (!windowsShell && !SHELL_COMMANDS.has(paneCommand)) return false;
+    // A Windows shell label can be a live launch wrapper. The native console
+    // proof below, never the label, decides whether it has no receiving child.
     if (!binding.tmuxPane) return true;
     const observed = await observeClaudeDelivery({ target: binding.tmuxPane, tmux: this.tmux, listProcesses: this.listProcesses },
       { unknownKeepsIdle: false });
@@ -648,7 +653,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true })))(); } catch { return "unknown"; }
     if (looksReady) return "another";
     const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
-      scriptLaunch: launch.scriptLaunch };
+      scriptLaunch: launch.scriptLaunch, selectedScript: launch.selectedScript };
     if (await observeClaudePaneProcess({ ...observation, expectedToken: launch.token })) return "own";
     const native = await observeClaudePaneRuntime(observation);
     if (native) {
@@ -1334,22 +1339,21 @@ function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
   const parsed = parseManagedClaudeNodeCommand(cmd);
   if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
-    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+    return nodePath.normalize(parsed.args[0]!).endsWith(OWNED_COLLECTOR_SUFFIX);
   }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
   if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
-  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  return nodePath.normalize(tokens[1]!).endsWith(OWNED_COLLECTOR_SUFFIX);
 }
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (!cmd) return false;
   const parsed = parseManagedClaudeNodeCommand(cmd);
   if (!parsed || parsed.args.length !== 1) return false;
-  const relay = parsed.args[0]!;
-  return relay.endsWith("/plugins/openrig-core/hooks/scripts/activity-relay.cjs")
-    || relay.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
-    || relay.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
+  const relay = nodePath.normalize(parsed.args[0]!);
+  return ["/plugins/openrig-core/hooks/scripts/activity-relay.cjs", LEGACY_OWNED_RELAY_SUFFIX,
+    `/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`].some(suffix => relay.endsWith(nodePath.normalize(suffix)));
 }
 
 function hashContent(content: string): string {

@@ -15,6 +15,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { UsageReadOutcome } from "./usage-windows.js";
+import { killWindowsChildTree } from "../windows-child-tree.js";
+import { resolveWindowsProviderCommand } from "../windows-provider-command.js";
+import { spawnWindowsJobProcess } from "../windows-job-process.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 export type ClaudeAuthFailureReason = "binary_not_found" | "auth_status_failed" | "not_logged_in" | "not_subscription_login";
 
@@ -52,14 +56,19 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The `claude` executable on the reader's own PATH, as an absolute path, or null. */
 export function resolveClaudeExecutable(env: NodeJS.ProcessEnv): string | null {
-  for (const dir of (env.PATH ?? "").split(path.delimiter)) {
-    if (!dir) continue;
-    const candidate = path.join(dir, "claude");
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      if (fs.statSync(candidate).isFile()) return path.resolve(candidate);
-    } catch {
-      continue;
+  const names = process.platform === "win32"
+    ? (readPlatformEnv(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean).map(ext => `claude${ext.toLowerCase()}`)
+    : ["claude"];
+  for (const dir of (readPlatformEnv(env, "PATH") ?? "").split(path.delimiter)) {
+    if (!dir && process.platform !== "win32") continue;
+    for (const name of names) {
+      const candidate = path.join(dir.replace(/^"(.*)"$/, "$1"), name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return path.resolve(candidate);
+      } catch {
+        continue;
+      }
     }
   }
   return null;
@@ -70,14 +79,22 @@ export function claudeAuthReaderEnv(options: ClaudeAuthReaderOptions, base: Node
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(base)) {
     if (value === undefined) continue;
-    if (key === "TMUX" || key === "TMUX_PANE" || key === "CLAUDECODE") continue;
-    if (key.startsWith("OPENRIG_") || key.startsWith("RIGGED_") || key.startsWith("CLAUDE_CODE_")) continue;
+    const name = process.platform === "win32" ? key.toUpperCase() : key;
+    if (name === "TMUX" || name === "TMUX_PANE" || name === "CLAUDECODE") continue;
+    if (name.startsWith("OPENRIG_") || name.startsWith("RIGGED_") || name.startsWith("CLAUDE_CODE_")) continue;
     env[key] = value;
   }
-  if (options.launchPath) env.PATH = options.launchPath;
-  if (options.home) env.HOME = options.home;
-  if (options.claudeConfigDir) env.CLAUDE_CONFIG_DIR = options.claudeConfigDir;
-  env.DISABLE_AUTOUPDATER = "1";
+  const set = (name: string, value: string) => {
+    if (process.platform === "win32") for (const key of Object.keys(env)) if (key.toUpperCase() === name) delete env[key];
+    env[name] = value;
+  };
+  if (options.launchPath !== undefined) set("PATH", options.launchPath);
+  if (options.home) {
+    set("HOME", options.home);
+    if (process.platform === "win32") set("USERPROFILE", options.home);
+  }
+  if (options.claudeConfigDir !== undefined) set("CLAUDE_CONFIG_DIR", options.claudeConfigDir);
+  set("DISABLE_AUTOUPDATER", "1");
   return env;
 }
 
@@ -110,7 +127,10 @@ export function runClaudeCommand(file: string, env: NodeJS.ProcessEnv, cwd: stri
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(file, args, { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
+      const executable = process.platform === "win32" && /\.(cmd|bat)$/i.test(file)
+        ? resolveWindowsProviderCommand("claude", { ...env, PATH: [path.dirname(file), readPlatformEnv(env, "PATH") ?? ""].join(path.delimiter) }, cwd)
+        : { command: file, prefix: [] };
+      child = (process.platform === "win32" ? spawnWindowsJobProcess : spawn)(executable.command, [...executable.prefix, ...args], { env, cwd, stdio: ["ignore", "pipe", "ignore"], detached: true });
     } catch (error) {
       resolve({ code: null, stdout: "", error: error as NodeJS.ErrnoException, timedOut: false });
       return;
@@ -129,7 +149,8 @@ export function runClaudeCommand(file: string, env: NodeJS.ProcessEnv, cwd: stri
       settled = true;
       clearTimeout(timer);
       if (child.pid !== undefined) {
-        await stopProcessGroup(child.pid, graceMs);
+        if (process.platform === "win32") await killWindowsChildTree(child);
+        else await stopProcessGroup(child.pid, graceMs);
         // A killed group leaves the group list before Node reaps the child: wait, bounded, for the reap too
         // (as the Codex reader's stopGroup does), so the read never returns with its own child unreaped.
         let reapTimer: ReturnType<typeof setTimeout> | undefined;

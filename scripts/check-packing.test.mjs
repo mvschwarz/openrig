@@ -1,12 +1,14 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { npmCommand } from "./npm-command.mjs";
 import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () => {
-  const output = execSync("npm pack --dry-run --json 2>/dev/null", {
+  const output = execFileSync(...npmCommand(["pack", "--dry-run", "--json"]), {
     cwd: "packages/cli",
     encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
   });
   const entries = JSON.parse(output);
   const files = entries[0]?.files?.map((f) => f.path) ?? [];

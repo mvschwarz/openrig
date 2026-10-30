@@ -565,9 +565,13 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
     for (const member of compositionMembers) {
       if (!member.active) continue;
       const ref = member.ref;
-      const resolved = member.path;
-      if (path.basename(resolved) !== "slice.yaml") throw new Error(`slice ref must address slice.yaml: ${ref}`);
-      const relative = path.relative(fs.realpathSync(path.join(missionRoot, "slices")), resolved);
+      const resolved = process.platform === "win32" ? fs.realpathSync.native(member.path) : member.path;
+      const filename = path.basename(resolved);
+      if ((process.platform === "win32" ? filename.toLowerCase() : filename) !== "slice.yaml") throw new Error(`slice ref must address slice.yaml: ${ref}`);
+      const slicesRoot = process.platform === "win32"
+        ? fs.realpathSync.native(path.join(missionRoot, "slices"))
+        : fs.realpathSync(path.join(missionRoot, "slices"));
+      const relative = path.relative(slicesRoot, resolved);
       const dir = relative.split(path.sep)[0];
       if (!dir || dir === "..") throw new Error(`slice ref is outside slices/: ${ref}`);
       const sliceManifest = parseYaml(fs.readFileSync(resolved, "utf8")) as unknown;

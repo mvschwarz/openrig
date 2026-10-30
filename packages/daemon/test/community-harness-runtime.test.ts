@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { listCommunityHarnessPresets, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter, withCommunityHarnessResolver, withCommunityHarnesses } from "../src/adapters/community-harness-runtime-adapter.js";
 import { migrate } from "../src/db/migrate.js";
@@ -30,8 +31,8 @@ import { seatCommand } from "../../cli/src/commands/seat.js";
 const dirs: string[] = [];
 const dbs: Database.Database[] = [];
 afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   for (const db of dbs.splice(0)) db.close();
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function presets(files: Record<string, string>): string {
@@ -165,12 +166,12 @@ describe("the community harness adapter", () => {
       expect(result.firstInput?.submission).toBe("unconfirmed");
       const file = result.firstInput!.path;
       expect(readFileSync(file, "utf8")).toBe(text);
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      expect(realpathSync(file)).toBe(join(realpathSync(dir), "state", "first-input", encodeURIComponent(session), basename(file)));
+      expectPrivateFile(file);
+      expect(realpathSync.native(file)).toBe(join(realpathSync.native(dir), "state", "first-input", encodeURIComponent(session), basename(file)));
       paths.push(file);
     }
     expect(new Set(paths).size).toBe(3);
-    expect(paths[0]!.split("/").slice(0, -1)).not.toEqual(paths[1]!.split("/").slice(0, -1));
+    expect(dirname(paths[0]!)).not.toBe(dirname(paths[1]!));
     tmux.sendShellCommand.mockClear();
     const resumed = await app.launchHarness(binding, { name: "w@r", resumeToken: "saved", resumeType: "community:synth" });
     expect(resumed.firstInput).toBeUndefined();
@@ -196,7 +197,7 @@ describe("the community harness adapter", () => {
     const outside = presets({ "keep": "unchanged" });
     const root = join(dir, "state", "first-input");
     mkdirSync(root, { recursive: true });
-    symlinkSync(outside, join(root, "w%40r"));
+    symlinkSync(outside, join(root, "w%40r"), process.platform === "win32" ? "junction" : "dir");
     const { tmux } = adapter(dir);
     const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
       launchResultRoot: () => join(dir, "state", "launch-results") });
@@ -424,23 +425,40 @@ describe("the pane reader for a community harness", () => {
 });
 
 describe("activity after the seat's occupant is replaced under the same session name", () => {
-  it("follows the new occupant's own selection: a free-text occupant's quiet screen reads idle, as on main", async () => {
+  it.runIf(process.platform !== "win32" || !!process.env.OPENRIG_TEST_PSMUX)("follows the new occupant's own selection: a free-text occupant's quiet screen reads idle, as on main", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "community-harness-swap-"));
     dirs.push(scratch);
     const socket = join(scratch, "tmux.sock");
-    const tmux = async (...args: string[]) => (await promisify(execFile)("tmux", ["-S", socket, ...args])).stdout;
+    const native = process.platform === "win32";
+    const multiplexer = native ? process.env.OPENRIG_TEST_PSMUX! : "tmux";
+    const scope = native ? ["-L", basename(scratch)] : ["-S", socket];
+    const registry = join(scratch, "registry");
+    mkdirSync(registry);
+    // -L alone still shares psmux's registry and orphan reaper with real seats.
+    // Keep all configuration, ownership markers and server discovery in this fixture.
+    const env = native ? {
+      SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot,
+      PATH: dirname(process.execPath), HOME: scratch, USERPROFILE: scratch,
+      APPDATA: scratch, LOCALAPPDATA: scratch, TEMP: scratch, TMP: scratch,
+      PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL",
+    } : process.env;
+    const tmux = async (...args: string[]) => (await promisify(execFile)(multiplexer, [...scope, ...args], { env, cwd: scratch, windowsHide: true, timeout: 10000 })).stdout;
     const db = new Database(join(scratch, "state.db"));
     dbs.push(db);
     db.exec(`CREATE TABLE nodes(id TEXT PRIMARY KEY, runtime TEXT);
       CREATE TABLE sessions(id INTEGER, node_id TEXT, session_name TEXT, status TEXT, agent_app TEXT);
       CREATE TABLE bindings(node_id TEXT, attachment_type TEXT);`);
+    let started = false;
     try {
       const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell path"); }, undefined, async argv => tmux(...argv.slice(1)));
       // A reader clock ten seconds ahead makes the real window timestamps quiet without sleeping.
       const svc = new SeatActivityService({ tmux: adapter, defaultWindowSeconds: 3, now: () => new Date(Date.now() + 10_000) });
       db.prepare("INSERT INTO nodes VALUES ('n1', 'synth')").run();
       db.prepare("INSERT INTO sessions VALUES (1, 'n1', 'work-worker@r', 'running', 'synth')").run();
-      await tmux("new-session", "-d", "-s", "work-worker@r", "sleep 60");
+      await tmux("new-session", "-d", "-s", "work-worker@r", ...(native
+        ? ["--", join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 60"]
+        : ["sleep 60"]));
+      started = true;
       await svc.pollAllRunningTmuxSeats(db);
       expect(svc.getSeatState("n1")).toMatchObject({ activity: "unknown", decidedBy: null });
       // The same seat and session name, now a free-text self-attach with no recorded selection; no sweep saw it absent.
@@ -449,7 +467,8 @@ describe("activity after the seat's occupant is replaced under the same session 
       await svc.pollAllRunningTmuxSeats(db);
       expect(svc.getSeatState("n1")).toMatchObject({ activity: "idle-at-prompt", decidedBy: "window-sampling" });
     } finally {
-      await tmux("kill-server").catch(() => {});
+      if (started) await tmux("kill-server");
+      else await tmux("kill-server").catch(() => {});
     }
   });
 });

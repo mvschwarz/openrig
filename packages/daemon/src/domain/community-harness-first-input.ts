@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
+import { createPrivateTextFile } from "./private-text-file.js";
 
 export interface FirstInputPassed {
   path: string;
@@ -17,6 +18,6 @@ export function writeFirstInput(session: string, text: string,
     throw new Error("first-input folder points outside this session's folder");
   }
   const file = path.join(dir, `${randomUUID()}.txt`);
-  fs.writeFileSync(file, text, { mode: 0o600, flag: "wx" });
+  createPrivateTextFile(file, text);
   return { path: file, submission: "unconfirmed" };
 }

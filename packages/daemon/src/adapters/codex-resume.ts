@@ -94,7 +94,7 @@ export class CodexResumeAdapter {
     if (codexConfigProfile?.trim()) {
       const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
       const execFn = this.options.exec ?? ((cmd: string) => execRuntimeProbe("codex.resume.profile_preflight", cmd,
-        codexHome ? { cwd, env: { ...process.env, CODEX_HOME: codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}));
+        { cwd, env: { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), ...(this.options.launchPath !== undefined ? { PATH: this.options.launchPath } : {}) } }));
       const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn, undefined, codexHome);
       if (!probeResult.ok) {
         return {
@@ -143,7 +143,7 @@ export class CodexResumeAdapter {
       effort,
     ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
-    const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
+    const launchEnv = [this.options.launchPath !== undefined ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
     const staged = this.options.seatLaunchEnvironment
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}) })
       : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;

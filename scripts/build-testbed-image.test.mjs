@@ -4,6 +4,8 @@ import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSy
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { packageBuildShell } from "./run-package-build.mjs";
+import { writeWindowsNodeFixture } from "./windows-node-fixture.mjs";
 
 // 51-04 testbed image — the build verb (scripts/build-testbed-image.sh) is HOST-executed (it needs
 // docker; the locus ruling puts the container runtime host-side). Its real logic lives in the
@@ -130,18 +132,20 @@ test("image-load success, failure and deadline all retain status and remove only
     // Use the real deadline helper with a short test deadline. No Docker daemon,
     // build, package install or network is involved; the marker models a remote
     // container surviving the client process until an explicit named removal.
-    writeFileSync(join(root, "bin/node"), `#!${process.execPath}
+    const nodeSource = `
 import {spawnSync} from 'node:child_process';const args=process.argv.slice(2);
 if(args[1]==='timeout')args[2]='0.4';
+if(process.platform==='win32')process.env.PATH=${JSON.stringify(join(root, "bin"))}+';'+process.env.SystemRoot+'/System32';
 const p=spawnSync(${JSON.stringify(process.execPath)},args,{stdio:'inherit'});process.exit(p.status??1);
-`, { mode: 0o755 });
-    writeFileSync(join(root, "bin/docker"), `#!${process.execPath}
+`;
+    const dockerSource = `
 import fs from 'node:fs';const args=process.argv.slice(2);const marker=process.env.FAKE_CONTAINER;
 const id='a'.repeat(64),image='sha256:'+'b'.repeat(64);
 if(args[0]==='version')console.log(JSON.stringify({Os:'linux',Arch:'amd64'}));
 else if(args[0]==='image')console.log(image);
 else if(args[0]==='build'){}
 else if(args[0]==='run'){
+  if(!args.at(-1).includes('curl -fsS http://127.0.0.1:7433/healthz; rig daemon status'))process.exit(10);
   const at=args.indexOf('--name'),cid=args.indexOf('--cidfile');if(at<0||cid<0)process.exit(9);
   fs.writeFileSync(args[cid+1],id);fs.writeFileSync(marker,JSON.stringify({Id:id,Name:'/'+args[at+1],Image:image,State:{Running:process.env.LOAD_CASE==='timeout',Status:process.env.LOAD_CASE==='timeout'?'running':'exited'}}));
   if(process.env.LOAD_CASE==='timeout')setInterval(()=>{},1000);
@@ -156,12 +160,26 @@ else if(args[0]==='rm'){
   if(args.length!==2||args[1]!==id||JSON.parse(fs.readFileSync(marker)).State.Running)process.exit(8);
   fs.unlinkSync(marker);
 }else process.exit(8);
-`, { mode: 0o755 });
+`;
+    for (const [name, source] of [["node", nodeSource], ["docker", dockerSource]]) {
+      if (process.platform === "win32") writeWindowsNodeFixture(join(root, "bin"), name, source);
+      else writeFileSync(join(root, "bin", name), `#!${process.execPath}\n${source}`, { mode: 0o755 });
+    }
+    const shell = packageBuildShell(process.platform, process.env);
+    const bashPath = value => {
+      if (process.platform !== "win32") return value;
+      const converted = spawnSync(shell, ["-c", 'cygpath -u -- "$1"', "fixture", value], { encoding: "utf8", windowsHide: true });
+      assert.equal(converted.status, 0, converted.stderr);
+      return converted.stdout.trim();
+    };
+    const fixtureEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^path$/i.test(key)));
+    const fixturePath = `${bashPath(join(root, "bin"))}:/usr/bin:/bin`;
     for (const [mode, status] of [["success", 0], ["success", 0], ["failure", 7], ["timeout", 124], ["retain", 2]]) {
       const out = join(root, mode), marker = join(root, "container");
-      const run = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
-        env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
-        encoding: "utf8", timeout: 8000,
+      const env = { ...fixtureEnv, PATH: fixturePath, HOME: bashPath(root), TMPDIR: bashPath(root), LOAD_CASE: mode, FAKE_CONTAINER: marker };
+      const run = spawnSync(shell, [bashPath(join(root, "scripts/build-testbed-image.sh")), bashPath(out)], {
+        env,
+        encoding: "utf8", timeout: 8000, windowsHide: true,
       });
       assert.equal(run.status, status, `${mode}: ${run.stderr}`);
       assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), mode === "retain" ? 0 : status);
@@ -170,9 +188,9 @@ else if(args[0]==='rm'){
       assert.equal(existsSync(join(out, "image-load.cid")), mode === "retain", `${mode}: cidfile follows confirmed removal`);
       assert.equal(existsSync(join(out, "manifest.json")), status === 0);
       if (mode === "retain") {
-        const retry = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
-          env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
-          encoding: "utf8", timeout: 3000,
+        const retry = spawnSync(shell, [bashPath(join(root, "scripts/build-testbed-image.sh")), bashPath(out)], {
+          env,
+          encoding: "utf8", timeout: 3000, windowsHide: true,
         });
         assert.equal(retry.status, 2); assert.match(retry.stderr, /Retained cidfile/);
       }

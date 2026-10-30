@@ -9,7 +9,7 @@ const sessionArg = (rig: string) => { const args = chatroomWatchTmuxArgs(rig); r
 
 describe("chatroom watch --tmux arguments", () => {
   it("hands tmux the watcher as separate arguments, with the rig name after --, and asks for the name it used", () => {
-    expect(chatroomWatchTmuxArgs("my rig")).toEqual(["new-session", "-d", "-P", "-F", "#{session_name}", "-s", "chatroom@my rig",
+    expect(chatroomWatchTmuxArgs("my rig", ["rig"], "linux")).toEqual(["new-session", "-d", "-P", "-F", "#{session_name}", "-s", "chatroom@my rig",
       "rig", "chatroom", "watch", "--", "my rig"]);
   });
 

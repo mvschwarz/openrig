@@ -16,6 +16,7 @@
 // FROZEN: encodes NONE of the disputed surface (hook channel / structured usage_limit / compaction /
 // script packaging). Readiness only.
 import { describe, it, expect, vi } from "vitest";
+import { stubSeatSidecarPath } from "../src/adapters/stub-runner-protocol.js";
 
 const STUB_ADAPTER_MODULE = "../src/adapters/stub-runtime-adapter.js";
 
@@ -48,7 +49,7 @@ describe("StubRuntimeAdapter.checkReady — readiness honesty (RED: adapter abse
   // Without this positive control a permanently-not-ready implementation would pass every negative.
   it("FACT5a: reports READY for a live seat with ready evidence", async () => {
     const mod = await import(STUB_ADAPTER_MODULE) as { StubRuntimeAdapter: new (deps: unknown) => { checkReady(b: unknown): Promise<{ ready: boolean; code?: string }> } }; // RED now: module absent
-    const adapter = new mod.StubRuntimeAdapter({ tmux: tmuxWith({ hasSession: true, pane: "STUB_READY\n" }), fsOps: memFs({ "/work/.openrig/stub/state.json": JSON.stringify({ ready: true }) }) });
+    const adapter = new mod.StubRuntimeAdapter({ platform: "linux", tmux: tmuxWith({ hasSession: true, pane: "STUB_READY\n" }), fsOps: memFs({ [stubSeatSidecarPath(binding.cwd)]: JSON.stringify({ ready: true }) }) });
     const result = await adapter.checkReady(binding);
     expect(result.ready, "a live/ready stub seat must report ready").toBe(true);
   });
@@ -64,7 +65,7 @@ describe("StubRuntimeAdapter.checkReady — readiness honesty (RED: adapter abse
   // FACT5c — EXITED negative: a recorded exit → not ready.
   it("FACT5c: reports NOT ready when the stub process has exited", async () => {
     const mod = await import(STUB_ADAPTER_MODULE) as { StubRuntimeAdapter: new (deps: unknown) => { checkReady(b: unknown): Promise<{ ready: boolean }> } }; // RED now
-    const adapter = new mod.StubRuntimeAdapter({ tmux: tmuxWith({ hasSession: true }), fsOps: memFs({ "/work/.openrig/stub/state.json": JSON.stringify({ ready: false, exited: { code: 1 } }) }) });
+    const adapter = new mod.StubRuntimeAdapter({ tmux: tmuxWith({ hasSession: true }), fsOps: memFs({ [stubSeatSidecarPath(binding.cwd)]: JSON.stringify({ ready: false, exited: { code: 1 } }) }) });
     const result = await adapter.checkReady(binding);
     expect(result.ready, "an exited stub process must not report ready").toBe(false);
   });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import Database from "better-sqlite3";
 import { resolveDaemonDbPath } from "../src/daemon-db-path.js";
 
@@ -10,14 +10,14 @@ describe("resolveDaemonDbPath — D15: db derives from OPENRIG_HOME, never CWD-r
     const p = resolveDaemonDbPath(undefined, "/scratch/home");
     // The tonight incident: a bare 'openrig.sqlite' resolved against the process
     // CWD -> could land on the SHARED fleet db. The default must be home-anchored.
-    expect(p).toBe("/scratch/home/openrig.sqlite");
+    expect(p).toBe(join("/scratch/home", "openrig.sqlite"));
     expect(p).not.toBe("openrig.sqlite");
-    expect(p.startsWith("/")).toBe(true); // absolute, CWD-independent
+    expect(isAbsolute(p)).toBe(true); // absolute, CWD-independent
   });
 
   it("isolates two daemons with different OPENRIG_HOME even from the same CWD", () => {
-    expect(resolveDaemonDbPath(undefined, "/tmp/iso-a")).toBe("/tmp/iso-a/openrig.sqlite");
-    expect(resolveDaemonDbPath(undefined, "/home/fleet")).toBe("/home/fleet/openrig.sqlite");
+    expect(resolveDaemonDbPath(undefined, "/tmp/iso-a")).toBe(join("/tmp/iso-a", "openrig.sqlite"));
+    expect(resolveDaemonDbPath(undefined, "/home/fleet")).toBe(join("/home/fleet", "openrig.sqlite"));
   });
 
   it("honors an explicit OPENRIG_DB path verbatim", () => {
@@ -25,7 +25,7 @@ describe("resolveDaemonDbPath — D15: db derives from OPENRIG_HOME, never CWD-r
   });
 
   it("treats an empty OPENRIG_DB as unset (falls back to home-anchored default)", () => {
-    expect(resolveDaemonDbPath("", "/scratch/home")).toBe("/scratch/home/openrig.sqlite");
+    expect(resolveDaemonDbPath("", "/scratch/home")).toBe(join("/scratch/home", "openrig.sqlite"));
   });
 
   it("fails loud when the implicit database resolves through a symlink outside resolved OPENRIG_HOME", () => {
@@ -76,12 +76,30 @@ describe("resolveDaemonDbPath — D15: db derives from OPENRIG_HOME, never CWD-r
     }
   });
 
+  it.runIf(process.platform === "win32")("rejects a native junction escape while accepting a home junction and absent tails", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-db-junction-"));
+    try {
+      const home = join(root, "home"), outside = join(root, "outside");
+      mkdirSync(home); mkdirSync(outside);
+      writeFileSync(join(outside, "sentinel"), "unchanged");
+      symlinkSync(outside, join(home, "openrig.sqlite"), "junction");
+      expect(() => resolveDaemonDbPath(undefined, home)).toThrow(/outside resolved OPENRIG_HOME/);
+      const alias = join(root, "home-alias");
+      symlinkSync(home, alias, "junction");
+      expect(resolveDaemonDbPath(join(outside, "explicit.sqlite"), alias)).toBe(join(outside, "explicit.sqlite"));
+      expect(resolveDaemonDbPath(undefined, join(alias, "absent", "nested"))).toBe(join(alias, "absent", "nested", "openrig.sqlite"));
+      expect(readFileSync(join(outside, "sentinel"), "utf8")).toBe("unchanged");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("does not reinterpret a non-directory path component as a missing tail", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-db-nondir-"));
     const notAHome = join(root, "not-a-directory");
     try {
       writeFileSync(notAHome, "not a directory");
       expect(() => resolveDaemonDbPath(undefined, notAHome)).toThrow();
+      expect(() => resolveDaemonDbPath(undefined, join(notAHome, "missing", "home"))).toThrow();
+      expect(resolveDaemonDbPath(undefined, join(root, "missing", "home"))).toBe(join(root, "missing", "home", "openrig.sqlite"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

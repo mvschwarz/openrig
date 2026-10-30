@@ -5,6 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
+import { packageBuildShell } from "./run-package-build.mjs";
+
+const shell = process.platform === "win32"
+  ? path.win32.resolve(packageBuildShell(process.platform, process.env), "../../usr/bin/sh.exe") : "/bin/sh";
+const portable = value => process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+const shellPath = value => portable(value).replace(/^([A-Za-z]):\//, (_, drive) => `/${drive.toLowerCase()}/`);
 
 const script = path.join(import.meta.dirname, "install.sh");
 const source = fs.readFileSync(script, "utf8");
@@ -56,15 +62,15 @@ case "$*" in
     printf 'Next steps: choose providers, then rig up\n'; exit "\${SETUP_EXIT:-0}" ;;
   *) exit 93 ;;
 esac`);
-  const env = { PATH: bin, HOME: dir, TEST_PREFIX: prefix, TEST_MODULES: modules, TEST_NODE: process.execPath, TEST_NPM_VERSION: "10.9.4", TEST_LOG: path.join(dir, "calls"), ...overrides };
+  const env = { SystemRoot: process.env.SystemRoot, PATH: shellPath(bin), HOME: portable(dir), TEST_PREFIX: portable(prefix), TEST_MODULES: portable(modules), TEST_NODE: portable(process.execPath), TEST_NPM_VERSION: "10.9.4", TEST_LOG: portable(path.join(dir, "calls")), ...overrides };
   return { dir, bin, prefix, checker, env,
     calls: () => fs.existsSync(env.TEST_LOG) ? fs.readFileSync(env.TEST_LOG, "utf8").trim().split("\n") : [],
-    run: (...args) => spawnSync("/bin/sh", [script, ...args], { env, encoding: "utf8", timeout: 10000 }),
+    run: (...args) => spawnSync(shell, [portable(script), ...args], { env, encoding: "utf8", timeout: 10000, windowsHide: true }),
   };
 }
 
 test("dry run needs no tools and only prints the complete plan", t => {
-  const syntax = spawnSync("/bin/sh", ["-n", script], { encoding: "utf8" });
+  const syntax = spawnSync(shell, ["-n", portable(script)], { encoding: "utf8", windowsHide: true });
   assert.equal(syntax.status, 0, syntax.stderr);
   const f = fixture(t);
   f.env.PATH = path.join(f.dir, "absent");
@@ -114,7 +120,7 @@ test("installed rig wins over stale PATH and a prefix containing spaces works", 
   const f = fixture(t);
   const r = f.run();
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup"]);
+  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${portable(f.checker)}`, "abi:check", "installed:setup --dry-run", "installed:setup"]);
   assert.match(r.stdout, /choose providers, then rig up/);
   assert.match(r.stderr, /setup native error/);
 });
@@ -152,14 +158,14 @@ test("missing installed executable never falls back to a stale rig", t => {
 
 test("the actual HTTP download piped to sh preserves setup failure", async t => {
   const f = fixture(t, { SETUP_EXIT: "43" });
-  const curl = spawnSync("/bin/sh", ["-c", "command -v curl"], { encoding: "utf8" });
+  const curl = spawnSync(shell, ["-c", "command -v curl"], { encoding: "utf8", windowsHide: true });
   assert.equal(curl.status, 0, "curl is required for the pipe control");
-  fs.symlinkSync(curl.stdout.trim(), path.join(f.bin, "curl"));
+  fs.writeFileSync(path.join(f.bin, "curl"), '#!/bin/sh\nexec "'+curl.stdout.trim()+'" "$@"\n', { mode: 0o755 });
   const server = http.createServer((_req, res) => res.end(source));
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}/install.sh`;
-  const child = spawn("/bin/sh", ["-c", 'curl -fsS --max-time 5 "$1" | /bin/sh', "pipe-test", url], { env: f.env, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(shell, ["-c", 'curl -fsS --max-time 5 "$1" | /bin/sh', "pipe-test", url], { env: f.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let stdout = "", stderr = "";
   child.stdout.on("data", b => { stdout += b; });
   child.stderr.on("data", b => { stderr += b; });
@@ -187,7 +193,7 @@ for (const code of [1, 40]) test(`a rig setup exit ${code} reports the CLI insta
   assert.match(r.stderr, /setup native error/);
   assert.ok(!r.stderr.includes("FAILED"), r.stderr);
   assert.ok(r.stderr.includes(`INSTALLED, SETUP NOT COMPLETE (exit ${code})`), r.stderr);
-  assert.ok(r.stderr.includes(`The OpenRig CLI is installed: ${path.join(f.prefix, "bin", "rig")}`), r.stderr);
+  assert.ok(r.stderr.includes(`The OpenRig CLI is installed: ${portable(path.join(f.prefix, "bin", "rig"))}`), r.stderr);
   assert.match(r.stderr, /Node\/SQLite compatibility check: passed\./);
   assert.match(r.stderr, /"Some steps need attention", with a Fix where setup gives one, or shows the error that stopped it/);
   assert.match(r.stderr, /run rig setup again; the CLI does not need reinstalling/);

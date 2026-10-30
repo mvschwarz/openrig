@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
@@ -13,7 +13,7 @@ import {
   readCmuxSocketControlModeFromText,
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl, tmuxInstallGuidance } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -125,12 +125,12 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
       status: "fail",
       message: "tmux not found.",
       reason: "OpenRig uses tmux to manage agent sessions.",
-      fix: "Install tmux: brew install tmux (macOS), apt install tmux (Linux).",
+      fix: tmuxInstallGuidance(deps.platform),
     });
   } else if (tmuxProbe.available && tmuxProbe.version) {
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
-    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts), undefined, platform);
     if (capture.status === "fail") {
       const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
       checks.push({ name: "tmux_capture", status: "fail", message: failure.message, reason: failure.reason, fix: failure.fix });
@@ -448,7 +448,6 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
-        checkWritable: (dirPath: string) => accessSync(dirPath, constants.W_OK),
         specPath: opts.spec ? path.resolve(opts.spec) : undefined,
         // Returns null when the live side is unavailable; a known foreign owner is reported. The conformance check treats null as
         // "unknown" and skips — an unreachable daemon must never read as a matching topology.

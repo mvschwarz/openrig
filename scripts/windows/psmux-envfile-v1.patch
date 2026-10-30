@@ -1,0 +1,156 @@
+diff --git a/src/commands.rs b/src/commands.rs
+index 90a3cd8..2f47d9b 100644
+--- a/src/commands.rs
++++ b/src/commands.rs
+@@ -2014 +2014 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
+-                let env_sets = crate::server::connection::env_flag_values(&parts);
++                let env_sets = crate::private_env::respawn_values(&parts).map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+diff --git a/src/main.rs b/src/main.rs
+index 2946430..ebb988a 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -52,0 +53 @@ mod environ;
++mod private_env;
+@@ -1457,0 +1459,4 @@ fn run_main() -> io::Result<()> {
++        "openrig-private-environment-capability" => {
++            println!("{}", crate::private_env::CAPABILITY);
++            return Ok(());
++        }
+@@ -1985,0 +1991 @@ fn run_main() -> io::Result<()> {
++                let mut env_payloads: Vec<String> = Vec::new();
+@@ -2045,4 +2051,2 @@ fn run_main() -> io::Result<()> {
+-                                match crate::util::parse_new_session_e_value_token(
+-                                    Some(v.as_str()),
+-                                ) {
+-                                    Ok(pair) => env_vars.push(pair),
++                                match crate::private_env::token(&v) {
++                                    Ok(pairs) => { env_vars.extend(pairs); env_payloads.push(v); },
+@@ -2198 +2202 @@ fn run_main() -> io::Result<()> {
+-                let claimed_warm = if held_claim || (!warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_vars.is_empty() && init_width.is_none() && init_height.is_none()) {
++                let claimed_warm = if held_claim || (!warm_disabled && !has_custom_config && initial_cmd.is_none() && raw_cmd_args.is_none() && start_dir.is_none() && env_payloads.is_empty() && init_width.is_none() && init_height.is_none()) {
+@@ -2379 +2383 @@ fn run_main() -> io::Result<()> {
+-                for (k, v) in &env_vars {
++                for value in &env_payloads {
+@@ -2381 +2385 @@ fn run_main() -> io::Result<()> {
+-                    server_args.push(format!("{}={}", k, v));
++                    server_args.push(value.clone());
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 874bd72..9f866e3 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -3520 +3520,8 @@ match cmd {
+-        let env_sets = env_flag_values(&args);
++        let env_sets = match crate::private_env::respawn_values(&args) {
++            Ok(values) => values,
++            Err(message) => {
++                let _ = writeln!(write_stream, "ERROR: {}", message);
++                let _ = write_stream.flush();
++                return;
++            }
++        };
+@@ -6774 +6781,7 @@ fn dispatch_control_command(
+-            let env_sets = env_flag_values(&args);
++            let env_sets = match crate::private_env::respawn_values(&args) {
++                Ok(values) => values,
++                Err(message) => {
++                    let _ = resp_tx.send(format!("\u{0001}ERR\u{0001}{}", message));
++                    return true;
++                }
++            };
+diff --git a/src/util.rs b/src/util.rs
+index f97eb27..f20361e 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -905 +905 @@ pub fn parse_new_session_e_value_token(next_arg: Option<&str>) -> Result<(String
+-fn is_valid_env_var_name(name: &str) -> bool {
++pub(crate) fn is_valid_env_var_name(name: &str) -> bool {
+@@ -935,2 +935,2 @@ pub fn collect_server_session_env_args(args: &[String]) -> Result<Vec<(String, S
+-            let pair = parse_new_session_e_value_token(args.get(i + 1).map(|s| s.as_str()))?;
+-            out.push(pair);
++            let value = args.get(i + 1).ok_or_else(|| "-e requires a value".to_string())?;
++            out.extend(crate::private_env::token(value)?);
+diff --git a/src/private_env.rs b/src/private_env.rs
+new file mode 100644
+--- /dev/null
++++ b/src/private_env.rs
+@@ -0,0 +1,80 @@
++//! Isolated OpenRig env-file-v1 experiment against the pinned psmux tag.
++//! No values are serialized into server argv or control command text.
++use std::io::Read;
++
++pub const PREFIX: &str = "@openrig-env-v1:";
++pub const CAPABILITY: &str = "openrig-envfile-v1:new-session,respawn-pane";
++const MAX_BYTES: usize = 1024 * 1024;
++const ERROR: &str = "private environment file unavailable or invalid";
++
++#[derive(serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Manifest {
++    schema: String,
++    entries: Vec<(String, String)>,
++}
++
++fn decode(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
++    if bytes.len() > MAX_BYTES { return Err(ERROR.into()); }
++    let manifest: Manifest = serde_json::from_slice(bytes).map_err(|_| ERROR.to_string())?;
++    if manifest.schema != "openrig.psmux.environment/v1" { return Err(ERROR.into()); }
++    for (key, value) in &manifest.entries {
++        if !crate::util::is_valid_env_var_name(key) || value.contains('\0') { return Err(ERROR.into()); }
++    }
++    Ok(manifest.entries)
++}
++
++pub fn token(value: &str) -> Result<Vec<(String, String)>, String> {
++    if let Some(path) = value.strip_prefix(PREFIX) {
++        let file = std::fs::File::open(path).map_err(|_| ERROR.to_string())?;
++        if !file.metadata().map_err(|_| ERROR.to_string())?.is_file() { return Err(ERROR.into()); }
++        let mut bytes = Vec::new();
++        file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(|_| ERROR.to_string())?;
++        decode(&bytes)
++    } else {
++        crate::util::parse_new_session_e_value_token(Some(value)).map(|pair| vec![pair])
++    }
++}
++
++/// Preserve legacy respawn -e parsing and ordering; only the versioned invalid-
++/// assignment shape selects the new input. A malformed file is never ignored.
++pub fn respawn_values(args: &[&str]) -> Result<Vec<(String, String)>, String> {
++    let mut result = Vec::new();
++    let options = &args[..args.iter().position(|arg| *arg == "--").unwrap_or(args.len())];
++    for pair in options.windows(2).filter(|pair| pair[0] == "-e") {
++        if pair[1].starts_with(PREFIX) { result.extend(token(pair[1])?); }
++        else if let Some((key, value)) = pair[1].trim_matches('"').split_once('=') {
++            result.push((key.to_owned(), value.to_owned()));
++        }
++    }
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn private_env_preserves_literal_values_and_order() {
++        let entries = vec![("KEY", ""), ("KEY", " spaces \r\n中文#{session_name}\"\\$ ")];
++        let bytes = serde_json::to_vec(&serde_json::json!({"schema":"openrig.psmux.environment/v1","entries":entries})).unwrap();
++        assert_eq!(decode(&bytes).unwrap(), entries.into_iter().map(|(k,v)|(k.into(),v.into())).collect::<Vec<_>>());
++        assert_eq!(token("KEY=value").unwrap(), vec![("KEY".into(), "value".into())]);
++    }
++    #[test]
++    fn private_env_rejects_invalid_input_without_echoing_values() {
++        for value in [
++            serde_json::json!({"schema":"wrong","entries":[]}),
++            serde_json::json!({"schema":"openrig.psmux.environment/v1","entries":[["BAD-KEY","synthetic-secret"]]}),
++            serde_json::json!({"schema":"openrig.psmux.environment/v1","entries":[["KEY","synthetic\u{0}secret"]]}),
++            serde_json::json!({"schema":"openrig.psmux.environment/v1","entries":[],"extra":"synthetic-secret"}),
++        ] { assert_eq!(decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(), ERROR); }
++        assert_eq!(decode(&vec![b'x'; MAX_BYTES + 1]).unwrap_err(), ERROR);
++        assert_eq!(decode(b"invalid synthetic-secret").unwrap_err(), ERROR);
++        assert_eq!(token("@openrig-env-v1:missing-file").unwrap_err(), ERROR);
++    }
++    #[test]
++    fn private_env_keeps_plain_respawn_order() {
++        assert_eq!(respawn_values(&["-e","KEY=first","-e","KEY=last"]).unwrap(), vec![("KEY".into(),"first".into()),("KEY".into(),"last".into())]);
++        assert_eq!(respawn_values(&["-e","KEY=first","--","node","-e","@openrig-env-v1:missing"]).unwrap(), vec![("KEY".into(),"first".into())]);
++    }
++}

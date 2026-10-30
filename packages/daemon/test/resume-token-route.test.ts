@@ -9,6 +9,9 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { sessionAdminRoutes } from "../src/routes/sessions.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 function seedRigNodes(db: Database.Database) {
   db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-1", "test-rig");
@@ -38,6 +41,24 @@ describe("POST /api/sessions/:sessionName/resume-token", () => {
     seedRigNodes(db);
   });
   afterEach(() => { db.close(); });
+
+  it.runIf(process.platform === "win32").each(["pi", "omp"])("stores an owned native %s path containing a literal short-name tilde without publishing it", async runtime => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "resume~owned-"));
+    const token = path.join(root, "session.jsonl"); fs.writeFileSync(token, "{}\n");
+    try {
+      db.prepare("UPDATE nodes SET runtime=? WHERE id='node-1'").run(runtime);
+      const { app, sessionRegistry } = createTestApp(db);
+      const session = sessionRegistry.registerSession("node-1", "dev1-impl@test-rig");
+      const response = await post(app, session.sessionName, { token, reason: "owned native fixture" });
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(JSON.stringify(result)).not.toContain(token);
+      const saved = db.prepare("SELECT resume_token, resume_type FROM sessions WHERE id=?").get(session.id);
+      expect(saved).toEqual({ resume_token: token, resume_type: runtime + "_session_file" });
+      expect(JSON.stringify(resumeTokenEvents(db))).not.toContain(token);
+      expect(fs.readFileSync(token, "utf8")).toBe("{}\n");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
 
   it("sets a claude token (operator provenance), redacts the token, emits an audit event", async () => {
     const { app, sessionRegistry } = createTestApp(db);

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, mkdtempSync, copyFileSync, chmodSync, statSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { execSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { replaceFile } from "../src/adapters/replace-file.js";
+import { denyWindowsDirectoryCreation, windowsDirectoryAccess } from "./helpers/directory-permissions.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -100,7 +101,7 @@ describe("Claude Status Line Collector Script", () => {
   // T1: Parses valid status line and writes sidecar
   it("parses valid Claude status line JSON and writes sidecar file", () => {
     const outputPath = join(tmpDir, "context", "test.json");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputPath], { encoding: "utf-8", input: VALID_STATUS_LINE });
 
     expect(existsSync(outputPath)).toBe(true);
     const content = JSON.parse(readFileSync(outputPath, "utf-8"));
@@ -114,7 +115,7 @@ describe("Claude Status Line Collector Script", () => {
 
   it("stamps the managed occupant generation inherited by the collector process", () => {
     const outputPath = join(tmpDir, "context", "generation.json");
-    const result = spawnSync("node", [collectorPath, outputPath], {
+    const result = spawnSync(process.execPath, [collectorPath, outputPath], {
       encoding: "utf-8",
       input: VALID_STATUS_LINE,
       env: { ...process.env, OPENRIG_OCCUPANT_GENERATION: "generation-current" },
@@ -128,7 +129,7 @@ describe("Claude Status Line Collector Script", () => {
   // T2: Atomic write (no .tmp left behind on success)
   it("writes atomically — no .tmp file left behind", () => {
     const outputPath = join(tmpDir, "context", "atomic.json");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputPath], { encoding: "utf-8", input: VALID_STATUS_LINE });
 
     expect(existsSync(outputPath)).toBe(true);
     expect(existsSync(outputPath + ".tmp")).toBe(false);
@@ -139,7 +140,7 @@ describe("Claude Status Line Collector Script", () => {
     mkdirSync(outputPath, { recursive: true });
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = spawnSync("node", [collectorPath, outputPath], {
+      const result = spawnSync(process.execPath, [collectorPath, outputPath], {
         encoding: "utf-8",
         input: VALID_STATUS_LINE,
       });
@@ -153,7 +154,7 @@ describe("Claude Status Line Collector Script", () => {
   // T3: Malformed stdin — graceful exit, no output
   it("handles malformed stdin gracefully — no output file created", () => {
     const outputPath = join(tmpDir, "context", "bad.json");
-    const result = spawnSync("node", [collectorPath, outputPath], {
+    const result = spawnSync(process.execPath, [collectorPath, outputPath], {
       encoding: "utf-8",
       input: "not json {{",
     });
@@ -165,7 +166,7 @@ describe("Claude Status Line Collector Script", () => {
 
   it("writes to a session-specific sidecar when given a context directory", () => {
     const outputDir = join(tmpDir, "context");
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath} ${outputDir}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath, outputDir], { encoding: "utf-8", input: VALID_STATUS_LINE });
 
     const sessionSidecar = join(outputDir, "dev-impl@test.json");
     expect(existsSync(sessionSidecar)).toBe(true);
@@ -177,7 +178,7 @@ describe("Claude Status Line Collector Script", () => {
   it("writes a seat-keyed subscription provider_usage cache atomically from rate_limits", () => {
     const contextDir = join(tmpDir, "context");
     const usageDir = join(tmpDir, "provider-usage");
-    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+    const result = spawnSync(process.execPath, [collectorPath, contextDir, usageDir], {
       encoding: "utf-8",
       input: VALID_STATUS_LINE,
     });
@@ -204,7 +205,7 @@ describe("Claude Status Line Collector Script", () => {
     const statusLine = JSON.parse(VALID_STATUS_LINE);
     statusLine.rate_limits.five_hour.resets_at = 1_770_000_000;
     statusLine.rate_limits.seven_day.resets_at = 1_770_086_400;
-    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+    const result = spawnSync(process.execPath, [collectorPath, contextDir, usageDir], {
       encoding: "utf-8",
       input: JSON.stringify(statusLine),
     });
@@ -222,7 +223,7 @@ describe("Claude Status Line Collector Script", () => {
     const usageDir = join(tmpDir, "provider-usage");
     const statusLine = JSON.parse(VALID_STATUS_LINE);
     statusLine.rate_limits.five_hour.resets_at = Number.MAX_VALUE;
-    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+    const result = spawnSync(process.execPath, [collectorPath, contextDir, usageDir], {
       encoding: "utf-8",
       input: JSON.stringify(statusLine),
     });
@@ -236,12 +237,12 @@ describe("Claude Status Line Collector Script", () => {
   // T3b: No output path arg — silent exit
   it("silently exits with no output path argument", () => {
     // Should not throw
-    execSync(`echo '${VALID_STATUS_LINE}' | node ${collectorPath}`, { encoding: "utf-8" });
+    execFileSync(process.execPath, [collectorPath], { encoding: "utf-8", input: VALID_STATUS_LINE });
   });
 
   it("logs a shape error when a directory target cannot be resolved to a session sidecar", () => {
     const outputDir = join(tmpDir, "context");
-    const result = spawnSync("node", [collectorPath, outputDir], {
+    const result = spawnSync(process.execPath, [collectorPath, outputDir], {
       encoding: "utf-8",
       input: JSON.stringify({ context_window: { used_percentage: 10 } }),
     });
@@ -258,7 +259,11 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
   beforeEach(() => {
     tmpDir = join(tmpdir(), `adapter-collector-${Date.now()}`);
-    written = {};
+    written = new Proxy<Record<string, string>>({}, {
+      get: (store, key) => typeof key === "string" ? store[resolve(key)] : Reflect.get(store, key),
+      set: (store, key, value) => { Reflect.set(store, typeof key === "string" ? resolve(key) : key, value); return true; },
+      has: (store, key) => Reflect.has(store, typeof key === "string" ? resolve(key) : key),
+    });
     dirsMade = [];
   });
 
@@ -337,14 +342,14 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /old/ctx /old/prov", padding: 2 } });
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
-      expect(statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
       expect(statusLine.padding).toBe(2);
     });
 
     it("refreshes the three-token collector command OpenRig wrote before provider usage", async () => {
       written[settingsPath] = JSON.stringify({ statusLine: { type: "command", command: "node /project/.openrig/context-collector.cjs /old/state/context" } });
       await deliver();
-      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
+      expect(JSON.parse(written[settingsPath]!).statusLine.command).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`);
     });
 
     it("installs the collector into a status line that has no command", async () => {
@@ -352,7 +357,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       await deliver();
       const statusLine = JSON.parse(written[settingsPath]!).statusLine;
       expect(statusLine).toMatchObject({ type: "command", padding: 3 });
-      expect(statusLine.command).toContain("/project/.openrig/context-collector.cjs");
+      expect(statusLine.command).toContain(join("/project", ".openrig", "context-collector.cjs"));
     });
 
     it("leaves a settings file it cannot parse byte-for-byte untouched", async () => {
@@ -384,10 +389,10 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     it.each(["", "  \n"])("installs the collector into an empty settings file (%j)", async (text) => {
       written[settingsPath] = text;
       await deliver();
-      expect(written[settingsPath]).toContain("/project/.openrig/context-collector.cjs");
+      expect(JSON.parse(written[settingsPath]!).statusLine.command).toContain(join("/project", ".openrig", "context-collector.cjs"));
       expect(JSON.parse(written[settingsPath]!).statusLine).toEqual({
         type: "command",
-        command: `${shellQuote(process.execPath)} ${shellQuote("/project/.openrig/context-collector.cjs")} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
+        command: `${shellQuote(process.execPath)} ${shellQuote(join("/project", ".openrig", "context-collector.cjs"))} ${shellQuote(join(tmpDir, "state", "context-usage"))} ${shellQuote(join(tmpDir, "state", "provider-usage"))}`,
       });
     });
   });
@@ -627,7 +632,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     const statePath = "/home/tester/.claude.json";
     expect(written[statePath]).toBeDefined();
     const state = JSON.parse(written[statePath]!);
-    expect(state.projects["/project"].hasTrustDialogAccepted).toBe(true);
+    expect(state.projects[resolve("/project")].hasTrustDialogAccepted).toBe(true);
   });
 
   it("deliverStartup marks Claude onboarding complete for fresh managed sessions", async () => {
@@ -668,11 +673,12 @@ describe("provisioned collector command shell paths", () => {
     adapter.ensureContextCollector({ cwd });
     return JSON.parse(readFileSync(settings, "utf8"));
   }
-  it.each(["workspace with spaces", "O'Brien workspace"])("runs the real collector through /bin/sh for %s", (name) => {
+  it.each(["workspace with spaces", "O'Brien workspace"])("runs the real collector through a POSIX shell for %s", (name) => {
     const state = join(root, "state " + name);
     const settings = provision(join(root, name), state);
-    const result = spawnSync("/bin/sh", ["-c", settings.statusLine.command], {
-      input: VALID_STATUS_LINE, encoding: "utf8", env: { ...process.env, OPENRIG_OCCUPANT_GENERATION: "fixture-generation" },
+    const shell = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/sh";
+    const result = spawnSync(shell, ["-c", settings.statusLine.command], {
+      input: VALID_STATUS_LINE, encoding: "utf8", env: { ...process.env, BASH_ENV: undefined, ENV: undefined, OPENRIG_OCCUPANT_GENERATION: "fixture-generation" },
     });
     expect(result.status, result.stderr).toBe(0);
     const context = JSON.parse(readFileSync(join(state, "state", "context-usage", "dev-impl@test.json"), "utf8"));
@@ -721,7 +727,7 @@ describe("re-seating the collector from a read-only asset", () => {
     const cwd = join(root, "seat");
     const adapter = adapterFor(asset, copyFileSync);
     adapter.ensureContextCollector({ cwd });
-    expect(() => adapter.ensureContextCollector({ cwd })).toThrow(/EACCES/);
+    expect(() => adapter.ensureContextCollector({ cwd })).toThrow(process.platform === "win32" ? /EPERM/ : /EACCES/);
   });
 
   it.skipIf(process.getuid?.() === 0)("updates a writable collector in a readonly directory", () => {
@@ -731,15 +737,19 @@ describe("re-seating the collector from a read-only asset", () => {
     const parent = join(cwd, ".openrig");
     const adapter = adapterFor(asset, replaceFile);
     adapter.ensureContextCollector({ cwd });
-    chmodSync(parent, 0o555);
+    const restore = process.platform === "win32" ? denyWindowsDirectoryCreation(parent) : () => chmodSync(parent, 0o755);
+    if (process.platform !== "win32") chmodSync(parent, 0o555);
+    const access = process.platform === "win32" ? windowsDirectoryAccess(parent) : "";
     try {
+      expect(() => mkdtempSync(join(parent, "blocked-"))).toThrow(/EACCES|EPERM/);
       writeFileSync(asset, "// v2\n");
       adapter.ensureContextCollector({ cwd });
       adapter.ensureContextCollector({ cwd });
       expect(readFileSync(join(parent, "context-collector.cjs"), "utf8")).toBe("// v2\n");
-      expect(statSync(parent).mode & 0o777).toBe(0o555);
+      if (process.platform === "win32") expect(windowsDirectoryAccess(parent)).toBe(access);
+      else expect(statSync(parent).mode & 0o777).toBe(0o555);
       expect(readdirSync(parent).filter(f => f.includes(".tmp"))).toEqual([]);
-    } finally { chmodSync(parent, 0o755); }
+    } finally { restore(); }
   });
 
   it.skipIf(process.getuid?.() === 0)("updates a writable activity relay in a readonly directory", async () => {
@@ -759,15 +769,19 @@ describe("re-seating the collector from a read-only asset", () => {
       resourcePath: "activity", absolutePath: asset }], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] } as ProjectionPlan;
     expect((await adapter.project(plan, { cwd } as NodeBinding)).projected).toContain("activity");
     const parent = join(stateDir, "state/claude-activity-hooks");
-    chmodSync(parent, 0o555);
+    const restore = process.platform === "win32" ? denyWindowsDirectoryCreation(parent) : () => chmodSync(parent, 0o755);
+    if (process.platform !== "win32") chmodSync(parent, 0o555);
+    const access = process.platform === "win32" ? windowsDirectoryAccess(parent) : "";
     try {
+      expect(() => mkdtempSync(join(parent, "blocked-"))).toThrow(/EACCES|EPERM/);
       writeFileSync(asset, "// relay v2\n");
       expect((await adapter.project(plan, { cwd } as NodeBinding)).projected).toContain("activity");
       expect(readFileSync(join(parent, "activity-relay.cjs"), "utf8")).toBe("// relay v2\n");
-      expect(statSync(join(parent, "activity-relay.cjs")).mode & 0o777).toBe(0o755);
-      expect(statSync(parent).mode & 0o777).toBe(0o555);
+      expect(statSync(join(parent, "activity-relay.cjs")).mode & 0o777).toBe(process.platform === "win32" ? statSync(asset).mode & 0o777 : 0o755);
+      if (process.platform === "win32") expect(windowsDirectoryAccess(parent)).toBe(access);
+      else expect(statSync(parent).mode & 0o777).toBe(0o555);
       expect(readdirSync(parent)).toEqual(["activity-relay.cjs"]);
-    } finally { chmodSync(parent, 0o755); }
+    } finally { restore(); }
   });
 
   it("replaceFile re-seats it on every poll, including after the asset changes", () => {

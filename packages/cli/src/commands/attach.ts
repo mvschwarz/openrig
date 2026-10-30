@@ -1,5 +1,5 @@
-import { Command } from "commander";
-import { execSync } from "node:child_process";
+import { Command, Option } from "commander";
+import { execFileSync } from "node:child_process";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -11,14 +11,21 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).trim();
+export function attachEnvironmentLines(nodeId: string, sessionName: string, shell: "sh" | "powershell"): string[] {
+  return Object.entries({ OPENRIG_NODE_ID: nodeId, OPENRIG_SESSION_NAME: sessionName }).map(([key, value]) =>
+    shell === "powershell" ? `$env:${key} = '${value.replace(/'/g, "''")}'` : `export ${key}=${shellQuote(value)}`);
+}
+
+type TmuxFileExecFn = (file: string, args: string[]) => string;
+const defaultTmuxFileExec: TmuxFileExecFn = (file, args) =>
+  execFileSync(file, args, { encoding: "utf-8", windowsHide: true }).trim();
 
 // tmux writes a control character in its output as "_", so a newline between fields can't separate them, and a
 // session name may hold spaces or underscores. Ask for the two fixed-shape ids first; the rest of the line is the name.
 const TMUX_CONTEXT_FORMAT = "#{pane_id} #{window_id} #{session_name}";
 const TMUX_CONTEXT_LINE = /^(%\d+) (@\d+) (.+)$/;
 
-export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
+export function resolveAttachContext(tmuxExec?: TmuxExecFn, fileExec: TmuxFileExecFn = defaultTmuxFileExec):
   | { attachmentType: "external_cli" }
   | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string } {
   const tmuxPane = process.env["TMUX_PANE"];
@@ -27,7 +34,9 @@ export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
   }
 
   try {
-    const output = tmuxExec(`tmux display-message -p -t ${shellQuote(tmuxPane)} ${shellQuote(TMUX_CONTEXT_FORMAT)}`);
+    const output = tmuxExec
+      ? tmuxExec(`tmux display-message -p -t ${shellQuote(tmuxPane)} ${shellQuote(TMUX_CONTEXT_FORMAT)}`)
+      : fileExec("tmux", ["display-message", "-p", "-t", tmuxPane, TMUX_CONTEXT_FORMAT]);
     const match = TMUX_CONTEXT_LINE.exec(output.trim());
     if (match) {
       const [, resolvedPane, tmuxWindow, tmuxSession] = match;
@@ -59,7 +68,8 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
     .option("--runtime <runtime>", "Runtime for pod attach mode; optional guard for node mode")
     .option("--cwd <path>", "Working directory to record", process.cwd())
     .option("--display-name <name>", "Display label inside tmux; external session name outside tmux")
-    .option("--print-env", "Print shell exports for OPENRIG_NODE_ID and OPENRIG_SESSION_NAME")
+    .option("--print-env", "Print shell assignments for OPENRIG_NODE_ID and OPENRIG_SESSION_NAME")
+    .addOption(new Option("--shell <shell>", "Shell syntax for --print-env").choices(["sh", "powershell"]).default(process.platform === "win32" ? "powershell" : "sh"))
     .option("--json", "JSON output, including the activity env the attached app needs. Its token is a credential: don't print or paste it, and use rig whoami for identity")
     .action(async (opts: {
       self?: boolean;
@@ -71,6 +81,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
       cwd?: string;
       displayName?: string;
       printEnv?: boolean;
+      shell: "sh" | "powershell";
       json?: boolean;
     }) => {
       if (!opts.self) {
@@ -149,8 +160,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
       const sessionName = typeof env["OPENRIG_SESSION_NAME"] === "string" ? env["OPENRIG_SESSION_NAME"] : "";
 
       if (opts.printEnv) {
-        console.log(`export OPENRIG_NODE_ID=${shellQuote(nodeId)}`);
-        console.log(`export OPENRIG_SESSION_NAME=${shellQuote(sessionName)}`);
+        for (const line of attachEnvironmentLines(nodeId, sessionName, opts.shell)) console.log(line);
         return;
       }
 
@@ -168,7 +178,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
           ? "tmux"
           : "external_cli (outbound rig commands available; inbound tmux transport unavailable)"
       }`);
-      console.log("Identity:   rerun with --print-env and eval the output to persist OPENRIG_NODE_ID/OPENRIG_SESSION_NAME");
+      console.log(`Identity:   rerun with --print-env --shell ${opts.shell} and apply the output in your current shell to persist OPENRIG_NODE_ID/OPENRIG_SESSION_NAME`);
     });
 
   return cmd;

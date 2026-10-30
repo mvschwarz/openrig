@@ -9,8 +9,10 @@ import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
+import { readPlatformEnv, renderWindowsLaunch } from "@openrig/daemon/windows-launch";
+import { detachedTerminalEnvironment } from "./terminal-environment.js";
 
-interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string }
+interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
 interface Preview {
   planId: string;
@@ -33,9 +35,8 @@ export interface WindowDeps {
   notice?(message: string): void;
 }
 
-export function defaultWindowDeps(): WindowDeps {
-  const env = { ...process.env };
-  delete env["TMUX"];
+export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): WindowDeps {
+  const env = detachedTerminalEnvironment(sourceEnv);
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
@@ -51,6 +52,7 @@ export function defaultWindowDeps(): WindowDeps {
     herdrConfig: (socketPath, columns) => prepareHerdrLaunchConfig(env, socketPath, columns),
     columns: async () => {
       if (process.stdout.isTTY && process.stdout.columns > 0) return process.stdout.columns;
+      if (process.platform === "win32") return undefined;
       try {
         const size = await run("/bin/sh", ["-c", "stty size < /dev/tty"], { encoding: "utf8", timeout: 1000 });
         const width = Number(size.stdout.trim().split(/\s+/)[1]);
@@ -205,6 +207,91 @@ end run`;
   return `Unrecognised or unavailable hosting terminal: ${JSON.stringify(host ?? "unknown")}.`;
 }
 
+/** Windows Terminal renders the same composition directly; source sessions stay intact. */
+async function openWindowsTerminalView(client: DaemonClient, view: string, requestedProvider: string | undefined, deps: WindowDeps, expectedPlan?: string): Promise<OpenViewResult> {
+  if (requestedProvider === "herdr") return failure("herdr", "Herdr is unavailable on Windows; use --provider tmux --window.");
+  const refused = (reason: string) => ({ ...failure("tmux", `No terminal window was opened. ${reason}`), windowAttempted: false });
+  const nativeEnv = (name: string) => readPlatformEnv(deps.env, name, "win32");
+  const ci = nativeEnv("CI");
+  if (ci && !["0", "false"].includes(ci)) return refused("This is a CI run.");
+  if (nativeEnv("SSH_CONNECTION") || nativeEnv("SSH_CLIENT") || nativeEnv("SSH_TTY")) return refused("This is an SSH session; run the window command on the daemon's desktop.");
+  const systemDirectory = path.win32.join(nativeEnv("SystemRoot") || "C:\\Windows", "System32");
+  const powershell = path.win32.join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+  const desktop = (await deps.exec(powershell, ["-NoProfile", "-NonInteractive", "-Command", "[System.Diagnostics.Process]::GetCurrentProcess().SessionId"], 1000).catch(() => "")).trim();
+  if (!/^\d+$/.test(desktop) || Number(desktop) === 0) return refused("No interactive Windows desktop session could be confirmed.");
+  const binary = (await deps.exec(path.win32.join(systemDirectory, "where.exe"), ["wt.exe"]).catch(() => "")).trim().split(/\r?\n/)[0];
+  if (!binary) return refused("Windows Terminal is unavailable. Install Windows Terminal, then retry.");
+  const width = await deps.columns?.().catch(() => undefined);
+  const viewport = Number.isSafeInteger(width) && width! > 0 ? `&viewportColumns=${width}` : "";
+  const preview = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr${viewport}`);
+  if (preview.status >= 400 || !("composed" in preview.data)) return refused((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
+  const { composed, planId } = preview.data;
+  if (expectedPlan !== undefined && expectedPlan !== planId) return refused("The terminal view changed since preview. Refresh the preview before opening.");
+  if (!composed.opened.length) return { ...refused("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+  const args = ["--window", "new"];
+  let pages = 0;
+  const surfaceArgs = (pane: Pane) => {
+    const title = pane.label.replace(/[;\r\n\0]/g, " ");
+    // The daemon's native tile already has an encoded, literal-data bootstrap.
+    // Wrapping that again multiplies its size past CreateProcess's 32K limit.
+    if (pane.attachArgv?.length && /(?:^|[\\/])powershell\.exe$/i.test(pane.attachArgv[0]!)
+      && pane.attachArgv.includes("-EncodedCommand")) {
+      return ["--title", title, "--suppressApplicationTitle", ...pane.attachArgv];
+    }
+    const command = renderWindowsLaunch(pane.paneCommand);
+    const script = `Remove-Item Env:TMUX -ErrorAction SilentlyContinue; ${command}`;
+    return ["--title", title, "--suppressApplicationTitle", powershell, "-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+  };
+  type Tile = { pane: Pane } | { first: Tile; second: Tile; direction: string; fraction: number };
+  const rowTile = (row: Pane[]): Tile => {
+    if (row.length === 1) return { pane: row[0]! };
+    const cut = Math.ceil(row.length / 2);
+    return { first: rowTile(row.slice(0, cut)), second: rowTile(row.slice(cut)), direction: "-V", fraction: (row.length - cut) / row.length };
+  };
+  const gridTile = (rows: Pane[][]): Tile => {
+    if (rows.length === 1) return rowTile(rows[0]!);
+    const cut = Math.ceil(rows.length / 2);
+    return { first: gridTile(rows.slice(0, cut)), second: gridTile(rows.slice(cut)), direction: "-H", fraction: (rows.length - cut) / rows.length };
+  };
+  const firstPane = (tile: Tile): Pane => "pane" in tile ? tile.pane : firstPane(tile.first);
+  const append = (...command: string[]) => { if (args.length > 2) args.push(";"); args.push(...command); };
+  for (const page of composed.pages) {
+    if (!page.length) continue;
+    const columns = Number.isSafeInteger(composed.columns) && composed.columns! > 0 ? composed.columns! : Math.ceil(Math.sqrt(page.length));
+    const rows: Pane[][] = [];
+    for (let i = 0; i < page.length; i += columns) rows.push(page.slice(i, i + columns));
+    const tile = gridTile(rows);
+    append("new-tab", ...surfaceArgs(firstPane(tile)));
+    let nextId = 1;
+    const focus = (id: number) => {
+      append("move-focus", "first");
+      for (let index = 0; index < id; index++) append("move-focus", "nextInOrder");
+    };
+    const split = (current: Tile, id: number) => {
+      if ("pane" in current) return;
+      focus(id);
+      const secondId = nextId++;
+      append("split-pane", current.direction, "--size", String(current.fraction), ...surfaceArgs(firstPane(current.second)));
+      split(current.first, id);
+      split(current.second, secondId);
+    };
+    split(tile, 0);
+    pages++;
+  }
+  if (!pages) return refused("The daemon returned an empty view layout.");
+  args.push(";", "focus-tab", "--target", "0");
+  try {
+    await deps.launch(binary, args);
+  } catch (error) {
+    return { ...failure("tmux", `Terminal window status is unknown. ${(error as Error).message} Inspect the desktop before retrying.`), windowAttempted: true };
+  }
+  return {
+    provider: "tmux", ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages,
+    window: { app: "Windows Terminal", surface: "window-requested" },
+    notes: ["Requested a new Windows Terminal window using the daemon's existing view. Existing conversations were preserved.", "Check the new terminal shows the intended view; window creation alone is not visual confirmation."],
+  };
+}
+
 function failure(provider: string, error: string): OpenViewResult {
   return { provider, ok: false, opened: [], absent: [], degraded: [], pages: 0, error, code: "terminal_window_failed" };
 }
@@ -262,7 +349,10 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string, requestedSession?: string, following?: FollowControls): Promise<OpenViewResult> {
   const session = requestedSession?.trim();
-  if (!following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
+  if (deps.platform === "win32" && requestedProvider === "rex") {
+    return { ...failure("rex", "Rex is unavailable on Windows; use --provider tmux --window."), windowAttempted: false };
+  }
+  if (deps.platform !== "win32" && !following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
     return openRexView(client, view, deps, expectedPlan);
   }
   const selectedProvider = requestedProvider ?? (session !== undefined || following ? "herdr" : undefined);
@@ -286,6 +376,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (following && selectedProvider !== "herdr") throw new Error("Following requires the qualified Herdr provider.");
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
     if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
+    if (deps.platform === "win32") return await openWindowsTerminalView(client, view, selectedProvider, deps, expectedPlan);
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;

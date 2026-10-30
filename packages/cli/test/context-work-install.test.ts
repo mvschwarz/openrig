@@ -479,7 +479,7 @@ ${worlds}`);
     });
 
     const first = await run();
-    expect(first.exitCode).toBeUndefined();
+    expect(first.exitCode, first.errLogs.join("\n")).toBeUndefined();
     const installed = JSON.parse(first.logs.join("")) as {
       pieces: Array<{ address: string; exists: boolean }>;
       skillLoadout: { entries: Array<{ id: string; selectedBy: string[] }> };

@@ -3,8 +3,10 @@ import { Command } from "commander";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
+import { browserLaunch } from "../browser-launch.js";
 
 export interface UiDeps {
+  platform?: NodeJS.Platform;
   lifecycleDeps: LifecycleDeps;
   exec: (cmd: string, args: string[]) => Promise<void>;
   /** Reads the daemon's own answer for the UI page. Defaults to fetch with a short timeout. */
@@ -40,7 +42,8 @@ export function uiCommand(depsOverride?: UiDeps): Command {
       if (overrideUrl) {
         console.log(overrideUrl);
         try {
-          await deps.exec("open", [overrideUrl]);
+          const launch = browserLaunch(overrideUrl, deps.platform ?? process.platform);
+          await deps.exec(launch.command, launch.args);
         } catch {
           console.error("Failed to open browser — open the URL manually");
           process.exitCode = 1;
@@ -74,7 +77,8 @@ export function uiCommand(depsOverride?: UiDeps): Command {
       console.log(url);
 
       try {
-        await deps.exec("open", [url]);
+        const launch = browserLaunch(url, deps.platform ?? process.platform);
+        await deps.exec(launch.command, launch.args);
       } catch {
         console.error("Failed to open browser — open the URL manually");
         process.exitCode = 1;

@@ -322,7 +322,7 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
       // The evidence directory becomes a link to another directory inside the project, with the same accepted bytes.
       const real = path.join(t.f.root, "real"), live = path.join(real, "live");
       t.f.write(path.join(live, "report.md"), "accepted observation");
-      fs.renameSync(t.outside, `${t.outside}.old`); fs.symlinkSync(live, t.outside);
+      fs.renameSync(t.outside, `${t.outside}.old`); fs.symlinkSync(live, t.outside, process.platform === "win32" ? "junction" : "dir");
       t.handles.get(path.dirname(t.outside))!.event("rename", path.basename(t.outside)); vi.advanceTimersByTime(50);
       expect(readSliceReadiness(t.dir).state).toBe("ready");
       // Replacing the real directory is seen at its own parent, or the sources are reported unobserved.
@@ -333,7 +333,7 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
   });
   for (const name of ["missions", null]) it(`rebinds a linked missions root when its real directory is replaced (${name ?? "no filename"})`, () => {
     const f = fixture(), real = path.join(f.root, "real"), linked = path.join(f.root, "linked-missions");
-    fs.mkdirSync(real); fs.renameSync(f.missions, path.join(real, "missions")); fs.symlinkSync(path.join(real, "missions"), linked);
+    fs.mkdirSync(real); fs.renameSync(f.missions, path.join(real, "missions")); fs.symlinkSync(path.join(real, "missions"), linked, process.platform === "win32" ? "junction" : "dir");
     vi.useFakeTimers();
     // Each handle with its listener; a handle opened before the replacement watches the old directory and stays silent.
     const opened: Array<{ root: string; recursive: boolean; event: (event: string, name: string | null) => void }> = [];
@@ -363,7 +363,7 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
     const outside = path.join(other, "missions");
     // Another project's missions tree, readable on its own.
     fs.cpSync(f.missions, outside, { recursive: true }); fs.copyFileSync(f.projectFile, path.join(other, "project.yaml")); fs.mkdirSync(path.dirname(inside)); fs.renameSync(f.missions, inside);
-    fs.symlinkSync(start === "outside" ? outside : inside, linked);
+    fs.symlinkSync(start === "outside" ? outside : inside, linked, process.platform === "win32" ? "junction" : "dir");
     vi.useFakeTimers();
     const opened: Array<{ root: string; event: (event: string, name: string | null) => void }> = [];
     vi.spyOn(fs, "watch").mockImplementation(((root: string, _options: unknown, listener: (event: string, name: string | null) => void) => {
@@ -375,7 +375,7 @@ describe("QA bounded adverse coverage at 8b236e06", () => {
       if (start === "inside") {
         expect(watch.observation().state).toBe("watching");
         // The supported alias is re-pointed outside the project; the link's own parent sees it.
-        fs.unlinkSync(linked); fs.symlinkSync(outside, linked);
+        fs.unlinkSync(linked); fs.symlinkSync(outside, linked, process.platform === "win32" ? "junction" : "dir");
         opened.filter((h) => h.root === f.root).at(-1)!.event("rename", "linked-missions"); vi.advanceTimersByTime(50);
         expect(emit.mock.calls.map(([e]) => e.revision)).toContain("unavailable");
       }

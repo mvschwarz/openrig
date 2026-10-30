@@ -1,6 +1,7 @@
 // Real Commander commands, DaemonClient, loopback HTTP, daemon routes and SQLite.
 // Only the person's tmux metadata and pane effects are inert.
 import { describe, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { Command } from "commander";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -62,6 +63,7 @@ it.each(["0", "person-terminal"])("real attach -> returned env -> actual From ->
   if (!server.listening) await once(server, "listening");
   const address = server.address(); if (!address || typeof address === "string") throw new Error("missing fixture port");
   const url = `http://127.0.0.1:${address.port}`;
+  allowFetchTarget(url);
   const lifecycleDeps = { spawn: vi.fn(), fetch: async () => ({ ok: true }), kill: vi.fn(),
     readFile: (p: string) => p === STATE_FILE ? JSON.stringify({ pid: process.pid, port: address.port, db: "fixture", startedAt: "2026-10-20T00:00:00Z" }) : null,
     exists: (p: string) => p === STATE_FILE, writeFile: vi.fn(), removeFile: vi.fn(), mkdirp: vi.fn(), openForAppend: () => 3, isProcessAlive: () => true,

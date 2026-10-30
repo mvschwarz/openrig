@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import * as fs from "node:fs";
@@ -214,11 +215,13 @@ describe("Send CLI", () => {
       });
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
     // Use an actual connection refusal: fetch blocks port1 before connecting,
     // without a cause code, so it cannot exercise the coded no-connect branch.
     const closed = http.createServer();
     await new Promise<void>((resolve) => { closed.listen(0, "127.0.0.1", resolve); });
+    allowOwnedHttpFixture(closed);
     refusedUrl = `http://127.0.0.1:${(closed.address() as { port: number }).port}`;
     await new Promise<void>((resolve, reject) => { closed.close((err) => err ? reject(err) : resolve()); });
   });
@@ -634,6 +637,7 @@ describe("Send CLI", () => {
     try {
       let thrown: unknown;
       const { logs } = await captureLogs(async () => {
+        allowOwnedHttpFixture(cut);
         await makeCmd(runningDeps((cut.address() as { port: number }).port))
           .parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "400"]).catch((err: unknown) => { thrown = err; });
       });

@@ -13,8 +13,11 @@ export function launchArgs(launch: SpecLaunch): string[] {
   return ["up", "--cwd", launch.folder, ...(launch.host && launch.host !== "local" ? ["--host", launch.host] : []), "--", launch.source];
 }
 
-export function launchCommand(launch: SpecLaunch): string {
-  return (launch.host === "local" ? "OPENRIG_HOST_SELECTED=local " : "") + ["rig", ...launchArgs(launch)].map(s => /^[\w/.:=-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`).join(" ");
+export function launchCommand(launch: SpecLaunch, platform: NodeJS.Platform = process.platform): string {
+  const native = platform === "win32";
+  const prefix = launch.host === "local" ? (native ? "$env:OPENRIG_HOST_SELECTED = 'local'; " : "OPENRIG_HOST_SELECTED=local ") : "";
+  const quote = (s: string) => /^[\w/.:=-]+$/.test(s) ? s : `'${s.replaceAll("'", native ? "''" : "'\\''")}'`;
+  return prefix + (native ? "& " : "") + ["rig", ...launchArgs(launch)].map(quote).join(" ");
 }
 
 export interface LaunchProcess { executable: string; args: string[]; env: NodeJS.ProcessEnv }

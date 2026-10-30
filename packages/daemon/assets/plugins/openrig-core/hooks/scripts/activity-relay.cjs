@@ -236,7 +236,8 @@ const SETTINGS_RELAY_TAIL = "state/claude-activity-hooks/activity-relay.cjs";
 // Canonical POSIX quotes and literal unquoted words only; no expansion or wrappers.
 function settingsRelayPath(command) {
   if (/[\r\n]/.test(command)) return null;
-  const token = /'(?:[^']|'"'"')*'|[-A-Za-z0-9_./:@%+=,]+/.source;
+  const literal = process.platform === "win32" ? /[-A-Za-z0-9_./:@%+=,][-A-Za-z0-9_./:@%+=,~]*/.source : /[-A-Za-z0-9_./:@%+=,]+/.source;
+  const token = `'(?:[^']|'"'"')*'|${literal}`;
   const m = new RegExp(`^(${token})[ \t]+(${token})$`).exec(command.trim());
   if (!m) return null;
   const decode = token => token.startsWith("'") ? token.slice(1, -1).split(`'"'"'`).join("'") : token;
@@ -244,16 +245,22 @@ function settingsRelayPath(command) {
   const executable = decode(m[1]);
   const relay = decode(m[2]);
   if (m.slice(1).some(token => token.startsWith("'") && quote(decode(token)) !== token)) return null;
-  if (!path.isAbsolute(relay) || !relay.endsWith(`/${SETTINGS_RELAY_TAIL}`)) return null;
+  const relayPath = path.normalize(relay);
+  const tail = path.sep + SETTINGS_RELAY_TAIL.split("/").join(path.sep);
+  if (!path.isAbsolute(relay) || !(process.platform === "win32"
+    ? relayPath.toLowerCase().endsWith(tail.toLowerCase()) : relayPath.endsWith(tail))) return null;
   if (executable !== "node" && (!path.isAbsolute(executable) || !/^node(?:\.exe)?$/i.test(path.basename(executable)))) return null;
   return { executable, relay };
 }
 
 function interpreterAvailable(executable, env) {
+  const pathKey = process.platform === "win32" ? Object.keys(env).sort().find(key => key.toUpperCase() === "PATH") : "PATH";
+  const searchPath = pathKey === undefined ? undefined : env[pathKey];
   const candidates = executable === "node"
-    ? typeof env.PATH === "string" ? env.PATH.split(path.delimiter).map(dir => path.resolve(dir || ".", "node")) : []
+    ? typeof searchPath === "string" ? searchPath.split(path.delimiter).map(dir => path.resolve((process.platform === "win32" ? dir.replace(/^"(.*)"$/, "$1") : dir) || ".", process.platform === "win32" ? "node.exe" : "node")) : []
     : [executable];
   return candidates.some(candidate => {
+    if (process.platform === "win32" && !/^node\.exe$/i.test(path.basename(candidate))) return false;
     try { fs.accessSync(candidate, fs.constants.X_OK); return fs.statSync(candidate).isFile(); }
     catch { return false; }
   });

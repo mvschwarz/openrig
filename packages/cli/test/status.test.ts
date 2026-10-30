@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import { createProgram } from "../src/index.js";
@@ -27,21 +28,19 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<string[]> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    try {
-      await fn();
-    } finally {
-      console.log = origLog;
-      console.error = origErr;
-    }
-    resolve(logs);
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
+    return logs;
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
 }
 
 // Echo server for daemon API
@@ -85,6 +84,7 @@ function createDaemonServer(
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
     listen: () => new Promise<number>((resolve) => {
       server.listen(0, () => {
+        allowOwnedHttpFixture(server);
         const addr = server.address();
         const port = typeof addr === "object" && addr ? addr.port : 0;
         resolve(port);
@@ -541,6 +541,7 @@ describe("rig status", () => {
         close: () => new Promise<void>((r) => server.close(() => r())),
         listen: () => new Promise<number>((r) => {
           server.listen(0, () => {
+            allowOwnedHttpFixture(server);
             const addr = server.address();
             r(typeof addr === "object" && addr ? addr.port : 0);
           });
@@ -689,11 +690,13 @@ describe("rig status --json", () => {
     });
 
     it("unverified with a live sibling home: reachable null and the sibling hint", async () => {
+      const home = path.resolve("/home/x/.openrig"), sibling = path.resolve("/home/x/.openrig-new");
+      const marker = path.join(home, "HOME-MOVED");
       const parsed = await parsedJson({
         lifecycleDeps: mockLifecycleDeps({
-          homeDir: "/home/x/.openrig",
-          exists: vi.fn((p: string) => p === "/home/x/.openrig/HOME-MOVED"),
-          readFile: vi.fn((p: string) => (p === "/home/x/.openrig/HOME-MOVED" ? "/home/x/.openrig-new\n" : null)),
+          homeDir: home,
+          exists: vi.fn((p: string) => p === marker),
+          readFile: vi.fn((p: string) => (p === marker ? sibling + "\n" : null)),
           fetch: vi.fn(async () => { throw refused(); }),
         }),
         clientFactory: noClient(),
@@ -703,7 +706,7 @@ describe("rig status --json", () => {
         reachable: null,
         message: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
         probeErrorCode: "ECONNREFUSED",
-        siblingHint: { resolvedHome: "/home/x/.openrig", siblingHome: "/home/x/.openrig-new" },
+        siblingHint: { resolvedHome: home, siblingHome: sibling },
       });
     });
 
@@ -750,6 +753,7 @@ describe("rig status --json", () => {
       res.writeHead(404); res.end();
     });
     const port = await new Promise<number>((r) => server.listen(0, () => r((server.address() as { port: number }).port)));
+    allowOwnedHttpFixture(server);
     try {
       process.exitCode = undefined;
       const parsed = JSON.parse(await run(runningDeps(port), ["--json"]));

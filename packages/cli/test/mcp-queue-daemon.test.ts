@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
@@ -54,6 +55,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     server = await new Promise<ServerType>((resolve) => {
       const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
     });
+    allowOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
@@ -244,7 +246,7 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     // the root says nothing about what the same path is there, so it isn't followed.
     fs.mkdirSync(path.join(shared, "old"));
     fs.writeFileSync(path.join(shared, "old", "report.md"), "not shared");
-    fs.symlinkSync(path.join(shared, "old"), path.join(home, "alias"));
+    fs.symlinkSync(path.join(shared, "old"), path.join(home, "alias"), process.platform === "win32" ? "junction" : "dir");
     const linked = path.join(home, "alias", "report.md");
     for (const [evidenceRef, reason] of [[outside, "outside every shared root"], [linked, "outside every shared root"],
       ["https://example.com/report", "a link"], [undefined, "no evidenceRef"]] as const) {

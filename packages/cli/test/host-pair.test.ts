@@ -1,3 +1,5 @@
+import { createPrivateTextFile } from "../src/lib/private-text-file.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 // OPR.0.4.6.MH1 FR-6 — rig host pair <url>: the founder-simple add path.
 // One pasted address, one approval on the target, done — and the
 // nothing-persists guarantee on every failure leg.
@@ -86,7 +88,7 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
 
     const tokenPath = path.join(dir, "secrets", "host-vps-a.token");
     expect(fs.readFileSync(tokenPath, "utf8")).toBe("issued-bearer\n");
-    expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
     const yaml = fs.readFileSync(path.join(dir, "hosts.yaml"), "utf8");
     expect(yaml).toContain("id: vps-a");
     expect(yaml).toContain(`bearer_file: ${tokenPath}`);
@@ -146,7 +148,7 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     const secretsDir = path.join(dir, "secrets");
     const tokenPath = path.join(secretsDir, "host-vps-a.token");
     fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tokenPath, "live-credential\n", { mode: 0o600 });
+    createPrivateTextFile(tokenPath, "live-credential\n");
     expect(addHostEntry({ id: "vps-a", transport: "http", url: "http://old-target:7433", bearer_file: tokenPath }).ok).toBe(true);
     const yamlBefore = fs.readFileSync(path.join(dir, "hosts.yaml"), "utf8");
 
@@ -158,14 +160,14 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     expect(deps.postCalls()).toBe(0);
     expect(fs.readFileSync(path.join(dir, "hosts.yaml"), "utf8")).toBe(yamlBefore);
     expect(fs.readFileSync(tokenPath, "utf8")).toBe("live-credential\n");
-    expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
   });
 
   it("B1: a pre-existing token file at the derived path rejects the pair before target contact — file untouched", async () => {
     const secretsDir = path.join(dir, "secrets");
     const tokenPath = path.join(secretsDir, "host-vps-a.token");
     fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(tokenPath, "stale-but-not-ours-to-delete\n", { mode: 0o600 });
+    createPrivateTextFile(tokenPath, "stale-but-not-ours-to-delete\n");
 
     const deps = fakeDeps({ poll: [] });
     const { err, exitCode } = await capture(() => run(deps, ["pair", "vps-a:7433"]));
@@ -174,7 +176,7 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
 
     expect(deps.postCalls()).toBe(0);
     expect(fs.readFileSync(tokenPath, "utf8")).toBe("stale-but-not-ours-to-delete\n");
-    expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expectPrivateFile(tokenPath);
     expect(fs.existsSync(path.join(dir, "hosts.yaml"))).toBe(false);
   });
 

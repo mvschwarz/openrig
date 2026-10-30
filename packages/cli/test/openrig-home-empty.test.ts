@@ -19,6 +19,7 @@ describe("empty OPENRIG_HOME", () => {
     fs.mkdirSync(path.join(home, ".openrig"));
     fs.writeFileSync(path.join(home, ".openrig", "terminal-token"), "tok-123\n");
     vi.stubEnv("HOME", home);
+    if (process.platform === "win32") vi.stubEnv("USERPROFILE", home);
     vi.stubEnv("OPENRIG_HOME", "");
     vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "");
     expect(terminalAuthHeaders()).toEqual({ Authorization: "Bearer tok-123" });

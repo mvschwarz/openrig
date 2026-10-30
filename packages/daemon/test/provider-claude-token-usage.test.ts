@@ -18,6 +18,8 @@ import { allowanceLines } from "../../tui/src/usage/usage-model.js";
 import type { UsageReadOutcome } from "../src/domain/provider/usage-windows.js";
 import type { ClaudeTokenAnswer } from "../src/domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "../src/domain/provider/provider-types.js";
+import * as windowsText from "../src/domain/windows-owned-text.js";
+import { createPrivateTextFile } from "../src/domain/private-text-file.js";
 
 const NOW = "2026-10-24T04:16:45.000Z";
 // Sanitized provider event: no credential, account identity, UUID or model text.
@@ -28,19 +30,84 @@ const EVENT = { type: "rate_limit_event", rate_limit_info: { status: "allowed_wa
     seven_day: { utilization: 0.83, resetsAt: 1793196000, status: "allowed_warning", surpassedThreshold: 0.75 },
   } } };
 const answer = () => ({ ok: true as const, observedAt: NOW, ...parseClaudeTokenUsage(JSON.stringify(EVENT))! });
-const A = { label: "First subscription", tokenFile: "/private/first.token" };
-const B = { label: "Second subscription", tokenFile: "/private/second.token" };
+const A = { label: "First subscription", tokenFile: path.join("/private", "first.token") };
+const B = { label: "Second subscription", tokenFile: path.join("/private", "second.token") };
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const f of cleanup.splice(0).reverse()) f(); vi.unstubAllEnvs(); });
 function db() { const d = new Database(":memory:"); migrate(d, ALL_MIGRATIONS); cleanup.push(() => d.close()); return d; }
 function fake(script: string) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "token-probe-test-")); cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(root, "claude"), `#!${process.execPath}\n${script}`, { mode: 0o700 });
+  if (process.platform === "win32") {
+    const pkg = path.join(root, "node_modules", "@anthropic-ai", "claude-code");
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", bin: { claude: "cli.js" } }));
+    fs.writeFileSync(path.join(pkg, "cli.js"), script);
+    fs.writeFileSync(path.join(root, "claude.cmd"), '@echo off\r\n"node" "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n');
+  } else fs.writeFileSync(path.join(root, "claude"), `#!${process.execPath}\n${script}`, { mode: 0o700 });
   const tokenFile = path.join(root, "selected.token"); fs.writeFileSync(tokenFile, "SYNTHETIC-TEST-ONLY", { mode: 0o600 });
-  return { root, tokenFile };
+  return { root, tokenFile, launchPath: [root, path.dirname(process.execPath)].join(path.delimiter) };
 }
 
 describe("selected Claude credential usage", () => {
+  it.runIf(process.platform === "win32")("retains daemon PATHEXT for isolated synthetic token probes", async () => {
+    vi.stubEnv("PATHEXT", ".CMD;.EXE;.COM");
+    const f = fake(`if(process.env.PATHEXT!=='.CMD;.EXE;.COM')process.exit(7);console.log(JSON.stringify({type:'system',claude_code_version:'2.1.310'}));console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    fs.writeFileSync(path.join(f.root, "claude.com"), "selection decoy; never executed");
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "synthetic", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true, probe: { exitCode: 0 } });
+  });
+  it.runIf(process.platform === "win32")("assesses the opened token handle across pathname replacement without consuming bytes", async () => {
+    const f = fake("");
+    fs.unlinkSync(f.tokenFile); createPrivateTextFile(f.tokenFile, "SYNTHETIC-PRIVATE");
+    const fd = fs.openSync(f.tokenFile, "r");
+    try {
+      fs.renameSync(f.tokenFile, `${f.tokenFile}.original`);
+      fs.writeFileSync(f.tokenFile, "SYNTHETIC-BROAD");
+      let timerRan = false; setTimeout(() => { timerRan = true; }, 0);
+      expect(await windowsText.assessWindowsFilePermissions(fd)).toEqual({ owned: true, privateAcl: true });
+      expect(timerRan).toBe(true);
+      expect(fs.readFileSync(fd, "utf8")).toBe("SYNTHETIC-PRIVATE");
+      const replacement = fs.openSync(f.tokenFile, "r");
+      try { expect(await windowsText.assessWindowsFilePermissions(replacement)).toEqual({ owned: true, privateAcl: false }); }
+      finally { fs.closeSync(replacement); }
+    } finally { fs.closeSync(fd); }
+  }, 30_000);
+
+  it.runIf(process.platform === "win32")("uses a private token without POSIX-mode or ownership warnings", async () => {
+    const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    fs.unlinkSync(f.tokenFile); createPrivateTextFile(f.tokenFile, "SYNTHETIC-TEST-ONLY");
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) expect(result.probe.warnings).toBeUndefined();
+  });
+
+  it.runIf(process.platform === "win32")("reports unavailable native permission evidence without refusing the selected readable token", async () => {
+    const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
+    const assessment = vi.spyOn(windowsText, "assessWindowsFilePermissions").mockRejectedValue(new Error("synthetic internal detail"));
+    try {
+      const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
+      expect(result).toMatchObject({ ok: true, probe: { warnings: ["token file Windows owner/DACL could not be assessed"] } });
+      expect(JSON.stringify(result)).not.toMatch(/synthetic internal detail|SYNTHETIC-TEST-ONLY/);
+    } finally { assessment.mockRestore(); }
+  });
+  it.runIf(process.platform === "win32")("creates a native private scratch home before the synthetic CLI starts and removes it afterward", async () => {
+    const f = fake("");
+    const report = path.join(f.root, "scratch-report.json");
+    const aclScript = "$ErrorActionPreference='Stop';$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;$acl=[IO.Directory]::GetAccessControl($env:HOME);$rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]);[Console]::Write(($acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $sid.Value -and $rules.Count -eq 1 -and $rules[0].IdentityReference.Value -eq $sid.Value -and !$rules[0].IsInherited -and $rules[0].AccessControlType -eq 'Allow').ToString())";
+    const script = `const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');
+      const privateAcl=cp.execFileSync(path.join(process.env.SystemRoot,'System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-EncodedCommand',${JSON.stringify(Buffer.from(aclScript, "utf16le").toString("base64"))}],{encoding:'utf8',windowsHide:true}).trim()==='True';
+      fs.writeFileSync(${JSON.stringify(report)},JSON.stringify({scratch:process.env.HOME,privateAcl,sameHome:require('node:os').homedir()===process.env.HOME,selected:process.env.CLAUDE_CODE_OAUTH_TOKEN==='SYNTHETIC-TEST-ONLY'}));
+      console.log(JSON.stringify({type:'system',claude_code_version:'2.1.310'}));console.log(JSON.stringify(${JSON.stringify(EVENT)}));`;
+    fs.writeFileSync(path.join(f.root, "node_modules", "@anthropic-ai", "claude-code", "cli.js"), script);
+    let timerRan = false; setTimeout(() => { timerRan = true; }, 0);
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "synthetic", tokenFile: f.tokenFile });
+    expect(result).toMatchObject({ ok: true });
+    expect(timerRan).toBe(true);
+    const observed = JSON.parse(fs.readFileSync(report, "utf8"));
+    expect(observed).toMatchObject({ privateAcl: true, sameHome: true, selected: true });
+    expect(fs.existsSync(observed.scratch)).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("SYNTHETIC-TEST-ONLY");
+  }, 30_000);
   it("shows the supplied windows, times, label provenance and independent overage refusal", async () => {
     const cache = new ClaudeTokenUsage({ read: vi.fn(async () => answer()), now: () => NOW });
     await cache.refresh(A);
@@ -126,18 +193,19 @@ describe("selected Claude credential usage", () => {
 
   it("a failed or expired credential produces no raw error or fabricated usage", async () => {
     const f = fake("console.log('SYNTHETIC-TEST-ONLY invalid credential'); process.exit(1)");
-    const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile: f.tokenFile });
+    const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile: f.tokenFile });
     expect(result).toMatchObject({ ok: false, reason: "probe_failed" }); expect(JSON.stringify(result)).not.toContain("SYNTHETIC");
   });
 
   it("uses only the selected token in an isolated real child, with tools/hooks/MCP disabled and no secret in argv/results", async () => {
     const f = fake(`if(process.argv.includes('--version')) { if(process.env.CLAUDE_CODE_OAUTH_TOKEN) process.exit(5); console.log('2.1.310 (Claude Code)'); process.exit(0); }
       const fs=require('fs'); const args=process.argv.slice(2);
+      if(process.platform==='win32' && (require('os').homedir()!==process.env.HOME || process.env.USERPROFILE!==process.env.HOME || !process.env.APPDATA.startsWith(process.env.HOME) || !process.env.LOCALAPPDATA.startsWith(process.env.HOME) || process.env.TEMP!==process.env.HOME))process.exit(7);
       const ok = process.env.CLAUDE_CODE_OAUTH_TOKEN === 'SYNTHETIC-TEST-ONLY' && !process.env.ANTHROPIC_API_KEY && !process.env.OPENRIG_HOME && !process.env.CLAUDECODE && !process.env.TMUX && process.cwd() === fs.realpathSync(process.env.HOME) && process.env.HOME === process.env.CLAUDE_CONFIG_DIR && args[args.indexOf('--tools')+1] === '' && args.includes('--strict-mcp-config') && JSON.parse(args[args.indexOf('--settings')+1]).disableAllHooks;
       if(!ok || args.join(' ').includes(process.env.CLAUDE_CODE_OAUTH_TOKEN)) process.exit(4);
       console.log(JSON.stringify(${JSON.stringify(EVENT)})); console.log(JSON.stringify({type:'result',subtype:'success',is_error:false}));`);
     vi.stubEnv("ANTHROPIC_API_KEY", "UNRELATED-SYNTHETIC-KEY"); vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "UNSELECTED-SYNTHETIC-TOKEN");
-    const r = await claudeTokenUsageReader({ launchPath: f.root, now: () => NOW })({ label: "fixture", tokenFile: f.tokenFile });
+    const r = await claudeTokenUsageReader({ launchPath: f.launchPath, now: () => NOW })({ label: "fixture", tokenFile: f.tokenFile });
     expect(r).toMatchObject({ ok: true, probe: { exitCode: 0, requestOutcome: "completed", cliVersion: "2.1.310" } });
     expect(JSON.stringify(r)).not.toContain("SYNTHETIC");
   });
@@ -159,18 +227,22 @@ describe("selected Claude credential usage", () => {
     const f = fake(`console.log(JSON.stringify(${JSON.stringify(EVENT)}))`);
     let tokenFile = f.tokenFile;
     let uid: ReturnType<typeof vi.spyOn> | undefined;
+    let native: ReturnType<typeof vi.spyOn> | undefined;
     if (concern === "mode") fs.chmodSync(tokenFile, 0o644);
     if (concern === "owner" && process.getuid) { const current = process.getuid(); uid = vi.spyOn(process, "getuid").mockReturnValue(current + 1); }
+    if (concern === "owner" && process.platform === "win32") native = vi.spyOn(windowsText, "assessWindowsFilePermissions").mockResolvedValue({ owned: false, privateAcl: true });
     if (concern === "symlink") { tokenFile = path.join(f.root, "alias.token"); fs.symlinkSync(f.tokenFile, tokenFile); }
     try {
-      const result = await claudeTokenUsageReader({ launchPath: f.root })({ label: "fixture", tokenFile });
-      expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(concern === "mode" ? "group/others" : concern === "owner" ? "owned by uid" : "symlink")]) } });
-    } finally { uid?.mockRestore(); }
+      const result = await claudeTokenUsageReader({ launchPath: f.launchPath })({ label: "fixture", tokenFile });
+      const warning = concern === "mode" ? process.platform === "win32" ? "private Windows DACL" : "group/others"
+        : concern === "owner" ? process.platform === "win32" ? "current Windows user" : "owned by uid" : "symlink";
+      expect(result).toMatchObject({ ok: true, probe: { warnings: expect.arrayContaining([expect.stringContaining(warning)]) } });
+    } finally { uid?.mockRestore(); native?.mockRestore(); }
   });
 
   it("bounds an unfinished child and reports possible provider spend", async () => {
     const f = fake("setInterval(()=>{},1000)");
-    expect(await claudeTokenUsageReader({ launchPath: f.root, timeoutMs: 80, graceMs: 30 })({ label: "fixture", tokenFile: f.tokenFile })).toMatchObject({ ok: false, reason: "probe_timeout", detail: expect.stringContaining("may have been consumed") });
+    expect(await claudeTokenUsageReader({ launchPath: f.launchPath, timeoutMs: 80, graceMs: 30 })({ label: "fixture", tokenFile: f.tokenFile })).toMatchObject({ ok: false, reason: "probe_timeout", detail: expect.stringContaining("may have been consumed") });
   });
 
   it("plain API/view reads never probe; a selected refresh alone reads one credential", async () => {

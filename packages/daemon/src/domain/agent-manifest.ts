@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import { isAbsolute as nativeIsAbsolute } from "node:path";
 import type {
   AgentSpec, ImportSpec, StartupBlock, StartupFile, StartupAction,
   LifecycleDefaults, AgentResources, ProfileSpec,
@@ -50,12 +51,12 @@ function validateImportRef(ref: string, index: number): string | null {
   if (ref.startsWith("local:")) {
     const path = ref.slice("local:".length);
     if (!path) return `imports[${index}].ref: local: ref must have a path`;
-    if (path.startsWith("/")) return `imports[${index}].ref: local: ref must be a relative path (got "${ref}")`;
+    if (nativeIsAbsolute(path)) return `imports[${index}].ref: local: ref must be a relative path (got "${ref}")`;
   }
   if (ref.startsWith("path:")) {
     const path = ref.slice("path:".length);
     if (!path) return `imports[${index}].ref: path: ref must have a path`;
-    if (!path.startsWith("/")) return `imports[${index}].ref: path: ref must be an absolute path (got "${ref}")`;
+    if (!nativeIsAbsolute(path)) return `imports[${index}].ref: path: ref must be an absolute path (got "${ref}")`;
   }
   return null;
 }

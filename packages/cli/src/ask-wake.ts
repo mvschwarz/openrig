@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { resolveWindowsProviderCommand } from "@openrig/daemon/windows-launch";
 
 export interface WakeRunResult {
   stdout: string;
@@ -64,7 +65,14 @@ export function buildWakeCommand(runtime: "claude" | "codex", token: string, que
  *  exited (back-to-cold) — we never retain a handle. */
 export const defaultWakeRunner: WakeRunner = (cmd, args, opts) =>
   new Promise((resolve) => {
-    execFile(cmd, args, { timeout: opts.timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+    let launch = { command: cmd, prefix: [] as string[] };
+    try {
+      if (cmd === "codex" || cmd === "claude") launch = resolveWindowsProviderCommand(cmd, process.env);
+    } catch (error) {
+      resolve({ stdout: "", stderr: (error as Error).message, code: null, timedOut: false });
+      return;
+    }
+    execFile(launch.command, [...launch.prefix, ...args], { timeout: opts.timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       const e = err as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
       const timedOut = !!(e && e.killed && e.signal === "SIGTERM");
       resolve({

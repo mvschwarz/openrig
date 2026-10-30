@@ -7,6 +7,7 @@ import YAML from "yaml";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { evidenceAt } from "../src/domain/proof/judgments.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 import { watchProofSources } from "../src/domain/proof/source-watch.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 import { Hono } from "hono";
@@ -38,6 +39,38 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("resolves native workspace-relative evidence paths to the same canonical reference", () => {
+    const f = fixture();
+    const native = join("missions", "trial", "slices", "01-alpha", "proof", "evidence.md");
+    const canonical = "missions/trial/slices/01-alpha/proof/evidence.md";
+    expect(evidenceAt(f.root, f.alpha, native)).toEqual(evidenceAt(f.root, f.alpha, canonical));
+    expect(evidenceAt(f.root, f.alpha, native).ref).toBe(canonical);
+  });
+  it("reads CRLF judgment receipts without changing identity or accepting changed payloads", () => {
+    const f = fixture(), input = f.input(), first = f.judge(input);
+    const file = join(f.alpha, "proof", "judgments", "00000001.md");
+    const crlf = fs.readFileSync(file, "utf8").replace(/\r?\n/g, "\r\n");
+    fs.writeFileSync(file, crlf);
+    expect(readSliceReadiness(f.alpha).items[0]).toMatchObject({ state: "accepted", judgment: { id: first.judgment.id } });
+    expect(f.judge(input)).toMatchObject({ replayed: true, judgment: { id: first.judgment.id } });
+    expect(fs.readFileSync(file, "utf8")).toBe(crlf);
+    fs.writeFileSync(file, crlf.replace("Independent accept judgment", "Changed payload"));
+    const changed = readSliceReadiness(f.alpha);
+    expect(changed.state).toBe("unknown");
+    expect(changed.issues.join()).toContain("changed judgment");
+  });
+  it("keeps published receipts private through replay and correction", () => {
+    const f = fixture(), input = f.input();
+    const first = f.judge(input);
+    const home = join(f.alpha, "proof", "judgments"), file = join(home, "00000001.md");
+    expectPrivateFile(file);
+    const bytes = fs.readFileSync(file);
+    expect(f.judge(input)).toMatchObject({ replayed: true, judgment: { id: first.judgment.id } });
+    f.judge(f.input(undefined, "reject"));
+    expectPrivateFile(join(home, "00000002.md"));
+    expect(fs.readFileSync(file)).toEqual(bytes);
+    expect(fs.readdirSync(home).sort()).toEqual(["00000001.md", "00000002.md"]);
+  });
   it("prepares the same evidence identity that judgments use in nested mission roots", async () => {
     const f = fixture(), nested = join(f.root, "work", "initiatives");
     fs.mkdirSync(join(f.root, "work"));
@@ -217,7 +250,7 @@ describe("retained authority negative controls", () => {
   it("refuses escaped scope/evidence paths before publishing a receipt", () => {
     const f = fixture(), outside = fs.mkdtempSync(join(tmpdir(), "proof-outside-")); fixtures.push(outside);
     fs.writeFileSync(join(outside, "evidence.md"), "outside boundary");
-    fs.symlinkSync(outside, join(f.alpha, "proof/outside"));
+    fs.symlinkSync(outside, join(f.alpha, "proof/outside"), process.platform === "win32" ? "junction" : "dir");
     expect(() => f.judge({ ...f.input(), evidence: ["proof/outside/evidence.md"] })).toThrow("escapes");
     expect(() => f.judge({ ...f.input(), scope: "../../" })).toThrow("within");
     expect(fs.existsSync(join(f.alpha, "proof/judgments"))).toBe(false);
@@ -301,6 +334,7 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
   const script = `
     import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
     const crash = ${JSON.stringify(crash)}, original = fs.linkSync;
+    const pause = () => { process.send({ stopped: crash }); fs.readSync(0, Buffer.alloc(1), 0, 1, null); };
     if (crash === "write-error" || crash === "fsync-error") {
       const write = fs.writeFileSync, sync = fs.fsyncSync; let receiptFd;
       fs.writeFileSync = (...args) => {
@@ -318,13 +352,15 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
     if (crash === "stale-read") {
       let reads = 0; const originalRead = fs.readdirSync;
       fs.readdirSync = (...args) => {
-        if (String(args[0]).endsWith("/proof/judgments") && ++reads === 2) { process.send({ stopped: crash }); process.kill(process.pid, "SIGSTOP"); }
+        if (String(args[0]).split(String.fromCharCode(92)).join("/").endsWith("/proof/judgments") && ++reads === 2) pause();
         return originalRead(...args);
       }; syncBuiltinESMExports();
     }
     if (crash === "before" || crash === "after") { fs.linkSync = (...args) => {
+      // Observe immutable receipt publication, not private staging internals.
+      if (!/^[0-9]{8}[.]md$/.test(String(args[1]).split(String.fromCharCode(92)).join("/").split("/").pop())) return original(...args);
       if (crash === 'after') original(...args);
-      process.send({ stopped: crash }); process.kill(process.pid, 'SIGSTOP');
+      pause();
     }; syncBuiltinESMExports(); }
     const { recordJudgment } = await import(${JSON.stringify(module)});
     process.on('message', () => {
@@ -333,7 +369,7 @@ async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "
       if (!crash) process.disconnect();
     }); process.send({ ready: true });
   `;
-  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { stdio: ["pipe", "ignore", "pipe", "ipc"] });
   await once(child, "message"); return child;
 }
 async function request(child: ChildProcess) {
@@ -389,7 +425,7 @@ describe("real process publication and recovery", () => {
     try {
       expect(await request(child)).toEqual({ stopped: "stale-read" });
       const intervening = f.judge(f.input(undefined, "withdraw"));
-      const reply = once(child, "message"); child.kill("SIGCONT");
+      const reply = once(child, "message"); child.stdin!.write("\n");
       expect((await reply)[0].error).toBe("revision_conflict");
       expect(readSliceReadiness(f.alpha).items[0]!.judgment!.id).toBe(intervening.judgment.id);
       expect(readSliceReadiness(f.alpha).items[0]!.state).toBe("withdrawn");

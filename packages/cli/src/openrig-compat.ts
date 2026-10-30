@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { readPlatformEnv } from "./lib/codex-auth.js";
 
 const warnedKeys = new Set<string>();
 
@@ -30,10 +31,17 @@ export function isFixtureScopedHome(home: string): boolean {
   // 2. Temp-path QA-fixture convention: an `openrig-qa*` home under a
   //    system temp root.
   const tempRoots = [tmpdir(), "/tmp", "/private/tmp", "/var/folders"];
+  const pathKey = (value: string): string => process.platform === "win32"
+    ? value.replace(/\\/g, "/").toLowerCase()
+    : value;
+  const homeKey = pathKey(home);
   const underTemp = tempRoots.some(
-    (root) => home === root || home.startsWith(root.endsWith("/") ? root : `${root}/`),
+    (root) => {
+      const key = pathKey(root);
+      return homeKey === key || homeKey.startsWith(key.endsWith("/") ? key : `${key}/`);
+    },
   );
-  return underTemp && /(^|\/)openrig-qa[^/]*/.test(home);
+  return underTemp && /(^|\/)openrig-qa[^/]*/.test(homeKey);
 }
 
 export function getOpenRigHome(): string {
@@ -56,11 +64,11 @@ function warnOnce(key: string, message: string): void {
 }
 
 export function readOpenRigEnv(primary: string, legacy?: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const primaryValue = env[primary];
+  const primaryValue = readPlatformEnv(env, primary);
   if (primaryValue !== undefined && primaryValue !== "") return primaryValue;
 
   if (legacy) {
-    const legacyValue = env[legacy];
+    const legacyValue = readPlatformEnv(env, legacy);
     if (legacyValue !== undefined && legacyValue !== "") {
       warnOnce(`env:${legacy}`, `Warning: ${legacy} is deprecated; use ${primary} instead.`);
       return legacyValue;

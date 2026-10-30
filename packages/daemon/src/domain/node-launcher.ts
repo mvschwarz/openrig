@@ -373,9 +373,14 @@ export class NodeLauncher {
     }
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
+    let shell: string | null = null;
+    if (this.tmuxAdapter.isNativeWindows) {
+      shell = await this.tmuxAdapter.getDefaultShell();
+      if (!shell) return { ok: false, code: "default_shell_unavailable", message: "The Windows default shell could not be read, so nothing was stopped. Check the psmux default-shell option and retry." };
+    }
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
-    const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    shell ??= (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
     const respawned = await this.tmuxAdapter.respawnPane(inputTarget, shell, { ...(cwd ? { cwd } : {}), env });
     if (!respawned.ok) {
       return { ok: false, code: "pane_not_respawned", message: `The seat's process in pane ${pane} ended, but a shell couldn't start there: ${respawned.message}` };

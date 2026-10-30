@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { posix } from 'node:path';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
+// Every path here belongs to the Linux scenario container, including when
+// its command/SQLite seams are exercised by a Windows host test.
+const { join } = posix;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const panesOf = rows => rows.map(line => {
   const [name, pane, pid, dead] = line.split(':');

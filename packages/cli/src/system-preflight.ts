@@ -1,10 +1,11 @@
 import net from "node:net";
 import { execSync } from "node:child_process";
-import { accessSync, mkdirSync, constants } from "node:fs";
-import { dirname } from "node:path";
+import { accessSync, mkdirSync, constants, openSync, closeSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
-import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
+import { buildTmuxControlFailure, probeTmuxControlAsync, tmuxInstallGuidance } from "./tmux-health.js";
 import { classifyNodeVersion } from "./node-support.js";
 
 export interface PreflightCheck {
@@ -76,7 +77,14 @@ export function buildWritableHomeCheck(
   deps: WritableHomeCheckDeps = {},
 ): PreflightCheck {
   const mkdirp = deps.mkdirp ?? ((dirPath: string) => mkdirSync(dirPath, { recursive: true }));
-  const checkWritable = deps.checkWritable ?? ((dirPath: string) => accessSync(dirPath, constants.W_OK));
+  const checkWritable = deps.checkWritable ?? ((dirPath: string) => {
+    if (process.platform !== "win32") { accessSync(dirPath, constants.W_OK); return; }
+    // Windows access(W_OK) does not assess directory ACLs. Exercise the actual
+    // file-creation permission without overwriting any existing path or bytes.
+    const probe = join(dirPath, `.openrig-write-check-${randomUUID()}`);
+    const fd = openSync(probe, "wx", 0o600);
+    try { closeSync(fd); } finally { unlinkSync(probe); }
+  });
 
   const pathsToCheck = [
     { path: openrigHome, label: "OpenRig home" },
@@ -151,7 +159,7 @@ export class SystemPreflight {
         ok: false,
         error: "tmux was not found in PATH.",
         reason: "OpenRig uses tmux to create and control agent sessions.",
-        fix: "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).",
+        fix: tmuxInstallGuidance(),
       });
     } else if (tmuxProbe.available) {
       checks.push({ name: "tmux", ok: true });
@@ -189,7 +197,7 @@ export class SystemPreflight {
           ok: false,
           error: `Port ${effectivePort} is already in use on ${effectiveHost}.`,
           reason: "The daemon cannot bind to a port that is already occupied.",
-          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN.`,
+          fix: `Run rig config set daemon.port ${effectivePort + 1} and retry, or find the existing process with ${process.platform === "win32" ? `Get-NetTCPConnection -LocalPort ${effectivePort} -State Listen | Select-Object OwningProcess` : `lsof -nP -iTCP:${effectivePort} -sTCP:LISTEN`}.`,
         });
       }
     }

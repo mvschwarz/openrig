@@ -7,14 +7,17 @@ import { ProviderServiceImpl } from "../src/domain/provider/provider-service-imp
 import type { ClaudeSeatTokenRef } from "../src/domain/claude-seat-token.js";
 import type { CredentialPrecedence } from "../src/domain/claude-credential-precedence.js";
 import type { ClaudeSeatRelaunch } from "../src/domain/provider/provider-service.js";
+import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
+import { powershellQuote } from "../src/adapters/windows-launch.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 
 // `rig provider switch --seat` for a Claude seat: the seat keeps its config dir and its pane, gets its own subscription token
 // through a token-file reference, and resumes the same conversation by restore's own path: under the seat's lifecycle lease, a
 // snapshot taken now that resumes it, then only that seat relaunched from that snapshot in its own pane. Nothing changes until
 // every check has passed, and only a refusal before the seat was touched reads as unchanged.
 
-const cleanup: Array<() => void> = [];
-afterEach(() => { for (const f of cleanup.splice(0)) f(); });
+const cleanup: Array<() => void | Promise<void>> = [];
+afterEach(async () => { for (const f of cleanup.splice(0)) await f(); });
 
 const SEAT = "dev-a@rig";
 const CLEAR: CredentialPrecedence = { conflicts: [], checked: ["the launch environment"], notChecked: ["managed settings (a managed-settings.json file, MDM or the server)"] };
@@ -75,7 +78,9 @@ const to = (account: string, file: string | null) => ({ seat: SEAT, toAccount: a
 describe("rig provider switch --seat moves a Claude seat to its own subscription token on the same conversation, in its own pane", () => {
   it("switches to an API-key reference and back without changing the resumed conversation", async () => {
     const h = harness();
-    const file = tokenFile();
+    const nativeFile = process.platform === "win32" ? await writeWindowsPrivateConfig("fixture-file-contents") : null;
+    if (nativeFile) cleanup.push(() => nativeFile.dispose());
+    const file = nativeFile?.path ?? tokenFile();
     const result = await h.svc.switchAccount({ seat: SEAT, toAccount: "api-budget", apiKeyFile: file, forceUnsafe: false }, h.seatRestart, h.claudeSeat);
     expect(result).toMatchObject({ outcome: "rebind_in_progress", seat: { account: "api-budget", credentialKind: "api-key", conversation: "conv-1", tokenApplied: true } });
     expect(h.ref()).toEqual({ label: "api-budget", tokenFile: file, kind: "api-key" });
@@ -176,9 +181,12 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     const r = await h.svc.switchAccount(to("stored-login", null), h.seatRestart, h.claudeSeat);
     expect(h.calls).toContain("precedence node-a (stored login)");
     expect(r).toMatchObject({ outcome: "rebind_in_progress", message: expect.stringContaining("on its config dir's stored login"), seat: { account: "stored-login",
-      undo: `rig provider switch --seat ${SEAT} --to-account work --token-file '${before.tokenFile.replace(/'/g, `'"'"'`)}'` } });
+      undo: `rig provider switch --seat ${SEAT} --to-account work --token-file ${(process.platform === "win32" ? powershellQuote : shellQuote)(before.tokenFile)}` } });
     expect(h.ref()).toBeNull();
-    const args = execFileSync("/bin/sh", ["-c", `rig() { printf '%s\\n' "$@"; }\n${r.seat!.undo}`], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" }).trimEnd().split("\n");
+    const output = process.platform === "win32"
+      ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(`function rig { $args | ForEach-Object { [Console]::WriteLine($_) } }; ${r.seat!.undo}`, "utf16le").toString("base64")], { encoding: "utf8", windowsHide: true })
+      : execFileSync("/bin/sh", ["-c", `rig() { printf '%s\\n' "$@"; }\n${r.seat!.undo}`], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+    const args = output.trimEnd().split(/\r?\n/);
     expect(args.slice(args.indexOf("--token-file") + 1)).toEqual([before.tokenFile]);
   });
 

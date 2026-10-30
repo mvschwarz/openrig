@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { defaultTmuxFileOps, isStagedSendScriptPath } from "../src/adapters/tmux.js";
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import type Database from "better-sqlite3";
@@ -40,6 +41,7 @@ const HOME = "/home/u/.codex";
 type Shape = "shell_backed" | "direct_native";
 
 interface WorldOptions {
+  relaunchHome?: string;
   shape?: Shape;
   runningArgs?: string;
   runningArgv?: string[];
@@ -198,7 +200,7 @@ function world(options: WorldOptions = {}) {
         + `${binding.effort ? ` -c 'model_reasoning_effort="${binding.effort}"'` : ""} -s workspace-write`
         + `${running?.networkOverride ? " -c 'sandbox_workspace_write.network_access=true'" : ""} resume`
         + `${(running?.addDirs ?? []).map((dir) => ` --add-dir '${dir}'`).join("")} '${opts.resumeToken}'`;
-      return { ok: true as const, core, command: `env CODEX_HOME='${HOME}' ${core}` };
+      return { ok: true as const, core, command: `env CODEX_HOME='${options.relaunchHome ?? HOME}' ${core}` };
     },
     async sendResumeCommand(_session: string, command: string, resumeToken: string, _nodeId?: string, home?: string): Promise<HarnessLaunchResult> {
       launches.push({ command, resumeToken });
@@ -273,6 +275,29 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it.runIf(process.platform === "win32")("accepts proven native home aliases but refuses a different owned directory before stopping", async () => {
+    const root = fs.mkdtempSync(path.join(process.env.TEMP ?? process.cwd(), "restart-directory-identity-"));
+    const home = path.join(root, "home"), other = path.join(root, "other");
+    fs.mkdirSync(home); fs.mkdirSync(other);
+    try {
+      for (const relaunchHome of [home.replaceAll("\\", "/"), home.toUpperCase()]) {
+        const w = world({ relaunchHome, facts: { 200: facts({ env: { CODEX_HOME: home } }) } });
+        expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, codexHome: home });
+        expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+      }
+      const w = world({ relaunchHome: other, facts: { 200: facts({ env: { CODEX_HOME: home } }) } });
+      expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "settings_drift" });
+      expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  it("plans from the default process home when CODEX_HOME is explicitly empty without stopping the seat", async () => {
+    const root = path.join(path.parse(process.cwd()).root, "synthetic-restart-home"), home = path.join(root, ".codex");
+    const w = world({ relaunchHome: home, facts: { 200: facts({ env: { HOME: root, CODEX_HOME: "" } }), 100: facts({ env: { HOME: root, CODEX_HOME: "" } }) } });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, codexHome: home });
+    expect(w.relaunched).toBe(false);
+    expect(w.launches).toEqual([]);
+    expect(w.calls).toEqual([]);
+  });
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),
@@ -1447,5 +1472,80 @@ describe("post-relaunch identity observation window", () => {
     expect(w.replacementReads).toBe(2);
     expect(w.events()).toHaveLength(2);
     expect(w.launches).toHaveLength(1);
+  });
+});
+
+it('native Windows PowerShell Codex shape probe', async () => {
+  const w = world();
+  const native = codexRow(200, 100, '-m gpt-5.5 -s workspace-write resume ' + TOKEN);
+  const exe = 'C:/fixture/codex.exe';
+  w.setRows([{ platform: 'win32', pid: 100, ppid: 1, startedAt: LSTART,
+    executableName: 'powershell.exe', executablePath: 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',
+    command: 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile' },
+    { ...native, platform: 'win32', executableName: 'codex.exe', executablePath: exe,
+      command: exe + ' -m gpt-5.5 -s workspace-write resume ' + TOKEN, argv: [exe, ...native.argv!.slice(1)] }]);
+  const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true }); expect(result).toMatchObject({ ok: true, paneShape: 'shell_backed' });
+  expect(w.calls).toEqual([]);
+});
+
+function nativeCandidateRows(host = 'powershell.exe', pid = 200, startedAt = LSTART): NativeProcessRow[] {
+  const exe = 'C:/fixture/codex.exe';
+  const argv = [exe, '-m', 'gpt-5.5', '-s', 'workspace-write', 'resume', TOKEN];
+  return [{ platform: 'win32', pid: 100, ppid: 1, executableName: host, executablePath: 'C:/fixture/' + host,
+    command: 'C:/fixture/' + host, startedAt: LSTART },
+    { platform: 'win32', pid, ppid: 100, executableName: 'codex.exe', executablePath: exe,
+      argv, command: argv.join(' '), startedAt }];
+}
+describe('native Windows restart boundaries', () => {
+  it.each(['powershell.exe', 'pwsh.exe', 'cmd.exe'])('plans the verified provider below %s without input or signals', async host => {
+    const w = world(); w.setRows(nativeCandidateRows(host));
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: true, paneShape: 'shell_backed' });
+    expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+  });
+  it.each(['shell foreground', 'wrong conversation', 'missing command line', 'duplicate provider', 'newer root', 'unknown wrapper'])('refuses %s without input or signals', async kind => {
+    const w = world(); const rows = nativeCandidateRows();
+    if (kind === 'shell foreground') w.tmux.getPaneCommand = async () => 'powershell.exe';
+    if (kind === 'wrong conversation') { rows[1]!.argv![6] = 'other'; rows[1]!.command = rows[1]!.argv!.join(' '); }
+    if (kind === 'missing command line') { rows[1]!.argv = null; rows[1]!.command = String(); }
+    if (kind === 'duplicate provider') rows.push({ ...rows[1]!, pid: 201 });
+    if (kind === 'newer root') rows[0]!.startedAt = LATER;
+    if (kind === 'unknown wrapper') { rows[0]!.executableName = 'python.exe'; rows[0]!.command = 'C:/fixture/python.exe'; }
+    w.setRows(rows);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false });
+    expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+  });
+  it('signals only the provider, observes the native shell return and resumes once', async () => {
+    let foreground = 'codex.exe';
+    const w = world({ replacementRows: () => nativeCandidateRows('powershell.exe', 300, LATER) });
+    w.setRows(nativeCandidateRows());
+    w.tmux.getPaneCommand = async () => w.relaunched ? 'codex.exe' : foreground;
+    w.tmux.signalPid = async (pid, signal) => {
+      w.calls.push('signalPid ' + pid + ' ' + signal);
+      expect(pid).toBe(200);
+      w.setRows(nativeCandidateRows().slice(0, 1)); foreground = 'powershell.exe';
+      return { ok: true };
+    };
+    const stopped = await w.service.restartInPlace({ seatRef: SEAT, reason: 'synthetic native regression' }); expect(stopped).toMatchObject({ ok: true, outcome: 'restarted_account_unverified', paneShape: 'shell_backed' });
+    expect(w.calls.filter(x => x.startsWith('signalPid'))).toEqual(['signalPid 200 TERM']);
+    expect(w.launches).toHaveLength(1);
+  });
+});
+
+describe('native npm launcher ownership', () => {
+  it.each(['valid entry', 'codex label only', 'preload value only', 'wrong OS executable', 'unreadable argv'])('%s', async kind => {
+    const node = 'C:/fixture/node.exe';
+    const entry = 'C:/fixture/node_modules/@openai/codex/bin/codex.js';
+    let argv = [node, entry];
+    if (kind === 'codex label only') argv = [node, 'C:/fixture/server.js', '--label', 'codex'];
+    if (kind === 'preload value only') argv = [node, '--require', entry, 'C:/fixture/server.js'];
+    const w = world({ facts: { 150: facts({ exe: kind === 'wrong OS executable' ? 'C:/fixture/other.exe' : node,
+      argv: kind === 'unreadable argv' ? null : argv }) } });
+    const rows = nativeCandidateRows(); rows[1]!.ppid = 150;
+    rows.splice(1, 0, { platform: 'win32', pid: 150, ppid: 100, executableName: 'node.exe', executablePath: node,
+      command: argv.join(' '), argv, startedAt: LSTART });
+    w.setRows(rows);
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject(kind === 'valid entry'
+      ? { ok: true, paneShape: 'shell_backed' } : { ok: false, code: 'pane_shape_unknown' });
+    expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
   });
 });

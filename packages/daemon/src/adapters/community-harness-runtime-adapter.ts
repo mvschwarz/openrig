@@ -110,7 +110,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       ...(model ? { modelInput: { model, dispatch: sent ? "confirmed" as const : "uncertain" as const } } : {}) });
     try {
       const result = await this.launchPreset(session, preset, resumeRef, firstInput || model ? () => { typed = true; } : undefined,
-        model ? () => { sent = true; } : undefined);
+        model ? () => { sent = true; } : undefined, binding.cwd);
       return { ...result, ...(typed ? handed() : {}) };
     } catch (error) {
       if (!typed) throw error;
@@ -119,8 +119,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   }
 
   private async launchPreset(session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, beforeInput?: () => void,
-    onSent?: () => void): Promise<HarnessLaunchResult> {
-    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, beforeInput, onSent);
+    onSent?: () => void, cwd?: string): Promise<HarnessLaunchResult> {
+    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, beforeInput, onSent, cwd);
     let attempt: LaunchAttempt | undefined;
     let program = preset.command;
     // The record is optional: a folder that can't be made leaves the identity unavailable, and the harness still launches.
@@ -139,7 +139,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       }
     }
     const command = this.deps.seatLaunchEnvironment
-      ? await this.deps.seatLaunchEnvironment.command(session, program, { runtime: this.runtime })
+      ? await this.deps.seatLaunchEnvironment.command(session, program, { runtime: this.runtime, cwd })
       : program;
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };
@@ -173,11 +173,11 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
    *  that a process runs: a harness that hasn't yet found a gone conversation reads as ready. Never creating one on a
    *  resume is the launcher's job; OpenRig never asks for a new conversation on a resume. */
   private async launchNamed(session: string, preset: string, resumeRef: string | undefined, beforeInput?: () => void,
-    onSent?: () => void): Promise<HarnessLaunchResult> {
+    onSent?: () => void, cwd?: string): Promise<HarnessLaunchResult> {
     const name = resumeRef ?? conversationName(session);
     const program = `/usr/bin/env ${resumeRef ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(name)} ${preset}`;
     const command = this.deps.seatLaunchEnvironment
-      ? await this.deps.seatLaunchEnvironment.command(session, program, { runtime: this.runtime })
+      ? await this.deps.seatLaunchEnvironment.command(session, program, { runtime: this.runtime, cwd })
       : program;
     const sent = await this.deps.tmux.sendShellCommand(session, command, beforeInput, { stageIfLong: true, execInScript: true });
     if (!sent.ok) return { ok: false, error: `Couldn't start community harness "${this.runtime}": ${sent.message}` };

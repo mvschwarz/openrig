@@ -23,6 +23,7 @@ import {
 import { deriveMissionDependencyGraph, type MissionDependencyGraph } from "./scope-audit.js";
 
 const SLICE_DIRNAME_RE = /^(\d+)-(.+)$/;
+const canonicalPath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
 
 // ---------------------------------------------------------------------
 // Frontmatter parse + write
@@ -272,14 +273,16 @@ export function resolveMissionsRoot(opts: {
     const candidate = path.isAbsolute(fromOverride) ? fromOverride : path.resolve(cwd, fromOverride);
     const missions = path.join(candidate, "missions");
     const hasMissionsChild = fs.existsSync(missions) && fs.statSync(missions).isDirectory();
+    const basename = path.basename(candidate);
+    const isMissionsDirectory = (process.platform === "win32" ? basename.toLowerCase() : basename) === "missions";
     // A named workspace reads the missions.root its project.yaml declares, where mission creation writes;
     // a named missions folder is read as is.
-    if (hasMissionsChild || path.basename(candidate) !== "missions") {
+    if (hasMissionsChild || !isMissionsDirectory) {
       const declared = readProjectMissionsRoot(candidate, []);
       if (declared && fs.existsSync(declared) && fs.statSync(declared).isDirectory()) return declared;
     }
     if (hasMissionsChild) return missions;
-    if (path.basename(candidate) === "missions" && fs.existsSync(candidate)) return candidate;
+    if (isMissionsDirectory && fs.existsSync(candidate)) return candidate;
     if (opts.strictOverride) {
       const source = fromFlag === null ? "OPENRIG_WORK_ROOT" : "--workspace";
       throw new ScopeCliError({
@@ -324,7 +327,8 @@ export function resolveNotesFile(absPath: string): NotesFileResolution | null {
     const candidate = path.join(absPath, name);
     try {
       if (!fs.statSync(candidate).isFile()) continue;
-      fs.accessSync(candidate, fs.constants.R_OK);
+      const fd = fs.openSync(candidate, "r");
+      fs.closeSync(fd);
       return { path: candidate, name };
     } catch {
       // Missing, unreadable, and non-file candidates all fall through to the next name.
@@ -662,7 +666,7 @@ export function gitTopLevel(absPath: string): string | null {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return out || null;
+    return out ? canonicalPath(out) : null;
   } catch {
     return null;
   }
@@ -737,11 +741,11 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
   }
   // Normalize symlinks (macOS /var/folders → /private/var/folders) so
   // path.relative produces a path INSIDE the repo, not a ../../escape.
-  const realSrcAbs = fs.realpathSync(srcAbs);
+  const realSrcAbs = canonicalPath(srcAbs);
   const srcRel = path.relative(repoRoot, realSrcAbs);
   assertCleanWorkingTree(repoRoot, srcRel);
   fs.mkdirSync(destParent, { recursive: true });
-  const realDestParent = fs.realpathSync(destParent);
+  const realDestParent = canonicalPath(destParent);
   const realDestAbs = path.join(realDestParent, path.basename(destAbs));
   const destRel = path.relative(repoRoot, realDestAbs);
   try {
@@ -774,8 +778,8 @@ export function rollbackMovedSlice(
     fs.renameSync(destAbs, srcAbs);
     return;
   }
-  const srcRel = path.relative(move.repoRoot, fs.realpathSync(path.dirname(srcAbs)) + path.sep + path.basename(srcAbs));
-  const destRel = path.relative(move.repoRoot, fs.realpathSync(destAbs));
+  const srcRel = path.relative(move.repoRoot, canonicalPath(path.dirname(srcAbs)) + path.sep + path.basename(srcAbs));
+  const destRel = path.relative(move.repoRoot, canonicalPath(destAbs));
   execFileSync("git", ["-C", move.repoRoot, "mv", "--", destRel, srcRel], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],

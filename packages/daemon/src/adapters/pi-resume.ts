@@ -10,7 +10,10 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
+import { sameSessionFile } from "./same-session-file.js";
 import type { TmuxAdapter } from "./tmux.js";
+import { shellQuote } from "./shell-quote.js";
+import { renderWindowsLaunch } from "./windows-launch.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
@@ -119,14 +122,16 @@ export class PiResumeAdapter {
       openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
     });
 
+    const bareCommand = process.platform === "win32"
+      ? renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}) : cmd;
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
-      : cmd;
+      : bareCommand;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
-    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
-      textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {
+      textResult = await this.tmux.sendShellCommand(tmuxSessionName, bareCommand, undefined, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
@@ -161,7 +166,7 @@ export class PiResumeAdapter {
           } as ResumeResult;
         }
         if (state.ready) {
-          if (state.sessionFile !== sessionFile) {
+          if (!sameSessionFile(state.sessionFile, sessionFile)) {
             return {
               ok: false,
               code: "resume_failed",

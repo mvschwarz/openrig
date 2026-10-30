@@ -25,21 +25,33 @@ function fixture() {
   const add = addGitContext(upstream, {}, root);
   git(add.selected.checkout, "config", "user.name", "Context Test");
   git(add.selected.checkout, "config", "user.email", "context@example.invalid");
-  return { home, upstream, pack, root, target: add.installedAt, checkout: add.selected.checkout, a: add.selected.revision };
+  const original = readFileSync(join(add.selected.checkout, pack, "upstream.md"), "utf8");
+  return { home, upstream, pack, root, target: add.installedAt, checkout: add.selected.checkout, a: add.selected.revision, original };
 }
 
 describe("Git context selections preserve author work", () => {
+  it("refuses a real checkout subdirectory before selecting any context", () => {
+    const f = fixture();
+    expect(() => addGitContext(join(f.upstream, f.pack), { checkout: true, name: "nested" }, f.root)).toThrow(/checkout root, not a subdirectory/);
+    expect(existsSync(join(f.root, "nested"))).toBe(false);
+    expect(git(f.upstream, "rev-parse", "HEAD")).toBe(f.a);
+  });
+
   it("discovers a repository pack, merges upstream B with a local commit and serves both", () => {
     const f = fixture();
     writeFileSync(join(f.checkout, f.pack, "local.md"), "Preserved authored improvement\n"); commit(f.checkout, "local improvement");
     writeFileSync(join(f.upstream, f.pack, "upstream.md"), "Revision B\n"); commit(f.upstream, "B");
     const before = inspectGitContext(f.target);
     expect(before.checkout).toMatchObject({ ahead: 1, behind: 0, selectedRevisionMatches: false }); // cached remote, no implicit fetch
-    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe("Revision A\n");
+    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe(f.original);
     const result = updateGitContext(f.target);
     expect(result.checkout).toMatchObject({ status: "", ahead: 2, behind: 0, selectedRevisionMatches: true });
-    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe("Revision B\n");
-    expect(readFileSync(join(f.target, "local.md"), "utf8")).toBe("Preserved authored improvement\n");
+    const upstream = readFileSync(join(f.target, "upstream.md"), "utf8");
+    const local = readFileSync(join(f.target, "local.md"), "utf8");
+    expect(upstream).toMatch(/^Revision B\r?\n$/);
+    expect(local).toMatch(/^Preserved authored improvement\r?\n$/);
+    expect(upstream).toBe(readFileSync(join(f.checkout, f.pack, "upstream.md"), "utf8"));
+    expect(local).toBe(readFileSync(join(f.checkout, f.pack, "local.md"), "utf8"));
     expect(git(f.checkout, "rev-list", "--parents", "-n", "1", "HEAD").split(" ")).toHaveLength(3);
     expect(readdirSync(f.root)).toEqual(["guide"]); // no staging/history becomes another discoverable authority
     expect(readdirSync(`${f.root}-git-history`).some((name) => name.startsWith("previous-"))).toBe(true);
@@ -55,7 +67,7 @@ describe("Git context selections preserve author work", () => {
     expect(() => updateGitContext(f.target)).toThrow(/merge failed/);
     expect(git(f.checkout, "rev-parse", "HEAD")).toBe(local);
     expect(git(f.checkout, "rev-parse", "MERGE_HEAD")).toBe(remote);
-    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe("Revision A\n");
+    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe(f.original);
     expect(inspectGitContext(f.target).checkout).toMatchObject({ conflicts: `${f.pack}/upstream.md`, ahead: 1, behind: 1 });
     expect(() => updateGitContext(f.target)).toThrow(/local changes or conflicts/);
   });
@@ -75,7 +87,7 @@ describe("Git context selections preserve author work", () => {
     const f = fixture();
     renameSync(f.upstream, `${f.upstream}-offline`);
     expect(() => updateGitContext(f.target)).toThrow(/fetch failed/);
-    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe("Revision A\n");
+    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe(f.original);
     renameSync(f.checkout, `${f.checkout}-offline`);
     expect(inspectGitContext(f.target).checkout).toHaveProperty("unavailable");
   });
@@ -94,7 +106,7 @@ describe("Git context selections preserve author work", () => {
     const f = fixture();
     expect(() => addGitContext(f.checkout, { checkout: true, pack: "../outside", name: "escape" }, f.root)).toThrow(/relative/);
     expect(() => addGitContext(f.checkout, { checkout: true, name: "../escape" }, f.root)).toThrow(/unsafe/);
-    symlinkSync(f.home, join(f.checkout, f.pack, "escape"));
+    symlinkSync(f.home, join(f.checkout, f.pack, "escape"), process.platform === "win32" ? "junction" : "dir");
     expect(() => addGitContext(f.checkout, { checkout: true, name: "escape" }, f.root)).toThrow(/symlink/);
     expect(existsSync(join(f.root, "escape"))).toBe(false);
   });
@@ -103,6 +115,6 @@ describe("Git context selections preserve author work", () => {
     const f = fixture(); git(f.checkout, "checkout", "--detach", "HEAD");
     expect(inspectGitContext(f.target).checkout).toMatchObject({ branch: null, upstream: null });
     expect(() => updateGitContext(f.target)).toThrow(/symbolic-ref failed/);
-    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe("Revision A\n");
+    expect(readFileSync(join(f.target, "upstream.md"), "utf8")).toBe(f.original);
   });
 });

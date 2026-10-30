@@ -44,6 +44,7 @@ import { MOTION_FRAME_MS } from "./visual-layout.js";
 import { launchProcess, runSpecLaunch } from "./specs/launch.js";
 import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
 import { openTerminalInWindow, terminalWindowNotice } from "./terminals/open-window.js";
+import { resolveTuiCliEntry } from "./cli-command.js";
 
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -55,7 +56,7 @@ async function run(): Promise<void> {
   const instanceId = argOf(args, "--instance") ?? "tui-1";
   const demo = args.includes("--demo");
   // Reuse the entry/runtime that opened this TUI, even under a conflicting PATH.
-  const cliEntry = process.env["OPENRIG_TUI_CLI_ENTRY"];
+  const cliEntry = resolveTuiCliEntry();
   const cliExecutable = cliEntry ? process.execPath : "rig";
   const cliArgs = (args: string[]): string[] => cliEntry ? [cliEntry, ...args] : args;
 

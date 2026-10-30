@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { subscribeActivityEvents } from "../src/live-events.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
 
 it("cancels an HTTP activity stream that finishes opening after subscription shutdown", async () => {
   let respond!: () => void;
@@ -18,7 +18,7 @@ it("cancels an HTTP activity stream that finishes opening after subscription shu
     reportArrival();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const url = httpFixtureOrigin(server);
   const onEvent = vi.fn();
   const onStatus = vi.fn();
   const sub = subscribeActivityEvents({ open: () => fetch(url), onEvent, onStatus });

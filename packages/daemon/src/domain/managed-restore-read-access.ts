@@ -1,5 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
+
+/** Match the shipped compaction hook's output-root selection. */
+export function compactionPacketRoot(): string {
+  return path.resolve(process.env.OPENRIG_COMPACTION_OUT_ROOT
+    || (process.platform === "win32" ? path.join(tmpdir(), "claude-compaction-restore") : "/tmp/claude-compaction-restore"));
+}
 
 export interface RestoreReadContext {
   openrigHome: string | null | undefined;
@@ -71,7 +78,7 @@ export function withManagedRestoreReads(args: string[], context: RestoreReadCont
   // Fresh/fork launches know their own UUID. Never grant the fork parent's or
   // another seat's packet directory; a legacy name is not a packet identity.
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(context.nativeSessionId)) {
-    for (const packets of spellings(process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore")) {
+    for (const packets of spellings(compactionPacketRoot())) {
       for (const file of ["restore-instructions.md", "restore-summary.json", "transcript.txt", "transcript-narrative.txt", "touched-files.md"]) {
         files.push(`${packets}/${context.nativeSessionId}-*/${file}`);
       }

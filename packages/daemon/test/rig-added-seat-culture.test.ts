@@ -152,7 +152,7 @@ function fixture(opts: { podStartup?: boolean } = {}) {
     `        agent_ref: "local:agents/impl"`,
     `        profile: default`,
     `        runtime: claude-code`,
-    `        cwd: "${cwd("repo")}"`,
+    `        cwd: ${JSON.stringify(cwd("repo"))}`,
     `    edges: []`,
     ...(opts.podStartup ? [
       `  - id: ops`,
@@ -166,7 +166,7 @@ function fixture(opts: { podStartup?: boolean } = {}) {
       `        agent_ref: "local:agents/impl"`,
       `        profile: default`,
       `        runtime: claude-code`,
-      `        cwd: "${cwd("ops-repo")}"`,
+      `        cwd: ${JSON.stringify(cwd("ops-repo"))}`,
       `    edges: []`,
     ] : []),
     `edges: []`,
@@ -558,11 +558,11 @@ describe("an added seat's own skill storage composes with the rig's culture and 
     for (const logicalId of ["dev.impl", "ux.designer", "dev.helper"]) {
       const paths = seatSkillPaths({ rigId, logicalId, runtime: "claude-code" });
       expect(fs.existsSync(paths.pluginManifestPath), `${logicalId}: its own plugin manifest`).toBe(true);
-      // This seat's own launch carries its own plugin dir (the list is ":"-joined).
+      // This seat's own launch carries its own plugin dir in the native path list.
       const { id: nodeId } = f.db.prepare("SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(rigId, logicalId) as { id: string };
       const own = launchEnvs.filter((env) => env["OPENRIG_NODE_ID"] === nodeId);
       expect(own, `${logicalId}: one launch`).toHaveLength(1);
-      expect((own[0]!["CLAUDE_CODE_PLUGIN_DIRS"] ?? "").split(":"), `${logicalId}: its plugin on its launch`).toContain(paths.pluginDir);
+      expect((own[0]!["CLAUDE_CODE_PLUGIN_DIRS"] ?? "").split(nodePath.delimiter), `${logicalId}: its plugin on its launch`).toContain(paths.pluginDir);
       const saved = f.context(logicalId).files.map((file) => file.path);
       expect(saved, logicalId).toEqual(expect.arrayContaining(["CULTURE.md", "RIG-NOTES.md", "openrig-seat-skills.md"]));
       expect(f.context(logicalId).actions).toContain("rig hello");

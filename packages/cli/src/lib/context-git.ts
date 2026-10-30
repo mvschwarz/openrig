@@ -48,9 +48,13 @@ function originLabel(origin: string | null): string | null {
   } catch { return origin; } // ordinary local paths and Git's user@host:path
 }
 
+// Git for Windows expands DOS short names. Canonicalize both sides with the
+// native API so the same checkout cannot look like two different directories.
+const canonicalPath = process.platform === "win32" ? realpathSync.native : realpathSync;
+
 function checkoutRoot(checkout: string): string {
-  const root = realpathSync(checkout);
-  if (realpathSync(git(root, ["rev-parse", "--show-toplevel"])) !== root) {
+  const root = canonicalPath(checkout);
+  if (canonicalPath(git(root, ["rev-parse", "--show-toplevel"])) !== root) {
     throw new Error(`Select the Git checkout root, not a subdirectory: ${checkout}`);
   }
   return root;
@@ -58,7 +62,7 @@ function checkoutRoot(checkout: string): string {
 
 function packDirectory(checkout: string, pack: string): string {
   if (isAbsolute(pack) || pack.split(/[\\/]/).includes("..")) throw new Error("Pack must be a relative directory inside the checkout.");
-  const path = realpathSync(resolve(checkout, pack));
+  const path = canonicalPath(resolve(checkout, pack));
   const rel = relative(checkout, path);
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("Pack escapes the checkout.");
   assertTreeHasNoSymlinks(path);

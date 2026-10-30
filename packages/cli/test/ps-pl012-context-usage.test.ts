@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // PL-012 Token / Context Usage Surface v0 — `rig ps --nodes --filter
 // contextUsage.percent>=N` + `contextUsage.state=…` + `--fields contextUsage`.
 // Mirrors the PL-019 mock-daemon harness so this stays independent of
@@ -130,6 +131,7 @@ describe("PL-012 ps --filter contextUsage.* + CTX field", () => {
       }
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   beforeEach(() => {

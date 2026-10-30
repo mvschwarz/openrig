@@ -1262,7 +1262,14 @@ function promptAnswerStaged(pane: string | null, answer: string, runtime: string
 
 // Codex 0.160 input box: the last prompt line plus indented continuation rows, one blank row, then a footer
 // of at most two rows: the `<model> · <~ or /path>` status line, optionally followed by one known hint row.
-const CODEX_STATUS_LINE = /^ {2}[^\s·][^·]* · [~/]/;
+function hasTuiPathPrefix(value: string): boolean {
+  return /^[~/]/.test(value) || /^[A-Za-z]:[\\/]/.test(value)
+    || /^\\\\[^\\\s]+\\[^\\\r\n]+(?:\\|$)/.test(value);
+}
+function codexStatusLine(line: string): boolean {
+  const location = /^ {2}[^\s·][^·]* · (.+)/.exec(line)?.[1];
+  return location !== undefined && hasTuiPathPrefix(location);
+}
 const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2 to view\s*$/;
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
@@ -1275,7 +1282,7 @@ function codexFooterSeparator(lines: string[]): number {
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
-  if (last < 0 || footer.length > 2 || !CODEX_STATUS_LINE.test(footer[0]!)
+  if (last < 0 || footer.length > 2 || !codexStatusLine(footer[0]!)
     || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
   return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
@@ -1588,7 +1595,7 @@ const SEAT_IDLE_SHAPES: {
     // Any other row reads unknown.
     statusSlot: {
       finishedTurn: (lines: string[], at: number) => CLAUDE_COMPLETION_ROW.test(lines[at] ?? ""),
-      freshSession: (lines: string[], at: number) => at >= 2 && /^ ▝▝ {3}▝▝ {3}[~/]/.test(lines[at]!)
+      freshSession: (lines: string[], at: number) => at >= 2 && hasTuiPathPrefix(/^ ▝▝ {3}▝▝ {3}(.*)$/.exec(lines[at]!)?.[1] ?? "")
         && /^▝▜██████▀ {2}\S/.test(lines[at - 1]!) && /^ ▐▛███▛█ {3}Claude Code v2\.1\.296$/.test(lines[at - 2]!),
     },
   },
@@ -1605,7 +1612,7 @@ const SEAT_IDLE_SHAPES: {
         if (!/^ {2}\S/.test(lines[at] ?? "")) return false;
         let i = at - 1;
         while (i >= 0 && !lines[i]!.trim()) i--;
-        return i >= 2 && i < at - 1 && /^ {2}permissions: \S/.test(lines[i]!) && /^ {5}[~/]/.test(lines[i - 1]!)
+        return i >= 2 && i < at - 1 && /^ {2}permissions: \S/.test(lines[i]!) && hasTuiPathPrefix(/^ {5}(.*)$/.exec(lines[i - 1]!)?.[1] ?? "")
           && /^ {2}>_ OpenAI Codex \(v0\.160\.0\)$/.test(lines[i - 2]!);
       },
     },

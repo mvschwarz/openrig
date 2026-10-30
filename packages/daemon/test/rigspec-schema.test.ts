@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import path from "node:path";
 import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
 
 const VALID_RIG = {
@@ -475,6 +476,17 @@ describe("RigSpec schema (pod-aware)", () => {
     const result = RigSpecSchema.validate(rig);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toMatch(/restore_policy.*must be one of/);
+  });
+
+  it.each([
+    [`path:${path.resolve("owned agent")}`, true],
+    ["path:agents/helper", false],
+    [`local:${path.resolve("owned agent")}`, false],
+    ["local:agents/helper", true],
+  ] as const)("validates native member reference path shape %s", (ref, valid) => {
+    const rig = structuredClone(VALID_RIG);
+    rig.pods[0]!.members[0]!.agent_ref = ref;
+    expect(RigSpecSchema.validate(rig).valid).toBe(valid);
   });
 
   // R6: member agent_ref "github:foo/bar" rejected

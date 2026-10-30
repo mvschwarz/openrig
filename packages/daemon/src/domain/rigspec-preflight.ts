@@ -488,7 +488,8 @@ function piAvailabilityFailure(err: unknown, warnings: string[]): string[] {
   }
   const detail = runtimeProbeFailure(err);
   if (detail === "ENOENT" || detail.includes("executable not found on PATH")) {
-    warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check 'command -v pi' in that shell.`);
+    const lookup = process.platform === "win32" ? "where.exe pi" : "command -v pi";
+    warnings.push(`Pi was not found on the daemon's PATH ('pi --version': ${detail}). The pane's shell may have a different PATH; launch will check Pi there. If it also cannot find Pi, install @earendil-works/pi-coding-agent and check '${lookup}' in that shell.`);
     return [];
   }
   warnings.push(`Pi version unknown ('pi --version' failed: ${detail}); launch continues. Check 'pi --version' in the pane's shell. If Pi is not installed, install @earendil-works/pi-coding-agent and ensure 'pi' is on PATH.`);

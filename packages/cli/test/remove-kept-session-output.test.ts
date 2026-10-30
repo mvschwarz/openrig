@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // #174: when removal keeps a session that belongs to another rig's live seat, the human output of
 // `rig remove` and `rig shrink` says so (JSON already carries `sessionKeptFor`).
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
@@ -35,6 +36,7 @@ describe("#174 remove/shrink human output names a kept session", () => {
       res.end(JSON.stringify(body ?? { error: "not found" }));
     });
     await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
   afterAll(() => { server.close(); });

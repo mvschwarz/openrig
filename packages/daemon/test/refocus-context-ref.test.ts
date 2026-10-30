@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveCurrentWork } from "../src/domain/current-work.js";
 
@@ -22,6 +22,48 @@ const NO_BATON = deriveCurrentWork([], "/missions").currentWorkBasis;
 const AMBIGUOUS = "2 distinct typed work nodes — refusing to guess";
 
 let root: string | undefined;
+let nativeTraceRoot: string | undefined;
+let pythonExecutable: string | undefined;
+function testPython(): string {
+  if (process.platform !== "win32") return "python3";
+  if (pythonExecutable) return pythonExecutable;
+  const result = spawnSync("py", ["--list-paths"], { encoding: "utf8", timeout: 5000 });
+  const installed = (result.stdout + result.stderr).split(/\r?\n/)
+    .map(line => /-V:(\d+\.\d+)\s+\*?\s*(.+)$/.exec(line))
+    .find(match => match && existsSync(match[2]!.trim()));
+  if (!installed) throw new Error("Native refocus tests require an installed Python 3 runtime");
+  return pythonExecutable = installed[2]!.trim();
+}
+afterAll(() => { if (nativeTraceRoot) rmSync(nativeTraceRoot, { recursive: true, force: true }); });
+
+function nativeTraceProbe(destination: string): string {
+  if (!nativeTraceRoot) {
+    nativeTraceRoot = mkdtempSync(join(tmpdir(), "refocus-trace-probe-"));
+    const source = `using System; using System.IO; using System.Text;
+public class TraceProbe { public static int Main(string[] args) {
+  Console.OutputEncoding = new UTF8Encoding(false);
+  string log = Environment.GetEnvironmentVariable("PYTHON_ARGV_LOG");
+  if (!String.IsNullOrEmpty(log)) File.AppendAllText(log, String.Join(" ", args) + "\\n", new UTF8Encoding(false));
+  if (Path.GetFileNameWithoutExtension(Environment.GetCommandLineArgs()[0]) == "trace-success") Console.Write("WORK TRACE: fixture intent\\n");
+  return 0;
+} }`;
+    const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly $env:TRACE_PROBE_EXE -OutputType ConsoleApplication`;
+    execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { env: { ...process.env, TRACE_PROBE_EXE: join(nativeTraceRoot, "probe.exe") }, windowsHide: true, timeout: 15000 });
+  }
+  const file = destination + ".exe";
+  copyFileSync(join(nativeTraceRoot, "probe.exe"), file);
+  return file;
+}
+
+function nativeRig(bin: string, body: string): void {
+  const pkg = join(bin, "node_modules", "@openrig", "cli");
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@openrig/cli", bin: { rig: "probe.cjs" } }));
+  writeFileSync(join(pkg, "probe.cjs"), body);
+  writeFileSync(join(bin, "rig.cmd"), '"%dp0%\\node_modules\\@openrig\\cli\\probe.cjs" %*');
+}
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
   root = undefined;
@@ -86,16 +128,26 @@ printf '%s' "$RIG_STDERR" >&2
 exit "\${RIG_STATUS:-0}"
 `, "utf8");
   chmodSync(rig, 0o755);
+  if (process.platform === "win32") nativeRig(bin, `
+const fs=require('fs'), args=process.argv.slice(2), env=process.env;
+fs.appendFileSync(env.RIG_VERB_LOG, (env.RIG_NODE_FIXTURE ? args.join(' ') : args.slice(0,3).join(' '))+'\\n');
+if(env.RIG_NODE_FIXTURE && args.includes('--work-candidates')) { process.stderr.write('unknown option --work-candidates'); process.exit(1); }
+if(args[0]==='queue') { process.stdout.write(env.RIG_WHOAMI_STDOUT||''); process.exit(Number(env.RIG_WHOAMI_STATUS||0)); }
+if(env.RIG_NODE_FIXTURE && args[0]==='config') { process.stdout.write(JSON.stringify({workspace:{root:env.OPENRIG_HOME}})); process.exit(0); }
+fs.writeFileSync(env.RIG_ARGV_CAPTURE,JSON.stringify(args.slice(0,3)));
+process.stdout.write(env.RIG_STDOUT||''); process.stderr.write(env.RIG_STDERR||''); process.exit(Number(env.RIG_STATUS||0));
+`);
 
   // The hook resolves its interpreter through PYTHON, so a shim there records the exact
   // trace-to-root argv — which is where --work-start is observable as an effect.
   const pythonLog = join(root, "python-argv.log");
-  const python = join(bin, "python-shim");
+  let python = join(bin, "python-shim");
   writeFileSync(python, `#!/bin/sh
 printf '%s\\n' "$*" >> "$PYTHON_ARGV_LOG"
 exit 0
 `, "utf8");
   chmodSync(python, 0o755);
+  if (process.platform === "win32") python = nativeTraceProbe(python);
 
   let contentFile: string | undefined;
   if (options.fileContent !== undefined) {
@@ -105,7 +157,8 @@ exit 0
 
   const env = {
     ...process.env,
-    PATH: options.nodeRig ? bin : `${bin}:${process.env.PATH || ""}`,
+    PATH: options.nodeRig ? bin : [bin, process.env.PATH || ""].join(delimiter),
+    RIG_NODE_FIXTURE: options.nodeRig ? "1" : undefined,
     OPENRIG_HOME: home,
     OPENRIG_SESSION_NAME: "seat@test",
     OPENRIG_REFOCUS_CONTENT_REF: options.ref,
@@ -122,6 +175,7 @@ exit 0
     OPENRIG_REFOCUS_TREES: "work",
     OPENRIG_WORKSPACE_ROOT: home,
     OPENRIG_REFOCUS_WORK_NODE: home,
+    ...(process.platform === "win32" ? { PYTHON: testPython() } : {}),
     ...(options.capturePython ? { PYTHON: python } : {}),
     ...options.extraEnv,
   } as NodeJS.ProcessEnv;
@@ -346,9 +400,25 @@ fi
 exit 1
 `, "utf8");
     chmodSync(rig, 0o755);
+    if (process.platform === "win32") nativeRig(bin, `
+const fs=require('fs'), args=process.argv.slice(2), env=process.env;
+fs.appendFileSync(env.RIG_CALL_LOG,args.join(' ')+'\\n');
+const sleep=value=>{if(value)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,Number(value)*1000);};
+if(env.RIG_HANG)sleep(env.RIG_HANG);
+const verb=args.slice(0,2).join(' ');
+if(verb==='queue whoami'){sleep(env.RIG_QUEUE_WHOAMI_SLEEP);sleep(env.RIG_SLOW_QUEUE_WHOAMI);process.stdout.write(env.RIG_QUEUE_WHOAMI_STDOUT||'');process.exit(0);}
+if(verb==='config --json'){sleep(env.RIG_SLOW_CONFIG_JSON);process.stdout.write(env.RIG_CONFIG_JSON_STDOUT||'');process.exit(Number(env.RIG_CONFIG_JSON_STATUS||0));}
+if(verb==='context get'){sleep(env.RIG_SLOW_CONTEXT);console.log('slow configured content for '+args[2]);process.exit(0);}
+if(verb==='whoami --json'){console.log(JSON.stringify({identity:{rigName:'demo',sessionName:'builder@demo'}}));process.exit(0);}
+if(args.join(' ')==='config get topology.root'){console.log(env.OPENRIG_TEST_TOPOLOGY_ROOT);process.exit(0);}
+if(args.join(' ')==='config get workspace.root'){console.log(env.OPENRIG_TEST_WORKSPACE_ROOT);process.exit(0);}
+if(verb==='scope resolve-notes'){sleep(env.RIG_SLOW_RESOLVE);for(const name of ['NOTES.md','MISSION_NOTES.md']){const p=require('path').join(args[2],name);if(fs.existsSync(p)){console.log(JSON.stringify({ok:true,resolution:{path:p,name}}));process.exit(0);}}console.log(JSON.stringify({ok:true,resolution:null}));process.exit(0);}
+process.exit(1);
+`);
     const env = {
       ...process.env,
-      PATH: `${bin}:${process.env.PATH || ""}`,
+      PATH: [bin, process.env.PATH || ""].join(delimiter),
+      ...(process.platform === "win32" ? { PYTHON: testPython(), OPENRIG_NODE: process.execPath, PYTHONIOENCODING: "utf-8" } : {}),
       OPENRIG_TEST_TOPOLOGY_ROOT: topology,
       OPENRIG_TEST_WORKSPACE_ROOT: workspace,
       RIG_CALL_LOG: callLog,
@@ -359,7 +429,8 @@ exit 1
   }
 
   function trace(args: string[], env: NodeJS.ProcessEnv, cwd?: string) {
-    return spawnSync("python3", [TRACE, ...args], { encoding: "utf8", env, cwd });
+    const result = spawnSync(testPython(), [TRACE, ...args], { encoding: "utf8", env, cwd });
+    return { ...result, stdout: result.stdout?.replace(/\r\n/g, "\n") };
   }
 
   // The work-node cases below must not inherit an ambient work-node variable from the runner.
@@ -411,7 +482,7 @@ exit 1
     // cwd sits on a slice to prove the fallback does not quietly re-point to cwd inference.
     const result = trace(["--trees", "work", "--work-basis", NO_BATON], unpinned(f.env), f.workStart);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(`start: ${realpathSync(f.workspace)}\nFALLBACK — no current typed baton (${NO_BATON})`);
+    expect(result.stdout).toContain(`start: ${realpathSync.native(f.workspace)}\nFALLBACK — no current typed baton (${NO_BATON})`);
     expect(result.stdout).toContain("not evidence of a current mission");
     expect(result.stdout).toContain("Build useful things");
     expect(result.stdout).not.toContain("Ship the release");
@@ -478,7 +549,7 @@ exit 1
 
   it("keeps the trace script's no-baton text equal to the daemon's refusal", () => {
     // -B: importing the script must not write __pycache__ into the shipped skill, which the pack build rejects.
-    const loaded = spawnSync("python3", ["-B", "-c", [
+    const loaded = spawnSync(testPython(), ["-B", "-c", [
       "import importlib.util, sys",
       "spec = importlib.util.spec_from_file_location('trace_to_root', sys.argv[1])",
       "module = importlib.util.module_from_spec(spec)",
@@ -524,7 +595,7 @@ exit 1
       OPENRIG_REFOCUS_DEPTH: undefined,
       OPENRIG_REFOCUS_CONTENT_REF: undefined,
       OPENRIG_REFOCUS_CONTENT_FILE: undefined,
-      PYTHON: undefined,
+      PYTHON: process.platform === "win32" ? testPython() : undefined,
     });
 
     function hook(f: ReturnType<typeof fixture>, env: NodeJS.ProcessEnv = {}) {
@@ -545,7 +616,7 @@ exit 1
       const context = result.stdout
         ? (JSON.parse(result.stdout) as { hookSpecificOutput: { additionalContext: string } }).hookSpecificOutput.additionalContext
         : "";
-      return { ...result, context, calls: f.calls() };
+      return { ...result, context: context.replace(/\r\n/g, "\n"), calls: f.calls() };
     }
 
     it("spends 2 rig processes on both typed and no-baton fires", () => {
@@ -553,7 +624,7 @@ exit 1
       const typedFire = hook(f);
       expect(typedFire.status).toBe(0);
       expect(typedFire.stderr).toBe("");
-      expect(typedFire.context).toContain(`start: ${realpathSync(f.topology)}/rigs/demo/seats/builder\n`);
+      expect(typedFire.context).toContain(`start: ${join(realpathSync.native(f.topology), "rigs", "demo", "seats", "builder")}\n`);
       expect(typedFire.context).toContain("Builder learned");
       expect(typedFire.context).toContain("Deliver refocus");
       expect(typedFire.context).not.toContain("CONFIG-FIELD-NOT-FOR-OUTPUT");
@@ -593,7 +664,7 @@ exit 1
           "config get topology.root",
           "config get workspace.root",
         ]);
-        expect(result.context).toContain(`root: ${realpathSync(f.topology)}`);
+        expect(result.context).toContain(`root: ${realpathSync.native(f.topology)}`);
         expect(result.context).toContain("Builder learned");
         expect(result.context).toContain("Deliver refocus");
       }
@@ -618,13 +689,13 @@ exit 1
         RIG_CONFIG_JSON_STDOUT: configJson(decoy, f.workspace),
       });
       expect(partial.calls.filter((call) => call.startsWith("config"))).toEqual(["config --json"]);
-      expect(partial.context).toContain(`root: ${realpathSync(f.topology)}`);
+      expect(partial.context).toContain(`root: ${realpathSync.native(f.topology)}`);
       expect(partial.context).toContain("Deliver refocus");
       expect(partial.context).not.toContain("decoy-root");
 
       const empty = hook(f, { OPENRIG_TOPOLOGY_ROOT: "", OPENRIG_WORKSPACE_ROOT: f.workspace });
       expect(empty.calls.filter((call) => call.startsWith("config"))).toEqual(["config --json"]);
-      expect(empty.context).toContain(`root: ${realpathSync(f.topology)}`);
+      expect(empty.context).toContain(`root: ${realpathSync.native(f.topology)}`);
       expect(empty.context).toContain("Builder learned");
     });
 
@@ -685,7 +756,7 @@ exit 1
       const result = hook(f, { RIG_QUEUE_WHOAMI_SLEEP: "6" });
       expect(result.status).toBe(0);
       expect(result.context).toContain(
-        "TRACE GAP — current work node UNKNOWN: queue whoami failed: spawnSync rig ETIMEDOUT",
+        `TRACE GAP — current work node UNKNOWN: queue whoami failed: spawnSync ${process.platform === "win32" ? process.execPath : "rig"} ETIMEDOUT`,
       );
       expect(result.context).not.toContain("Deliver refocus");
     }, 20_000);
@@ -707,7 +778,7 @@ exit 1
         mkdirSync(join(f.topology, seat), { recursive: true });
         const result = topologyTrace(f, { OPENRIG_SESSION_NAME: session });
         expect(result.status, session).toBe(0);
-        expect(result.stdout, session).toContain(`start: ${realpathSync(f.topology)}/${seat}\n`);
+        expect(result.stdout, session).toContain(`start: ${join(realpathSync.native(f.topology), seat)}\n`);
         expect(f.calls(), session).not.toContain("whoami --json");
       }
     });
@@ -718,7 +789,7 @@ exit 1
       const result = topologyTrace(f, { OPENRIG_SESSION_NAME: "builder-v2@demo" });
       expect(result.status).toBe(0);
       expect(f.calls().filter((call) => call === "whoami --json")).toHaveLength(1);
-      expect(result.stdout).toContain(`start: ${realpathSync(f.topology)}/rigs/demo/seats/builder\n`);
+      expect(result.stdout).toContain(`start: ${join(realpathSync.native(f.topology), "rigs", "demo", "seats", "builder")}\n`);
       expect(result.stdout).toContain("Builder learned");
     });
 
@@ -728,7 +799,7 @@ exit 1
         const result = topologyTrace(f, { OPENRIG_SESSION_NAME: session });
         expect(result.status, String(session)).toBe(0);
         expect(f.calls(), String(session)).toContain("whoami --json");
-        expect(result.stdout, String(session)).toContain(`start: ${realpathSync(f.topology)}/rigs/demo/seats/builder\n`);
+        expect(result.stdout, String(session)).toContain(`start: ${join(realpathSync.native(f.topology), "rigs", "demo", "seats", "builder")}\n`);
       }
     });
 
@@ -750,6 +821,7 @@ describe("openrig-core refocus hook — delivery state", () => {
   // These cases exercise delivery state; the real dual-tree trace is covered above.
   function successfulTrace(home: string): string {
     const script = join(home, "trace-success");
+    if (process.platform === "win32") return nativeTraceProbe(script);
     writeFileSync(script, '#!/bin/sh\nprintf "WORK TRACE: fixture intent\\n"\n');
     chmodSync(script, 0o755);
     return script;

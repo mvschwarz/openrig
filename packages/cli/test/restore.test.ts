@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import { fileURLToPath } from "node:url";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { Command } from "commander";
 import { restoreCommand } from "../src/commands/restore.js";
 import { DaemonClient } from "../src/client.js";
@@ -22,23 +24,24 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const errLogs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origWarn = console.warn;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => errLogs.push(args.join(" "));
-    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; console.warn = origWarn; }
-    const exitCode = process.exitCode;
+async function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const errLogs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => errLogs.push(args.join(" "));
+  console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
+    return { logs, errLogs, exitCode: process.exitCode };
+  } finally {
+    console.log = origLog; console.error = origErr; console.warn = origWarn;
     process.exitCode = origExitCode;
-    resolve({ logs, errLogs, exitCode });
-  });
+  }
 }
 
 function runningDeps(port: number): StatusDeps {
@@ -74,6 +77,7 @@ describe("Restore CLI (L3)", () => {
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => { server.close(); });
@@ -110,7 +114,7 @@ describe("Restore CLI (L3)", () => {
     // compiled module's signal handler text via a lightweight regex.
     const fs = await import("node:fs");
     const path = await import("node:path");
-    const here = path.dirname(new URL(import.meta.url).pathname);
+    const here = path.dirname(fileURLToPath(import.meta.url));
     const restoreSrc = fs.readFileSync(path.resolve(here, "../src/commands/restore.ts"), "utf-8");
 
     // Must include the honest interrupt message mentioning daemon-side work

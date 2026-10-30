@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
@@ -26,22 +27,22 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<string[]> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origWarn = console.warn;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
-    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
-    try { await fn(); } finally {
-      console.log = origLog;
-      console.error = origErr;
-      console.warn = origWarn;
-    }
-    resolve(logs);
-  });
+async function captureLogs(fn: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => logs.push(args.join(" "));
+  console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await fn();
+    return logs;
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    console.warn = origWarn;
+  }
 }
 
 function runningState(port: number): DaemonState {
@@ -206,6 +207,7 @@ function createMockDaemon() {
     close: () => new Promise<void>((r) => server.close(() => r())),
     listen: () => new Promise<number>((r) => {
       server.listen(0, () => {
+        allowOwnedHttpFixture(server);
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
       });
@@ -441,8 +443,7 @@ edges: []
     const program = new Command();
     program.addCommand(importCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--cwd", "relative/project", "--rig-root", "/tmp"]));
-    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
-    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+    expect(capturedImportHeaders["x-cwd-override"]).toBe(path.resolve("relative/project"));
   });
 
   it("import --workspace-only targets the workspace-only route", async () => {
@@ -594,7 +595,7 @@ edges: []
     const output = logs.join("\n");
     expect(output).toContain("imported-rig");
     // Verify X-Rig-Root header was sent
-    expect(capturedImportHeaders["x-rig-root"]).toMatch(/\/my\/project/);
+    expect(capturedImportHeaders["x-rig-root"]).toBe(path.resolve("/my/project"));
   });
 
   it("import --instantiate with --cwd forwards absolute cwd override", async () => {
@@ -603,8 +604,7 @@ edges: []
     const program = new Command();
     program.addCommand(importCommand(deps));
     await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--instantiate", "--cwd", "relative/project", "--rig-root", "/my/project"]));
-    expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
-    expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+    expect(capturedImportHeaders["x-cwd-override"]).toBe(path.resolve("relative/project"));
   });
 
   // NS-T14: import --instantiate handoff includes attach command

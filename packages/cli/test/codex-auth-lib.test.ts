@@ -26,14 +26,14 @@ describe("resolveCodexHome (OPR.0.4.1.29 — default $HOME/.codex, env-overridab
   it("uses CODEX_HOME when set, deriving the secret-adjacent paths under it", () => {
     const p = resolveCodexHome({ CODEX_HOME: "/fix/codex" });
     expect(p.codexHome).toBe("/fix/codex");
-    expect(p.profileDir).toBe("/fix/codex/auth-profiles");
-    expect(p.activeAuth).toBe("/fix/codex/auth.json");
-    expect(p.registryPath).toBe("/fix/codex/auth-seat-registry.tsv");
+    expect(p.profileDir).toBe(join("/fix/codex", "auth-profiles"));
+    expect(p.activeAuth).toBe(join("/fix/codex", "auth.json"));
+    expect(p.registryPath).toBe(join("/fix/codex", "auth-seat-registry.tsv"));
   });
 
   it("defaults to $HOME/.codex when CODEX_HOME is unset/empty (no personal path baked in)", () => {
-    expect(resolveCodexHome({ HOME: "/home/u" }).codexHome).toBe("/home/u/.codex");
-    expect(resolveCodexHome({ HOME: "/home/u", CODEX_HOME: "" }).codexHome).toBe("/home/u/.codex");
+    expect(resolveCodexHome({ HOME: "/home/u" }).codexHome).toBe(join("/home/u", ".codex"));
+    expect(resolveCodexHome({ HOME: "/home/u", CODEX_HOME: "" }).codexHome).toBe(join("/home/u", ".codex"));
   });
 
   it("falls back to the user's home when HOME is unset or empty (never a cwd-relative .codex)", () => {

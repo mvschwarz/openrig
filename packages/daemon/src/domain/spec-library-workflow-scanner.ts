@@ -358,12 +358,11 @@ export function parseWorkflowLibraryId(id: string): { name: string; version: str
 }
 
 function isUnderDir(childPath: string, parentDir: string): boolean {
-  const child = path.resolve(childPath);
-  const parent = path.resolve(parentDir);
-  if (child === parent) return false;
-  const parentWithSep = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
-  return child.startsWith(parentWithSep);
+  const relative = path.relative(path.resolve(parentDir), path.resolve(childPath));
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
+
+const sourcePathKey = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : file;
 
 // =================================================================
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery)
@@ -451,7 +450,7 @@ export function scanWorkflowSpecFolder(
     } catch {
       continue;
     }
-    seenPaths.add(filePath);
+    seenPaths.add(sourcePathKey(filePath));
     result.scanned += 1;
 
     // Timestamp check (OQ-3): ctime protects the stat-only skip when a
@@ -534,9 +533,9 @@ export function scanWorkflowSpecFolder(
   const folderPrefix = opts.folder.endsWith(path.sep) ? opts.folder : `${opts.folder}${path.sep}`;
   const cachedUnderFolder = opts.db
     .prepare(
-      `SELECT source_path, spec_id, name, version FROM workflow_specs WHERE source_path LIKE ?`,
+      `SELECT source_path, spec_id, name, version FROM workflow_specs${process.platform === "win32" ? "" : " WHERE source_path LIKE ?"}`,
     )
-    .all(`${folderPrefix}%`) as Array<{
+    .all(...(process.platform === "win32" ? [] : [`${folderPrefix}%`])) as Array<{
       source_path: string;
       spec_id: string | null;
       name: string | null;
@@ -545,8 +544,8 @@ export function scanWorkflowSpecFolder(
   for (const row of cachedUnderFolder) {
     // LIKE treats _ and % in real folder names as patterns. Only this
     // literal directory owns deletion; neighboring cache rows must survive.
-    if (!row.source_path.startsWith(folderPrefix)) continue;
-    if (seenPaths.has(row.source_path)) continue;
+    if (process.platform === "win32" ? !isUnderDir(row.source_path, opts.folder) : !row.source_path.startsWith(folderPrefix)) continue;
+    if (seenPaths.has(sourcePathKey(row.source_path))) continue;
     if (!row.spec_id) continue;
     // #511: a version that unfinished work is pinned to stays readable until that work ends;
     // a later scan removes it. Every other row of the vanished file goes, one event per version.

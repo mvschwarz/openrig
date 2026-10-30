@@ -22,7 +22,7 @@ export interface TerminalPreview {
   status: { available: boolean };
   composed: {
     id: string;
-    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string }>>;
+    pages: Array<Array<{ seat: string; label: string; readOnly: boolean; paneCommand: string; recoveryCommand?: string; recoveryShell?: "powershell" | "sh" }>>;
     opened: Array<{ seat: string }>;
     absent: Array<{ seat: string; reason: string }>;
     degraded: Array<{ seat: string; reason: string }>;
@@ -143,7 +143,8 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
     for (const member of page) {
       const command = (member.recoveryCommand ?? member.paneCommand).replace(/^ssh /, "ssh -t ");
-      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
+      const reset = member.recoveryShell === "powershell" ? "Remove-Item Env:TMUX -ErrorAction SilentlyContinue; " : "env -u TMUX ";
+      lines.push({ text: `${member.label} · ${member.seat}` }, { text: `${reset}${command}` });
     }
   }
   return wrapDetailLines(lines, width);

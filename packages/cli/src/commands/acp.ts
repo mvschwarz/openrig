@@ -9,6 +9,8 @@ import { processIdentity } from "../local-daemon-owner.js";
 import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { answerCommand, runAcpAssignment, type AcpQueue } from "../acp/connector.js";
 import { findRunProcesses } from "../acp/run-processes.js";
+import { watchCancelRequest } from "../acp/cancel-request.js";
+import { resolveAcpAgentCommand } from "../acp/agent-command.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -51,7 +53,15 @@ function readRun(runId: string): RunFile | undefined {
 /** A process's start time, the discriminator the CLI already uses for daemon ownership (pids get reused). `ps` from PATH,
  *  as the other process readers use it: the setuid /bin/ps can't run in a sandbox (macOS CI runs a plain copy). */
 export function processStart(pid: number): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
   try {
+    if (process.platform === "win32") {
+      const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; (Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToFileTimeUtc().ToString()`;
+      const output = execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+        { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 64 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
+      return /^\d+$/.test(output) ? output : undefined;
+    }
     return processIdentity(execFileSync("ps", ["-o", "uid=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }))?.start;
   } catch { return undefined; }
 }
@@ -117,6 +127,11 @@ Guide: rig context get reference/acp-agents.md`)
         if (interrupts === 1) { console.error("\n[rig acp] cancel requested; Ctrl-C again to detach without waiting"); cancel(); } else detach();
       };
       process.on("SIGINT", onInterrupt);
+      const stopCancelWatch = process.platform === "win32"
+        ? watchCancelRequest(join(runsDir(), `${runId}.cancel.json`), runFile.processStart, () => {
+          console.error("\n[rig acp] cancel requested; waiting for the agent's acknowledgement");
+          cancel();
+        }) : () => {};
       console.error(`[rig acp] run ${runId} for ${qitemId}; cancel with Ctrl-C or rig acp cancel ${runId}`);
       try {
         const outcome = await runAcpAssignment(daemonAcpQueue(client), {
@@ -130,6 +145,7 @@ Guide: rig context get reference/acp-agents.md`)
         console.error(`rig acp run: ${(error as Error).message}`);
         process.exitCode = 1;
       } finally {
+        stopCancelWatch();
         process.removeListener("SIGINT", onInterrupt);
         writeRun({ ...runFile, endedAt: new Date().toISOString() });
       }
@@ -141,7 +157,9 @@ Guide: rig context get reference/acp-agents.md`)
     .action((runId: string) => {
       const run = readRun(runId);
       if (!run || !liveConnector(run)) { console.error(`No running rig acp run ${runId}`); process.exitCode = 1; return; }
-      process.kill(run.pid, "SIGINT");
+      if (process.platform === "win32") {
+        writeFileSync(join(runsDir(), `${runId}.cancel.json`), JSON.stringify({ processStart: run.processStart }));
+      } else process.kill(run.pid, "SIGINT");
       console.log(`Cancel requested for ${runId}; its row ${run.qitemId} records what the agent acknowledges`);
     });
 
@@ -158,8 +176,11 @@ shared one) is left alone; stop it with its own command, if it's yours to stop. 
       if (liveConnector(run)) { console.error(`${runId} is still running; cancel it or detach first`); process.exitCode = 1; return; }
       let ran = "no stop command was given";
       if (stopCommand.length > 0) {
-        const result = spawnSync(stopCommand[0]!, stopCommand.slice(1), { stdio: "inherit" });
-        ran = `${stopCommand.join(" ")} exited ${result.error ? `with ${result.error.message}` : result.status ?? result.signal}`;
+        try {
+          const executable = resolveAcpAgentCommand(stopCommand[0]!, process.cwd());
+          const result = spawnSync(executable.command, [...executable.prefix, ...stopCommand.slice(1)], { stdio: "inherit" });
+          ran = `${stopCommand.join(" ")} exited ${result.error ? `with ${result.error.message}` : result.status ?? result.signal}`;
+        } catch (error) { ran = `${stopCommand.join(" ")} could not run: ${(error as Error).message}`; }
       }
       const left = await findRunProcesses(runId).catch(() => undefined);
       const report = left === undefined ? "unknown: the process table couldn't be read"

@@ -464,11 +464,33 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(s33.planning_dial).toBe("INDETERMINATE");
   });
 
+  it.runIf(process.platform === "win32").each([false, true])("keeps native composition path aliases in the execution arrangement (uppercase file: %s)", async (uppercaseFile) => {
+    if (uppercaseFile) {
+      for (const dir of ["31-alpha", "32-beta"]) {
+        const source = path.join(missionsRoot, MISSION, "slices", dir, "slice.yaml");
+        fs.renameSync(source, `${source}.rename`);
+        fs.renameSync(`${source}.rename`, path.join(path.dirname(source), "SLICE.YAML"));
+      }
+    }
+    const manifest = path.join(missionsRoot, MISSION, "mission.yaml");
+    fs.writeFileSync(manifest, fs.readFileSync(manifest, "utf8")
+      .replaceAll("slices/31-alpha/slice.yaml", "SLICES/31-ALPHA/SLICE.YAML")
+      .replaceAll("slices/32-beta/slice.yaml", "SLICES/32-BETA/SLICE.YAML"));
+    const doc = await show();
+    const sources = doc.sources as Record<string, Record<string, unknown>>;
+    expect(sources.arrangement.value).not.toBe("INDETERMINATE");
+    const care = doc.q3_care as Record<string, unknown>[];
+    expect(care.find(slice => slice.slice_id === "OPR.9.9.31")?.build_wave).toBe("WA");
+    const sequencing = doc.q2_sequencing as Record<string, unknown>[];
+    expect((sequencing.find(slice => slice.slice_id === "OPR.9.9.31")?.source as Record<string, unknown>).arrangement_path)
+      .toBe(fs.realpathSync.native(path.join(missionsRoot, MISSION, "slices", "31-alpha", "slice.yaml")));
+  });
+
   it("promotes mission/slice YAML ahead of a parity-matched legacy wave map and names the superseded authority", async () => {
     const doc = await show();
     const q2 = doc.q2_sequencing as Record<string, unknown>[];
     expect((q2.find((s) => s.slice_id === "OPR.9.9.31")?.source as Record<string, unknown>).arrangement_path)
-      .toContain("31-alpha/slice.yaml");
+      .toContain(path.join("31-alpha", "slice.yaml"));
     expect(q2.find((s) => s.slice_id === "OPR.9.9.32")?.depends_on).toEqual(["OPR.9.9.31"]);
     const q3 = doc.q3_care as Record<string, unknown>[];
     expect(q3.find((s) => s.slice_id === "OPR.9.9.31")?.build_wave).toBe("WA");

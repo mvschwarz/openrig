@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { readlink } from "node:fs/promises";
 import { promisify } from "node:util";
+import { readWindowsProcessFactsBatch } from "./windows-process-facts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -24,6 +25,11 @@ export async function readNativeExecutablePaths(requested: number[]): Promise<Ma
   const pids = [...new Set(requested.filter(pid => Number.isInteger(pid) && pid > 0 && pid <= 2147483647))].slice(0, 1024);
   const result = new Map<number, string>();
   if (pids.length === 0) return result;
+  if (process.platform === "win32") {
+    try { for (const [pid, facts] of await readWindowsProcessFactsBatch(pids)) result.set(pid, facts.exe); }
+    catch { /* An unavailable native witness stays unknown. */ }
+    return result;
+  }
   let entries: unknown;
   try {
     if (process.platform === "linux") {

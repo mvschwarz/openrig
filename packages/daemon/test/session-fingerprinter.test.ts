@@ -45,9 +45,32 @@ describe("SessionFingerprinter", () => {
     expect(await fp.fingerprint(makePane({ activeCommand }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
   });
 
-  it.each(["codex", ".codex-wrapped", ".codex-unwrapped", ".codex-unwrappe", "/usr/local/bin/codex"])("retains known Codex executable spelling %s", async (activeCommand) => {
+  it.each(["codex", "codex.exe", ".codex-wrapped", ".codex-unwrapped", ".codex-unwrappe", "/usr/local/bin/codex"])("retains known Codex executable spelling %s", async (activeCommand) => {
     const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux() });
     expect(await fp.fingerprint(makePane({ activeCommand }))).toMatchObject({ runtimeHint: "codex", confidence: "high" });
+  });
+
+  it.skipIf(process.platform !== "win32")("recognizes native path separators without treating PowerShell wrappers as idle shells", async () => {
+    const fp = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux(), fsExists: () => false });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Program Files\\Codex\\codex.exe" }))).toMatchObject({ runtimeHint: "codex", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Users\\fixture\\claude.exe" }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Program Files\\Codex\\CODEX.COM" }))).toMatchObject({ runtimeHint: "codex", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "C:\\Users\\fixture\\claude.com" }))).toMatchObject({ runtimeHint: "claude-code", confidence: "high" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "codex-monitor.com" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "claude.cmd" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
+    expect(await fp.fingerprint(makePane({ activeCommand: "powershell.exe" }))).toMatchObject({ runtimeHint: "unknown", confidence: "low" });
+  });
+
+  it("queries an unavailable cmux once per batch and observes recovery on explicit refresh", async () => {
+    const cmux = mockCmux();
+    const fp = new SessionFingerprinter({ cmuxAdapter: cmux, tmuxAdapter: mockTmux(), fsExists: () => false });
+    await fp.refreshCmuxSignals();
+    await fp.fingerprint(makePane()); await fp.fingerprint(makePane({ pid: 5678 }));
+    expect(cmux.queryAgentPIDs).toHaveBeenCalledTimes(1);
+    vi.mocked(cmux.queryAgentPIDs).mockResolvedValue({ ok: true, data: new Map([[1234, { pid: 1234, runtime: "codex" }]]) });
+    await fp.refreshCmuxSignals();
+    expect(await fp.fingerprint(makePane())).toMatchObject({ runtimeHint: "codex", confidence: "highest" });
+    expect(cmux.queryAgentPIDs).toHaveBeenCalledTimes(2);
   });
 
   it("unrelated process name does not override real pane banner evidence", async () => {

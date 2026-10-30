@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { Command } from "commander";
@@ -93,6 +94,7 @@ describe("Attach CLI", () => {
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
     port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
   });
 
   afterAll(() => {
@@ -138,10 +140,21 @@ describe("Attach CLI", () => {
     });
 
     expect(exitCode).toBeUndefined();
-    expect(logs).toEqual([
+    expect(logs).toEqual(process.platform === "win32" ? [
+      "$env:OPENRIG_NODE_ID = 'node-1'",
+      "$env:OPENRIG_SESSION_NAME = 'orch1-lead@rigged-buildout'",
+    ] : [
       "export OPENRIG_NODE_ID='node-1'",
       "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'",
     ]);
+  });
+
+  it("permits explicit POSIX shell output on every platform", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-1", "--node", "orch1.lead", "--print-env", "--shell", "sh"]);
+    });
+    expect(exitCode).toBeUndefined();
+    expect(logs).toEqual(["export OPENRIG_NODE_ID='node-1'", "export OPENRIG_SESSION_NAME='orch1-lead@rigged-buildout'"]);
   });
 
   it("attach rejects missing --self", async () => {
@@ -179,6 +192,14 @@ describe("Attach CLI", () => {
       tmuxWindow: "@12",
       tmuxPane: "%42",
     });
+  });
+
+  it("resolveAttachContext passes native context arguments without shell quoting", () => {
+    const execute = vi.fn(() => "%42 @12 owned session");
+    expect(withTmuxPane("%42", () => resolveAttachContext(undefined, execute))).toEqual({
+      attachmentType: "tmux", tmuxSession: "owned session", tmuxWindow: "@12", tmuxPane: "%42",
+    });
+    expect(execute).toHaveBeenCalledWith("tmux", ["display-message", "-p", "-t", "%42", "#{pane_id} #{window_id} #{session_name}"]);
   });
 
   // Real tmux rewrote the newlines of a combined format as "_" ("unrelated-shell_@2_%2"), and the session fell back to

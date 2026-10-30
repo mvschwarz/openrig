@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parse } from "yaml";
 
+const realpath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+
 export class ProjectReadError extends Error {
   constructor(readonly code: string, message: string, readonly candidates?: string[]) { super(message); }
 }
@@ -32,7 +34,7 @@ export function selectCatalogProject(catalogPath: string, selectedId?: string): 
   const selected = projects.find(p => p.id === id);
   if (!selected) throw new ProjectReadError("project_not_found", `project '${id}' is not declared in ${catalogPath}`, candidates);
   const nominal = path.resolve(path.dirname(catalogPath), selected.root);
-  try { return { id, root: fs.realpathSync(nominal) }; }
+  try { return { id, root: realpath(nominal) }; }
   catch { throw new ProjectReadError("project_root_missing", `project '${id}' root does not exist: ${nominal}`); }
 }
 /** The rig of a canonical seat session (`member@rig`). Pod and member ids can't
@@ -51,7 +53,7 @@ function catalogEntries(catalogPath: string): unknown[] {
   } catch { return []; }
 }
 function canonicalExisting(file: string): string | null {
-  try { return fs.realpathSync(file); } catch { return null; }
+  try { return realpath(file); } catch { return null; }
 }
 function inside(root: string, file: string): boolean {
   const rel = path.relative(root, file);

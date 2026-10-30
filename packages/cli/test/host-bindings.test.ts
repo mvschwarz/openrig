@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadHostBindings, recordHostObservation, describeBindingConflict } from "../src/host-bindings.js";
 import { mkdirSync as fs2Mkdir, utimesSync as fs2Utimes } from "node:fs";
 import { resolveHost, type HostRegistry } from "../src/host-registry.js";
@@ -331,7 +332,7 @@ describe("F2 — concurrency guard: conflict records survive concurrent writers"
       const child = spawn(process.execPath, ["--import", "tsx", "-e",
         `import { recordHostObservation } from ${JSON.stringify(new URL("../src/host-bindings.ts", import.meta.url).href)};` +
         `recordHostObservation({ alias: ${JSON.stringify(alias)}, observedHostId: ${JSON.stringify(id)}, path: ${JSON.stringify(path)} });`,
-      ], { cwd: new URL("..", import.meta.url).pathname, stdio: "ignore" });
+      ], { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "ignore" });
       child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`writer ${alias} exited ${code}`))));
       child.on("error", reject);
     });

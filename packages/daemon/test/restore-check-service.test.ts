@@ -10,6 +10,7 @@ import {
   type RestoreCheckDeps,
   type NodeInventoryEntry,
 } from "../src/domain/restore-check-service.js";
+import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 
 const RELAY_PATH = "/custom-instance/state/claude-activity-hooks/activity-relay.cjs";
 
@@ -130,6 +131,47 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  it.runIf(process.platform === "win32")("recognizes the same native relay through slash variants without accepting another script", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-native-relay-"));
+    try {
+      const cwd = path.join(root, "seat"), settingsPath = path.join(cwd, ".claude", "settings.local.json");
+      const relay = claudeActivityRelayPath(root);
+      fs.mkdirSync(path.dirname(relay), { recursive: true });
+      fs.writeFileSync(relay, "// owned synthetic relay\n");
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+      const service = new RestoreCheckService(mockDeps({
+        stateDir: root, getNodeInventory: () => [claudeNode({ cwd })],
+        exists: fs.existsSync, readFile: file => fs.readFileSync(file, "utf8"),
+        getStartupContext: () => startupContextProbe({ projectionEntries: [{ absolutePath: root, effectiveId: "shared:activity", category: "runtime_resource", resourceType: "claude_activity_hooks" }] }),
+      }));
+      for (const [target, expected] of [[relay, "green"], [relay.replaceAll("\\", "/"), "green"], [relay + ".other", "yellow"]] as const) {
+        fs.writeFileSync(settingsPath, JSON.stringify({ hooks: Object.fromEntries(["SessionStart", "UserPromptSubmit"].map(event => [event, [{ hooks: [{ type: "command", command: `${quote(process.execPath)} ${quote(target)}` }] }]])) }));
+        const hook = service.check({ noQueue: true }).checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+        expect(hook?.status, target).toBe(expected);
+      }
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("finds a configured instance spec without HOME or a literal tilde directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-native-home-"));
+    const previousHome = process.env.HOME, previousInstance = process.env.OPENRIG_HOME;
+    try {
+      delete process.env.HOME;
+      process.env.OPENRIG_HOME = root;
+      const rigDir = path.join(root, "shared-docs", "rigs", "test-rig");
+      fs.mkdirSync(rigDir, { recursive: true });
+      fs.writeFileSync(path.join(rigDir, "rig.yaml"), "name: test-rig\n");
+      const result = new RestoreCheckService(mockDeps({ exists: file => fs.existsSync(file) })).check({ noQueue: true, noHooks: true }) as any;
+      expect(result.checks.find((entry: { check: string }) => entry.check === "rig.test-rig.spec-present"))
+        .toMatchObject({ status: "green", evidence: `Spec present at ${path.join(rigDir, "rig.yaml")}` });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+      if (previousInstance === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = previousInstance;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["ready", "failed", "attention_required"])("identity projection advice preserves the stored %s outcome", stored => {
     const db = createFullTestDb();
     try {
@@ -296,7 +338,18 @@ describe("RestoreCheckService", () => {
       expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
       // Check itself ran and produced a result
       const stateDir = result.checks.find((c) => c.check === "host.state-dir-writable");
-      expect(stateDir).toBeDefined();
+      expect(stateDir).toMatchObject({ status: "green" });
+      if (process.platform === "win32") {
+        const restore = denyWindowsDirectoryCreation(tmpDir);
+        try {
+          const denied = service.check({ noQueue: true, noHooks: true }).checks.find(c => c.check === "host.state-dir-writable");
+          expect(denied).toMatchObject({ status: "red", remediationSafe: false });
+          expect(denied?.remediation).toContain("Windows Security");
+          expect(denied?.remediation).not.toContain("chmod");
+          expect(fs.statSync(tmpDir).mtimeMs).toBe(before);
+          expect(fs.readdirSync(tmpDir)).toEqual([]);
+        } finally { restore(); }
+      }
     } finally {
       if (previous === undefined) delete process.env["OPENRIG_HOME"];
       else process.env["OPENRIG_HOME"] = previous;
@@ -2034,3 +2087,4 @@ describe("RestoreCheckService", () => {
     expect(result.continuity.status).toBe("not_proven");
   });
 });
+import { denyWindowsDirectoryCreation } from "./helpers/directory-permissions.js";

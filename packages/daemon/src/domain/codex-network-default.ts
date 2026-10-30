@@ -12,6 +12,9 @@
 // read its auth store and fetch managed policy. The read and the launch are not atomic.
 
 import { spawn } from "node:child_process";
+import { killWindowsChildTree } from "./windows-child-tree.js";
+import { resolveCodexCommand } from "./windows-provider-command.js";
+import { spawnWindowsJobProcess } from "./windows-job-process.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
@@ -130,7 +133,7 @@ export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {
     const started = performance.now();
     const env = {
       ...process.env,
-      ...(options.launchPath ? { PATH: options.launchPath } : {}),
+      ...(options.launchPath !== undefined ? { PATH: options.launchPath } : {}),
       ...(options.home ? { HOME: options.home } : {}),
       ...(codexHome ? { CODEX_HOME: codexHome } : {}),
     };
@@ -140,7 +143,8 @@ export function codexNetworkDefaultReader(options: CodexNetworkReaderOptions = {
     let child: ReturnType<typeof spawn>;
     try {
       // Its own process group, so cleanup reaches the reader's descendants and nothing else.
-      child = spawn("codex", args, { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
+      const executable = resolveCodexCommand(env, cwd);
+      child = (process.platform === "win32" ? spawnWindowsJobProcess : spawn)(executable.command, [...executable.prefix, ...args], { cwd, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
     } catch (error) {
       return { ...no(`codex app-server could not start: ${firstLine(error)}`), elapsedMs: Math.round(performance.now() - started) };
     }
@@ -209,6 +213,15 @@ export async function stopGroup(child: ReturnType<typeof spawn>, graceMs: number
     if (child.exitCode !== null || child.signalCode !== null) resolve();
     else child.once("exit", () => resolve());
   });
+  if (process.platform === "win32") {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([reaped, new Promise((resolve) => { timer = setTimeout(resolve, graceMs); })]);
+    clearTimeout(timer);
+    await killWindowsChildTree(child);
+    await Promise.race([reaped, new Promise((resolve) => { timer = setTimeout(resolve, graceMs); })]);
+    clearTimeout(timer);
+    return;
+  }
   for (const signal of [null, "SIGTERM", "SIGKILL"] as const) {
     if (signal) {
       try { process.kill(-pid, signal); } catch { break; }

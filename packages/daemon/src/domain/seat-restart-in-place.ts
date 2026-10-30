@@ -14,12 +14,13 @@ import {
   type NativeProcessLister, type NativeProcessRow,
 } from "./native-process-lineage.js";
 import { CodexThreadIdResolver, resolveCodexDbPaths, type CodexThreadEvidence } from "./codex-thread-id.js";
-import { isShellForeground } from "./shell-classifier.js";
+import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
 import { terminatePaneInPlace, type PaneCutoverTiming } from "./pane-cutover.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
+import { readWindowsProcessFacts } from "./windows-process-facts.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -50,8 +51,19 @@ export interface InPlaceCodexLauncher {
   sendResumeCommand(tmuxSession: string, command: string, resumeToken: string, nodeId?: string, home?: string): Promise<HarnessLaunchResult>;
 }
 
-/** What one process shows about itself, read without touching any credential: cwd, executable, and only
- *  the named environment values below. Other environment values are never kept. */
+/** Native spelling or positive directory identity, never case folding alone. */
+function sameRestartDirectory(first: string | null | undefined, second: string | null | undefined): boolean {
+  if (first === second) return true;
+  if (process.platform !== "win32" || !first || !second) return false;
+  // Separator normalization is exact even in a case-sensitive Windows directory.
+  if (nodePath.normalize(first) === nodePath.normalize(second)) return true;
+  try {
+    const a = fs.statSync(first, { bigint: true }), b = fs.statSync(second, { bigint: true });
+    return a.isDirectory() && b.isDirectory() && a.ino !== 0n && a.dev === b.dev && a.ino === b.ino;
+  } catch { return false; }
+}
+
+/** Observed cwd, executable and named environment values; unrelated values are never kept. */
 export interface ProcessFacts {
   cwd: string | null;
   exe: string | null;
@@ -409,8 +421,8 @@ export class CodexInPlaceRestart {
     if (!runningArgv) return { ok: false, code: "settings_unverified", message: "The running Codex's exact arguments could not be read, so its launch settings are unverified. Nothing was stopped." };
     const startedAt = process.startedAt ?? null;
     const facts = await this.io.readProcess(process.pid);
-    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (this observer reads /proc on Linux). Nothing was stopped." };
-    const codexHome = facts.env.CODEX_HOME ?? (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
+    if (!facts) return { ok: false, code: "settings_unverified", message: "The running Codex's working directory and Codex home could not be read (the default observers use /proc on Linux or native process metadata on Windows). Nothing was stopped." };
+    const codexHome = facts.env.CODEX_HOME || (facts.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
     if (!codexHome) return { ok: false, code: "settings_unverified", message: "The running Codex's home could not be determined (no CODEX_HOME or HOME). Nothing was stopped." };
 
     // The conversation the PROCESS is on: argv for a resumed Codex, its own native logs for a fresh one.
@@ -452,7 +464,8 @@ export class CodexInPlaceRestart {
       const parent = byPid.get(ancestor.ppid);
       if (!parent || visited.has(parent.pid)) break;
       visited.add(parent.pid);
-      if (executableBase(parent) === "MainThread") {
+      if (executableBase(parent) === "MainThread"
+        || (parent.platform === "win32" && executableBase(parent) === "node")) {
         launcherFacts.set(parent.pid, await this.io.readProcess(parent.pid));
       }
       ancestor = parent;
@@ -468,7 +481,7 @@ export class CodexInPlaceRestart {
     const between = rows.find((row) => row.pid === top.ppid);
     const viaLaunchScript = !!between && between.ppid === panePid && isStagedLaunchScript(between);
     if (top.pid === panePid) paneShape = "direct_native";
-    else if (root && (top.ppid === panePid || viaLaunchScript) && isShellForeground(executableBase(root))) paneShape = "shell_backed";
+    else if (root && (top.ppid === panePid || viaLaunchScript) && (isShellForeground(executableBase(root)) || (root.platform === "win32" && isWindowsShellHost(executableBase(root))))) paneShape = "shell_backed";
     else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped." };
 
     // Where the relaunched Codex would run, and with which home.
@@ -491,7 +504,7 @@ export class CodexInPlaceRestart {
     if (!relaunch.ok) return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     const relaunchHome = envAssignment(relaunch.command, "CODEX_HOME")
       ?? (paneShape === "shell_backed"
-        ? shellFacts!.env.CODEX_HOME ?? (shellFacts!.env.HOME ? nodePath.join(shellFacts!.env.HOME, ".codex") : null)
+        ? shellFacts!.env.CODEX_HOME || (shellFacts!.env.HOME ? nodePath.join(shellFacts!.env.HOME, ".codex") : null)
         : (await this.deps.tmux.getSessionEnv(sessionName, "CODEX_HOME")) ?? null);
 
     const effective = parseEffectiveSettings(runningArgv);
@@ -510,8 +523,8 @@ export class CodexInPlaceRestart {
     const applyChoice = effort.changes && effort.source === "seat_choice";
     const drift = [
       ...settingsDrift(effective, relaunched).filter((key) => key !== "effort" || !applyChoice),
-      ...(facts.cwd && facts.cwd !== cwd ? ["cwd"] : []),
-      ...(relaunchHome !== codexHome ? ["codex home"] : []),
+      ...(facts.cwd && !sameRestartDirectory(facts.cwd, cwd) ? ["cwd"] : []),
+      ...(!sameRestartDirectory(relaunchHome, codexHome) ? ["codex home"] : []),
     ];
     if (drift.length > 0) {
       return { ok: false, code: "settings_drift", detail: { differs: drift },
@@ -583,7 +596,7 @@ export class CodexInPlaceRestart {
     const rows = await this.listProcesses();
     const panePid = await this.deps.tmux.getPanePid(pane);
     if (!panePid) return null;
-    const observation = await verifyCodexPaneProcess({ target: pane, tmux: { getPanePid: async () => panePid },
+    const observation = await verifyCodexPaneProcess({ target: pane, tmux: { getPanePid: async () => panePid, getPaneCommand: target => this.deps.tmux.getPaneCommand(target) },
       listProcesses: () => rows, requireArgv: true, ...(token ? { expectedToken: token } : {}) });
     return observation && observation.panePid === panePid ? { process: observation.process, panePid, rows } : null;
   }
@@ -599,7 +612,8 @@ export class CodexInPlaceRestart {
         || (row.pid === native.pid && (row.startedAt ?? null) === native.startedAt))) return false;
       const command = await this.deps.tmux.getPaneCommand(pane);
       const root = rows.find((row) => row.pid === panePid);
-      return command !== null && isShellForeground(command) && !!root;
+      return command !== null && !!root && (isShellForeground(command)
+        || (root.platform === "win32" && isWindowsShellHost(command) && isWindowsShellHost(executableBase(root))));
     };
     const wait = async (): Promise<boolean | null> => {
       const polls = Math.max(1, Math.ceil(this.timing.timeoutMs / this.timing.pollMs));
@@ -773,8 +787,8 @@ export class CodexInPlaceRestart {
       if (row.tmux_pane && row.tmux_session) {
         const observed = await this.observeCodex(row.tmux_pane, null).catch(() => null);
         const facts = observed ? await this.io.readProcess(observed.process.pid) : null;
-        const peerHome = facts?.env.CODEX_HOME ?? (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
-        if (peerHome) home = peerHome === codexHome ? "same" : "different";
+        const peerHome = facts?.env.CODEX_HOME || (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : null);
+        if (peerHome) home = sameRestartDirectory(peerHome, codexHome) ? "same" : "different";
       }
       reports.push({ logicalId: row.logical_id, sessionName: row.tmux_session, home,
         effect: home === "same"
@@ -855,6 +869,7 @@ function readResumeToken(db: BetterSqlite3.Database, sessionId: string): string 
 
 function executableBase(row: NativeProcessRow): string {
   const name = row.executableName ?? processArgv(row.command)[0] ?? "";
+  if (row.platform === "win32") return nodePath.win32.basename(name).replace(/\.exe$/i, "").toLowerCase();
   return (name.split("/").pop() ?? name).replace(/^-/, "");
 }
 
@@ -904,12 +919,18 @@ function codexChain(rows: NativeProcessRow[], deepest: NativeProcessRow, panePid
     // Node can name its Linux main thread MainThread; require the OS executable before accepting it.
     const facts = launcherFacts.get(parent.pid);
     const mainThreadNode = name === "MainThread" && nodePath.basename(facts?.exe ?? "") === "node";
+    const windowsNode = parent.platform === "win32" && name === "node"
+      && nodePath.win32.basename(facts?.exe ?? "").toLowerCase() === "node.exe";
     // ps flattens argument boundaries; only exact argv can distinguish an option value from the entry script.
-    const script = mainThreadNode ? nodeLaunchScript(facts?.argv ?? []) : undefined;
-    const codexScript = !!script && nodePath.isAbsolute(script)
-      && (nodePath.basename(script) === "codex" || script.endsWith("/bin/codex.js"));
+    const script = mainThreadNode || windowsNode ? nodeLaunchScript(facts?.argv ?? []) : undefined;
+    const codexScript = !!script && (windowsNode ? nodePath.win32.isAbsolute(script) : nodePath.isAbsolute(script))
+      && ((windowsNode ? nodePath.win32.basename(script).toLowerCase() : nodePath.basename(script)) === "codex" || (windowsNode
+        ? script.replace(/\\/g, "/").toLowerCase().endsWith("/bin/codex.js")
+        : script.endsWith("/bin/codex.js")));
     const launcher = /^codex/i.test(name)
-      || (name === "node" && processArgv(parent.command).some((arg) => /codex/i.test(arg)))
+      || (name === "node" && (parent.platform === "win32"
+        ? windowsNode && codexScript
+        : processArgv(parent.command).some((arg) => /codex/i.test(arg))))
       || (mainThreadNode && codexScript);
     if (!launcher) break;
     chain.push(parent);
@@ -1164,6 +1185,14 @@ export function defaultInPlaceRestartIo(): InPlaceRestartIo {
   return {
     async readProcess(pid) {
       try {
+        if (process.platform === "win32") {
+          const facts = await readWindowsProcessFacts(pid);
+          if (!facts) return null;
+          const { HOME, USERPROFILE, CODEX_HOME } = facts.env;
+          const home = HOME || USERPROFILE || undefined;
+          return { cwd: facts.cwd, exe: facts.exe, argv: facts.argv,
+            env: { ...(home !== undefined ? { HOME: home } : {}), ...(CODEX_HOME !== undefined ? { CODEX_HOME } : {}) } };
+        }
         const environ = fs.readFileSync(`/proc/${pid}/environ`);
         const env: ProcessFacts["env"] = {};
         for (const entry of environ.toString("utf8").split("\0")) {

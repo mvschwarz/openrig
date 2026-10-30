@@ -1,9 +1,10 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, linkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parse } from "smol-toml";
 import { prepareHerdrLaunchConfig } from "../src/herdr-launch-config.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
 
 const roots: string[] = [];
 function root() { const dir = mkdtempSync(path.join(tmpdir(), "herdr-config-")); roots.push(dir); return dir; }
@@ -39,7 +40,7 @@ it.each([[undefined, true], [80, true], [119, true], [120, true], [159, true], [
   const dir = root(), env = { HOME: dir };
   const output = prepareHerdrLaunchConfig(env, "/owned/herdr.sock", columns);
   expect(read(output)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: collapsed } });
-  expect(statSync(output).mode & 0o777).toBe(0o600);
+  expectPrivateFile(output);
   expect(existsSync(path.join(path.dirname(output), "config.toml"))).toBe(false);
   expect(prepareHerdrLaunchConfig(env, "/owned/herdr.sock", columns)).toBe(output);
 });
@@ -68,5 +69,18 @@ it("replaces its generated file atomically without following an output symlink",
   rmSync(output); symlinkSync(victim, output);
   expect(prepareHerdrLaunchConfig(env, "/owned.sock", 160)).toBe(output);
   expect(readFileSync(victim, "utf8")).toBe('[ui]\nsidebar_width = 18\n');
+  expect(read(output)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: false } });
+});
+
+it("replaces a generated hard link without changing the personal file", () => {
+  const dir = root(), victim = path.join(dir, "personal.toml"), env = { HOME: dir };
+  const text = '[ui]\nsidebar_width = 18\n';
+  writeFileSync(victim, text);
+  const output = prepareHerdrLaunchConfig(env, "/owned.sock", 160);
+  rmSync(output); linkSync(victim, output);
+  expect(prepareHerdrLaunchConfig(env, "/owned.sock", 160)).toBe(output);
+  expect(readFileSync(victim, "utf8")).toBe(text);
+  expect(statSync(victim).nlink).toBe(1);
+  expectPrivateFile(output);
   expect(read(output)).toEqual({ onboarding: false, ui: { sidebar_start_collapsed: false } });
 });

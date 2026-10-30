@@ -1,6 +1,6 @@
-import { readFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, unlinkSync, existsSync, realpathSync } from "node:fs";
 import { writeTextAtomically } from "./atomic-text-write.js";
-import { join, dirname, resolve, isAbsolute } from "node:path";
+import { join, dirname, resolve, isAbsolute, normalize } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -883,6 +883,14 @@ function deriveLegacyWorkspaceDefault(key: ValidKey, workspaceRoot: string): str
   }
 }
 
+function matchesLegacyWorkspaceDefault(value: unknown, expected: string): boolean {
+  if (value === expected) return true;
+  if (process.platform !== "win32" || typeof value !== "string") return false;
+  if (normalize(value) === normalize(expected)) return true;
+  try { return realpathSync.native(value) === realpathSync.native(expected); }
+  catch { return false; }
+}
+
 const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
   "workspace.slices_root",
   "workspace.steering_path",
@@ -1459,7 +1467,7 @@ export class ConfigStore {
     const fileVal = getNestedValue(fileConfig, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
       const legacyDefault = deriveLegacyWorkspaceDefault(key, workspaceRoot);
-      if (legacyDefault !== null && fileVal === legacyDefault) {
+      if (legacyDefault !== null && matchesLegacyWorkspaceDefault(fileVal, legacyDefault)) {
         return { value: defaultValue, source: "default", defaultValue };
       }
       // Validate the file-source value too. Hand-edited config.json with

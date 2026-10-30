@@ -4,6 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { probeTmuxCapture, TMUX_CAPTURE_PROBE_TIMEOUT_MS } from "../src/tmux-health.js";
 import { doctorExec } from "../src/commands/doctor.js";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 describe("probeTmuxCapture", () => {
   const KILL = "tmux -L openrig-check-test -f /dev/null kill-server";
@@ -14,7 +16,7 @@ describe("probeTmuxCapture", () => {
       const message = failure(cmd);
       if (message) throw new Error(message);
       return "";
-    }, "openrig-check-test");
+    }, "openrig-check-test", "linux");
     return { result, calls, cmds: calls.map((c) => c.cmd) };
   };
 
@@ -43,6 +45,25 @@ describe("probeTmuxCapture", () => {
       // The create may have started a server anyway, so it gets a bounded kill; no capture is tried.
       expect(cmds).toEqual(["tmux -L openrig-check-test -f /dev/null new-session -d -s check", KILL]);
     }
+  });
+});
+
+describe.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("native capture health check", () => {
+  it("creates and captures an isolated psmux session with the Windows null device", () => {
+    const socket = `openrig-check-${randomUUID()}`;
+    const calls: string[] = [];
+    const result = probeTmuxCapture((cmd, opts) => {
+      calls.push(cmd);
+      return execFileSync(process.env.OPENRIG_TEST_PSMUX!, cmd.split(" ").slice(1), {
+        encoding: "utf8", windowsHide: true, timeout: opts.timeoutMs,
+      });
+    }, socket);
+    expect(result).toEqual({ status: "pass" });
+    expect(calls.every(cmd => cmd.includes(" -f NUL "))).toBe(true);
+    expect(calls.at(-1)).toContain("kill-server");
+    expect(() => execFileSync(process.env.OPENRIG_TEST_PSMUX!, ["-L", socket, "list-sessions"], {
+      encoding: "utf8", windowsHide: true, timeout: 5000, stdio: "pipe",
+    })).toThrow();
   });
 });
 

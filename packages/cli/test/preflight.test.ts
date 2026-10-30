@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import net from "node:net";
@@ -8,6 +8,7 @@ import { SystemPreflight } from "../src/system-preflight.js";
 import { ConfigStore } from "../src/config-store.js";
 import { preflightCommand } from "../src/commands/preflight.js";
 import type { DaemonStatus } from "../src/daemon-lifecycle.js";
+import { denyDirectoryChildren, denyWindowsDirectoryCreation } from "../../daemon/test/helpers/directory-permissions.js";
 
 function makeExec(tmuxMode: "healthy" | "missing" | "unhealthy" = "healthy"): (cmd: string) => Promise<string> {
   return async (cmd: string) => {
@@ -127,20 +128,31 @@ describe("SystemPreflight", () => {
   it("OpenRig home not writable → ready: false with guidance", async () => {
     const readonlyDir = join(tmpDir, "readonly-home");
     mkdirSync(readonlyDir);
-    chmodSync(readonlyDir, 0o444);
-    const pf = new SystemPreflight({
-      exec: makeExec(),
-      configStore: new ConfigStore(join(tmpDir, "config.json")),
-      getDaemonStatus: makeStatus(),
-      riggedHome: join(readonlyDir, "nested"),
-    });
-    const result = await pf.run();
-    expect(result.ready).toBe(false);
-    const homeCheck = result.checks.find((c) => c.name === "writable_home");
-    expect(homeCheck!.ok).toBe(false);
-    expect(homeCheck!.fix).toContain("permissions");
-    // Restore perms for cleanup
-    chmodSync(readonlyDir, 0o755);
+    const restore = denyDirectoryChildren(readonlyDir);
+    try {
+      const pf = new SystemPreflight({
+        exec: makeExec(),
+        configStore: new ConfigStore(join(tmpDir, "config.json")),
+        getDaemonStatus: makeStatus(),
+        riggedHome: join(readonlyDir, "nested"),
+      });
+      const result = await pf.run();
+      expect(result.ready).toBe(false);
+      const homeCheck = result.checks.find((c) => c.name === "writable_home");
+      expect(homeCheck!.ok).toBe(false);
+      expect(homeCheck!.fix).toContain("permissions");
+    } finally { restore(); }
+  });
+
+  it.runIf(process.platform === "win32")("refuses an existing home whose DACL denies new files instead of trusting W_OK", async () => {
+    const home = join(tmpDir, "existing-denied"); mkdirSync(home);
+    const restore = denyWindowsDirectoryCreation(home);
+    try {
+      const pf = new SystemPreflight({ exec: makeExec(), configStore: new ConfigStore(join(tmpDir, "config.json")), getDaemonStatus: makeStatus(), riggedHome: home });
+      const result = await pf.run();
+      expect(result.checks.find(check => check.name === "writable_home")).toMatchObject({ ok: false });
+      expect(readdirSync(home)).toEqual([]);
+    } finally { restore(); }
   });
 
   // Test 5
@@ -233,6 +245,22 @@ describe("Preflight CLI", () => {
   });
 
   // Test 9 (--json)
+  it.runIf(process.platform === "win32")("derives a native database parent without treating the existing database file as its home", async () => {
+    const home = join(tmpDir, "native home 中文"), database = join(home, "openrig.sqlite");
+    mkdirSync(home);
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(database, "");
+    const configPath = join(tmpDir, "native-config.json");
+    writeFileSync(configPath, JSON.stringify({ db: { path: database }, transcripts: { path: join(tmpDir, "transcripts") }, daemon: { port: 0 } }));
+    const prog = new Command(); prog.exitOverride();
+    prog.addCommand(preflightCommand({ exec: makeExec(), configPath, getDaemonStatus: makeStatus() }));
+    const { logs, exitCode } = await captureLogs(async () => { await prog.parseAsync(["node", "rig", "preflight", "--json"]); });
+    const result = JSON.parse(logs.join("\n"));
+    expect(result.checks.find((check: { name: string }) => check.name === "writable_home")).toMatchObject({ ok: true });
+    expect(result.ready).toBe(true);
+    expect(exitCode).toBeUndefined();
+  });
+
   it("rig preflight --json prints structured result", async () => {
     const homeDir = join(tmpDir, ".openrig");
     mkdirSync(homeDir, { recursive: true });

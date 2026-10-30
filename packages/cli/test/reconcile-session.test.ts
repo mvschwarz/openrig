@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.3.4.3 — rig reconcile-session CLI.
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
@@ -91,6 +92,7 @@ describe("rig reconcile-session", () => {
       });
     });
     await new Promise<void>((r) => { server.listen(0, r); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

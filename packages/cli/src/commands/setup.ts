@@ -1,17 +1,18 @@
 import { Command } from "commander";
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { shellQuote } from "../cross-host-executor.js";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
-import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl } from "../tmux-health.js";
+import { buildTmuxCaptureFailure, buildTmuxControlFailure, probeTmuxCapture, probeTmuxControl, tmuxInstallGuidance } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 import { describeSkillRouterFootprint } from "@openrig/daemon/router-line";
+import { readPlatformEnv } from "../lib/codex-auth.js";
 
 export interface SetupStep {
   id: string;
@@ -517,7 +518,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   // 2. tmux
   const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
   if (tmuxProbe.code === "not_installed") {
-    if (!brewOk) {
+    if (platform === "win32") {
+      steps.push({ id: "tmux_install", status: "fail", message: "Native multiplexer not found on PATH.", reason: "OpenRig requires psmux's tmux.exe alias to manage native Windows sessions.", fixHint: tmuxInstallGuidance(platform) });
+    } else if (!brewOk) {
       steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: Homebrew not available.", reason: "tmux install requires Homebrew." });
     } else {
       try {
@@ -538,7 +541,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     });
   } else {
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
-    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts));
+    const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts), undefined, platform);
     if (capture.status === "fail") {
       const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
       steps.push({ id: "tmux_install", status: "fail", message: failure.message, reason: failure.reason, fixHint: failure.fix });
@@ -612,10 +615,33 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 6. tmux config
-  const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
+  const setupEnv = deps.env ?? process.env;
+  let setupHome = readPlatformEnv(setupEnv, "HOME", platform) || homedir();
+  if (platform === "win32") {
+    const profile = readPlatformEnv(setupEnv, "USERPROFILE", platform);
+    if (profile) setupHome = profile;
+    else {
+      try { setupHome = userInfo().homedir; }
+      catch {
+        const drive = readPlatformEnv(setupEnv, "HOMEDRIVE", platform), relative = readPlatformEnv(setupEnv, "HOMEPATH", platform);
+        if (drive && relative && deps.exists(drive + relative)) setupHome = drive + relative;
+      }
+    }
+  }
+  const nativeConfigs = [`${setupHome}/.psmux.conf`, `${setupHome}/.psmuxrc`, `${setupHome}/.tmux.conf`, `${setupHome}/.config/psmux/psmux.conf`];
+  const rawConfig = platform === "win32" ? readPlatformEnv(setupEnv, "PSMUX_CONFIG_FILE", platform) : undefined;
+  const selectedConfig = rawConfig?.startsWith("~") ? setupHome + rawConfig.slice(1) : rawConfig;
+  const disabledConfig = platform === "win32" && selectedConfig?.toUpperCase() === "NUL";
+  const TMUX_CONF = platform === "win32"
+    ? selectedConfig || nativeConfigs.find(file => deps.exists(file)) || `${setupHome}/.tmux.conf`
+    : `${setupHome}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
 
-  try {
+  if (selectedConfig === "") {
+    steps.push({ id: "tmux_config", status: "warn", message: "PSMUX_CONFIG_FILE is explicitly empty; psmux cannot read that path. Select a config file or unset the variable; no config file was written." });
+  } else if (disabledConfig) {
+    steps.push({ id: "tmux_config", status: "skipped", message: "psmux configuration is disabled by PSMUX_CONFIG_FILE=NUL; no config file was written." });
+  } else try {
     const historyLimit = (deps.configStore ?? new ConfigStore()).resolve().terminal.historyLimit;
     const MANAGED_BLOCK = [
       MANAGED_MARKER,
@@ -637,14 +663,14 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       steps.push({ id: "tmux_config", status: "applied", message: `Appended OpenRig managed tmux config block (history-limit ${historyLimit}).` });
     } else {
       deps.writeFile(TMUX_CONF, MANAGED_BLOCK + "\n");
-      steps.push({ id: "tmux_config", status: "applied", message: `Created .tmux.conf with OpenRig managed block (history-limit ${historyLimit}).` });
+      steps.push({ id: "tmux_config", status: "applied", message: `Created ${platform === "win32" ? TMUX_CONF : ".tmux.conf"} with OpenRig managed block (history-limit ${historyLimit}).` });
     }
   } catch (err) {
     steps.push({ id: "tmux_config", status: "warn", message: `Could not update tmux config: ${(err as Error).message}` });
   }
 
   // Informational only: never enable inheritance automatically or add a setup prompt.
-  const tmuxConfigs = [TMUX_CONF, `${process.env["XDG_CONFIG_HOME"] ?? `${process.env["HOME"] ?? "~"}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
+  const tmuxConfigs = disabledConfig || selectedConfig === "" ? [] : platform === "win32" ? [TMUX_CONF] : [TMUX_CONF, `${readPlatformEnv(setupEnv, "XDG_CONFIG_HOME", platform) || `${setupHome}/.config`}/tmux/tmux.conf`, "/etc/tmux.conf"];
   const customTmux = tmuxConfigs.some(file => {
     try {
       const content = deps.readFile(file)?.replace(/# OpenRig managed block[\s\S]*?# End # OpenRig managed block/g, "") ?? "";
@@ -747,7 +773,6 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
     configStore: new ConfigStore(),
     platform: platform as NodeJS.Platform,
     mkdirp: (p: string) => mkdirSync(p, { recursive: true }),
-    checkWritable: (p: string) => accessSync(p, constants.W_OK),
     fetch: globalThis.fetch,
   };
 }

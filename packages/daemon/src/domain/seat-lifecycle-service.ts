@@ -715,7 +715,7 @@ export class SeatLifecycleService {
         if (own === undefined && process.startedAt) {
           const io = { ...defaultInPlaceRestartIo(), ...this.inPlaceRestartIo };
           const facts = await io.readProcess(process.pid);
-          const home = facts?.env.CODEX_HOME ?? (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : undefined);
+          const home = facts?.env.CODEX_HOME || (facts?.env.HOME ? nodePath.join(facts.env.HOME, ".codex") : undefined);
           own = home ? await io.readThreadId(process.pid, process.startedAt, home) : undefined;
         }
         if (own !== recorded) return { detail: mismatch };

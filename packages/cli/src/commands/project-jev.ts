@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
+import { readWindowsRegularText, writeWindowsOwnedText } from "../lib/windows-owned-text.js";
 import type { ClassificationDecision, ClassificationRequest } from "@openrig/daemon/stream-classifier";
 import type { prepareWorker } from "./project-worker.js";
 
@@ -14,6 +15,7 @@ export type JevResult = { status: "answered"; answers: Answers; model: string } 
 const hash = (text: string) => "sha256:" + createHash("sha256").update(text).digest("hex");
 
 export function readBounded(file: string, limit = 1024 * 1024): string {
+  if (process.platform === "win32") return readWindowsRegularText(file, limit);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const s = fs.fstatSync(fd);
@@ -39,6 +41,10 @@ export function readExperiment(file: string, read = readBounded): ExperimentConf
 export function setExperiment(file: string, enabled: boolean, options: Partial<ExperimentConfig> = {}) {
   const config = { ...readExperiment(file), ...options, enabled };
   readExperiment(file, () => JSON.stringify(config)); // validate before writing
+  if (process.platform === "win32") {
+    writeWindowsOwnedText(file, JSON.stringify(config, null, 2) + "\n");
+    return config;
+  }
   const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
   try {
     const s = fs.fstatSync(fd);

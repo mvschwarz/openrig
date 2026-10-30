@@ -6,6 +6,12 @@ export interface TmuxProbeResult {
   code: "available" | "no_server" | "not_installed" | "unhealthy";
 }
 
+export function tmuxInstallGuidance(platform: string = process.platform): string {
+  return platform === "win32"
+    ? "Install psmux for native Windows and put its directory (including tmux.exe) on PATH before unrelated tmux installations; open a new shell and verify tmux -V. See docs/reference/windows-support-experiment.md for experimental support limits."
+    : "Install tmux (brew install tmux on macOS, apt install tmux on Debian/Ubuntu).";
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -38,8 +44,9 @@ export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
  * timed out (it may have started anyway). A throwaway server that won't start is reported as not checked, not a failure.
  */
 export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }) => string,
-  socket = `openrig-check-${process.pid}`): TmuxCaptureResult {
-  const run = (args: string) => exec(`tmux -L ${socket} -f /dev/null ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
+  socket = `openrig-check-${process.pid}`, platform: string = process.platform): TmuxCaptureResult {
+  const emptyConfig = platform === "win32" ? "NUL" : "/dev/null";
+  const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
   try {
     try { run("new-session -d -s check"); }
     catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }

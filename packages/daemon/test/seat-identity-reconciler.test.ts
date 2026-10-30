@@ -15,6 +15,11 @@ import {
 } from "../src/domain/seat-identity-reconciler.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { listNativeProcesses, parseWindowsProcesses } from "../src/domain/native-process-lineage.js";
 
 interface TmuxState {
   /** session names tmux reports as live via listSessions(). */
@@ -79,6 +84,43 @@ describe("A3 Claude shell sampling", () => {
   const databases: Database.Database[] = [];
   afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
+  it.skipIf(process.platform !== "win32")("does not verify an owned actual PowerShell host with no Claude child", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "openrig-identity-shell-"));
+    const stop = path.join(root, "stop");
+    const child = spawn(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-Command", "[Console]::WriteLine('owned-ready');while(!(Test-Path -LiteralPath $env:OPENRIG_IDENTITY_STOP)){Start-Sleep -Milliseconds 50}"],
+      { env: { ...process.env, OPENRIG_IDENTITY_STOP: stop }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const exited = new Promise<void>(resolve => child.once("close", () => resolve()));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Owned PowerShell did not start")), 10_000);
+        child.once("error", error => { clearTimeout(timer); reject(error); });
+        child.stdout.once("data", () => { clearTimeout(timer); resolve(); });
+      });
+      const snapshot = await listNativeProcesses();
+      const ownPids = new Set([child.pid!]);
+      for (let size = -1; size !== ownPids.size;) {
+        size = ownPids.size;
+        for (const row of snapshot) if (ownPids.has(row.ppid)) ownPids.add(row.pid);
+      }
+      const rows = snapshot.filter(row => ownPids.has(row.pid));
+      const host = rows.find(row => row.pid === child.pid);
+      expect(host?.platform).toBe("win32");
+      const db = createFullTestDb(); databases.push(db);
+      seedSeat(db, { nodeId: "owned-shell", sessionName: "owned@fixture", pane: "%owned" });
+      db.prepare("UPDATE sessions SET resume_token = 'owned-test-token'").run();
+      const tmux = makeTmux({ sessions: ["owned@fixture"], panePid: { "%owned": child.pid! }, paneCommand: { "%owned": host!.executableName! } });
+      const rec = new SeatIdentityReconciler({ db, tmux, listProcesses: async () => rows, now: NOW });
+      await rec.reconcileAll();
+      expect(new SeatIdentityStore(db).getForNode("owned-shell")?.verdict).not.toBe("verified");
+    } finally {
+      writeFileSync(stop, "stop");
+      const timer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); }, 10_000);
+      await exited; clearTimeout(timer);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   function fixture(command = "sh", runtime = "claude-code") {
     const db = createFullTestDb(); databases.push(db);
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime });
@@ -95,6 +137,39 @@ describe("A3 Claude shell sampling", () => {
     const verdict = () => new SeatIdentityStore(db).getForNode("n1");
     return { db, tmux, rows, listProcesses, rec, verdict };
   }
+
+  it.skipIf(process.platform !== "win32").each(
+    ["PowerShell.EXE", "pwsh", "cmd.exe"].flatMap(command => [true, false].map(boundToken => ({ command, boundToken }))),
+  )("keeps native Claude constraints under $command (bound token $boundToken)", async ({ command, boundToken }) => {
+    const db = createFullTestDb(); databases.push(db);
+    seedSeat(db, { nodeId: "native-host", sessionName: "native@fixture", pane: "%1" });
+    if (boundToken) db.prepare("UPDATE sessions SET resume_token = 'saved-token'").run();
+    const state = { sessions: ["native@fixture"], panePid: { "%1": 10 }, paneCommand: { "%1": command } };
+    const tmux = Object.assign(makeTmux(state), { listPanes: vi.fn(async () => [{ id: "%1" }] as never) });
+    const values = parseWindowsProcesses(JSON.stringify([
+      { ProcessId: 10, ParentProcessId: 1, Name: "powershell.exe", ExecutablePath: "C:\\fixture\\powershell.exe", CommandLine: '"C:\\fixture\\powershell.exe"', StartedAt: "2026-07-02T12:00:00Z" },
+      { ProcessId: 11, ParentProcessId: 10, Name: "claude.exe", ExecutablePath: "C:\\fixture\\claude.exe", CommandLine: '"C:\\fixture\\claude.exe" --resume saved-token', StartedAt: "2026-07-02T12:00:01Z" },
+    ]));
+    const listProcesses = vi.fn(async () => values);
+    const rec = new SeatIdentityReconciler({ db, tmux, listProcesses, now: NOW });
+    const store = new SeatIdentityStore(db);
+    await rec.reconcileAll();
+    // Exact conversation proof also requires the existing native foreground
+    // label. A provider child under a still-reported shell is not enough.
+    if (boundToken) expect(store.getForNode("native-host")).toMatchObject({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+    else expect(store.getForNode("native-host")).toMatchObject({ verdict: "verified", evidence: { observedPid: 11 } });
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+    listProcesses.mockResolvedValue(values.slice(0, 1));
+    await rec.reconcileAll();
+    expect(store.getForNode("native-host")).toMatchObject({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+    listProcesses.mockResolvedValue(values);
+    await rec.reconcileAll();
+    if (!boundToken) expect(store.getForNode("native-host")?.verdict).toBe("verified");
+    listProcesses.mockRejectedValue(new Error("native observation unavailable"));
+    await rec.reconcileAll();
+    expect(store.getForNode("native-host")?.verdict).not.toBe("verified");
+    expect(db.prepare("SELECT status FROM sessions WHERE node_id = 'native-host'").get()).toEqual({ status: "running" });
+  });
 
   it("does not sample native processes for direct Claude, but still makes the final command/PID observations", async () => {
     const f = fixture("claude");

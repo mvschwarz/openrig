@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { DaemonClient, DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
@@ -37,6 +38,7 @@ describe("a request allowed 300 s or more", () => {
       });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(server);
     baseUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   });
 
@@ -99,6 +101,7 @@ describe("a request allowed 300 s or more", () => {
   it("a refused connection keeps its code, so it reads as not connected", async () => {
     const closed = http.createServer();
     await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    allowOwnedHttpFixture(closed);
     const port = (closed.address() as { port: number }).port;
     await new Promise<void>((resolve) => closed.close(() => resolve()));
     const err = await new DaemonClient(`http://127.0.0.1:${port}`).post("/api/transport/send", {}, { timeoutMs: 405_000 }).catch((e: unknown) => e);

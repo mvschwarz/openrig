@@ -1,3 +1,4 @@
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
@@ -16,6 +17,7 @@ describe("ntfy native transport", () => {
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
+    allowFetchTarget(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     try {
       const adapter = new NtfyNotificationAdapter({ topicUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/owned-topic` });
       const result = await adapter.send({ title: "a".repeat(500), body: "offline fixture" });
@@ -39,6 +41,7 @@ describe("ntfy native transport", () => {
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
+    allowFetchTarget(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     try {
       const adapter = new NtfyNotificationAdapter({ topicUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/owned-topic` });
       const title = "Release \u2014 shipped \u{1F680}";
@@ -63,6 +66,7 @@ describe("ntfy native transport", () => {
     });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
+    allowFetchTarget(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     try {
       const adapter = new NtfyNotificationAdapter({ topicUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/owned-topic` });
       await adapter.send({ title: "Needs review: qitem 42", body: "x" });

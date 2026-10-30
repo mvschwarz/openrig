@@ -3,6 +3,9 @@
 // COMMAND CONSTRUCTION, sidecar-driven token capture, trust-flag posture, and
 // the deny-by-default env allowlist (BR-3) are all pure/fake-backed. The live
 // legs are the VM proof contract.
+// POSIX runtime fixtures select Linux explicitly. Resume assertions inspect
+// actual argv in either shell; owned native dispatch is checked separately in
+// pi-omp-native-dispatch.test.ts, without a live Pi/OMP provider.
 
 import nodePath from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -11,6 +14,7 @@ import { PiRuntimeAdapter, type PiAdapterFsOps } from "../src/adapters/pi-runtim
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import { runnerCommandArgument } from "./helpers/runner-command-arguments.js";
 import {
   piSeatPaths, buildPiRunnerCommand, buildPiChildArgs, buildPiChildEnv,
   providerFromModel, parsePiRunnerState, buildPendingRunnerState, PI_RUNNER_READY_MARKER,
@@ -51,9 +55,9 @@ function mockTmux(overrides?: {
 /** Extract the --launch-id value the adapter typed into the pane (the runner
  *  would stamp this into its sidecar writes). */
 function launchIdFrom(cmd: string): string {
-  const m = /--launch-id '([^']+)'/.exec(cmd);
-  if (!m) throw new Error("typed command carries no --launch-id");
-  return m[1]!;
+  const id = runnerCommandArgument(cmd, "--launch-id");
+  if (!id) throw new Error("typed command carries no --launch-id");
+  return id;
 }
 
 /** In-memory fs. `files` maps absolute path -> content. */
@@ -79,6 +83,7 @@ function readyState(sessionFile: string = SESSION_FILE, launchId?: string): stri
 
 function adapterWith(fs: PiAdapterFsOps, tmux: TmuxAdapter, trust?: "approve" | "no-approve") {
   return new PiRuntimeAdapter({
+    platform: "linux", // This factory models POSIX pane commands and paths.
     tmux, fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER,
     trustPosture: trust, sleep: async () => {},
   });
@@ -286,7 +291,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
         return { ok: true as const };
       });
-      const adapter = new Adapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {} });
+      const adapter = new Adapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {} });
       expect((await adapter.launchHarness({ ...(binding as object), effort } as never, { name: SESSION })).ok).toBe(true);
       return sendShellCommand.mock.calls[0]![1] as string;
     };
@@ -305,7 +310,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         commands.push(text);
         return { ok: true as const };
       });
-      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      const adapter = new PiRuntimeAdapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
       expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
       enabled = commands.length >= 2; // switched on before the third launch, which reads it again
     }
@@ -322,7 +327,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
         commands.push(text);
         return { ok: true as const };
       });
-      const adapter = new PiRuntimeAdapter({ tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
+      const adapter = new PiRuntimeAdapter({ platform: "linux", tmux: mockTmux({ sendShellCommand }), fsOps: fs, stateRoot: STATE_ROOT, runnerEntryPath: RUNNER, sleep: async () => {}, ...deps });
       expect((await adapter.launchHarness(binding, { name: SESSION })).ok).toBe(true);
     }
     expect(commands.map((c) => c.includes("--openrouter-charge"))).toEqual([false, false, false, true]);
@@ -504,7 +509,7 @@ describe("PiResumeAdapter", () => {
   it("resumes: types the runner --session command and confirms via the sidecar", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
     const sendShellCommand = vi.fn(async (_t: string, text: string) => {
-      expect(text).toContain(`--session '${SESSION_FILE}'`);
+      expect(runnerCommandArgument(text, "--session")).toBe(SESSION_FILE);
       expect(text).not.toContain("--resume");
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
@@ -527,7 +532,10 @@ describe("PiResumeAdapter", () => {
     };
     const omp = (fs: ReturnType<typeof memFs>, tmux: TmuxAdapter) =>
       new OmpResumeAdapter(tmux, fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, { pollMs: 1, maxWaitMs: 5, sleep: async () => {} });
-    expect(await run(resumeAdapter, "pi_session_file", "high")).toContain("--model 'zai/glm' --thinking 'high' --session");
+    const high = await run(resumeAdapter, "pi_session_file", "high");
+    expect(runnerCommandArgument(high, "--model")).toBe("zai/glm");
+    expect(runnerCommandArgument(high, "--thinking")).toBe("high");
+    expect(runnerCommandArgument(high, "--session")).toBe(SESSION_FILE);
     expect(await run(resumeAdapter, "pi_session_file")).not.toContain("--thinking");
     expect(await run(resumeAdapter, "pi_session_file", null)).not.toContain("--thinking");
     expect(await run(omp, "omp_session_file", "high")).not.toContain("--thinking");

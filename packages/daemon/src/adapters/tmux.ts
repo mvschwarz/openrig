@@ -1,13 +1,21 @@
 import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as pathJoin } from "node:path";
+import { basename as pathBaseName, isAbsolute as pathIsAbsolute, join as pathJoin } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
 import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
+import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
+import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
+import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
+import { windowsCmdBridgeInvocation } from "../domain/windows-cmd-bridge.js";
+const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
@@ -35,6 +43,7 @@ export type ArgvExecFn = (argv: string[]) => Promise<string>;
  * without touching the real filesystem; production wires node fs + os.tmpdir.
  */
 export interface TmuxFileOps {
+  privateConfig?(content: string): Promise<PrivateConfig>;
   writeFile(path: string, content: string, options?: { mode: number; flag: "wx" }): Promise<void>;
   unlink(path: string): Promise<void>;
   /** Unique temp-file path per call - parallel `rig up` stands up many seats. */
@@ -45,21 +54,19 @@ export interface TmuxFileOps {
 
 // One source for the staged script's name: the generator (defaultTmuxFileOps) and the matcher
 // (isStagedSendScriptPath) are both built from it.
-const SEND_SCRIPT_PREFIX = "openrig-tmux-send-";
-const SEND_SCRIPT_SUFFIX = ".txt";
-const SEND_SCRIPT_NAME = new RegExp(
-  `^${SEND_SCRIPT_PREFIX}\\d+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${SEND_SCRIPT_SUFFIX.replace(".", "\\.")}$`,
-);
 
 /** Whether `path` names a launch script sendShellCommand staged (an absolute path with the name
  *  defaultTmuxFileOps gives it). The script removes itself first, so this is a name check only. */
 export function isStagedSendScriptPath(path: string): boolean {
-  return path.startsWith("/") && SEND_SCRIPT_NAME.test(path.split("/").pop() ?? "");
+  return pathIsAbsolute(path) && isStagedSendName(pathBaseName(path));
 }
 
 export function defaultTmuxFileOps(): TmuxFileOps {
   return {
-    writeFile: (p, content, options) => fsWriteFile(p, content, { encoding: "utf8", ...options }),
+    privateConfig: writeWindowsPrivateConfig,
+    writeFile: (p, content, options) => process.platform === "win32"
+      ? createPrivateTextFileAsync(p, content)
+      : fsWriteFile(p, content, { encoding: "utf8", ...options }),
     unlink: (p) => fsUnlink(p),
     tmpName: () => pathJoin(tmpdir(), `${SEND_SCRIPT_PREFIX}${process.pid}-${randomUUID()}${SEND_SCRIPT_SUFFIX}`),
     bufferName: () => `openrig_${process.pid}_${randomUUID().replace(/-/g, "")}`,
@@ -445,7 +452,9 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", name];
+      if (cwd != null) argv.push("-c", cwd);
+      const out = await this.run(argv, `tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -478,7 +487,8 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
-      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      const out = await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
+        `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {
@@ -557,7 +567,13 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
+    private terminalKind: "tmux" | "psmux" = "tmux",
   ) {}
+
+  /** Whether pane commands run in the native Windows multiplexer. */
+  get isNativeWindows(): boolean {
+    return this.terminalKind === "psmux" && process.platform === "win32";
+  }
 
   /**
    * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
@@ -568,7 +584,23 @@ export class TmuxAdapter {
    * differently (the `-F "..."` double-quoted formats); pass it ONLY to
    * preserve an exact legacy string, never to smuggle new semantics.
    */
-  private async run(argv: string[], legacy?: string): Promise<string> {
+  private async run(argv: string[], legacy?: string, bufferScope?: string): Promise<string> {
+    if (this.terminalKind === "psmux") {
+      const scopedArg = argv.find(a => /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(a));
+      const scoped = scopedArg ?? bufferScope;
+      if (scoped) {
+        const [, encoded, pane] = scoped.split(":");
+        const session = scoped.startsWith("psmux:") ? Buffer.from(encoded!, "base64url").toString("utf8") : scoped;
+        // psmux selects the server AND the initial target from the first -t.
+        // Some client commands (notably send-keys) consume the later -t and
+        // omit it from their control request. Carry the immutable pane/window
+        // in the first target too; session-only routing would hit its active pane.
+        const target = scopedArg && pane!.startsWith("%") ? `=${session}:.${pane}`
+          : scopedArg && pane!.startsWith("@") ? `=${session}:${pane}` : `=${session}`;
+        argv = [argv[0]!, "-t", target, ...argv.slice(1).map(a => a === scoped ? pane! : a)];
+        legacy = undefined;
+      }
+    }
     if (this.argvExec) return this.argvExec(argv);
     return this.exec(legacy ?? posixJoinArgv(argv));
   }
@@ -578,6 +610,45 @@ export class TmuxAdapter {
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+    // Stock psmux 3.4 cannot bootstrap new-session through source-file. A
+    // versioned candidate accepts file references without serializing values.
+    if (this.terminalKind === "psmux") {
+      const capability = "openrig-envfile-v1:new-session,respawn-pane";
+      let supported = false;
+      try {
+        supported = (await this.run(["tmux", "openrig-private-environment-capability"])).trim() === capability;
+      } catch (error) {
+        // Stock 3.4.0 explicitly rejects this command. An unavailable transport
+        // is not evidence of an unsupported protocol and must not trigger retry.
+        if (!/unknown command: openrig-private-environment-capability/i.test(String(error))) throw error;
+      }
+      if (!supported) return this.run(argv, legacy);
+      if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+      const entries: [string, string][] = [];
+      const rewritten: string[] = [];
+      let referenceIndex = -1;
+      for (let index = 0; index < argv.length; index++) {
+        const arg = argv[index]!;
+        if (arg === "--") { rewritten.push(...argv.slice(index)); break; }
+        if (arg !== "-e") { rewritten.push(arg); continue; }
+        const assignment = argv[++index] ?? "";
+        const separator = assignment.indexOf("=");
+        const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
+        if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+        entries.push([key, value]);
+        if (referenceIndex < 0) { rewritten.push("-e", ""); referenceIndex = rewritten.length - 1; }
+      }
+      const content = JSON.stringify({ schema: "openrig.psmux.environment/v1", entries });
+      if (referenceIndex < 0) return this.run(argv, legacy);
+      if (Buffer.byteLength(content, "utf8") > 1024 * 1024) throw new Error("Native environment file exceeds protocol limit");
+      const file = await this.fileOps.privateConfig(content);
+      rewritten[referenceIndex] = `@openrig-env-v1:${file.path}`;
+      // Retain on an uncertain/failed command: a server may still be reading it.
+      // No fallback containing values is attempted after protocol selection.
+      const output = await this.run(rewritten);
+      await file.dispose().catch(() => {});
+      return output;
+    }
     const file = this.fileOps.tmpName();
     await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
     const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
@@ -639,11 +710,24 @@ export class TmuxAdapter {
     // A bare leading '=' belongs to the literal session name. Only qualified
     // targets already carry tmux's encoded exact-match syntax.
     const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
-    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+    const exactTarget = target.startsWith("psmux:") ? target : /^[%$@]\d+$/.test(target) ? target
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", PANE_FORMAT],
-        `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
+      const format = this.terminalKind === "psmux" ? `#{session_name}|${PANE_FORMAT}` : PANE_FORMAT;
+      const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format],
+        `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`);
+      if (this.terminalKind === "psmux") {
+        return parseLines(output, line => {
+          const separator = line.indexOf("|");
+          if (separator <= 0) return null;
+          const session = line.slice(0, separator);
+          const pane = parsePaneLine(line.slice(separator + 1));
+          if (!pane || !/^%\d+$/.test(pane.id)) return null;
+          // psmux has one server per session: %1 is NOT globally unique.
+          // Persist its scope with the immutable pane id, never its mutable index.
+          return { ...pane, id: `psmux:${Buffer.from(session).toString("base64url")}:${pane.id}` };
+        });
+      }
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -672,6 +756,11 @@ export class TmuxAdapter {
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       const error = tmuxReportedError(err);
+      // psmux's has-session returns an empty exit 1 for an absent session.
+      // Spawn/permission/transport failures carry diagnostics or a different code.
+      const native = err as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
+      if (this.terminalKind === "psmux" && native.code === 1 && native.stdout === "" && native.stderr === ""
+        && !native.signal && !native.killed) return { state: "absent" };
       if (isSessionAbsenceError(error)) {
         return { state: "absent" };
       }
@@ -868,7 +957,9 @@ export class TmuxAdapter {
    * an identity, so it reports a warning (the launch still goes ahead). */
   private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
     const inherited = await this.globalEnvironment();
-    const keys = parentSessionEnvKeys(inherited).filter((key) => !keep.includes(key));
+    const compare = (key: string) => process.platform === "win32" ? key.toUpperCase() : key;
+    const kept = new Set(keep.map(compare));
+    const keys = parentSessionEnvKeys(inherited).filter((key) => !kept.has(compare(key)));
     for (const key of keys) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
       await this.run(argv, posixJoinArgv(argv));
@@ -906,6 +997,30 @@ export class TmuxAdapter {
     }, false, "text");
   }
 
+  /** Launch-only repair of a recognised terminal reply, before accepting seat work. */
+  async prepareWindowsCodexComposer(target: string): Promise<TmuxResult> {
+    if (this.terminalKind !== "psmux" || process.platform !== "win32") return { ok: true };
+    // The terminal's OSC colour replies may arrive after the first ready screen.
+    // Stay inside launch's input guard while observing this bounded startup window.
+    let responseDraft = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const content = await this.capturePaneScreen(target);
+      if (content && hasOnlyWindowsTerminalResponseDraft(content)) { responseDraft = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!responseDraft) return { ok: true };
+    const result = await this.sendKeys(target, ["C-u"]);
+    if (!result.ok) return result;
+    // ConPTY capture can precede the TUI redraw. Observe one write's result;
+    // never repeat the clearing key against a possibly changed user draft.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const after = await this.capturePaneScreen(target);
+      if (after && !hasOnlyWindowsTerminalResponseDraft(after)) return { ok: true };
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return { ok: false, code: "native_composer_unverified", message: "Native startup terminal response removal unverified." };
+  }
+
   private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true,
     policy?: { beforePaste: () => Promise<void>; afterPaste: () => Promise<void> }): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
@@ -915,8 +1030,29 @@ export class TmuxAdapter {
     try {
       await this.fileOps.writeFile(path, text, { mode: 0o600, flag: "wx" });
       created = true;
+      const windowsCommand = this.terminalKind === "psmux" && process.platform === "win32"
+        ? (await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase() : null;
+      if (windowsCommand && bracketed && !["pwsh", "powershell"].includes(windowsCommand)) {
+        const pid = await this.getPanePid(target);
+        if (!pid) throw new Error("Windows pane process unavailable; no payload submitted");
+        if (policy) await policy.beforePaste();
+        beforeWrite();
+        // ConPTY removes bracketed-paste delimiters on its pipe. Console input
+        // records preserve the delimiters and raw LF for the receiving editor.
+        const helper = pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1");
+        const powershell = pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+        try {
+          await execFileAsync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
+            "-TargetPid", String(pid), "-PayloadFile", path, "-Mode", ["codex", "codex-code-mode-host"].includes(windowsCommand) ? "codex" : "bracketed"], { windowsHide: true, timeout: 15000 });
+        } catch (error) {
+          const phase = /failed at (read|compile|attach|open|write);/.exec(String((error as { stderr?: string }).stderr ?? ""))?.[1];
+          throw new Error(`Windows console delivery failed${phase ? ` at ${phase}` : ""}; payload consumption unverified`);
+        }
+        if (policy) await policy.afterPaste();
+        return { ok: true };
+      }
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
-        `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
+        `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`, this.terminalKind === "psmux" ? target : undefined);
       bufferLoaded = true;
       if (policy) await policy.beforePaste();
       beforeWrite();
@@ -933,7 +1069,7 @@ export class TmuxAdapter {
         // resident. Best-effort delete to avoid leaking it.
         try {
           await this.run(["tmux", "delete-buffer", "-b", buffer],
-        `tmux delete-buffer -b ${shellQuote(buffer)}`);
+        `tmux delete-buffer -b ${shellQuote(buffer)}`, this.terminalKind === "psmux" ? target : undefined);
         } catch { /* best-effort cleanup */ }
       }
       return classifyWriteError(err);
@@ -964,6 +1100,7 @@ export class TmuxAdapter {
 
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
+    if (this.terminalKind === "psmux") return this.sendWindowsShellCommand(target, command, beforeInput);
     const commandBytes = Buffer.byteLength(command, "utf8");
     // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
     const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
@@ -1021,6 +1158,40 @@ export class TmuxAdapter {
     }
   }
 
+  private async sendWindowsShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
+    const paneShell = (await this.getPaneCommand(target) ?? "").toLowerCase().replace(/\.exe$/, "");
+    if (!["pwsh", "powershell", "cmd"].includes(paneShell)) {
+      return { ok: false, code: "unsupported_windows_pane", message: "Experimental Windows launch requires a PowerShell or cmd pane; no command was typed." };
+    }
+    const script = this.fileOps.tmpName();
+    let invocation: string;
+    try {
+      invocation = paneShell === "cmd" ? windowsCmdBridgeInvocation(script)
+        : `& ([scriptblock]::Create([IO.File]::ReadAllText(${powershellQuote(script)})))`;
+    } catch (error) { return { ok: false, code: "unsupported_windows_launch", message: (error as Error).message }; }
+    if (Buffer.byteLength(invocation, "utf8") > 512) {
+      return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+    }
+    let created = false;
+    try {
+      await this.fileOps.writeFile(script, `Remove-Item -LiteralPath ${powershellQuote(script)}\n${command}\n`, { mode: 0o600, flag: "wx" });
+      created = true;
+      const text = await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation,
+        () => { check(); beforeInput?.(); }, paneShell !== "cmd"));
+      if (!text.ok) return text;
+      // The actual consumer deletes the script. Successful paste alone is not consumption.
+      const enter = beforeInput
+        ? await this.guardedInput(target, pane => { beforeInput(); return this.sendKeysUnchecked(pane, ["Enter"]); })
+        : await this.sendKeys(target, ["Enter"]);
+      if (enter.ok) created = false;
+      return enter;
+    } catch (error) {
+      return classifyWriteError(error);
+    } finally {
+      if (created) { try { await this.fileOps.unlink(script); } catch { /* preserve original failure */ } }
+    }
+  }
+
   async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
@@ -1035,6 +1206,16 @@ export class TmuxAdapter {
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
     try {
+      if (this.terminalKind === "psmux" && process.platform === "win32" && keys.length === 1 && keys[0] === "C-u"
+        && ["codex", "codex-code-mode-host"].includes((await this.getPaneCommand(target) ?? "").replace(/\.exe$/, "").toLowerCase())) {
+        const pid = await this.getPanePid(target);
+        if (!pid) return { ok: false, code: "guard_target_unknown", message: "Native console process unavailable; no key sent." };
+        try {
+          await execFileAsync(pathJoin(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+            ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", pathJoin(import.meta.dirname, "../../assets/windows-console-input.ps1"), "-TargetPid", String(pid), "-Mode", "codex-clear"], { windowsHide: true, timeout: 15000 });
+        } catch { return { ok: false, code: "native_key_unverified", message: "Native console key delivery unverified." }; }
+        return { ok: true };
+      }
       await this.run(["tmux", "send-keys", "-t", target, ...keys],
         `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
       return { ok: true };
@@ -1124,7 +1305,9 @@ export class TmuxAdapter {
         const sessionId = stdout.trim();
         if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
         const kill = async () => {
-          const result = await this.killSessionUnchecked(sessionId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
+          const scopedId = this.terminalKind === "psmux" && pane.startsWith("psmux:")
+            ? `${pane.slice(0, pane.lastIndexOf(":") + 1)}${sessionId}` : sessionId;
+          const result = await this.killSessionUnchecked(scopedId, beforeEffect && (() => { beforeWrite(); beforeEffect(); }), phase => { stopPhase = phase; });
           if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
           return result;
         };
@@ -1139,6 +1322,28 @@ export class TmuxAdapter {
 
   /** Keep effect checks outside command catches so a selection refusal retains its code and phase. */
   private async killSessionUnchecked(name: string, beforeEffect?: () => void, phase?: (value: StopPhase) => void): Promise<TmuxResult> {
+    if (this.terminalKind === "psmux") {
+      let sessionName: string;
+      let id: string;
+      try {
+        const scoped = /^psmux:([A-Za-z0-9_-]+):(\$\d+)$/.exec(name);
+        sessionName = scoped ? Buffer.from(scoped[1]!, "base64url").toString("utf8") : name.replace(/^=/, "");
+        id = scoped?.[2] ?? (await this.run(["tmux", "display-message", "-p", "-t", `=${sessionName}`, "#{session_id}"])).trim();
+        if (!/^\$\d+$/.test(id)) return { ok: false, code: "guard_target_unknown", message: "Native session identity unavailable; nothing killed." };
+      } catch (error) { return classifyWriteError(error); }
+      beforeEffect?.();
+      phase?.("kill_attempted");
+      try {
+        // psmux doesn't accept $N as a selector. Select its server once, check
+        // identity inside that connection, then kill SELF without resolving a
+        // name again. Each native session has its own server: no sibling view can switch.
+        const out = await this.run(["tmux", "if-shell", "-F", `#{==:#{session_id},${id}}`, "kill-session", "display-message -p kept"], undefined, sessionName);
+        if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: "Native server identity changed; nothing killed." };
+        if ((await this.probeSession(sessionName)).state !== "absent") return { ok: false, code: "kill_unverified", message: "Native session disappearance unverified." };
+        this.freshProbes.delete(name); this.freshManaged.delete(name);
+        return { ok: true };
+      } catch (error) { return classifyWriteError(error); }
+    }
     // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
     const session = exactTarget(name, "session");
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
@@ -1323,11 +1528,13 @@ export class TmuxAdapter {
   }
 
   /** Signal one process by pid. signalPaneProcess signals the pane's root, which in a shell-backed pane is
-   *  the shell, not the runtime running under it. Unix `kill`, like signalPaneProcess. */
+   *  the shell, not the runtime running under it. Uses the native host's termination command. */
   async signalPid(pid: number, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     if (!Number.isInteger(pid) || pid <= 1) return { ok: false, code: "invalid_pid", message: `Refusing to signal pid ${pid}.` };
     try {
-      await this.exec(`kill -${signal} ${pid}`);
+      await this.exec(this.terminalKind === "psmux" && process.platform === "win32"
+        ? `taskkill /PID ${pid} /T${signal === "KILL" ? " /F" : ""}`
+        : `kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1350,8 +1557,7 @@ export class TmuxAdapter {
   /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
    *  an unresolvable pid is a structured, non-throwing failure.
-   *  Stays on the shell-string path deliberately: this is a Unix `kill`,
-   *  not a multiplexer command (Windows needs taskkill — named follow-up). */
+   *  Termination is host-native and remains scoped to the resolved pane process. */
   async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
   }
@@ -1363,8 +1569,7 @@ export class TmuxAdapter {
     }
     try {
       beforeWrite();
-      await this.exec(`kill -${signal} ${pid}`);
-      return { ok: true };
+      return await this.signalPid(pid, signal);
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -1437,6 +1642,13 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "show-environment", "-t", target, key],
         `tmux show-environment -t ${shellQuote(target)} ${shellQuote(key)}`);
+      if (this.terminalKind === "psmux") {
+        // psmux 3.3.8 ignores the optional variable selector and returns the
+        // whole environment. Select the exact key without logging that body.
+        const values = output.split(/\r?\n/).filter(line => line.startsWith(`${key}=`));
+        if (values.length > 1) throw new Error("Ambiguous session environment response");
+        return values[0]?.slice(key.length + 1);
+      }
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
       return output.slice(key.length + 1).replace(/\r?\n$/, "");
@@ -1450,6 +1662,14 @@ export class TmuxAdapter {
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
+    if (this.terminalKind === "psmux") {
+      if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+      const config = await this.fileOps.privateConfig(psmuxPrivateEnvironmentLine(key, value));
+      // Keep the file after any uncertain call; never fall back to value argv.
+      await this.run(["tmux", "source-file", "-t", target, config.path]);
+      await config.dispose().catch(() => { console.warn(`Native environment config cleanup failed: ${config.path}`); });
+      return;
+    }
     await this.runEnvironmentCommand(["tmux", "set-environment", "-t", target, key, value],
       `tmux set-environment -t ${tmuxConfigQuote(target)} ${tmuxConfigQuote(key)} ${tmuxConfigQuote(value)}`);
   }
@@ -1461,10 +1681,12 @@ export class TmuxAdapter {
   async unsetSessionEnv(session: string, key: string): Promise<void> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const parentIdentity = parentSessionEnvKeys(await this.globalEnvironment()).includes(key);
-    const flag = parentIdentity ? "-r" : "-u";
-    await this.run(["tmux", "set-environment", "-t", target, flag, key],
-      `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(key)}`);
+    const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key : name === key);
+    const flag = parents.length ? "-r" : "-u";
+    for (const name of new Set([key, ...parents])) {
+      await this.run(["tmux", "set-environment", "-t", target, flag, name],
+        `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(name)}`);
+    }
   }
 
   private async globalEnvironment(): Promise<Record<string, string>> {
@@ -1730,12 +1952,22 @@ export class TmuxAdapter {
   }
 
   /**
-   * OPR.0.4.6.02 S1 (guard b2): set a SERVER-scoped option via
-   * `set-option -s <option> <value>` — the daemon configuring its OWN tmux
-   * server (NOT a live-flip of anyone's session). NEVER targets a session
-   * (`-t`): server scope and session scope are distinct and never crossed.
-   * Used for `set-clipboard` / `copy-command`.
+   * Native psmux server scope is selected by its owning session target;
+   * each session has a separate server. Call only for a freshly created target.
    */
+  async setNativeServerOption(sessionName: string, option: string, value: string): Promise<TmuxResult> {
+    if (this.terminalKind !== "psmux") return { ok: false, code: "unsupported", message: "Targeted native server options require psmux." };
+    // psmux has one server per session. The explicit target selects only the
+    // freshly created server; the unscoped POSIX server API must not be used.
+    const exact = exactTarget(sessionName, "pane");
+    try {
+      await this.run(["tmux", "set-option", "-s", "-t", exact, option, value],
+        `tmux set-option -s -t ${shellQuote(exact)} ${shellQuote(option)} ${shellQuote(value)}`);
+      return { ok: true };
+    } catch (err) { return classifyWriteError(err); }
+  }
+
+  /** POSIX server scope: no session target; used for clipboard defaults once per daemon. */
   async setServerOption(option: string, value: string): Promise<TmuxResult> {
     try {
       await this.run(["tmux", "set-option", "-s", option, value],
@@ -1844,6 +2076,9 @@ export class TmuxAdapter {
    *  its former PID/command: neither proves an executor is alive. A dead pane without a valid PID is retained with
    *  null PID; other invalid rows fall back to per-pane reads. The command stays LAST to preserve separators. */
   async readAllPaneProcesses(): Promise<Map<string, { pid: number | null; command: string | null; dead?: boolean }> | null> {
+    // Cross-session psmux listings expose duplicate local %N ids. Use scoped
+    // per-pane reads until a scoped batch projection is implemented.
+    if (this.terminalKind === "psmux") return null;
     try {
       const format = ["#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-panes", "-a", "-F", format], `tmux list-panes -a -F '${format}'`);

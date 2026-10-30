@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -22,20 +23,23 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>, onLine?: (line: string) => void): Promise<{ logs: string[]; exitCode: number | undefined }> {
-  return new Promise(async (resolve) => {
-    const logs: string[] = [];
-    const origLog = console.log;
-    const origErr = console.error;
-    const origExitCode = process.exitCode;
-    process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); onLine?.(line); };
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+async function captureLogs(fn: () => Promise<void>, onLine?: (line: string) => void): Promise<{ logs: string[]; exitCode: number | undefined }> {
+  const logs: string[] = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  const origExitCode = process.exitCode;
+  process.exitCode = undefined;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); onLine?.(line); };
+  try {
+    await fn();
     const exitCode = process.exitCode;
+    return { logs, exitCode };
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
-  });
+  }
 }
 
 function runningDeps(port: number): StatusDeps {
@@ -125,6 +129,7 @@ describe("Down CLI", () => {
       }
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 

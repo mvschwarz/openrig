@@ -92,7 +92,8 @@ export function workflowDetail(execution: ExecutionViewSnap, key: string, width:
     lines.push(sectionRule("Bound graph and sources", width), field("workflow", instance.workflow_name), field("version", instance.workflow_version), field("graph", instance.graph_source), { text: instance.reconciliation ? "  Bound source receipts are retained; the authored/running comparison below explains current changes." : "  Sources are bound at compilation. Current source bytes have not been compared." });
     for (const source of rows(instance.sources)) {
       if (source.kind === "slice" && typeof source.path === "string") {
-        const parts = source.path.split("/");
+        // Sources are daemon filesystem paths; the TUI may run on another OS.
+        const parts = source.path.replaceAll("\\", "/").split("/");
         const slice = parts.at(-2);
         if (slice) lines.push(listItem(`Slice ${slice}`, { type: "scopes-open", mission: execution.mission, slice }));
       }
@@ -171,7 +172,11 @@ function splitQuotedWord(word: string, maxWidth: number): string[] | null {
   return chunks;
 }
 
-function actionLines(action: string, width: number): ContentLine[] {
+export function actionLines(action: string, width: number, platform: NodeJS.Platform = process.platform): ContentLine[] {
+  if (platform === "win32") {
+    const native = powershellActionLines(action, width);
+    if (native) return native;
+  }
   const firstIndent = "      action ";
   const nextIndent = "        ";
   const room = Math.max(width, 24);
@@ -203,5 +208,42 @@ function actionLines(action: string, width: number): ContentLine[] {
     }
   }
   if (current) lines.push({ text: current });
+  return lines;
+}
+
+/** Decode only the literal words emitted by the daemon, never shell programs. */
+function powershellActionLines(action: string, width: number): ContentLine[] | null {
+  const values: string[] = [];
+  for (const word of shellWords(action)) {
+    if (/^[\w/.:=@+-]+$/.test(word)) values.push(word);
+    else {
+      const value = word.slice(1, -1).replaceAll(`'"'"'`, "'");
+      if (quoteShell(value) !== word || /[\r\n\0]/.test(value)) return null;
+      values.push(value);
+    }
+  }
+  if (values[0] !== "rig") return null;
+  const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const room = Math.max(width, 24), lines: ContentLine[] = [];
+  let current = "      action rig";
+  for (const value of values.slice(1)) {
+    const part = /^(?:[A-Za-z_/.=:][\w/.:=@+-]*|--[a-z][\w-]*)$/.test(value) ? value : quote(value);
+    if (`${current} ${part} \``.length <= room) { current += ` ${part}`; continue; }
+    lines.push({ text: `${current} \`` });
+    if (`        ${part} \``.length <= room) { current = `        ${part}`; continue; }
+    // PowerShell requires + within parentheses to join literal chunks; adjacent
+    // quoted chunks and POSIX backslash-newline are different arguments.
+    const chunks: string[] = []; let chunk = "";
+    for (const char of value) {
+      if (chunk && quote(chunk + char).length + 5 > room) { chunks.push(chunk); chunk = char; }
+      else chunk += char;
+    }
+    chunks.push(chunk);
+    lines.push({ text: `(${quote(chunks[0]!)}${chunks.length > 1 ? " + `" : ") `"}` });
+    for (let i = 1; i < chunks.length; i++) lines.push({ text: `${quote(chunks[i]!)}${i < chunks.length - 1 ? " + `" : ") `"}` });
+    current = "";
+  }
+  if (current) lines.push({ text: current });
+  else if (lines.length) lines[lines.length - 1]!.text = lines[lines.length - 1]!.text.replace(/ \`$/, "");
   return lines;
 }

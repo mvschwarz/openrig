@@ -1,3 +1,5 @@
+import { readPlatformEnv } from "./platform-env.js";
+
 // Identity of the Claude Code session, Herdr pane or Rex block that started the daemon.
 // The daemon starts the tmux server, so anything left here reaches every seat.
 // Named variables, never prefixes: CLAUDE_CODE_* also carries user configuration
@@ -23,16 +25,20 @@ export const PARENT_SESSION_ENV_KEYS = [
 
 /** The parent-session names present in `env`. CLAUDE_EFFORT is user
  * configuration unless CLAUDECODE shows a parent Claude Code session set it. */
-export function parentSessionEnvKeys(env: Readonly<Record<string, string | undefined>>): string[] {
+export function parentSessionEnvKeys(env: Readonly<Record<string, string | undefined>>, platform: NodeJS.Platform = process.platform): string[] {
   const keys: string[] = [...PARENT_SESSION_ENV_KEYS];
-  if (env.CLAUDECODE) keys.push("CLAUDE_EFFORT");
+  if (readPlatformEnv(env, "CLAUDECODE", platform)) keys.push("CLAUDE_EFFORT");
+  if (platform === "win32") {
+    const names = new Set(keys);
+    return Object.keys(env).filter(key => names.has(key.toUpperCase()));
+  }
   return keys.filter((key) => key in env);
 }
 
 /** Remove the parent session's identity from `env` in place; nothing else is
  * set or changed. Returns the removed names. */
-export function removeParentSessionEnv(env: Record<string, string | undefined>): string[] {
-  const removed = parentSessionEnvKeys(env);
+export function removeParentSessionEnv(env: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform): string[] {
+  const removed = parentSessionEnvKeys(env, platform);
   for (const key of removed) delete env[key];
   return removed;
 }

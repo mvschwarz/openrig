@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import type { AttentionItem, AttentionRead } from "@openrig/daemon/attention";
 import { composeHumanUpdates, attentionLines, type DeliveredHumanUpdates } from "../src/attention/attention-model.js";
 import { retainAttentionSources } from "../src/attention/source-continuity.js";
@@ -84,6 +85,7 @@ async function refreshHistoryControl(updates: DeliveredHumanUpdates, expected: s
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Owned HTTP fixture did not bind");
   const origin = "http://127.0.0.1:" + address.port;
+  allowFetchTarget(origin);
   const cache = new PageRead(() => 1000), signal = new AbortController().signal;
   async function refresh() {
     cache.begin(); const request = cache.fetch(fetch, signal);

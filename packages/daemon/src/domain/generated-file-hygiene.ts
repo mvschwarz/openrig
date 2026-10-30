@@ -9,6 +9,8 @@ const within = (root: string, file: string): boolean => {
 const patternFor = (relative: string) => `/${relative.split(path.sep).join("/").replace(/([\\*?\[\] !#])/g, "\\$1")}`;
 // Git's ignore-case comparison folds ASCII bytes, not Unicode filenames.
 const foldCase = (value: string) => value.replace(/[A-Z]/g, c => c.toLowerCase());
+// Native Windows resolution expands DOS short names consistently with Git.
+const realpath = (file: string) => fs.realpathSync.native(file);
 // The bundled plugin is imported as shared:openrig-core; keep the unqualified projection too.
 const corePluginDirectories = [".codex/plugins/openrig-core", ".codex/plugins/shared:openrig-core"];
 
@@ -40,7 +42,7 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
   const files = createdFiles.filter(file => fs.existsSync(file));
   if (!files.length) return warnings; // In-memory adapters have no disk projection.
   let root: string;
-  try { root = fs.realpathSync(git(cwd, ["rev-parse", "--show-toplevel"]).trim()); }
+  try { root = realpath(git(cwd, ["rev-parse", "--show-toplevel"]).trim()); }
   catch (error) {
     if ((error as { status?: number }).status !== 128) warn(cwd, (error as Error).message);
     return warnings; // Non-Git workspaces are supported.
@@ -48,9 +50,9 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
   try {
     const [exclude, common] = git(root, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude", "--git-common-dir"]).trimEnd().split("\n");
     if (!exclude || !common) throw new Error("Git did not return exclusion and common metadata paths");
-    const metadataIdentity = (file: string) => fs.existsSync(file) ? fs.realpathSync(file)
-      : path.join(fs.realpathSync(path.dirname(file)), path.basename(file));
-    const coreDirectories = corePluginDirectories.map(directory => path.join(path.relative(root, fs.realpathSync(cwd)), directory));
+    const metadataIdentity = (file: string) => fs.existsSync(file) ? realpath(file)
+      : path.join(realpath(path.dirname(file)), path.basename(file));
+    const coreDirectories = corePluginDirectories.map(directory => path.join(path.relative(root, realpath(cwd)), directory));
     const ignoresCase = (dir: string) => git(dir, ["config", "--type=bool", "--get", "core.ignorecase"], undefined, true).trim() === "true";
     // One bounded listing per worktree, including ignored files only at relevant paths.
     const inventory = (dir: string, ignoreCase: boolean, paths = coreDirectories) => git(dir, ["ls-files", "--cached", "--others", "-t", "-z", "--",
@@ -58,17 +60,18 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
       .split("\0").filter(Boolean).map(record => ({ tracked: record[0] !== "?", name: record.slice(2) }));
     const rootIgnoreCase = ignoresCase(root);
     // Guidance also needs an exact tracked-file check, but never a directory-wide scan.
-    const own = inventory(root, rootIgnoreCase, [...coreDirectories, ...files.map(file => path.relative(root, fs.realpathSync(file)))]);
+    const own = inventory(root, rootIgnoreCase, [...coreDirectories, ...files.map(file => path.relative(root, realpath(file)))]);
     const ignored = new Set(git(root, ["check-ignore", "--stdin", "-z"], files.join("\0") + "\0", true).split("\0"));
     const candidates: Array<{ file: string; relative: string }> = [];
     for (const file of files) {
       remaining();
-      const canonical = fs.realpathSync(file);
+      const canonical = realpath(file);
       if (!within(root, canonical) || !fs.lstatSync(file).isFile()) { warn(file, "not a regular file inside this worktree"); continue; }
-      const relative = path.relative(root, canonical);
+      // ls-files always returns Git's slash-separated paths, including on Windows.
+      const relative = path.relative(root, canonical).split(path.sep).join("/");
       if (/[\r\n]/.test(relative)) { warn(file, "Git exclude cannot represent this filename on one line"); continue; }
       if (own.some(item => item.tracked && item.name === relative) || ignored.has(file)) continue;
-      const fromCwd = path.relative(fs.realpathSync(cwd), canonical).split(path.sep).join("/");
+      const fromCwd = path.relative(realpath(cwd), canonical).split(path.sep).join("/");
       if (!corePluginDirectories.some(directory => fromCwd.startsWith(`${directory}/`))) {
         const message = `${file} was created by OpenRig and is untracked. If you do not want to commit it, add this line to ${exclude}: ${patternFor(relative)} (shared by linked worktrees).`;
         warnings.push(message);
@@ -86,7 +89,7 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
     const conflicts = new Set<string>();
     for (const peer of peers) {
       remaining();
-      const isRoot = fs.realpathSync(peer) === root;
+      const isRoot = realpath(peer) === root;
       const peerExclude = isRoot ? exclude : git(peer, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).trim();
       if (metadataIdentity(peerExclude) !== metadataIdentity(exclude)) continue;
       const ignoreCase = isRoot ? rootIgnoreCase : ignoresCase(peer);
@@ -106,8 +109,8 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
     if (!patterns.length) return warnings;
     remaining();
     fs.mkdirSync(path.dirname(exclude), { recursive: true });
-    if (!within(fs.realpathSync(common), fs.realpathSync(path.dirname(exclude)))
-      || (fs.existsSync(exclude) && !within(fs.realpathSync(common), fs.realpathSync(exclude)))) {
+    if (!within(realpath(common), realpath(path.dirname(exclude)))
+      || (fs.existsSync(exclude) && !within(realpath(common), realpath(exclude)))) {
       throw new Error("Git exclusion path resolves outside repository metadata");
     }
     if (fs.existsSync(exclude) && !fs.statSync(exclude).isFile()) throw new Error("Git exclusion target is not a regular file");

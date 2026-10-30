@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import { createDaemon } from "../src/startup.js";
 import { createSlowOpRequestMiddleware } from "../src/domain/slow-op-recorder.js";
+import { expectPrivateFile } from "./helpers/private-file.js";
+import { createPrivateTextFile } from "../src/domain/private-text-file.js";
 
 const expectedSites = new Map<string, string[]>([
   ["adapters/codex-resume.ts", ["codex.resume.profile_preflight"]],
@@ -99,7 +101,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
       expect(records[1]).toMatchObject({ site: "test.sync.boundary", outcome: "ok" });
       expect(typeof records[1]!.durationMs).toBe("number");
       expect(fs.readFileSync(logPath, "utf8")).not.toContain(secret);
-      expect(fs.statSync(logPath).mode & 0o777).toBe(0o600);
+      expectPrivateFile(logPath);
     } finally {
       delete process.env.OPENRIG_TEST_SECRET;
       await recorder.close();
@@ -195,7 +197,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
   it("durably records an open span before a main-thread sync wedge is killed", async () => {
     const dir = tempDir();
     const logPath = path.join(dir, "crash.jsonl");
-    fs.writeFileSync(logPath, "", { mode: 0o600 });
+    createPrivateTextFile(logPath, "");
     const moduleUrl = pathToFileURL(path.resolve(import.meta.dirname, "../src/domain/slow-op-recorder.ts")).href;
     const childSource = `
       import fs from "node:fs";
@@ -279,7 +281,7 @@ describe("SlowOpRecorder locked instrumentation contract", () => {
     const retained = [logPath, `${logPath}.1`, `${logPath}.2`, `${logPath}.3`];
     for (const retainedPath of retained) {
       expect(fs.existsSync(retainedPath), `${retainedPath} should exist`).toBe(true);
-      expect(fs.statSync(retainedPath).mode & 0o777).toBe(0o600);
+      expectPrivateFile(retainedPath);
     }
     expect(fs.existsSync(`${logPath}.4`)).toBe(false);
     const all = retained

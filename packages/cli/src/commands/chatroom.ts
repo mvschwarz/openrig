@@ -5,6 +5,11 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+export function chatroomWatcherCommand(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === "win32" ? [process.execPath, fileURLToPath(new URL("../index.js", import.meta.url))] : ["rig"];
+}
 
 /** tmux's arguments for the session that runs `rig chatroom watch`. The watcher goes to tmux as separate arguments, so
  *  tmux runs it without a shell and the rig name arrives as one argument; `--` keeps a name that starts with `-` from
@@ -12,10 +17,13 @@ import { execFileSync } from "node:child_process";
  *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. Some tmux versions
  *  still change a session name (3.5a writes `_` for `:` and `.`, and escapes a backslash or a control character such
  *  as a newline or tab), so `-P -F` prints the name tmux used. */
-export function chatroomWatchTmuxArgs(rig: string): string[] {
+export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = ["rig"], platform: NodeJS.Platform = process.platform): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
   return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
-    "rig", "chatroom", "watch", "--", tmuxArg(rig)];
+    // Stock psmux otherwise joins positional words into a shell command, losing
+    // executable and script paths with spaces. `--` selects its direct argv mode.
+    ...(platform === "win32" ? ["--"] : []),
+    ...watcher.map(tmuxArg), "chatroom", "watch", "--", tmuxArg(rig)];
 }
 
 /** tmux ends a command at an argument that ends in `;`, unless a `\` comes before it, so a final `;` gets that `\`. */
@@ -193,7 +201,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         const sessionName = `chatroom@${rig}`;
         try {
           // The name tmux used, which differs from sessionName when tmux changed it (a `.` in a rig name, for example).
-          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig, chatroomWatcherCommand()), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
             .trim() || sessionName;
           console.log(`Started watch in tmux session: ${created}`);
           console.log(`Attach with: tmux attach -t ${created}`);

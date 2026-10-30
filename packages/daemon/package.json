@@ -5,6 +5,9 @@
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./windows-owned-files": { "types": "./dist/windows-owned-files-surface.d.ts", "import": "./dist/windows-owned-files-surface.js" },
+    "./windows-process-facts": { "types": "./dist/windows-process-facts-surface.d.ts", "import": "./dist/windows-process-facts-surface.js" },
+    "./windows-launch": { "types": "./dist/windows-launch-surface.d.ts", "import": "./dist/windows-launch-surface.js" },
     "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./router-line": { "types": "./dist/router-line-surface.d.ts", "import": "./dist/router-line-surface.js" },
     "./spec-validation": {

@@ -1,6 +1,8 @@
-import { constants, writeFileSync, unlinkSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { constants, writeFileSync, unlinkSync, rmdirSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
+import { createWindowsPrivateDirectory } from "./lib/private-text-file.js";
+import { replaceWindowsFilePreservingMetadata } from "./lib/windows-owned-text.js";
 
 /** Publish complete text while retaining the previous file on a failed staged write. */
 export function writeTextAtomically(path: string, content: string, label = "file"): void {
@@ -24,10 +26,15 @@ export function writeTextAtomically(path: string, content: string, label = "file
   // Match direct writes: a writable directory must not bypass a read-only
   // target. Opening without truncation also checks native ACL permissions.
   if (existing) closeSync(openSync(target, constants.O_WRONLY));
-  const temporary = join(dirname(target), `.openrig.tmp-${randomUUID()}`);
+  let stagingDirectory: string | undefined;
+  let temporary = join(dirname(target), `.openrig.tmp-${randomUUID()}`);
   let owned = false;
   let canFallBack = true;
   try {
+    if (existing && process.platform === "win32") {
+      stagingDirectory = createWindowsPrivateDirectory(dirname(target));
+      temporary = join(stagingDirectory, `.openrig.tmp-${randomUUID()}`);
+    }
     // Atomic replacement requires directory create/rename permission. Keep
     // staged bytes private until the original ownership and mode are restored.
     const fd = openSync(temporary, "wx", 0o600);
@@ -48,7 +55,12 @@ export function writeTextAtomically(path: string, content: string, label = "file
     }
     // chown may clear permission bits, so apply the final mode afterward.
     chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
-    renameSync(temporary, target);
+    if (existing && process.platform === "win32") {
+      // A native replacement preserves the target DACL and other metadata.
+      // Its failure may have changed names: never retry by truncating target.
+      canFallBack = false;
+      replaceWindowsFilePreservingMetadata(target, temporary);
+    } else renameSync(temporary, target);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
@@ -60,5 +72,6 @@ export function writeTextAtomically(path: string, content: string, label = "file
     throw error;
   } finally {
     if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+    if (stagingDirectory) try { rmdirSync(stagingDirectory); } catch { /* Retain owned staging if cleanup is unavailable. */ }
   }
 }

@@ -18,6 +18,61 @@ describe("replaceFile staging ownership", () => {
     return { src, dest };
   }
 
+  it("replaces a readonly destination repeatedly without changing the source mode", () => {
+    const { src, dest } = files();
+    fs.chmodSync(dest, 0o444);
+    replaceFile(src, dest); replaceFile(src, dest);
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+    expect(fs.statSync(dest).mode & 0o222).toBe(0);
+    expect(fs.statSync(src).mode & 0o222).toBe(0);
+    expect(fs.readdirSync(root).sort()).toEqual(["destination", "source"]);
+  });
+
+  it.runIf(process.platform === "win32")("stages a long readonly asset name without falling back to an in-place copy", () => {
+    const { src } = files();
+    const name = "a".repeat(245) + ".txt";
+    const dest = path.join(root, name);
+    fs.writeFileSync(dest, "old complete bytes");
+    fs.chmodSync(dest, 0o444);
+    replaceFile(src, dest);
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+    expect(fs.statSync(dest).mode & 0o222).toBe(0);
+    replaceFile(src, dest);
+    expect(fs.readFileSync(dest, "utf8")).toBe("new complete bytes");
+    expect(fs.readdirSync(root).sort()).toEqual([name, "destination", "source"].sort());
+  });
+
+  it.skipIf(process.platform !== "win32")("restores the old readonly attribute if replacement still fails", () => {
+    const { src, dest } = files(); fs.chmodSync(dest, 0o444);
+    const failure = Object.assign(new Error("replacement blocked"), { code: "EPERM" });
+    vi.spyOn(fs, "renameSync").mockImplementation(() => { throw failure; });
+    expect(() => replaceFile(src, dest)).toThrow(failure);
+    expect(fs.readFileSync(dest, "utf8")).toBe("old complete bytes");
+    expect(fs.statSync(dest).mode & 0o222).toBe(0);
+    expect(fs.readdirSync(root).sort()).toEqual(["destination", "source"]);
+  });
+
+  it.skipIf(process.platform !== "win32")("does not clear readonly on a multiply-linked destination", () => {
+    const { src, dest } = files(); fs.chmodSync(dest, 0o444);
+    const other = path.join(root, "other-link"); fs.linkSync(dest, other);
+    expect(() => replaceFile(src, dest)).toThrow(/EPERM|EACCES/);
+    expect(fs.readFileSync(other, "utf8")).toBe("old complete bytes");
+    expect(fs.statSync(other).mode & 0o222).toBe(0);
+  });
+
+  it.skipIf(process.platform !== "win32")("does not restore attributes onto a concurrent replacement", () => {
+    const { src, dest } = files(); fs.chmodSync(dest, 0o444);
+    const failure = Object.assign(new Error("replacement raced"), { code: "EPERM" });
+    let attempts = 0;
+    vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      if (++attempts === 2) { fs.rmSync(dest, { force: true }); fs.writeFileSync(dest, "concurrent winner"); }
+      throw failure;
+    });
+    expect(() => replaceFile(src, dest)).toThrow(failure);
+    expect(fs.readFileSync(dest, "utf8")).toBe("concurrent winner");
+    expect(fs.statSync(dest).mode & 0o200).toBe(0o200);
+  });
+
   it("does not follow or consume an existing predictable symlink", () => {
     const { src, dest } = files();
     const victim = path.join(root, "unrelated");

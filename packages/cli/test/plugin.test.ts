@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig plugin CLI commands (slice 3.4) — list/show/used-by/validate.
 //
 // Per IMPL-PRD §4 + DESIGN.md §6 (CLI minimalism: read-only inspection only).
@@ -176,6 +177,7 @@ describe("rig plugin CLI (slice 3.4)", () => {
     });
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
+        allowOwnedHttpFixture(server);
         port = (server.address() as { port: number }).port;
         resolve();
       });

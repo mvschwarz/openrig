@@ -7,6 +7,7 @@ import { subscribeActivityEvents } from "../src/live-events.js";
 import { createLiveRefresh } from "../src/live.js";
 import { emptySnapshot } from "../src/state.js";
 import type { FleetSnapshot } from "../src/types.js";
+import { httpFixtureOrigin } from "./http-fixture.js";
 
 // OPR.0.5.5.19 AM-R18 — the open view updates ITSELF: pushes from the oracle's SSE
 // stream drive the refresh owner; zero clicks, zero manual refresh, zero idle polling.
@@ -26,7 +27,7 @@ function sseServer(): Promise<{ server: Server; url: string; push: (data: unknow
     server.listen(0, "127.0.0.1", () => {
       resolve({
         server,
-        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        url: httpFixtureOrigin(server),
         push: (data) => { for (const s of sockets) s.write(`data: ${JSON.stringify(data)}\n\n`); },
         pushRaw: (frame) => { for (const s of sockets) s.write(frame); },
         connections: () => sockets.size,
@@ -130,7 +131,7 @@ describe("S19 AM-R18 — the subscription path", () => {
       res.end("{}");
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
-    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const url = httpFixtureOrigin(server);
     const statuses: string[] = [];
     const open = async () => {
       const res = await fetch(`${url}/api/activity/events`, { headers: { accept: "text/event-stream" } });

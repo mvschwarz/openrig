@@ -1,3 +1,4 @@
+import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -70,6 +71,7 @@ describe("Specs CLI", () => {
       }
     });
     await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });
 
@@ -131,6 +133,7 @@ describe("Specs CLI", () => {
       ]));
     });
     await new Promise<void>((resolve) => { dupServer.listen(0, resolve); });
+    allowOwnedHttpFixture(dupServer);
     const dupPort = (dupServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -157,6 +160,7 @@ describe("Specs CLI", () => {
       }
     });
     await new Promise<void>((resolve) => { dupServer.listen(0, resolve); });
+    allowOwnedHttpFixture(dupServer);
     const dupPort = (dupServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -209,6 +213,7 @@ describe("Specs CLI", () => {
     await new Promise<void>(resolve => { previewServer.listen(0, resolve); });
     try {
       for (const json of [false, true]) {
+        allowOwnedHttpFixture(previewServer);
         const program = new Command().addCommand(specsCommand(runningDeps((previewServer.address() as { port: number }).port)));
         const { logs, exitCode } = await captureLogs(() => program.parseAsync([
           "node", "rig", "specs", "preview", entry.id, "--kind", String(kind), ...(json ? ["--json"] : []),
@@ -277,6 +282,7 @@ describe("Specs CLI", () => {
       });
     });
     await new Promise<void>((resolve) => { addServer.listen(0, resolve); });
+    allowOwnedHttpFixture(addServer);
     const addPort = (addServer.address() as { port: number }).port;
 
     const prog = new Command();
@@ -378,6 +384,7 @@ describe("Specs CLI", () => {
       });
     });
     await new Promise<void>((resolve) => { addServer.listen(0, resolve); });
+    allowOwnedHttpFixture(addServer);
     const addPort = (addServer.address() as { port: number }).port;
 
     const prog = new Command();

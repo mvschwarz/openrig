@@ -3,8 +3,9 @@ import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
 import type { SessionTransport, SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
-import { postCompactExtraSetting } from "./managed-restore-read-access.js";
+import { compactionPacketRoot, postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
+import { checkWindowsDirectoryWriteAccess, readWindowsOwnedText } from "./windows-owned-text.js";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -366,9 +367,9 @@ export function buildPostCompactRestorePrompt(input: {
   if (input.transcriptPath) {
     pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for session id ${input.sessionId}.`);
   } else {
-    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
   const instructionFilePath = input.postCompactInstructionFilePath?.trim();
@@ -1221,17 +1222,24 @@ export class ClaudeCompactionEnforcer {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           // Reuse only our equivalent, owned regular file; never rewrite it.
           // NONBLOCK also prevents an unexpected FIFO from stalling preparation.
-          const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-          try {
-            const stat = fs.fstatSync(fd);
-            if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+          if (process.platform === "win32") {
+            if (readWindowsOwnedText(ignorePath, 2) !== "*\n") {
               throw new Error("Existing compaction ignore file is not owned and equivalent");
             }
-          } finally { fs.closeSync(fd); }
+          } else {
+            const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+            try {
+              const stat = fs.fstatSync(fd);
+              if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+                throw new Error("Existing compaction ignore file is not owned and equivalent");
+              }
+            } finally { fs.closeSync(fd); }
+          }
         }
         const parent = path.join(preparationRoot ?? path.join(root, "preparation"), sanitizeSessionKey(input.sessionName), attemptId);
         fs.mkdirSync(parent, { recursive: true });
-        fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
+        if (process.platform === "win32") checkWindowsDirectoryWriteAccess(parent);
+        else fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
         attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
       } catch {
         // An explicit location is a permission choice: never silently move it back into

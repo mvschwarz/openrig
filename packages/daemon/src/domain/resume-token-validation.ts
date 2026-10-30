@@ -64,21 +64,28 @@ function validateIdShapedToken(resumeType: ResumeType, token: string): ResumeTok
   return { ok: true, resumeType, token };
 }
 
-function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string): ResumeTokenValidationOk | ResumeTokenValidationErr {
+function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_file", token: string, platform: NodeJS.Platform): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const label = resumeType === "pi_session_file" ? "Pi" : "OMP";
   if (token.length > MAX_SESSION_FILE_LEN) {
     return { ok: false, error: `${label} session-file token is too long (max ${MAX_SESSION_FILE_LEN} characters).` };
   }
-  if (!token.startsWith("/")) {
-    return { ok: false, error: `${label} session-file token must be an absolute path (starting with '/').` };
+  const windowsPath = platform === "win32" && (/^[A-Za-z]:[\\/]/.test(token) || /^\\\\[^\\]+\\[^\\]+\\/.test(token));
+  if (!token.startsWith("/") && !windowsPath) {
+    return { ok: false, error: platform === "win32"
+      ? `${label} session-file token must be an absolute path (a drive-rooted or UNC Windows path, or starting with '/').`
+      : `${label} session-file token must be an absolute path (starting with '/').` };
   }
-  if (token.split("/").includes("..")) {
+  if (token.split(windowsPath ? /[\\/]/ : "/").includes("..")) {
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
   }
-  if (!SESSION_FILE_CHARSET_RE.test(token)) {
+  const safeWindowsPath = windowsPath && !/^\\\\[?.]\\/.test(token)
+    && /^[\p{L}\p{N}\p{M} ._/@~\\-]+$/u.test(token.replace(/^[A-Za-z]:/, ""));
+  if (!(windowsPath ? safeWindowsPath : SESSION_FILE_CHARSET_RE.test(token))) {
     return {
       ok: false,
-      error: `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
+      error: windowsPath
+        ? `${label} session-file token contains disallowed characters or device/stream syntax; use an ordinary absolute Windows session-file path.`
+        : `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
     };
   }
   if (!token.endsWith(SESSION_FILE_SUFFIX)) {
@@ -90,6 +97,7 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
 export function validateResumeToken(
   runtime: string | null,
   rawToken: unknown,
+  platform: NodeJS.Platform = process.platform,
 ): ResumeTokenValidationOk | ResumeTokenValidationErr {
   const resumeType = resumeTypeForRuntime(runtime);
   if (!resumeType) {
@@ -106,7 +114,7 @@ export function validateResumeToken(
     return { ok: false, error: "Resume token is empty." };
   }
   if (resumeType === "pi_session_file" || resumeType === "omp_session_file") {
-    return validateSessionFileToken(resumeType, token);
+    return validateSessionFileToken(resumeType, token, platform);
   }
   return validateIdShapedToken(resumeType, token);
 }

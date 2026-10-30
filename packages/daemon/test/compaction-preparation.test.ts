@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
+import {accessSync, constants, mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -10,6 +10,7 @@ import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
+import {denyDirectoryChildren, denyWindowsFileCreation} from './helpers/directory-permissions.js';
 import Database from 'better-sqlite3';
 import {ALL_MIGRATIONS} from '../src/db/all-migrations.js';
 import {migrate} from '../src/db/migrate.js';
@@ -387,11 +388,28 @@ it('registered cwd: automatic monitor forwards the launch workspace and isolates
  expect(b.mapPath).not.toBe(a.mapPath);expect(compacts(f)).toHaveLength(0);
 });
 it('registered cwd: absent, relative or unwritable cwd preserves the legacy map location',async()=>{
- for(const cwd of [undefined,'relative',join('/dev/null','unwritable')]){
-  const f=fixture();await f.e.maybeAutoCompact({...input,cwd} as any);
+ for(const kind of ['absent','relative','unwritable']){
+  const f=fixture(),blocker=join(f.home,'not-a-directory');writeFileSync(blocker,'keep fixture');
+  const cwd=kind==='absent'?undefined:kind==='relative'?'relative':join(blocker,'unwritable');
+  await f.e.maybeAutoCompact({...input,cwd} as any);
   expect(f.e.getPreparationState(seat)!.mapPath).toBe(join(f.home,'compaction','preparation',seat,f.e.getPreparationState(seat)!.attemptId,'RESTORE-MAP.md'));
   expect(f.writes).toHaveLength(1);
+  expect(readFileSync(blocker,'utf8')).toBe('keep fixture');
  }
+});
+
+for(const configured of [false,true])it(`directory-linked ignore remains untouched (configured=${configured})`,async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=configured?join(f.home,'maps'):join(cwd,'.openrig','compaction');
+ mkdirSync(root,{recursive:true});const outside=join(f.home,'outside-directory');mkdirSync(outside);
+ const marker=join(outside,'keep.txt');writeFileSync(marker,'preserve');
+ const ignore=join(root,'.gitignore');symlinkSync(outside,ignore,process.platform==='win32'?'junction':'dir');
+ if(configured)f.policy.preparationRoot=root;
+ await f.e.maybeAutoCompact({...input,cwd});
+ const state=f.e.getPreparationState(seat)!;
+ if(configured){expect(state.status).toBe('stopped');expect(f.writes).toHaveLength(0);}
+ else expect(state.mapPath).toBe(join(f.home,'compaction','preparation',seat,state.attemptId,'RESTORE-MAP.md'));
+ expect(lstatSync(ignore).isSymbolicLink()).toBe(true);expect(readFileSync(marker,'utf8')).toBe('preserve');
+ expect(compacts(f)).toHaveLength(0);
 });
 
 it('preparation contract: prompt qualifies later refusal and the shipped skill follows its named map',async()=>{
@@ -452,11 +470,11 @@ it('workspace setup: publishes only after creating the actual attempt parent',as
  stageMap(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
 });
 it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant selects the home fallback',async()=>{
- const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});const restore=denyDirectoryChildren(parent);
  try{
   await f.e.maybeAutoCompact({...input,cwd});const a=f.e.getPreparationState(seat)!;
   expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
- }finally{chmodSync(parent,0o700);}
+ }finally{restore();}
 });
 
 for(const mode of ['automatic','manual'])it(`${mode}: daemon publishes the complete temp bytes before compact input`,async()=>{
@@ -551,6 +569,15 @@ it('configured preparation root: stays bound to the attempt while later seats us
  expect(readFileSync(first.mapPath,'utf8')).toContain(first.marker);
 });
 
+it.runIf(process.platform==='win32')('configured preparation root: reuses an owned equivalent ignore file beyond MAX_PATH',async()=>{
+ const f=fixture(),root=join(f.home,...Array.from({length:5},()=> 'native long map directory '.repeat(3)));
+ mkdirSync(root,{recursive:true});writeFileSync(join(root,'.gitignore'),'*\n');f.policy.preparationRoot=root;
+ await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'waiting',delivery:'delivered'});
+ expect(f.e.getPreparationState(seat)!.mapPath).toContain(root);
+ expect(readFileSync(join(root,'.gitignore'),'utf8')).toBe('*\n');
+});
+
 for(const mode of ['manual','automatic'] as const)it(`configured preparation root: ${mode} keeps the bounded command and carries the original long path and instruction into restore`,async()=>{
  const f=fixture();
  const root=join(f.home,...Array.from({length:8},()=> 'allowed-map-directory-'.repeat(4)));
@@ -625,6 +652,20 @@ for(const mode of ['manual','automatic'] as const)it(`configured preparation roo
  expect(compacts(f)).toHaveLength(1);
 });
 
+it.runIf(process.platform==='win32')('configured preparation root: stops when new directories are allowed but restore-map files are denied',async()=>{
+ const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});
+ const restore=denyWindowsFileCreation(parent);f.policy.preparationRoot=root;
+ try{
+  expect(await f.e.maybeAutoCompact(input)).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
+  const attempt=f.e.getPreparationState(seat)!;
+  expect(existsSync(dirname(attempt.mapPath))).toBe(true);
+  expect(()=>accessSync(dirname(attempt.mapPath),constants.W_OK|constants.X_OK)).not.toThrow();
+  expect(()=>writeFileSync(attempt.mapPath,'synthetic')).toThrow();
+  expect(f.writes).toHaveLength(0);expect(compacts(f)).toHaveLength(0);
+  expect(existsSync(join(f.home,'compaction'))).toBe(false);
+ }finally{restore();}
+});
+
 for(const kind of ['file','ignore','symlink'] as const) it(`configured preparation root: ${kind} conflict stops without fallback or rewriting`,async()=>{
  const f=fixture(),root=join(f.home,'maps'),cwd=join(f.home,'cwd');mkdirSync(cwd);
  f.policy.preparationRoot=root;
@@ -678,12 +719,12 @@ for(const mode of ['manual','automatic'] as const)for(const end of ['expiry','ca
 });
 
 it.skipIf(process.getuid?.()===0)('configured preparation root: an unwritable descendant stops without fallback',async()=>{
- const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ const f=fixture(),root=join(f.home,'maps'),parent=join(root,seat);mkdirSync(parent,{recursive:true});const restore=denyDirectoryChildren(parent);
  f.policy.preparationRoot=root;
  try{
   expect(await f.e.maybeAutoCompact(input)).toEqual({triggered:false,reason:'preparation_directory_unavailable'});
   expect(f.writes).toHaveLength(0);expect(existsSync(join(f.home,'compaction'))).toBe(false);
- }finally{chmodSync(parent,0o700);}
+ }finally{restore();}
 });
 
 // Manual preparation owns this bounded attention wait; generic sends still refuse attention.

@@ -16,6 +16,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { allowFetchTarget } from "../../cli/test/fetch-guard.js";
 import { seedHostShaped } from "./helpers/seed-host-shaped.js";
 import { buildStallApp } from "./fixtures/ps-stall-http-child.js";
 import { HEALTHZ_RESPONSIVENESS_BUDGET_MS } from "../src/domain/event-loop-monitor.js";
@@ -203,6 +204,7 @@ describe("slice-04 ps/summary event-loop regression", () => {
         child!.on("exit", (code) => { clearTimeout(to); reject(new Error(`child exited ${code} before READY; stderr=${err}`)); });
       });
       base = `http://127.0.0.1:${port}`;
+      allowFetchTarget(base);
 
       // post-READY proof BEFORE the burst: child still alive + listener/diagnostic-health 200.
       expect(port).toBeGreaterThan(0);

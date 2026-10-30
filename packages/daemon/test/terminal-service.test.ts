@@ -11,6 +11,8 @@ import { describe, it, expect } from "vitest";
 import { Hono } from "hono";
 import { terminalRoutes } from "../src/routes/terminal.js";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
@@ -73,6 +75,7 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
   const cmux = new RecordingProvider("cmux");
   const providerMap: Record<string, TerminalProvider> = { herdr, cmux };
   const deps: TerminalServiceDeps = {
+    localPlatform: "linux",
     resolveProvider: (name) => providerMap[name] ?? null,
     viewsStore: {
       get: (id) => (id === savedView.id ? savedView : null),
@@ -92,6 +95,28 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
 }
 
 describe("TerminalService — view resolution + one-shape result", () => {
+  it.runIf(process.platform === "win32")("prints executable native terminal recovery instructions", async () => {
+    const { deps, herdr } = makeDeps({ localPlatform: "win32" });
+    herdr.openView = async view => ({ provider: "herdr", ok: false, code: "herdr_unavailable", error: "fixture", opened: [], absent: view.absent, degraded: view.degraded, pages: 0 });
+    const result = await new TerminalService(deps).openView({ view: "acme-build" });
+    const line = result.notes!.find(note => note.startsWith("dev.driver: "))!.slice("dev.driver: ".length);
+    const script = `$ProgressPreference='SilentlyContinue'; $env:TMUX='owned-old'; function tmux { [Console]::WriteLine((ConvertTo-Json -Compress -InputObject @{ args=@($args); cleared=($null -eq $env:TMUX) })) }; ${line}`;
+    const output = execFileSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { encoding: "utf8", windowsHide: true, timeout: 5000 });
+    expect(JSON.parse(output)).toEqual({ args: ["attach", "-f", "ignore-size", "-t", "dev-driver@acme-build"], cleared: true });
+  });
+  it("composes native local tiles when the daemon runs on Windows", async () => {
+    const { deps, herdr } = makeDeps({ localPlatform:"win32", resolveLocalTmux:()=>"C:\\Program Files\\psmux\\tmux.exe" });
+    expect(await new TerminalService(deps).openView({view:"acme-build"})).toMatchObject({ok:true});
+    expect(herdr.lastView?.opened[0]?.attachArgv?.[0]).toMatch(/powershell\.exe$/i);
+  });
+  it("uses the host platform when no local-platform test seam is supplied", async () => {
+    const { deps, herdr } = makeDeps({localPlatform:undefined});
+    await new TerminalService(deps).openView({view:"acme-build"});
+    const executable=herdr.lastView?.opened[0]?.attachArgv?.[0];
+    if(process.platform==='win32')expect(executable).toMatch(/powershell\.exe$/i);
+    else expect(executable).toBe('/bin/sh');
+  });
   it.each([false, true])("keeps the view outcome and puts the human handoff beside it (provider unavailable=%s)", async unavailable => {
     const { deps, herdr } = makeDeps({ resolveLocalTmux: () => "/opt/tools/tmux" });
     let calls = 0;

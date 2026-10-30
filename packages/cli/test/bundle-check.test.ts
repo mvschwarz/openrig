@@ -63,9 +63,9 @@ describe("advisory bundle check", () => {
     fs.writeFileSync(path.join(dir, "context.md"), "Context");
     expect((await checkBundleFolder(root)).checks.filter(c => c.status === "finding")).toEqual([]);
     fs.rmSync(path.join(dir, "context.md"));
-    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: path.join("agent", "context.md") })]));
     fs.mkdirSync(path.join(dir, "context.md"));
-    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: "agent/context.md" })]));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", reason: "Declared file is a directory, expected a file.", path: path.join("agent", "context.md") })]));
   });
 
   it("leaves an openrig-home: plugin to the host and still checks a bundle-relative plugin path", async () => {
@@ -77,7 +77,7 @@ describe("advisory bundle check", () => {
     expect(hostResolved.filter(c => c.status === "finding")).toEqual([]);
     expect(hostResolved).toContainEqual(expect.objectContaining({ ruleId: "host_resources", status: "not_checked", path: "agent" }));
     fs.writeFileSync(path.join(dir, "agent.yaml"), manifest("plugins/missing"));
-    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/plugins/missing" }));
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: path.join("agent", "plugins", "missing") }));
   });
 
   it("command does not resolve a daemon, create a bundle, or invoke preflight", async () => {
@@ -98,7 +98,7 @@ describe("advisory bundle check", () => {
     try {
       const deps = { clientFactory: vi.fn(), lifecycleDeps: {} } as unknown as StatusDeps;
       await new Command().addCommand(bundleCommand(deps)).parseAsync(["bundle", "check", root], { from: "user" });
-      expect(log.mock.calls.map(c => String(c[0]))).toContain("finding: referenced_files: Declared file is missing, unreadable or outside the bundle folder. (docs/missing.md)");
+      expect(log.mock.calls.map(c => String(c[0]))).toContain(`finding: referenced_files: Declared file is missing, unreadable or outside the bundle folder. (${path.join("docs", "missing.md")})`);
       expect(process.exitCode).toBe(1);
     } finally { log.mockRestore(); process.exitCode = exitCode; }
   });

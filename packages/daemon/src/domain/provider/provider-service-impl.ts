@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import os from "node:os";
+import { readPlatformEnv } from "../platform-env.js";
 import type Database from "better-sqlite3";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
@@ -162,9 +163,9 @@ export class ProviderServiceImpl implements ProviderService {
       auth: readAuth(),
       usage: allUsage,
       claudeSamples: this.deps.usageWindows!.claude?.seatSamples() ?? null,
-      codexHome: env.CODEX_HOME || nodePath.join(env.HOME ?? os.homedir(), ".codex"),
-      claudeConfigDir: env.CLAUDE_CONFIG_DIR,
-      home: env.HOME ?? os.homedir(),
+      codexHome: resolveCodexHome(env).codexHome,
+      claudeConfigDir: readPlatformEnv(env, "CLAUDE_CONFIG_DIR"),
+      home: readPlatformEnv(env, "HOME") || os.homedir(),
     });
     return { ...model, usage: allUsage, seatAccounts };
   }

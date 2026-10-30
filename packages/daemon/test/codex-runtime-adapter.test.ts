@@ -20,6 +20,21 @@ import { codexCommandResumeToken } from "../src/domain/native-process-lineage.js
 const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
 const currentTrustPrompt = fs.readFileSync(new URL("./fixtures/codex-trust-0.156.1.txt", import.meta.url), "utf8");
 const firstLoginPrompt = fs.readFileSync(new URL("./fixtures/codex-first-login.txt", import.meta.url), "utf8");
+const workspaceTrustKey = nodePath.resolve("/tmp/workspace");
+const workspaceTrustHeader = `[projects.${JSON.stringify(workspaceTrustKey)}]`;
+const workspaceLiteralTrustHeader = `[projects.'${workspaceTrustKey}']`;
+
+function fixtureShell(command: string, env = process.env): string {
+  const shell = process.platform === "win32"
+    ? nodePath.join(process.env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe") : "/bin/sh";
+  const clean = { ...env }; delete clean.BASH_ENV; delete clean.ENV;
+  return execFileSync(shell, ["-c", command], { env: clean, encoding: "utf8", windowsHide: true });
+}
+
+function fixtureShellPath(file: string): string {
+  return process.platform === "win32"
+    ? fixtureShell('cygpath -u "$OPENRIG_FIXTURE_PATH"', { ...process.env, OPENRIG_FIXTURE_PATH: file }).trim() : file;
+}
 
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
@@ -47,14 +62,22 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
   return mockShellCommand(tmux);
 }
 
+function mockPath(path: string): string {
+  const normalized = nodePath.normalize(path);
+  return process.platform === "win32" ? normalized.replaceAll("\\", "/") : normalized;
+}
+
 function mockFs(files?: Record<string, string>): CodexAdapterFsOps {
-  const store: Record<string, string> = { ...files };
+  const store: Record<string, string> = Object.fromEntries(Object.entries(files ?? {}).map(([p, value]) => [mockPath(p), value]));
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
-    writeFile: (p: string, c: string) => { store[p] = c; },
-    exists: (p: string) => p in store,
+    readFile: (p: string) => { const key = mockPath(p); if (key in store) return store[key]!; throw new Error(`Not found: ${p}`); },
+    writeFile: (p: string, c: string) => { store[mockPath(p)] = c; },
+    exists: (p: string) => mockPath(p) in store,
     mkdirp: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => {
+      const prefix = mockPath(dir).replace(/\/$/, "") + "/";
+      return Object.keys(store).filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length));
+    },
     _store: store,
   } as CodexAdapterFsOps & { _store: Record<string, string> };
 }
@@ -62,10 +85,11 @@ function mockFs(files?: Record<string, string>): CodexAdapterFsOps {
 /** Model file and directory Git markers through the adapter's filesystem seam. */
 function mockProjectFs(files: Record<string, string>, markers: Record<string, "file" | "directory">): CodexAdapterFsOps {
   const ops = mockFs(files);
+  markers = Object.fromEntries(Object.entries(markers).map(([p, kind]) => [mockPath(p), kind]));
   const exists = ops.exists;
-  ops.exists = (path) => path in markers || exists(path);
+  ops.exists = (path) => mockPath(path) in markers || exists(path);
   ops.statMode = (path) => {
-    const kind = markers[path];
+    const kind = markers[mockPath(path)];
     if (!kind) throw new Error(`Cannot stat ${path}`);
     return kind === "directory" ? fs.constants.S_IFDIR : fs.constants.S_IFREG;
   };
@@ -193,10 +217,15 @@ describe("Codex runtime adapter", () => {
       fs.writeFileSync(nodePath.join(selected, "codex"), "#!/bin/sh\nprintf selected", { mode: 0o755 });
       fs.writeFileSync(nodePath.join(stale, "codex"), "#!/bin/sh\nprintf stale", { mode: 0o755 });
       const tmux = mockTmux();
-      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), launchPath: selected + ":/usr/bin:/bin", sleep: async () => {} });
+      const selectedPath = fixtureShellPath(selected) + ":/usr/bin:/bin", stalePath = fixtureShellPath(stale) + ":/usr/bin:/bin";
+      // Both PATHs resolve only our inert shell fixture before exercising the
+      // POSIX command builder; Windows native launches are covered separately.
+      expect(fixtureShell("command -v codex", { ...process.env, PATH: selectedPath }).trim()).toBe(fixtureShellPath(nodePath.join(selected, "codex")));
+      expect(fixtureShell("command -v codex", { ...process.env, PATH: stalePath }).trim()).toBe(fixtureShellPath(nodePath.join(stale, "codex")));
+      const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), launchPath: selectedPath, sleep: async () => {} });
       await adapter.launchHarness(makeBinding(), { name: "operator@example-rig" });
       const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
-      const output = execFileSync("/bin/sh", ["-c", command], { env: { ...process.env, PATH: stale + ":/usr/bin:/bin" }, encoding: "utf8" });
+      const output = fixtureShell(command, { ...process.env, PATH: stalePath });
       expect(output).toBe("selected");
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
@@ -1491,7 +1520,7 @@ describe("Codex runtime adapter", () => {
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
     // ps joins argv with spaces; it does not retain the shell's quotes around each path.
     expect(codexCommandResumeToken(command.replace(/'/g, ""))).toBe("sess-456");
-    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}' --add-dir '/project/.git'`);
+    expect(command).toContain(`resume 'sess-456' --add-dir '${testQueueRoot(sharedDocsRoot)}'${gitDirOption("/project")}`);
   });
 
   it("launchHarness sends correct resume command", async () => {
@@ -1980,7 +2009,7 @@ describe("Codex runtime adapter", () => {
     const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
     const content = store["/home/tester/.codex/config.toml"];
     expect(content).toBeDefined();
-    expect(content).toContain('[projects."/tmp/workspace"]');
+    expect(content).toContain(workspaceTrustHeader);
     expect(content).toContain('trust_level = "trusted"');
   });
 
@@ -2010,7 +2039,7 @@ describe("Codex runtime adapter", () => {
     await adapter.project(plan, makeBinding("/tmp/workspace"));
 
     const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
-    expect(store["/daemon-codex/config.toml"]).toContain('[projects."/tmp/workspace"]');
+    expect(store["/daemon-codex/config.toml"]).toContain(workspaceTrustHeader);
     expect(store["/daemon-codex/config.toml"]).toContain("[mcp_servers.test]");
     expect(store["/daemon-home/.codex/config.toml"]).toBeUndefined();
   });
@@ -2035,8 +2064,8 @@ describe("Codex runtime adapter", () => {
   // #2029: Codex saves project trust with literal-quoted keys. Finding the table by key means no second table for the
   // same project, which Codex rejects as a duplicate key and then refuses to start.
   it.each([
-    ["a literal-quoted table Codex saved", "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n", 1],
-    ["an inline entry", "[projects]\n'/tmp/workspace' = { trust_level = 'trusted' }\n", 0],
+    ["a literal-quoted table Codex saved", `${workspaceLiteralTrustHeader}\ntrust_level = 'trusted'\n`, 1],
+    ["an inline entry", `[projects]\n'${workspaceTrustKey}' = { trust_level = 'trusted' }\n`, 0],
   ])("deliverStartup reuses %s for the project's trust and adds no duplicate", async (_name, existing, tables) => {
     const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
     const fsWithHome = { ...fs, homedir: "/home/tester" };
@@ -2045,24 +2074,61 @@ describe("Codex runtime adapter", () => {
     await adapter.deliverStartup([], makeBinding("/tmp/workspace"));
 
     const content = (fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]!;
-    expect((parseToml(content) as Record<string, any>).projects["/tmp/workspace"].trust_level).toBe("trusted");
-    expect(content.match(/^\[projects\.['"]\/tmp\/workspace['"]\]/gm)?.length ?? 0).toBe(tables);
+    const projects = (parseToml(content) as Record<string, any>).projects;
+    expect(projects[workspaceTrustKey].trust_level).toBe("trusted");
+    expect(Object.keys(projects)).toEqual([workspaceTrustKey]);
+    expect(content.split("\n").filter(line => line === workspaceLiteralTrustHeader)).toHaveLength(tables);
   });
 
   it("deliverStartup leaves a project-table example in a person's multi-line instructions exact and writes the real trust", async () => {
-    const existing = `developer_instructions = """\n[projects.'/tmp/workspace']\ntrust_level = 'example only'\n"""\n`;
+    const existing = `developer_instructions = """\n${workspaceLiteralTrustHeader.replaceAll("\\", "\\\\")}\ntrust_level = 'example only'\n"""\n`;
     const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
     const fsWithHome = { ...fs, homedir: "/home/tester" };
     await new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome }).deliverStartup([], makeBinding("/tmp/workspace"));
     const parsed = parseToml((fsWithHome as unknown as { _store: Record<string, string> })._store["/home/tester/.codex/config.toml"]!) as Record<string, any>;
     expect(parsed.developer_instructions).toBe((parseToml(existing) as Record<string, any>).developer_instructions);
-    expect(parsed.projects["/tmp/workspace"].trust_level).toBe("trusted");
+    expect(parsed.projects[workspaceTrustKey].trust_level).toBe("trusted");
+  });
+
+  it.each(["\n", "\r\n"])("preserves user instructions and MCP tables when re-projecting a %j config", async eol => {
+    const instructions = [
+      'developer_instructions = """',
+      "Keep this person's text unchanged.",
+      "# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: fixture-config",
+      "[mcp_servers.example_inside_instructions]",
+      "# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: fixture-config",
+      '"""',
+    ].join(eol);
+    const initial = [instructions, "", workspaceTrustHeader, 'trust_level = "trusted"', "",
+      "[mcp_servers.personal]", 'url = "https://personal.example.test/mcp"', ""].join(eol);
+    const ops = mockFs({
+      "/home/tester/.codex/config.toml": initial,
+      "/agents/base/runtime/fixture.toml": '[mcp_servers.fixture]\nurl = "https://fixture.example.test/mcp"\n',
+    });
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: { ...ops, homedir: "/home/tester" } });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/tmp/workspace", entries: [makeEntry({ category: "runtime_resource",
+        effectiveId: "fixture-config", resourceType: "codex_config_fragment", absolutePath: "/agents/base/runtime/fixture.toml" })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+    const first = await adapter.project(plan, makeBinding("/tmp/workspace"));
+    const store = (ops as unknown as { _store: Record<string, string> })._store;
+    const once = store["/home/tester/.codex/config.toml"]!;
+    const second = await adapter.project(plan, makeBinding("/tmp/workspace"));
+    const twice = store["/home/tester/.codex/config.toml"]!;
+    expect(first).toMatchObject({ projected: ["fixture-config"], failed: [] });
+    expect(second).toEqual(first); expect(twice).toBe(once);
+    expect(twice).toContain(instructions);
+    const parsed = parseToml(twice) as Record<string, any>;
+    expect(parsed.developer_instructions).toBe((parseToml(initial) as Record<string, any>).developer_instructions);
+    expect(parsed.mcp_servers.personal.url).toBe("https://personal.example.test/mcp");
+    expect(parsed.mcp_servers.fixture.url).toBe("https://fixture.example.test/mcp");
   });
 
   // An earlier OpenRig's double-quoted table beside Codex's own is a duplicate Codex won't start with. Each launch leaves it
   // exactly as it is, so removing the extra table once is the whole repair.
   it("deliverStartup leaves a config that doesn't parse (#2029's duplicate project table) byte-identical, launch after launch", async () => {
-    const existing = "[projects.'/tmp/workspace']\ntrust_level = 'trusted'\n\n[projects.\"/tmp/workspace\"]\ntrust_level = \"trusted\"\n";
+    const existing = `${workspaceLiteralTrustHeader}\ntrust_level = 'trusted'\n\n${workspaceTrustHeader}\ntrust_level = "trusted"\n`;
     expect(() => parseToml(existing)).toThrow();
     const fs = mockFs({ "/home/tester/.codex/config.toml": existing });
     const fsWithHome = { ...fs, homedir: "/home/tester" };

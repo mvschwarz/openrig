@@ -81,7 +81,9 @@ describe("Core-event terminal following", () => {
     expect(f.render).toHaveBeenCalledTimes(65);
     const resumed = await restored.open({ ...selector, view: "qitem:empty-0" }, { enabled: true });
     expect(resumed.ok).toBe(true); expect(f.render).toHaveBeenCalledTimes(66);
-  });
+  // Every open and retirement persists a private file. Windows establishes the
+  // native DACL through an async helper; this capacity test performs 132 writes.
+  }, process.platform === "win32" ? 90_000 : 20_000);
 });
 
 

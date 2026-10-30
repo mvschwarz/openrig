@@ -1,6 +1,7 @@
 import nodePath from "node:path";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { readPlatformEnv } from "./platform-env.js";
 
 const ENV_REF = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
@@ -11,8 +12,9 @@ export function expandCwd(
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): string {
-  const tilded = authored === "~" || authored.startsWith("~/") ? home + authored.slice(1) : authored;
-  return tilded.replace(ENV_REF, (ref, braced?: string, bare?: string) => env[braced ?? bare!] ?? ref);
+  const tilded = authored === "~" || authored.startsWith("~/")
+    || (process.platform === "win32" && authored.startsWith("~\\")) ? home + authored.slice(1) : authored;
+  return tilded.replace(ENV_REF, (ref, braced?: string, bare?: string) => readPlatformEnv(env, braced ?? bare!) ?? ref);
 }
 
 /** Picks the directory an authored cwd means. The literal path wins when it exists, so a directory

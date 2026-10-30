@@ -43,6 +43,22 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
 
   const lib = () => new ContextPackLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });
 
+  it.runIf(process.platform === "win32").each([false, true])("keeps native overlapping-root custody across case aliases (collision: %s)", collision => {
+    writePackAt(root, "system/baseline", "system-baseline");
+    if (collision) writePackAt(root, "baseline", "operator-baseline");
+    const service = new ContextPackLibraryService({ roots: [
+      { path: root, sourceType: "user_file" },
+      { path: join(root, "system").toLowerCase(), sourceType: "workspace" },
+    ] });
+    expect(service.scan()).toMatchObject({ count: collision ? 2 : 1, errors: [] });
+    expect(service.getByRef("system/baseline")?.name).toBe("system-baseline");
+    if (collision) {
+      expect(service.getByRef("baseline")?.name).toBe("operator-baseline");
+      expect(service.removeByRef("baseline").removedPath).toBe(join(root, "baseline"));
+      expect(existsSync(join(root, "system", "baseline", "manifest.yaml"))).toBe(true);
+    } else expect(service.getByRef("baseline")).toBeNull();
+  });
+
   it("discovers the spec's OWN example refs — 2-level `packs/compaction-restore` and `as-built/queue-internals` (RED: one-level scan misses them)", () => {
     writePackAt(root, "packs/compaction-restore", "compaction-restore");
     writePackAt(root, "as-built/queue-internals", "queue-internals");

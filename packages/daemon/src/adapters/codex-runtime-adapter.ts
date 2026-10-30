@@ -5,6 +5,8 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { resolveCodexCommand } from "../domain/windows-provider-command.js";
+import { prepareWindowsJobProcess } from "../domain/windows-job-process.js";
 import { createRequire } from "node:module";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -52,14 +54,26 @@ import {
 /** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
 export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
 
-const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
-  execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
-    const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
-    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
-    const err = String(stderr ?? "");
-    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
-  });
-});
+export const defaultCodexCli: CodexCliRunner = async (args, env) => {
+  let selected: ReturnType<typeof resolveCodexCommand>;
+  let job: ReturnType<typeof prepareWindowsJobProcess> | undefined;
+  try {
+    selected = resolveCodexCommand(env);
+    if (process.platform === "win32") job = prepareWindowsJobProcess(selected.command, [...selected.prefix, ...args], { env });
+  } catch (error) { return { status: null, stdout: "", stderr: (error as Error).message }; }
+  try {
+    return await new Promise((resolve) => {
+      execFile(job?.file ?? selected.command, job?.args ?? [...selected.prefix, ...args],
+        { env, ...job?.options, windowsHide: true, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+          ...(job ? { killSignal: "SIGKILL" as const } : {}) }, (error, stdout, stderr) => {
+          const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
+          // A spawn failure has no exit code: keep its message as the reason.
+          const err = String(stderr ?? "");
+          resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
+        });
+    });
+  } finally { job?.dispose(); }
+};
 
 // Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
 const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
@@ -280,7 +294,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight ?? ((profile, cwd, home) => {
       const selected = home ?? this.codexHome;
-      return defaultProfilePreflight(profile, selected ? { cwd, codexHome: selected, launchPath: this.launchPath } : undefined);
+      return defaultProfilePreflight(profile, { cwd, ...(selected ? { codexHome: selected } : {}), launchPath: this.launchPath });
     });
   }
 
@@ -516,7 +530,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       this.fs.mkdirp(nodePath.dirname(manifestPath));
       this.fs.writeFile(manifestPath, manifest);
     }
-    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath !== undefined ? { PATH: this.launchPath } : {}) };
     if (recorded === undefined) {
       const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
       if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
@@ -939,6 +953,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           forkIdentityPending: true,
         };
       }
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
@@ -966,6 +982,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken, ...this.ownHomeOpt(binding) });
       if (!verification.ok) return verification;
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
         ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
     }
@@ -973,6 +991,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const threadId = await this.captureFreshThreadId(binding, updatePrompt);
     if (updatePrompt.failure) return updatePrompt.failure;
     if (threadId) {
+      const composer = await this.tmux.prepareWindowsCodexComposer?.(binding.tmuxSession!);
+      if (composer && !composer.ok) return { ok: false, error: composer.message };
       return { ok: true, resumeToken: threadId, resumeType: "codex_id", appliedLaunch };
     }
 
@@ -1944,7 +1964,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private launchCommand(command: string, home: string | undefined = this.codexHome): string {
-    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
+    const env = [this.launchPath !== undefined ? `PATH=${shellQuote(this.launchPath)}` : "", home ? `CODEX_HOME=${shellQuote(home)}` : ""].filter(Boolean);
     return env.length ? `env ${env.join(" ")} ${command}` : command;
   }
 }
@@ -2851,10 +2871,10 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` through
 // execRuntimeProbe (utf-8, 10s bound, off the event loop). Injected as the
 // adapter's default verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
+async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome?: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const execFn = (cmd: string) => execRuntimeProbe("codex.runtime.profile_preflight", cmd,
-    selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {});
+    selected ? { cwd: selected.cwd, env: { ...process.env, ...(selected.codexHome ? { CODEX_HOME: selected.codexHome } : {}), ...(selected.launchPath !== undefined ? { PATH: selected.launchPath } : {}) } } : {});
   return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 

@@ -4,6 +4,8 @@ import { dockerPlatform, runWithDeadline } from './scenario-executor.mjs';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { packageBuildShell } from './run-package-build.mjs';
+import { writeWindowsNodeFixture } from './windows-node-fixture.mjs';
 
 test('target follows the Docker server, not this client platform', () => {
   assert.equal(dockerPlatform({ Os: 'linux', Arch: 'amd64' }), 'linux/amd64');
@@ -16,7 +18,7 @@ test('deadline wrapper preserves actual successful and nonzero exits', async () 
   assert.equal(await runWithDeadline([process.execPath, '-e', 'process.exit(0)'], { timeoutMs: 3000 }), 0);
   assert.equal(await runWithDeadline([process.execPath, '-e', 'process.exit(7)'], { timeoutMs: 3000 }), 7);
 });
-test('deadline expires even when the child ignores TERM', async () => {
+test('deadline expires even when the child ignores TERM', { timeout: 10000 }, async () => {
   const start = Date.now();
   const status = await runWithDeadline([process.execPath, '-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { timeoutMs: 300, killAfterMs: 100 });
   assert.equal(status, 124);
@@ -31,16 +33,20 @@ test('the platform CLI queries a fake remote server and writes its actual receip
   const root = mkdtempSync(join(process.cwd(), '.scenario-platform-'));
   try {
     const server = { Os: 'linux', Arch: 'amd64', Version: 'test-only' };
-    writeFileSync(join(root, 'docker'), `#!/bin/sh
+    const log = join(root, 'docker-argv.json');
+    if (process.platform === 'win32') writeWindowsNodeFixture(root, 'docker', `import fs from 'node:fs';fs.writeFileSync(process.env.OPENRIG_TEST_DOCKER_ARGV,JSON.stringify(process.argv.slice(2)));console.log(JSON.stringify(${JSON.stringify(server)}));`);
+    else writeFileSync(join(root, 'docker'), `#!/bin/sh
 printf '%s\\n' '${JSON.stringify(server)}'
 `, { mode: 0o755 });
     const receipt = join(root, 'server.json');
     const run = spawnSync(process.execPath, [resolve('scripts/scenario-executor.mjs'), 'platform', receipt], {
-      env: { ...process.env, PATH: root + ':/usr/bin:/bin', DOCKER_HOST: 'ssh://fixture.invalid' }, encoding: 'utf8',
+      env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH')), PATH: root,
+        OPENRIG_TEST_DOCKER_ARGV: log, DOCKER_HOST: 'ssh://fixture.invalid' }, encoding: 'utf8',
     });
     assert.equal(run.status, 0, run.stderr);
     assert.equal(run.stdout.trim(), 'linux/amd64');
     assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), { platform: 'linux/amd64', server });
+    if (process.platform === 'win32') assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')), ['version', '--format', '{{json .Server}}']);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 test('ordinary invocation and ambiguous remote selection refuse before any build', () => {
@@ -53,7 +59,7 @@ test('ordinary invocation and ambiguous remote selection refuse before any build
     [['--remote', '--mode', 'typo'], {}, /Expected --mode/],
   ]) {
     const env = { ...process.env, GITHUB_ACTIONS: '', DOCKER_HOST: '', DOCKER_CONTEXT: '', ...extra };
-    const run = spawnSync('/bin/bash', [script, ...args], { env, encoding: 'utf8', timeout: 3000 });
+    const run = spawnSync(packageBuildShell(process.platform, env), [script, ...args], { env, encoding: 'utf8', timeout: 3000, windowsHide: true });
     assert.equal(run.status, 2, run.stderr);
     assert.match(run.stderr, message);
   }

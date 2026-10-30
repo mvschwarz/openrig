@@ -51,6 +51,15 @@ describe("readCodexAuthMetadata — falsy HOME resolves under the account home (
     expect(meta.profilesRead.status).toBe("read");
   });
 
+  it.runIf(process.platform === "win32")("reads native home key variants without reading profile contents", () => {
+    expect(readCodexAuthMetadata({ home: ctl.account }).profiles).toEqual(["alpha"]);
+    const codexHome = path.join(ctl.account, ".codex");
+    expect(readCodexAuthMetadata({ codex_home: codexHome }).profiles).toEqual(["alpha"]);
+    // The canonical blank key wins over its lower-case duplicate, then the
+    // existing account-home fallback applies rather than selecting the duplicate.
+    expect(readCodexAuthMetadata({ CODEX_HOME: "", codex_home: ctl.homedirSentinel }).profiles).toEqual(["alpha"]);
+  });
+
   it("HOME empty in the process environment still reads the account home's .codex", () => {
     process.env.HOME = "";
     const meta = readCodexAuthMetadata({ HOME: "" } as NodeJS.ProcessEnv);

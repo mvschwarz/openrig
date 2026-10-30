@@ -8,6 +8,7 @@ import { validateMissionComposition } from "../lifecycle-manifest.js";
 import type { ScopeFsDeps } from "../scope/scope-view-projection.js";
 import { resolveNodeFileVia } from "../scope/node-file.js";
 import { parseFrontmatter } from "../slices/slice-indexer.js";
+import { openPrivateTextFile } from "../private-text-file.js";
 
 /** Addressed Markdown owns judgments. These views are rebuilt, never written upstream. */
 export type JudgmentVerdict = "accept" | "reject" | "withdraw";
@@ -128,7 +129,7 @@ function ledger(dir: string, io: ScopeFsDeps): Judgment[] {
     const expected = `${String(receipts.length + 1).padStart(8, "0")}.md`;
     if (name !== expected) throw new JudgmentError("journal_conflict", `${home}: expected ${expected}, found ${name}; inspect retained receipts`);
     const raw = io.readFile(path.join(home, name));
-    const fm = raw && /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(raw);
+    const fm = raw && /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
     if (!fm) throw new JudgmentError("journal_invalid", `${home}/${name}: incomplete judgment`);
     const obj = mapping(YAML.parse(fm[1]!), name), { id, ...payload } = obj;
     if (id !== hash(payload) || obj.version !== 1 || obj.sequence !== receipts.length + 1 || typeof obj.itemId !== "string" || typeof obj.itemRevision !== "string" || typeof obj.policyRevision !== "string" || typeof obj.actor !== "string" || typeof obj.operationId !== "string" || typeof obj.intent !== "string" || !["accept", "reject", "withdraw"].includes(String(obj.verdict)) || !Array.isArray(obj.evidence)) throw new JudgmentError("journal_invalid", `${home}/${name}: malformed or changed judgment; inspect history`);
@@ -155,7 +156,8 @@ export function evidenceAt(root: string, dir: string, ref: string): Evidence {
   if (!ref || typeof ref !== "string") throw new JudgmentError("evidence_required", "Reference readable evidence under the project workspace");
   const { ref: file, headerPath } = parseAddress(ref);
   const fragment = headerPath.join("/");
-  const target = contained(root, path.isAbsolute(file!) ? file! : file!.startsWith("missions/") ? file! : path.resolve(dir, file!));
+  const workspaceRelative = file!.startsWith("missions/") || file!.startsWith(`missions${path.sep}`);
+  const target = contained(root, path.isAbsolute(file!) ? file! : workspaceRelative ? file! : path.resolve(dir, file!));
   if (!fs.existsSync(target) || !fs.statSync(target).isFile()) throw new JudgmentError("evidence_missing", `Evidence is unavailable: ${ref}`);
   const bytes = fs.readFileSync(target);
   let addressed: Buffer | string = bytes;
@@ -277,12 +279,22 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   const temporary = path.join(home, `.write-${randomUUID()}`), target = path.join(home, `${String(payload.sequence).padStart(8, "0")}.md`);
   // Same-directory temp+fsync follows FileWriteService; link publishes without replacing a receipt.
   // Synchronous in the supported daemon writer. A competing process loses the exclusive publication.
-  const fd = fs.openSync(temporary, "wx", 0o600);
+  const fd = openPrivateTextFile(temporary);
   try {
-    try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    fs.linkSync(temporary, target);
-    const directory = fs.openSync(home, "r");
-    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    try {
+      fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`);
+      fs.fsyncSync(fd);
+      fs.linkSync(temporary, target);
+      if (process.platform === "win32") {
+        // Windows FlushFileBuffers requires a writable file handle. A directory
+        // fsync fails after publication with EPERM; flush the still-open receipt
+        // instead. This does not claim POSIX directory-fsync power-loss durability.
+        fs.fsyncSync(fd);
+      } else {
+        const directory = fs.openSync(home, "r");
+        try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+      }
+    } finally { fs.closeSync(fd); }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
