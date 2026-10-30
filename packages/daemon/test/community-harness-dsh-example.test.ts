@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -187,19 +187,18 @@ describe("the documented dsh example runner", () => {
     expect(seat.out()).toMatch(/you ▸ hello there/);
   });
 
-  it("frames a bracketed paste as one block, keeps typed edits, and treats only a bare /abort or Ctrl-C as control", async () => {
-    const { InputFramer } = await import(pathToFileURL(RUNNER).href) as {
-      InputFramer: new () => { push(chunk: string): Array<{ type: string; text?: string }> } };
-    const framer = new InputFramer();
-    const control = (chunk: string) => framer.push(chunk).filter((event) => event.type === "block" || event.type === "abort");
-    expect(control("\x1b[200~From: a@rig\nline one\n/abort\x1b[201~")).toEqual([]);
-    expect(control("\r")).toEqual([{ type: "block", text: "From: a@rig\nline one\n/abort" }]);
-    expect(control("\x1b[20")).toEqual([]);
-    expect(control("0~a\r\nb\x1b[201~\r")).toEqual([{ type: "block", text: "a\nb" }]);
-    expect(control("hi\x7f\x7fok\r")).toEqual([{ type: "block", text: "ok" }]);
-    expect(control("/abort\r")).toEqual([{ type: "abort" }]);
-    expect(control("half typed\x03")).toEqual([{ type: "abort" }]);
-    expect(control("\r")).toEqual([]);
+  it("frames a bracketed paste as one block, keeps typed edits, and treats only a bare /abort or Ctrl-C as control", () => {
+    // The runner's own framer, imported by plain Node, one chunk of terminal bytes at a time.
+    const script = `import { InputFramer } from ${JSON.stringify(pathToFileURL(RUNNER).href)};
+const framer = new InputFramer();
+const chunks = JSON.parse(process.argv[1]);
+process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).filter((event) => event.type === "block" || event.type === "abort"))));`;
+    const chunks = ["\x1b[200~From: a@rig\nline one\n/abort\x1b[201~", "\r", "\x1b[20", "0~a\r\nb\x1b[201~\r", "hi\x7f\x7fok\r", "/abort\r", "half typed\x03", "\r"];
+    const framed = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script, JSON.stringify(chunks)], { encoding: "utf8", timeout: 20_000 })) as unknown;
+    expect(framed).toEqual([
+      [], [{ type: "block", text: "From: a@rig\nline one\n/abort" }], [], [{ type: "block", text: "a\nb" }],
+      [{ type: "block", text: "ok" }], [{ type: "abort" }], [{ type: "abort" }], [],
+    ]);
   });
 
   it("sends the cancel on /abort and reports cancelled only on the agent's own stop reason", async () => {
@@ -264,7 +263,9 @@ describe("the documented dsh example runner", () => {
     await waitFor(() => openrig.withdraws.length > 0, "the withdraw");
     expect(openrig.withdraws).toEqual([{ askId: "ask-1", body: { reason: "turn_cancelled" } }]);
     const log = seat.log();
-    expect(log.indexOf(requests(log, "session/cancel")[0]!)).toBeLessThan(log.indexOf(answer));
+    const cancelAt = log.findIndex((entry) => entry.method === "session/cancel");
+    expect(cancelAt).toBeGreaterThan(-1);
+    expect(cancelAt).toBeLessThan(log.findIndex((entry) => entry.id === "perm-1" && entry.method === undefined));
     await waitFor(() => has(openrig.hooks, "Stop/cancelled"), "the cancelled turn end");
   });
 
