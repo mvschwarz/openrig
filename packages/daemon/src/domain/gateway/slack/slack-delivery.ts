@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
 import {
-  buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, splitForSlack,
+  buildOutboundMessage, attributionFromSession, openFenceAfter, reconcileToken, redactSecrets, splitForSlack,
   HumanMessageShapeError, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type SlackMediaRef,
 } from "./message.js";
 import type { SeenStore } from "./state-store.js";
@@ -241,7 +241,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
       log(`delivery: decision ${decision.decisionId} already delivered — re-ack, no re-post`);
       return { ok: true };
     }
-    const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
+    const q = (decision.payload ?? {}) as DeliveryPart;
     // #192: the channel first, from this post's record when it has one, so the thread below is
     // chosen inside the channel the post actually goes to (and went to, on a retry).
     const pinned = firstAttemptChannel(opts, opts.attempted.load(), decision.decisionId);
@@ -302,6 +302,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           state: q.state,
           tags: q.tags,
           evidenceRef: q.evidenceRef,
+          bodyOpenFence: q.bodyOpenFence,
         },
         {
           sourceLabel: opts.sourceLabel,
@@ -531,7 +532,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
   };
 }
 
-type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[] };
+type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[]; bodyOpenFence?: string };
 
 /** #897 — the most Slack messages one ask may post: the primary plus its thread replies. */
 export const MAX_HUMAN_MESSAGE_PARTS = 20;
@@ -623,10 +624,14 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   // A brief that fits keeps the usual note; only a brief that continues says so.
   const note = body.length > 1 ? CONTINUES_NOTE : DETAIL_NOTE;
   const parts: DeliveryPart[] = [{ ...primary, body: body[0] ? `${body[0]}\n\n${note}` : note }];
-  for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k] });
+  // A piece cut inside a code fence keeps rendering as code in the next part.
+  const fences = (pieces: string[]) => { let open = ""; return pieces.map((piece) => { const start = open; open = openFenceAfter(piece, open); return start; }); };
+  const bodyFences = fences(body);
+  for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k], bodyOpenFence: bodyFences[k] });
   // #1013 — a detail piece carries the human's own content, never the agent packet, so the
   // parked-gate state must not ride it (the gate check would eat its body like the packet's).
-  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece, state: null }));
+  const detailFences = fences(detail);
+  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece, state: null, bodyOpenFence: detailFences[j] }));
   if (parts.length > MAX_HUMAN_MESSAGE_PARTS) {
     throw new HumanMessageShapeError(`This brief needs ${parts.length} Slack messages (maximum ${MAX_HUMAN_MESSAGE_PARTS}). Shorten it, or put the long part in a file and link it.`);
   }

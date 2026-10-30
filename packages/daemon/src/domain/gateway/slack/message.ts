@@ -29,6 +29,8 @@ export interface QitemLike {
   /** #1013 — the structured evidenceRef: for a parked gate it rides the evidence link/media
    *  path when it is an https ref, else it renders as one Evidence line (never the packet). */
   evidenceRef?: string | null;
+  /** The code fence an earlier part of a split brief left open; this body starts inside it. */
+  bodyOpenFence?: string | null;
 }
 
 /** #1013 — a workflow gate row parked on a human seat (the projector parks it
@@ -220,41 +222,40 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
-// ponytail: private-use sentinels hold code spans and links aside; input already carrying U+E000/U+E001 renders those spans as text.
-const HOLD_OPEN = "";
-const HOLD_CLOSE = "";
-const HOLD_PATTERN = /(\d+)/g;
-
-/** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. Code spans
- *  stay literal; a link becomes `<url|text>` only for a safe https URL and a label without `|`,
- *  otherwise it stays escaped text. Everything else is escaped, so no control sequence survives. */
+/** Convert one non-fenced, already-redacted line of Markdown to inert Slack mrkdwn. The line is
+ *  escaped first, so it holds no raw `<` or `>`, and `<n>` can mark a code span or link set aside
+ *  without colliding with input. A link becomes `<url|text>` only for a safe https URL without
+ *  `<`, `>` or `|` and a label (code included) without `|`; otherwise it stays escaped text. */
 function inlineMarkdownToMrkdwn(line: string): string {
   const held: string[] = [];
-  const hold = (rendered: string) => `${HOLD_OPEN}${held.push(rendered) - 1}${HOLD_CLOSE}`;
-  const restore = (s: string) => s.replace(HOLD_PATTERN, (_, i: string) => held[Number(i)] ?? "");
-  let out = line
-    .replace(/`[^`\n]+`/g, (code) => hold(escapeSlackText(code)))
-    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (link, label: string, url: string) =>
-      isSafeHttpsUrl(url) && !/[<>|]/.test(url) && !label.includes("|") ? hold(`<${escapeSlackText(url)}|${restore(escapeSlackText(label))}>`) : link);
-  out = escapeSlackText(out)
+  const hold = (rendered: string) => `<${held.push(rendered) - 1}>`;
+  const restore = (s: string) => s.replace(/<(\d+)>/g, (_, i: string) => held[Number(i)] ?? "");
+  return restore(escapeSlackText(line)
+    .replace(/`[^`\n]+`/g, hold)
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (link, label: string, url: string) => {
+      const text = restore(label);
+      const raw = url.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+      return isSafeHttpsUrl(raw) && !/[<>|]/.test(raw) && !text.includes("|") ? hold(`<${url}|${text}>`) : link;
+    })
     .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, "*$1*")
-    .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*");
-  return restore(out);
+    .replace(/__(?=\S)(.+?)(?<=\S)__/g, "*$1*"));
 }
 
-/** Agent-written Markdown as Slack mrkdwn, through the same inert pipeline as every other
- *  queue-controlled field (secrets redacted, then &, <, > escaped). `**b**`/`__b__` become
- *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `•` (indented: `◦`), and safe https
- *  `[text](url)` links `<url|text>`. A list marker needs a following space, so `*bold*` is not
- *  a list item. Code spans and fenced blocks are only escaped. */
-export function markdownToSlackMrkdwn(text: string): string {
-  let fenced = false;
-  return redactSecrets(text).split("\n").map((line) => {
-    if (/^\s*```/.test(line)) {
-      fenced = !fenced;
+const FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/;
+
+/** One pass over the lines: the converted text, and the fence still open at its end ("" if none). */
+function convertMarkdown(text: string, openFence: string): { text: string; openFence: string } {
+  let fence = openFence;
+  const lines = redactSecrets(text).split("\n").map((line) => {
+    const marker = FENCE_PATTERN.exec(line)?.[1];
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && /^ {0,3}[`~]+\s*$/.test(line)) fence = "";
       return escapeSlackText(line);
     }
-    if (fenced) return escapeSlackText(line);
+    if (marker) {
+      fence = marker;
+      return escapeSlackText(line);
+    }
     const heading = /^#{1,6}\s+(.*?)(?:\s+#+)?\s*$/.exec(line);
     if (heading) return heading[1] ? `*${inlineMarkdownToMrkdwn(heading[1])}*` : "";
     const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
@@ -263,7 +264,23 @@ export function markdownToSlackMrkdwn(text: string): string {
       return `${indent}${indent ? "◦" : "•"} ${inlineMarkdownToMrkdwn(rest)}`;
     }
     return inlineMarkdownToMrkdwn(line);
-  }).join("\n");
+  });
+  return { text: lines.join("\n"), openFence: fence };
+}
+
+/** Agent-written Markdown as Slack mrkdwn, through the same inert pipeline as every other
+ *  queue-controlled field (secrets redacted, then &, <, > escaped). `**b**`/`__b__` become
+ *  `*b*`, `#` headings a bold line, `-`/`*`/`+` list items `•` (indented: `◦`), and safe https
+ *  `[text](url)` links `<url|text>`. A list marker needs a following space, so `*bold*` is not
+ *  a list item. Code spans and ``` or ~~~ fenced blocks are only escaped. `openFence` is the
+ *  fence a split brief's earlier part left open (see openFenceAfter). */
+export function markdownToSlackMrkdwn(text: string, openFence = ""): string {
+  return convertMarkdown(text, openFence).text;
+}
+
+/** The fence still open after `text`, so the next part of a split brief continues inside it. */
+export function openFenceAfter(text: string, openFence = ""): string {
+  return convertMarkdown(text, openFence).openFence;
 }
 
 function isSafeHttpsUrl(url: string): boolean {
@@ -435,7 +452,7 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
     ? (!gateEvidence || gateEvidenceCarried
       ? ""
       : bounded(`Evidence: ${inert(gateEvidence)}`, SLACK_SECTION_CAP, "body"))
-    : bounded(markdownToSlackMrkdwn(String(q.body || "")), SLACK_SECTION_CAP, "body");
+    : bounded(markdownToSlackMrkdwn(String(q.body || ""), q.bodyOpenFence ?? ""), SLACK_SECTION_CAP, "body");
   const mention = opts.mentionUserId ? `<@${opts.mentionUserId}> :rotating_light: ` : "";
   const headline = bounded(`${mention}*${summary}*`, SLACK_SECTION_CAP, "subject");
   const machine = opts.attribution && !opts.attribution.host && opts.machine ? ` on ${inert(opts.machine)}` : "";
