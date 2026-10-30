@@ -97,6 +97,12 @@ The later stable CLI+TUI run at `dd4bc68` records 7017 passes, 96 failures and
 permission failures reproduced on current Windows because POSIX directory mode
 bits did not deny creation. Native ACL-based fixture setup now exercises that
 delegation path, with the exact owned HTTP origin registered and the guard retained.
+The stable CLI+TUI `a2d903d` run separately records 7031 passes, 94 failures
+and 77 skips. Four failures reproduced in current create/grow and config fixtures:
+their expected values hardcoded POSIX spellings despite native absolute cwd and
+default paths. Native path expectations retain the exact create/grow payload and
+header assertions; all 41 cases across those two modules pass. No real rig is
+created or grown, and no complete-package result is inferred from this subset.
 
 The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
 512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
