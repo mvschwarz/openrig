@@ -2310,12 +2310,12 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
-      this.carryPermissionQuestion(source, newId, input.toSession);
+      const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
         destinationSession: input.toSession,
-        humanAlert: input.humanAlert,
+        humanAlert: input.humanAlert ?? (carried ? true : undefined), // a carried permission ask alerts, as Mission Control's does
         nextState: "pending",
       });
       this.transitionLog.append({
@@ -2490,12 +2490,12 @@ export class QueueRepository {
       this.persistSummary(newId, input.summary ?? null);
       this.persistEvidenceRef(newId, input.evidenceRef ?? null);
       this.persistMintingGeneration(newId, input.fromSession);
-      this.carryPermissionQuestion(source, newId, input.toSession);
+      const carried = this.carryPermissionQuestion(source, newId, input.toSession);
 
       const successorNotification = this.classifyOwnerNotification({
         action: "create",
         destinationSession: input.toSession,
-        humanAlert: input.humanAlert,
+        humanAlert: input.humanAlert ?? (carried ? true : undefined), // a carried permission ask alerts, as Mission Control's does
         nextState: "pending",
       });
       this.transitionLog.append({
@@ -4872,11 +4872,23 @@ export class QueueRepository {
    *  transaction (create / handoff / handoff-and-complete). */
   /** A runner's permission ask handed to a person: that person decides, so their row carries the agent's options, as
    *  Mission Control's route and handoff give it. Any other row is handed on unchanged. */
-  private carryPermissionQuestion(source: QueueItem, successorId: string, toSession: string): void {
-    if (!runnerPermissionOrigin(source) || !source.humanQuestions?.length || !this.hasHumanQuestionsColumn
-      || !this.hasHumanIntentColumn || !this.isPersonAddress(toSession)) return;
+  private carryPermissionQuestion(source: QueueItem, successorId: string, toSession: string): boolean {
+    const questions = runnerPermissionOrigin(source) ? this.permissionQuestionsFor(source) : null;
+    if (!questions || !this.hasHumanQuestionsColumn || !this.hasHumanIntentColumn || !this.isPersonAddress(toSession)) return false;
     this.db.prepare("UPDATE queue_items SET human_questions = ?, human_intent = 'decision' WHERE qitem_id = ?")
-      .run(JSON.stringify(source.humanQuestions), successorId);
+      .run(JSON.stringify(questions), successorId);
+    return true;
+  }
+
+  /** A runner permission ask's options: the row's own, or, when it came through a seat that got none (an agent seat),
+   *  the nearest earlier row's along handed_off_from. */
+  permissionQuestionsFor(item: QueueItem): HumanQuestion[] | null {
+    let current: QueueItem | null = item;
+    for (let hops = 0; current && runnerPermissionOrigin(current) && hops <= 10; hops++) {
+      if (current.humanQuestions?.length) return current.humanQuestions;
+      current = current.handedOffFrom ? this.getById(current.handedOffFrom) : null;
+    }
+    return null;
   }
 
   private persistSummary(qitemId: string, summary: string | null): void {

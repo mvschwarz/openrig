@@ -199,6 +199,11 @@ export class MissionControlWriteContract {
 
         // 2. For route/handoff: create the destination packet in same txn.
         if ((input.verb === "route" || input.verb === "handoff") && input.destinationSession) {
+          // A runner's permission ask passed to a colleague: the colleague decides, so a person gets the agent's options
+          // (found back along the handoffs when it came through an agent seat), and the row records what it was handed
+          // from, as the queue's own handoff does, so the request follows it exactly.
+          const permission = runnerPermissionOrigin(source) !== null;
+          const questions = permission && this.queueRepo.isPersonAddress(input.destinationSession) ? this.queueRepo.permissionQuestionsFor(source) : null;
           const created = this.queueRepo.createWithinTransaction({
             sourceSession: input.actorSession,
             destinationSession: input.destinationSession,
@@ -211,11 +216,8 @@ export class MissionControlWriteContract {
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
             chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
-            // A runner's permission ask passed to a colleague: the colleague decides, so they get the agent's options, and
-            // the row records what it was handed from, as the queue's own handoff does, so the request follows it exactly.
-            ...(runnerPermissionOrigin(source) ? { handedOffFrom: input.qitemId } : {}),
-            ...(runnerPermissionOrigin(source) && source.humanQuestions && this.queueRepo.isPersonAddress(input.destinationSession)
-              ? { humanIntent: "decision" as const, humanAlert: true, humanQuestions: source.humanQuestions } : {}),
+            ...(permission ? { handedOffFrom: input.qitemId } : {}),
+            ...(questions ? { humanIntent: "decision" as const, humanAlert: true, humanQuestions: questions } : {}),
             // Default nudge handled post-commit per Phase D pattern.
             nudge: input.notify,
           });

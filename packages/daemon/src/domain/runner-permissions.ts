@@ -289,12 +289,14 @@ export class RunnerPermissions {
 
   /** A person who routes or hands the ask to a colleague means the colleague decides: follow each handoff (a handed-off
    *  row, or one completed with closure handed_off_to) along its own edge, to the row handed from it at the handed-to
-   *  address. A handoff closes its row, so there is one. Null when that can't be followed on this host. */
+   *  address. Null when that can't be followed on this host. */
   private liveEnd(item: QueueItem): QueueItem | null {
     let current = item;
     for (let hops = 0; current.state === "handed-off" || (current.state === "done" && current.closureReason === "handed_off_to"); hops++) {
       if (hops >= MAX_HANDOFF_HOPS || !current.handedOffTo) return null;
-      const next = this.deps.db.prepare("SELECT qitem_id FROM queue_items WHERE destination_session = ? AND handed_off_from = ? LIMIT 1")
+      // The newest: a reopened ask handed to the same person again has a later successor.
+      const next = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE destination_session = ? AND handed_off_from = ?
+        ORDER BY ts_created DESC, rowid DESC LIMIT 1`)
         .get(current.handedOffTo, current.qitemId) as { qitem_id: string } | undefined;
       const successor = next ? this.deps.queueRepo.getById(next.qitem_id) : null;
       if (!successor) return null;
