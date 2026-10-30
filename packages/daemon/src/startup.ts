@@ -125,6 +125,7 @@ import { WakeResolveService, WAKE_SESSIONS_SQL } from "./domain/wake-resolve-ser
 import type { WakeSessionRow } from "./domain/wake-resolver.js";
 import { ChatRepository } from "./domain/chat-repository.js";
 import { StreamStore } from "./domain/stream-store.js";
+import { StreamIntakeCoordinator } from "./domain/stream-intake.js";
 import { SlowOpRecorder, type SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
@@ -1584,6 +1585,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     })(),
     chatRepo: new ChatRepository(db),
     streamStore,
+    streamIntakeCoordinator: new StreamIntakeCoordinator({
+      db,
+      eventBus,
+      streamStore,
+      queueRepo: queueRepoInstance,
+      destination: () => String(new ContextPackSettingsStore().resolveOne("stream.intake").value),
+    }),
     slowOpRecorder,
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),

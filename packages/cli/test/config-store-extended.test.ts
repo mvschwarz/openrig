@@ -211,6 +211,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "retention.watchdog_keep_per_job",
       "retention.stream_days", // slice 22 outcome 9: stream retention
       "retention.stream_max_items",
+      "stream.intake",
       "retention.batch_size",
       "queue.pickup_stall_threshold_minutes",
       // S02 — standing-stuck-sweep cadence + unclaimed-obligation age.
@@ -232,6 +233,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     store.set("daemon.db_conflict", "stop");
     expect(store.get("daemon.db_conflict")).toBe("stop");
     expect(() => store.set("daemon.db_conflict", "always")).toThrow(/warn or stop/);
+  });
+
+  it("defaults stream.intake to queue.worker and validates destinations", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.get("stream.intake")).toBe("queue.worker");
+    store.set("stream.intake", "off");
+    expect(store.get("stream.intake")).toBe("off");
+    store.set("stream.intake", "lead@kernel");
+    expect(store.get("stream.intake")).toBe("lead@kernel");
+    expect(() => store.set("stream.intake", "invalid-bare-seat")).toThrow(/Invalid value for stream.intake/);
   });
 
   it("resolves context.root from the canonical default and OPENRIG_CONTEXT_ROOT", () => {

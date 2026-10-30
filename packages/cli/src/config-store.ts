@@ -388,6 +388,10 @@ const DEFAULTS = {
     consumers: "",
     templateDir: "",
   },
+  // Issue #1856 — stream intake default queue.worker; read live by the stream intake coordinator.
+  stream: {
+    intake: "queue.worker",
+  },
   // OPR.0.4.6.FS-1 W2 — retention defaults (twin of daemon getDefaultValue).
   retention: {
     enabled: true,
@@ -537,6 +541,7 @@ export const VALID_KEYS = [
   // Slice 22 outcome 9 — stream retention: unreferenced items older than N days or beyond the newest N.
   "retention.stream_days",
   "retention.stream_max_items",
+  "stream.intake",
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
   "queue.pickup_stall_threshold_minutes",
@@ -652,6 +657,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.stream_days": { primary: "OPENRIG_RETENTION_STREAM_DAYS" },
   "retention.stream_max_items": { primary: "OPENRIG_RETENTION_STREAM_MAX_ITEMS" },
+  "stream.intake": { primary: "OPENRIG_STREAM_INTAKE" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
   "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
@@ -750,6 +756,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.stream_days": ["retention", "streamDays"],
   "retention.stream_max_items": ["retention", "streamMaxItems"],
+  "stream.intake": ["stream", "intake"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
@@ -1111,6 +1118,12 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "retention.stream_max_items": (raw, coerced) => {
     if (!/^-?\d+$/.test((raw ?? "").trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1) {
       throw new Error(`Invalid value for retention.stream_max_items: must be an integer >= 1, got "${raw}"`);
+    }
+  },
+  "stream.intake": (raw) => {
+    const val = (raw ?? "").trim();
+    if (val !== "off" && val !== "queue.worker" && !/^[a-zA-Z0-9\-_.]+@[a-zA-Z0-9\-_.]+$/.test(val)) {
+      throw new Error(`Invalid value for stream.intake: must be "queue.worker", a canonical session (<seat>@<rig>), or "off", got "${raw}"`);
     }
   },
   "retention.batch_size": (raw, coerced) => {
