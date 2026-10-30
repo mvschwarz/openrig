@@ -48,7 +48,8 @@ export function blockedConnectionGuidance(
  *  itself. Pure: `exists` is injected. */
 export function resolveOfflineHelpPath(baseDir: string, exists: (p: string) => boolean): string | undefined {
   const bundled = path.resolve(baseDir, "../daemon/docs/reference/help.md");
-  const installed = path.resolve(baseDir).split(path.sep).includes("node_modules");
+  const installed = path.resolve(baseDir).split(path.sep)
+    .some(part => (process.platform === "win32" ? part.toLowerCase() : part) === "node_modules");
   const candidates = installed ? [bundled] : [path.resolve(baseDir, "../../../docs/reference/help.md"), bundled];
   return candidates.find((candidate) => exists(candidate));
 }

@@ -57,6 +57,14 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+The offline help resolver also needed a native installation-boundary correction:
+Windows `NODE_MODULES` spellings were treated as source checkouts and could select
+an outside help file first. An owned-directory reproduction failed before the
+case-aware component check. The repaired [blocked-connection module](../../packages/cli/test/daemon-blocked-connection.test.ts)
+passes 21 cases, including selecting the bundled file and refusing the outside
+fallback after the bundled file is removed. Three POSIX-only fixture spellings
+were corrected. CLI TypeScript passes; no live daemon or user help files are read.
+
 At `1104674`, exact package-relative filename and full test-name reconciliation
 of the old `a2d903d` CLI/TUI report matches 25 of its 94 failed assertions to
 passes in 12 selected later scoped reports. The other 69 assertions have no match
