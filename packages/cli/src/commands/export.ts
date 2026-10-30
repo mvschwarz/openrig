@@ -22,7 +22,8 @@ interface ExportedStartupBlock {
 /** Copy only the declared local culture, preserving any recipient file. */
 function copyCulture(file: string, root: string, outDir: string): void {
   if (nodePath.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error("culture path must stay inside the rig folder");
-  const sourceRoot = fs.realpathSync(root), source = fs.realpathSync(nodePath.resolve(root, file));
+  const realpath = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+  const sourceRoot = realpath(root), source = realpath(nodePath.resolve(root, file));
   const inside = (base: string, target: string) => target.startsWith(base.endsWith(nodePath.sep) ? base : base + nodePath.sep);
   if (!inside(sourceRoot, source) || !fs.statSync(source).isFile()) throw new Error("culture source is not a file inside the rig folder");
   const target = nodePath.resolve(outDir, file);
@@ -32,7 +33,7 @@ function copyCulture(file: string, root: string, outDir: string): void {
   }
   let parent = nodePath.dirname(target);
   while (!fs.existsSync(parent)) parent = nodePath.dirname(parent);
-  const outputRoot = fs.realpathSync(outDir), realParent = fs.realpathSync(parent);
+  const outputRoot = realpath(outDir), realParent = realpath(parent);
   if (realParent !== outputRoot && !inside(outputRoot, realParent)) throw new Error("culture destination resolves outside the export folder");
   fs.mkdirSync(nodePath.dirname(target), { recursive: true });
   fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);

@@ -2,6 +2,17 @@
 
 ## Current review status (2026-10-30)
 
+### Rig export copies culture through valid native directory aliases
+
+An owned CLI export reproduced a contained culture directory junction being
+rejected when the recorded rig root used a different case spelling. Culture
+copy now canonicalizes both source/root and destination/root through native
+Windows real paths; POSIX behavior is retained. Seven selected culture export
+cases pass, including the contained junction, refusal of an outside destination
+junction, preserving an existing recipient file, missing sources and remote
+daemon refusal. CLI TypeScript checking passes. These use an owned HTTP fixture
+and synthetic files, not a real daemon or project export.
+
 ### Context pack discovery preserves custody across native case aliases
 
 Overlapping context-store roots spelled with different case indexed the same
