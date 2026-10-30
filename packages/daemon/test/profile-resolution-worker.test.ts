@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { createServer } from "node:http";
 import { execFileSync, fork, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import { Worker } from "node:worker_threads";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import { resolveNodeConfigAsync, withNodeConfigResolver } from "../src/domain/profile-resolution-worker.js";
@@ -118,13 +119,20 @@ function catalogWithGitLog(root: string): { catalog: string; log: string; bin: s
   writeAt(join(catalog, "managed"), "---\nname: managed\ndescription: Managed skill\n---\nBody\n");
   gitIn(catalog, "add", ".");
   gitIn(catalog, "commit", "-qm", "fixture");
-  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const realGit = process.platform === "win32"
+    ? execFileSync("where.exe", ["git.exe"], { encoding: "utf8" }).trim().split(/\r?\n/)[0]!
+    : execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const bin = join(root, "bin");
   const log = join(root, "git.log");
   mkdirSync(bin);
   writeFileSync(log, "");
   writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${realGit}' "$@"\n`);
   chmodSync(join(bin, "git"), 0o755);
+  if (process.platform === "win32") {
+    writeWindowsNodeFixture(bin, "git", `import fs from 'node:fs';import {spawnSync} from 'node:child_process';
+const args=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},args.join(' ')+'\\n');
+const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit',windowsHide:true});if(r.error)throw r.error;process.exitCode=r.status??1;`);
+  }
   return { catalog, log, bin };
 }
 
@@ -387,11 +395,14 @@ describe("profile resolution outside the daemon request thread", () => {
     }
   });
 
-  it.each(["deleted", "deleted-cached"])("preserves fresh reads across repeated resolutions with a %s cwd", mode => {
+  it.for(["deleted", "deleted-cached", "relocated", "relocated-cached"])("preserves fresh reads across repeated resolutions with a %s cwd", (mode, context) => {
+    // Windows locks a process's current directory. Keep the POSIX deletion
+    // cases and test the supported move-then-remove lifecycle separately.
+    if ((process.platform === "win32") !== mode.startsWith("relocated")) context.skip();
     const ctx = fixture();
     skill(ctx, "different-folder", "wanted");
     writeFileSync(join(ctx.homedir!, "context.json"), JSON.stringify(ctx));
-    const child = spawnSync(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"),
+    const child = spawnSync(process.execPath, ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
       fileURLToPath(new URL("./fixtures/profile-worker-deleted-cwd.ts", import.meta.url)), ctx.homedir!, mode],
     { cwd: ctx.homedir!, encoding: "utf8", timeout: 10_000, env: { ...process.env } });
     expect(child.error).toBeUndefined();
@@ -464,7 +475,7 @@ describe("profile resolution outside the daemon request thread", () => {
     const catalogScans = () => readFileSync(log, "utf8").split("\n")
       .filter(line => line === `-C ${catalog} rev-parse --show-toplevel`).length;
     const path = process.env.PATH;
-    process.env.PATH = `${bin}:${path}`;
+    process.env.PATH = `${bin}${delimiter}${path}`;
     try {
       const first = await preflight();
       expect(reads).toBe(6);
