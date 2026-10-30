@@ -5,6 +5,17 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Spec discovery follows native filename case conventions
+
+An owned Windows library containing `.YAML`, mixed-case `.YmL`, and uppercase
+builtin `RIGS/.../RIG.YAML` and `AGENTS/.../AGENT.YAML` entrypoints previously
+returned no entries. Native filename and builtin-entrypoint matching now accept
+these spellings while retaining original source paths and identifiers. The same
+native case convention applies to the existing noise-directory exclusion set,
+so `.GIT` and `NODE_MODULES` content is not indexed. POSIX matching is unchanged.
+The reproduction failed before repair; the service/route files pass 21 cases
+afterward, and daemon TypeScript checking passes. No real library was scanned.
+
 ### Installed TUI transitions into connected read mode
 
 The isolated npm TUI check also launches without `--demo`, against an owned

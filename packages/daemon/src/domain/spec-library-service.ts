@@ -46,7 +46,8 @@ function makeId(sourceType: string, relativePath: string): string {
 }
 
 function isYamlFile(filename: string): boolean {
-  return filename.endsWith(".yaml") || filename.endsWith(".yml");
+  const name = process.platform === "win32" ? filename.toLowerCase() : filename;
+  return name.endsWith(".yaml") || name.endsWith(".yml");
 }
 
 // OPR.0.3.2.22 Bug 4 — noise directories that should never enter the
@@ -83,7 +84,7 @@ function walkYamlFiles(rootPath: string): string[] {
     for (const entry of entries) {
       const absPath = join(current, entry.name);
       if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
+        if (SKIP_DIRS.has(process.platform === "win32" ? entry.name.toLowerCase() : entry.name)) continue;
         stack.push(absPath);
         continue;
       }
@@ -102,7 +103,8 @@ function shouldIndexRelativePath(sourceType: "builtin" | "user_file", relPath: s
     return true;
   }
 
-  const normalized = relPath.replaceAll("\\", "/");
+  const portable = relPath.replaceAll("\\", "/");
+  const normalized = process.platform === "win32" ? portable.toLowerCase() : portable;
   return normalized.startsWith("rigs/") ? normalized.endsWith("/rig.yaml") : normalized.endsWith("/agent.yaml");
 }
 

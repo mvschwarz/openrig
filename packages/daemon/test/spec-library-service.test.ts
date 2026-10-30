@@ -62,6 +62,25 @@ describe("SpecLibraryService", () => {
     });
   }
 
+  it.runIf(process.platform === "win32")("discovers native YAML extension and builtin entrypoint case spellings", () => {
+    const builtin = join(tmpDir, "builtin"), user = join(tmpDir, "user");
+    mkdirSync(join(builtin, "RIGS", "native"), { recursive: true });
+    mkdirSync(join(builtin, "AGENTS", "native"), { recursive: true });
+    mkdirSync(user);
+    writeFileSync(join(builtin, "RIGS", "native", "RIG.YAML"), VALID_RIG_YAML);
+    writeFileSync(join(builtin, "AGENTS", "native", "AGENT.YAML"), VALID_AGENT_YAML);
+    writeFileSync(join(user, "owned.YmL"), VALID_AGENT_YAML);
+    for (const noise of ["NODE_MODULES", ".GIT"]) {
+      mkdirSync(join(user, noise));
+      writeFileSync(join(user, noise, "noise.yaml"), VALID_RIG_YAML);
+    }
+    const lib = createLibrary([{ path: builtin, sourceType: "builtin" }, { path: user, sourceType: "user_file" }]);
+    lib.scan();
+    expect(lib.list().map(entry => [entry.sourceType, entry.kind]).sort()).toEqual([
+      ["builtin", "agent"], ["builtin", "rig"], ["user_file", "agent"],
+    ]);
+  });
+
   it.runIf(process.platform === "win32").each(["CON", "x".repeat(251), "ORIGINAL"])("renames a native user spec to a valid display name %s", name => {
     writeFileSync(join(tmpDir, "original.yaml"), VALID_AGENT_YAML);
     const lib = createLibrary(); lib.scan();
