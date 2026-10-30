@@ -26,6 +26,19 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native SFTP consumer and replacement refusal (2026-10-30)
+
+The complete native SFTP protocol/copy files pass 5/5 against the installed
+Windows OpenSSH subsystem launched only over owned process pipes. They cover
+actual recursive upload/download, Unicode names, dry-run, extra-file retention,
+idempotence, replacement, malformed framing, bounded silent handshake, file
+timestamps and exclusive creation. An added readonly-destination download case
+asserts failure, unchanged original bytes, the retained complete staging file
+and the explicit staging hint when Windows refuses replacement. The owned
+fixtures are removed after their checks. These checks do not exercise an SSH
+network connection, authentication, Linux server permissions or privileged
+Windows file-symlink creation, and change no remote host or user files.
+
 ## Native Git context update consumer (2026-10-30)
 
 The current complete Git-context file passes 8/8 on native Windows using owned
