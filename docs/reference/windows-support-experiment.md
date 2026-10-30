@@ -47,6 +47,15 @@ classifications. The actual readonly check failed on the old classification;
 both complete native SFTP files pass 5/5 afterward, and CLI typecheck passes.
 Original/staging bytes and the retention hint remain asserted.
 
+The file-command consumer already passed failedStep/hint through, but its
+help described only ssh/rsync and its empty-stderr JSON fallback blamed rsync
+even for native transfers. Help now describes native SFTP, recursive copy and
+Windows local drive/UNC operands; the fallback says file-copy failure. The
+complete command file passes 10/10, including injected SFTP/native-local
+failures preserving transport, classification, hint and exit status without
+inventing rsync argv. CLI typecheck passes; these command-layer checks create
+no connection or file transfer.
+
 ## Native Git context update consumer (2026-10-30)
 
 The current complete Git-context file passes 8/8 on native Windows using owned
