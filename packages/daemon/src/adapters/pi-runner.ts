@@ -914,6 +914,7 @@ export class RunnerCore {
 
 interface RunnerArgs {
   runtime?: RunnerRuntime;
+  command?: string;
   sessionName: string;
   stateRoot: string;
   cwd: string;
@@ -941,6 +942,7 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
       return value;
     };
     switch (flag) {
+      case "--command": args.command = next(); break;
       case "--session-name": args.sessionName = next(); break;
       case "--runtime": {
         const runtime = next();
@@ -1071,6 +1073,16 @@ export function resolveRuntimeExecutable(
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
 ): { ok: true; path: string } | { ok: false; error: string } {
+  if (nodePath.isAbsolute(name)) {
+    if (ops.isExecutable(name)) {
+      try {
+        return { ok: true, path: ops.realpath(name) };
+      } catch (err) {
+        return { ok: false, error: `could not resolve ${name}: ${(err as Error).message}` };
+      }
+    }
+    return { ok: false, error: `'${name}' is not executable` };
+  }
   const onPath = (env.PATH ?? "").split(nodePath.delimiter)
     .filter((dir) => nodePath.isAbsolute(dir))
     .map((dir) => nodePath.join(dir, name))
@@ -1181,9 +1193,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
   // shim) cannot find its target there, so resolve the real binary first,
-  // with the runner's own environment.
-  let command: string = runtime;
-  if (runtime === "omp") {
+  // with the runner's own environment. A custom runner command (--command) is
+  // resolved similarly before spawning.
+  let command: string = args.command ?? runtime;
+  if (args.command) {
+    const resolved = resolveRuntimeExecutable(args.command, process.env);
+    if (!resolved.ok) {
+      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
+      const at = new Date().toISOString();
+      try {
+        const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+        const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+      } catch { /* the pane ERROR marker still fails readiness */ }
+      process.exitCode = 127;
+      return;
+    }
+    command = resolved.path;
+  } else if (runtime === "omp") {
     const resolved = resolveRuntimeExecutable("omp", process.env);
     if (!resolved.ok) {
       console.error(`[omp-runner] ERROR launch: ${resolved.error}`);

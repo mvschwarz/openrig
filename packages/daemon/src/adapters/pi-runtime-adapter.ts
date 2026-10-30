@@ -66,17 +66,17 @@ export interface PiRuntimeAdapterDeps {
 }
 
 export class PiRuntimeAdapter implements RuntimeAdapter {
-  readonly runtime: RunnerRuntime = "pi";
-  private tmux: TmuxAdapter;
-  private seatLaunchEnvironment?: SeatLaunchEnvironment;
-  private fs: PiAdapterFsOps;
+  readonly runtime: string = "pi";
+  protected tmux: TmuxAdapter;
+  protected seatLaunchEnvironment?: SeatLaunchEnvironment;
+  protected fs: PiAdapterFsOps;
   protected stateRoot: string;
-  private runnerEntryPath: string;
-  private trustPosture: "approve" | "no-approve";
-  private sleep: (ms: number) => Promise<void>;
-  private newLaunchId: () => string;
-  private usageFactsEnabled: () => boolean;
-  private openRouterChargeEnabled: () => boolean;
+  protected runnerEntryPath: string;
+  protected trustPosture: "approve" | "no-approve";
+  protected sleep: (ms: number) => Promise<void>;
+  protected newLaunchId: () => string;
+  protected usageFactsEnabled: () => boolean;
+  protected openRouterChargeEnabled: () => boolean;
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.usageFactsEnabled = deps.usageFactsEnabled ?? (() => false);
@@ -89,6 +89,29 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.trustPosture = deps.trustPosture ?? "no-approve";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
+  }
+
+  getCommunityDeps(): PiRuntimeAdapterDeps {
+    return {
+      tmux: this.tmux,
+      seatLaunchEnvironment: this.seatLaunchEnvironment,
+      fsOps: this.fs,
+      stateRoot: this.stateRoot,
+      runnerEntryPath: this.runnerEntryPath,
+      trustPosture: this.trustPosture,
+      sleep: this.sleep,
+      newLaunchId: this.newLaunchId,
+      usageFactsEnabled: this.usageFactsEnabled,
+      openRouterChargeEnabled: this.openRouterChargeEnabled,
+    };
+  }
+
+  protected get commandName(): string | undefined {
+    return undefined;
+  }
+
+  protected get resumeType(): string {
+    return `${this.runtime}_session_file`;
   }
 
   /** The pi-runner sidecar reader shape resume-token-capture consumes
@@ -282,14 +305,15 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
       : observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
-      runtime: this.runtime,
+      runtime: this.runtime === "omp" ? "omp" : "pi",
+      command: this.commandName,
       runnerEntryPath: this.runnerEntryPath,
       sessionName,
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
       model: binding.model,
       // The seat's resolved effort, sent as Pi's --thinking; OMP unchanged.
-      thinking: this.runtime === "pi" ? binding.effort : undefined,
+      thinking: this.runtime === "omp" ? undefined : binding.effort,
       // OPR.0.4.8.2: Pi RESOURCE TRUST (not a permission policy). YOLO forces `approve` on every
       // seat; otherwise the configured posture. Same decision used on the restore path (pi-resume).
       trust,
@@ -341,7 +365,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // OMP lazily creates its JSONL on the first persisted turn. Readiness
     // is real, but until then there is no history to resume after a reboot.
     if (this.runtime === "omp" && !this.fs.exists(validation.token)) return { ok: true, appliedLaunch };
-    return { ok: true, resumeToken: validation.token, resumeType: `${this.runtime}_session_file`, appliedLaunch };
+    return { ok: true, resumeToken: validation.token, resumeType: this.resumeType, appliedLaunch };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
@@ -390,7 +414,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private readRunnerState(sessionName: string): PiRunnerState | null {
+  protected readRunnerState(sessionName: string): PiRunnerState | null {
     const { runnerStatePath } = piSeatPaths(this.stateRoot, sessionName);
     if (!this.fs.exists(runnerStatePath)) return null;
     try {
@@ -400,7 +424,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private async waitForRunnerReady(
+  protected async waitForRunnerReady(
     sessionName: string,
     launchId: string,
   ): Promise<{ ok: true; value: PiRunnerState } | { ok: false; failure: HarnessLaunchResult }> {
