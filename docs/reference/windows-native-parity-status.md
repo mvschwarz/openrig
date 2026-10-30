@@ -633,3 +633,21 @@ process/resume proof. Delivery remains unverified during the shell-label
 transition. The stub only waits after writing readiness: this is process and
 foreground observation evidence, not Codex provider, conversation or input
 acceptance, and it does not exercise an existing seat or deployment.
+
+The old 94-failure CLI/TUI snapshot is now reconciled to 54 exact-name later
+passes and 40 cases without an exact-name passing receipt. This supersedes the
+earlier 46/48 split. Three current doctor path/distribution checks pass, including
+two old failures; 43 unrelated doctor cases were filtered. Renamed home/auth
+tests retain separate scoped evidence and are not silently counted as exact
+matches. File-link privilege limits, ACP companion behavior and the unlaunched
+grant-service integration remain distinct unresolved evidence boundaries.
+
+Two old terminal integration files were also missing platform qualification:
+they run real POSIX tmux viewers using `/bin/sh`, `/dev/null` and shell wrapper
+files while simulating macOS launchers. They now explicitly skip on Windows,
+instead of attempting that incompatible fixture or invoking an installed psmux
+as POSIX tmux. Their 13 skipped cases are not passes and remain within the 40
+unmatched historical cases. The separate native Windows window suite passes
+14/14, including expected-plan refusal; CLI TypeScript passes. Native plan tests
+do not substitute for visible desktop acceptance or for running the POSIX
+integration cases on a supported host.

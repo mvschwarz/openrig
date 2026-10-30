@@ -4,7 +4,7 @@
 // localhost, the TUI and CLI daemon clients, and the window opener's plain-tmux fallback on an isolated tmux server.
 // Stubbed: the provider adapters' status and liveness, the Herdr binary probe, and the macOS desktop launcher
 // (osascript), which records its command instead of opening a window.
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it as platformIt, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -22,6 +22,9 @@ import type { TerminalProvider } from "../../daemon/src/domain/terminal/terminal
 
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "window-fixture" }));
 
+// This fixture launches POSIX tmux/shell viewers. Native Windows plans and
+// expected-plan handling live in terminal-window-windows.test.ts.
+const it = platformIt.skipIf(process.platform === "win32");
 const env = { ...process.env }; delete env["TMUX"];
 const sockets: string[] = [];
 const dirs: string[] = [];
