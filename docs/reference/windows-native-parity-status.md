@@ -542,3 +542,13 @@ CLI bridge, and preserves explicit-interpreter failure without retrying through
 another interpreter. No new refocus implementation gap was reproduced. This
 does not prove availability on a host with no Python runtime or restore any
 actual managed session; the fixture roots and CLI replies are synthetic.
+
+At source `16c12c652`, the Windows daemon-control and shutdown suites pass
+24/24. An owned child crosses the production startServer drain through the
+native named-pipe channel, exits cleanly, persists the matching shutdown receipt
+and removes its capability. Separate cases reject stale instance identity and
+inherited-access control directories, and preserve a successor capability when
+closing a predecessor. The shutdown regressions also cover bounded drain phases,
+late/repeated shutdown and receipt-write failures. These checks operate only on
+test-owned homes, servers and processes; they do not stop or restart the deployed
+daemon or diagnose a historical abnormal exit.
