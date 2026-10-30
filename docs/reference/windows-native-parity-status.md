@@ -287,3 +287,14 @@ including the existing executable identity check. The resolved interpreter and
 entry are compared to native canonical paths; synthetic executable/script files
 are never executed. This establishes selection behavior, not provider readiness.
 
+Five selected seat launch-additions cases now pass on native Windows: owned
+prompt/agent/plugin copies, native plugin-list separators and three linked
+directory refusal paths. Directory links use junctions on Windows; file-symlink
+cases remain unchanged and unverified. The initial broader diagnostic run had
+26 passes and nine failures, including POSIX path/list assumptions, directory
+and file symlink setup errors and a mode-based deletion-denial fixture. Source
+changed before that run finished, so it is diagnostic only. The subsequent
+five-case scoped receipt does not clear the remaining permission/file-link cases
+or establish a complete launch-additions suite pass. Launch and restore adapters
+are fixtures, not actual provider sessions.
+

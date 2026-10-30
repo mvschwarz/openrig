@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, sep } from "node:path";
 import { cleanSeatSkills, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, type SeatSkillPaths } from "../src/domain/seat-skill-storage.js";
 import { inspectSeatSkills } from "../src/domain/seat-skill-apply.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -62,11 +62,11 @@ describe("a seat's launch additions in its own storage", () => {
     if (!prepared.ok) return;
     const { additions } = prepared;
     expect(additions.agent).toBe("openrig:reviewer");
-    expect(additions.appendSystemPromptFile?.startsWith(paths.root + "/")).toBe(true);
+    expect(additions.appendSystemPromptFile?.startsWith(paths.root + sep)).toBe(true);
     expect(readFileSync(additions.appendSystemPromptFile!, "utf8")).toBe("Answer in short sentences.\n");
     expect(readFileSync(join(paths.pluginDir, "agents", "reviewer.md"), "utf8")).toContain("name: reviewer");
     expect(additions.pluginDirs).toHaveLength(1);
-    expect(additions.pluginDirs[0]!.startsWith(paths.root + "/")).toBe(true);
+    expect(additions.pluginDirs[0]!.startsWith(paths.root + sep)).toBe(true);
     expect(readFileSync(join(additions.pluginDirs[0]!, ".claude-plugin", "plugin.json"), "utf8")).toContain("review-plugin");
     // The sources are untouched, and a later read of the seat finds the same additions.
     expect(tree(dir)).toEqual(before);
@@ -136,7 +136,7 @@ describe("a seat's launch additions in its own storage", () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" });
     const moved = scratch("seat-additions-linked-");
     mkdirSync(paths.root, { recursive: true });
-    symlinkSync(moved, join(paths.root, "additions"));
+    symlinkSync(moved, join(paths.root, "additions"), process.platform === "win32" ? "junction" : "dir");
     const prepared = prepareSeatLaunchAdditions(paths, sources().input);
     expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
     expect(tree(moved)).toEqual([]);
@@ -146,7 +146,7 @@ describe("a seat's launch additions in its own storage", () => {
     const paths = seatSkillPaths({ rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" });
     const moved = scratch("seat-additions-moved-");
     mkdirSync(join(home, "state", "seats"), { recursive: true });
-    symlinkSync(moved, join(home, "state", "seats", "rig-1"));
+    symlinkSync(moved, join(home, "state", "seats", "rig-1"), process.platform === "win32" ? "junction" : "dir");
     const prepared = prepareSeatLaunchAdditions(paths, sources().input);
     expect(prepared).toMatchObject({ ok: false, code: "seat_storage_refused" });
     expect(prepared.ok ? "" : prepared.message).toContain("not inside this seat's storage");
@@ -246,7 +246,7 @@ describe("a seat's additions on the launch environment", () => {
     for (const id of ["dev.impl", "dev.peer"]) expect((await launcher.launchNode(rig.id, id)).ok).toBe(true);
     // The agent needs the generated plugin, so preparing an agent makes sure its manifest exists.
     expect(existsSync(paths.pluginManifestPath)).toBe(true);
-    expect(created[0]!["CLAUDE_CODE_PLUGIN_DIRS"]).toBe([paths.pluginDir, ...prepared.additions.pluginDirs].join(":"));
+    expect(created[0]!["CLAUDE_CODE_PLUGIN_DIRS"]).toBe([paths.pluginDir, ...prepared.additions.pluginDirs].join(delimiter));
     expect(created[1]).not.toHaveProperty("CLAUDE_CODE_PLUGIN_DIRS");
     db.close();
   });
@@ -338,7 +338,7 @@ describe("a seat's additions at rig down", () => {
     const elsewhere = scratch("seat-additions-elsewhere-");
     writeFileSync(join(elsewhere, "notes.md"), "notes\n");
     rmSync(pluginCopy, { recursive: true, force: true });
-    symlinkSync(elsewhere, pluginCopy);
+    symlinkSync(elsewhere, pluginCopy, process.platform === "win32" ? "junction" : "dir");
     const cleaned = cleanSeatSkills(paths);
     expect(cleaned.refused).toContain(join(pluginCopy, "notes.md"));
     expect(readFileSync(join(elsewhere, "notes.md"), "utf8")).toBe("notes\n");
