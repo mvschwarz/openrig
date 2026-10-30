@@ -79,8 +79,8 @@ export interface InboundQueuePort {
   answersPark?(qitemId: string, actorSession: string, ts: string | undefined): boolean;
   /** This person's returned answer to the current question of a decision parked on them; never an earlier one. */
   getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
-  /** This person's returned answer to the ask that carries this event's footer, so a replay after close finds its own. */
-  getHumanAnswerForEvent?(qitemId: string, actorSession: string, footer: string): { qitemId: string; body: string } | null;
+  /** Every answer this person returned to the ask, oldest first, so a replay after close can find its own. */
+  listHumanAnswers?(qitemId: string, actorSession: string): Array<{ qitemId: string; body: string }>;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -240,7 +240,7 @@ export function makeQueuePorts(
       return item !== null && queueRepo.answersPark(item, actorSession, ts);
     },
     getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
-    getHumanAnswerForEvent: (qitemId, actorSession, footer) => queueRepo.humanAnswerForEvent(qitemId, actorSession, footer),
+    listHumanAnswers: (qitemId, actorSession) => queueRepo.listHumanAnswers(qitemId, actorSession),
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"

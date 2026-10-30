@@ -1845,17 +1845,16 @@ export class QueueRepository {
     return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] });
   }
 
-  /** This person's returned answer to the ask whose body ends with this event's footer: after close, a replay of the
-   *  event finds the answer it returned, whichever park it answered. */
-  humanAnswerForEvent(qitemId: string, actorSession: string, footer: string): QueueItem | null {
+  /** Every answer this person returned to the ask (one per park), oldest first: after close, a replay finds the one its
+   *  event returned or was absorbed into, whichever park it answered. */
+  listHumanAnswers(qitemId: string, actorSession: string): Array<{ qitemId: string; body: string }> {
     const ask = this.getById(qitemId);
-    if (!this.hasReplyToColumn || !ask || ask.destinationSession !== actorSession || !footer) return null;
-    const rows = this.db.prepare(`SELECT qitem_id, body FROM queue_items
+    if (!this.hasReplyToColumn || !ask || ask.destinationSession !== actorSession) return [];
+    return (this.db.prepare(`SELECT qitem_id, body FROM queue_items
       WHERE reply_to = ? AND source_session = ? AND destination_session = ?
         AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')
-      ORDER BY ts_created, rowid`).all(qitemId, actorSession, ask.sourceSession) as Array<{ qitem_id: string; body: string | null }>;
-    const row = rows.find((candidate) => candidate.body?.endsWith(footer));
-    return row ? this.getById(row.qitem_id) : null;
+      ORDER BY ts_created, rowid`).all(qitemId, actorSession, ask.sourceSession) as Array<{ qitem_id: string; body: string | null }>)
+      .map((row) => ({ qitemId: row.qitem_id, body: row.body ?? "" }));
   }
 
   /** This person's answer to the current question of a decision parked on them, if one was returned. */
