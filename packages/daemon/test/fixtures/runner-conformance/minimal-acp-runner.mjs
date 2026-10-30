@@ -112,7 +112,9 @@ const queue = [];
 // answer is delivered once, while that request is still live, and the ask is withdrawn when the turn is cancelled or ends,
 // or the agent exits.
 const HOLDS = new Set(["denied_by_seat", "options_unsupported"]);
-const NOT_CURRENT = new Set(["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale", "activity_grant_revoked"]);
+// A revoked grant isn't here: one is reissued after a lost response, so it can still be the live occupant, and it permits.
+const NOT_CURRENT = new Set(["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale",
+  ...(breaks.has("cancel-on-revoked") ? ["activity_grant_revoked"] : [])]);
 let live = null;
 const refuse = (id) => answer(id, { result: { outcome: { outcome: "cancelled" } } });
 const select = (id, optionId) => answer(id, { result: { outcome: { outcome: "selected", optionId } } });
@@ -171,7 +173,9 @@ async function onPermission(msg) {
         || (NOT_CURRENT.has(code) && !breaks.has("permit-on-not-current"));
       if (HOLDS.has(code) || NOT_CURRENT.has(code)) ask.open = false;
       if (HOLDS.has(code)) { refuse(ask.id); attention = true; }
-      else if (cancelled || (!state && breaks.has("cancel-on-read-error"))) { refuse(ask.id); attention = breaks.has("hold-on-cancel"); }
+      else if (cancelled || (!state && breaks.has("cancel-on-read-error")) || (state && breaks.has("cancel-on-unlisted-state"))) {
+        refuse(ask.id); attention = breaks.has("hold-on-cancel");
+      }
       else { permit(); attention = !allowOf(options); }
     }
     ask.done = true;

@@ -84,6 +84,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
     ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
     ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
+    ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
+    ["cancel-on-unlisted-state", "4b", "unlisted read state (deferred): the agent gets its allow_once option"],
     ["no-withdraw", "4b", "pending: /abort withdraws the ask with turn_cancelled"],
     ["late-deliver", "4b", "pending: an answer after the withdraw isn't delivered"],
     ["paste-answers", "4b", "pending: a pasted message isn't an answer"],
