@@ -26,6 +26,21 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Native agent-image display names (2026-10-30)
+
+The actual image install/scan roundtrip failed for the supported display name
+`model: fast`: Windows cannot create that directory component. Image installation
+now generates a stable SHA-256 directory key for names with Win32-invalid
+characters, reserved device names, trailing dots/spaces or oversized components.
+The key prefix is reserved by encoding literal names using it as well, avoiding
+aliasing a generated key. Ordinary directory names and POSIX behavior remain
+unchanged. The manifest name, public image ID and scan lookup preserve the exact
+operator identity; existing images are not migrated or renamed.
+The complete roundtrip file passes 18/18, including native device/trailing-name
+cases, generated-key/literal-name separation and duplicate-install refusal.
+Daemon typecheck passes. These use owned synthetic images, not provider
+conversations, real resume tokens or deployed image libraries.
+
 ## Native bundle target-name collisions (2026-10-30)
 
 Owned native filesystem checks reproduced case-only target aliases across all
