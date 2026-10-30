@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,26 @@ import { pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
+
+function ownedInvoker(dir: string) {
+  const registry = path.join(dir, "registry");
+  mkdirSync(registry);
+  const windows = process.env.SystemRoot ?? "C:\\Windows";
+  const powershell = path.join(windows, "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const namespace = `owned-${randomUUID()}`;
+  const env: NodeJS.ProcessEnv = {
+    SystemRoot: windows, WINDIR: windows, ComSpec: path.join(windows, "System32/cmd.exe"),
+    PATH: [path.dirname(process.execPath), path.dirname(powershell), path.join(windows, "System32")].join(path.delimiter),
+    HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir,
+    PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL",
+  };
+  return async (argv: string[]) => {
+    const args = ["-L", namespace, ...argv.slice(1)];
+    // Exercise staging in a real interactive shell without loading host profiles.
+    if (argv.includes("new-session")) args.push("--", powershell, "-NoLogo", "-NoProfile", "-NoExit");
+    return (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, args, { env, cwd: dir, windowsHide: true, timeout: 10000 })).stdout;
+  };
+}
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
   it("delivers a multiline block as one runner submission", async () => {
@@ -21,10 +42,10 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     writeFileSync(script, `import fs from 'node:fs'; import {createRunnerInput} from ${JSON.stringify(runner)};
       createRunnerInput(process.stdin, process.stdout, block => { fs.writeFileSync(${JSON.stringify(output + ".tmp")}, JSON.stringify(block)); fs.renameSync(${JSON.stringify(output + ".tmp")}, ${JSON.stringify(output)}); process.exit(0); });
       fs.writeFileSync(${JSON.stringify(ready)}, 'ready');`);
-    const invoke = async (argv: string[]) => (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { windowsHide: true })).stdout;
+    const invoke = ownedInvoker(dir);
     const adapter = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
     try {
-      expect(await adapter.createSession(session, os.tmpdir())).toEqual({ ok: true });
+      expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
       const q = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
       expect(await adapter.sendShellCommand(session, renderWindowsLaunch([process.execPath, script].map(q).join(" "), {}))).toEqual({ ok: true });
       const waitForFile = async (file: string) => {
@@ -66,7 +87,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     const output = path.join(dir, "result.json");
     const script = path.join(dir, "echo args.js");
     writeFileSync(script, `require('fs').writeFileSync(process.argv[2], JSON.stringify({args: process.argv.slice(3), marker: process.env.OPENRIG_TEST_MARKER}));`);
-    const invoke = async (argv: string[]) => (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { windowsHide: true })).stdout;
+    const invoke = ownedInvoker(dir);
     const adapter = new TmuxAdapter(async () => { throw new Error("POSIX shell execution is forbidden in this probe"); }, undefined, invoke, "psmux");
     try {
       expect(await adapter.createSession(session, dir)).toEqual({ ok: true });

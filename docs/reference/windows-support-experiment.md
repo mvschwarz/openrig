@@ -5,6 +5,18 @@ points and remaining verification, see the [native parity status](windows-native
 
 ## Current review status (2026-10-30)
 
+### Stock psmux native input fixtures are isolated and passing
+
+The existing native terminal fixtures now select a separate home, registry and
+namespace and explicitly start NoProfile PowerShell, rather than relying on a
+random session name in the default server registry. Both cases pass on stock
+psmux 3.4.0: multiline Unicode input is delivered as one synthetic runner
+submission, and literal argv/environment survive staging through a real pane.
+The first case also confirms that a refusing draft-policy callback prevents
+writing; the second keeps a distinct decoy session alive after ending its target.
+Fixture-owned sessions and files are cleaned up. This exercises real console
+input and staging without a provider, live seat, user profile or default server.
+
 ### CONFIG browser shows valid native named paths
 
 The resolver accepted native drive and UNC paths in named-path settings such as
