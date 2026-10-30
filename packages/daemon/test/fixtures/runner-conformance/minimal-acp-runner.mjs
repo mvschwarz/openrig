@@ -145,7 +145,8 @@ async function onPermission(msg) {
   // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
   attention = true;
   if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
-  const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false };
+  // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
+  const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
   live = ask;
   // The agent may have exited, or ended the turn, while the submit was on its way.
   if (agent.exitCode !== null || agent.signalCode !== null) { await withdrawLive("exited"); return; }
@@ -155,6 +156,8 @@ async function onPermission(msg) {
     if (ask.done && !breaks.has("late-deliver")) return;
     const state = read.status === 200 ? read.body?.state : undefined;
     if (state === "pending") continue;
+    // A listed answer means OpenRig closed its ask; anything else leaves it open, to withdraw at the turn's end.
+    if (["answered", "permitted", "refused", "withdrawn", "stale"].includes(state)) ask.open = false;
     if ((state === "answered" || state === "permitted") && ask.offered.includes(read.body.optionId)) {
       select(ask.id, read.body.optionId);
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
@@ -166,23 +169,30 @@ async function onPermission(msg) {
       const code = read.status === 200 ? undefined : read.body?.code;
       const cancelled = (state === "refused" && !breaks.has("permit-on-refused-read")) || state === "withdrawn" || state === "stale"
         || (NOT_CURRENT.has(code) && !breaks.has("permit-on-not-current"));
+      if (HOLDS.has(code) || NOT_CURRENT.has(code)) ask.open = false;
       if (HOLDS.has(code)) { refuse(ask.id); attention = true; }
       else if (cancelled || (!state && breaks.has("cancel-on-read-error"))) { refuse(ask.id); attention = breaks.has("hold-on-cancel"); }
       else { permit(); attention = !allowOf(options); }
     }
     ask.done = true;
-    if (live === ask) live = null;
+    if (live === ask && (!ask.open || breaks.has("forget-permitted-ask"))) live = null;
     return;
   }
 }
 // Only a cancelled turn's request still has an agent waiting on it; after a turn's end or an exit there's no one to answer.
+// Either way no person is still waiting, so nothing is held. An ask the agent already has its answer to (permitted after a
+// read got none) is still withdrawn, so it doesn't stay open for a person.
 function withdrawLive(reason) {
   const ask = live;
-  if (!ask || ask.done) return Promise.resolve();
-  ask.done = true;
+  if (!ask) return Promise.resolve();
   live = null;
-  if (reason === "turn_cancelled") refuse(ask.id);
-  if (breaks.has("no-withdraw")) return Promise.resolve();
+  if (!ask.done) {
+    ask.done = true;
+    if (reason === "turn_cancelled") refuse(ask.id);
+    if (!breaks.has("hold-after-withdraw")) attention = false;
+  }
+  if (!ask.open || breaks.has("no-withdraw")) return Promise.resolve();
+  ask.open = false;
   return api("POST", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}/withdraw`, { reason });
 }
 
