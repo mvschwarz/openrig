@@ -33,9 +33,9 @@ it("confines the actual guest HTTP port to grant-bound hooks", async () => {
   const grant=issue(); expect((await post(grant.token)).status).toBe(200);
   expect((await post(grant.token,{sessionName:"other@guest-fixture"})).status).toBe(403);
   expect((await post("install-token")).status).toBe(401);
-  for (const path of ["/api/config","/api/queue","/api/activity/events","/api/activity/parked","/api/activity/pi-usage","/healthz"]) {
-    const response=await fetch(origin+path,{headers:{authorization:`Bearer ${grant.token}`}});
-    expect(response.status,path).toBe(404);
+  for (const [method,path] of [["GET","/api/config"],["POST","/api/queue/create"],["GET","/api/activity/events"],["GET","/api/activity/parked"],["POST","/api/activity/pi-usage"],["POST","/api/activity/pi-usage-charges"],["GET","/healthz"]]) {
+    const response=await fetch(origin+path,{method,headers:{authorization:`Bearer ${grant.token}`,"content-type":"application/json"},...(method === "POST" ? {body:"{}"} : {})});
+    expect(response.status,`${method} ${path}`).toBe(404);
   }
   sessions.registerSession(node.id,seat,"handover");
   expect((await post(grant.token)).status).toBe(409);
