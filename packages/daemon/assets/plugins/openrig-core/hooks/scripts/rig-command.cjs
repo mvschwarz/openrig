@@ -8,12 +8,20 @@ const { createHash } = require("node:crypto");
 // the launching daemon. Recognize that exact generated form, never execute it.
 function pairedSeatRig(candidate) {
   const text = fs.readFileSync(candidate, "utf8");
-  const words = /^@echo off\r?\n"([^"%\r\n]+)" "([^"%\r\n]+)" %\*\r?\n$/.exec(text);
+  const modern = /^@echo off\r?\nsetlocal DisableDelayedExpansion\r?\n"([^"\r\n]+)" "([^"\r\n]+)" %\*\r?\n$/.exec(text);
+  const words = modern || /^@echo off\r?\n"([^"%\r\n]+)" "([^"%\r\n]+)" %\*\r?\n$/.exec(text);
   if (!words) return null;
-  const interpreter = fs.realpathSync(words[1]);
-  const cli = fs.realpathSync(words[2]);
+  const literalPath = value => {
+    if (!modern) return value;
+    if (value.replaceAll("%%", "").includes("%")) throw new Error("Unrecognized Windows seat rig path escape");
+    return value.replaceAll("%%", "%");
+  };
+  const interpreter = fs.realpathSync(literalPath(words[1]));
+  const cli = fs.realpathSync(literalPath(words[2]));
   const directory = path.dirname(candidate);
-  const digest = createHash("sha256").update(cli).digest("hex");
+  const identity = createHash("sha256").update(cli);
+  if (modern) identity.update("\0windows-seat-bin-v2");
+  const digest = identity.digest("hex");
   if (path.relative(interpreter, fs.realpathSync(process.execPath)) !== ""
     || path.basename(directory) !== digest
     || path.basename(path.dirname(directory)) !== "seat-bin"

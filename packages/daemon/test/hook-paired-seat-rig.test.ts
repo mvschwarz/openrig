@@ -14,7 +14,7 @@ let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
 it.runIf(process.platform === "win32")("dispatches the actual generated seat rig shim through the hook's paired CLI resolver", async () => {
-  root = mkdtempSync(path.join(tmpdir(), "openrig-paired-hook O'Brien 用户-"));
+  root = mkdtempSync(path.join(tmpdir(), "openrig-paired-hook O'Brien 用户 %PATH% !-"));
   const pkg = path.join(root, "cli"), cli = path.join(pkg, "dist", "bin-wrapper.cjs"), home = path.join(root, "home");
   mkdirSync(path.dirname(cli), { recursive: true }); mkdirSync(home);
   const manifest = path.join(pkg, "package.json");
@@ -39,6 +39,9 @@ it.runIf(process.platform === "win32")("dispatches the actual generated seat rig
   expect(hook.status, hook.stderr).toBe(0);
   expect(JSON.parse(hook.stdout).hookSpecificOutput.additionalContext).toContain("# Owned paired context 用户\n");
   const shim = path.join(bin, "rig.cmd"), originalShim = readFileSync(shim, "utf8");
+  writeFileSync(shim, originalShim.replaceAll("%%", "%"));
+  expect(spawnRig(args, { env, cwd: root, encoding: "utf8" }).error).toBeDefined();
+  writeFileSync(shim, originalShim);
   const wrongBin = path.join(seats, "wrong-digest"); mkdirSync(wrongBin);
   writeFileSync(path.join(wrongBin, "rig.cmd"), originalShim);
   expect(spawnRig(args, { env: { ...env, PATH: wrongBin }, cwd: root, encoding: "utf8" }).error).toBeDefined();

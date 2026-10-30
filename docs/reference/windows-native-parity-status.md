@@ -973,6 +973,25 @@ unrelated immediate error cannot count as deadline evidence. A default-delay
 native Claude fixture still passes after extending the test helper. No product
 code changed in this follow-up; daemon TypeScript passes.
 
+The refocus follow-up reproduced a production regression in the paired CLI hook
+resolver. Windows seat launch now generates the v2 `rig.cmd` with
+`setlocal DisableDelayedExpansion`, escaped percent paths and a v2-specific
+directory digest; the hook still recognized only the earlier shim/digest and
+therefore could not invoke that seat's paired CLI. The resolver now accepts both
+exact generated forms, decodes only doubled literal percents for v2, and checks
+the matching digest, Node identity and declared OpenRig package entry. It never
+executes the batch text; malformed escapes, extra commands, wrong digests and
+unrelated/mismatched package entries remain refused.
+
+Twenty-eight related native tests pass, including the actual v2 generator and
+hook dispatch under an owned path containing Unicode, apostrophe, `%PATH%` and
+`!`, exact argv/empty-argument readback and refocus content retrieval. The older
+role fixture now uses a recognized owned npm CLI and a native Python stand-in
+with platform PATH separators, making its role/unknown/failure cases executable
+on Windows. These stand-ins do not prove real Python traces, provider delivery
+or current seat state. Daemon TypeScript passes. Windows CI includes this group
+but has not run; no installed plugin is refreshed and no live seat is touched.
+
 Agent resolution, package resolution and install planning pass 51/51 together
 on native Windows. Seventeen earlier resolver failures were fixture-only native
 path lookup/absolute-path expectations; their mock keys now resolve paths before
