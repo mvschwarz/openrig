@@ -32,7 +32,8 @@ const OPTIONS = [
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean } = {}) {
+function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: boolean; people?: string[] } = {}) {
+  const people = options.people ? { ok: true as const, entities: options.people.map(person) } : registry;
   const db = createDb();
   migrate(db, ALL_MIGRATIONS);
   cleanups.push(() => db.close());
@@ -50,13 +51,13 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   occupy(runner.id, SEAT);
   occupy(other.id, "dev-other@perm-rig");
   const nudges: string[] = [];
-  const queueRepo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => registry,
+  const queueRepo = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => people,
     transport: { send: async (session) => { nudges.push(session); return { ok: true, verified: true, sent: true }; } } });
   const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo, actionLog: new MissionControlActionLog(db) });
   const store = new AgentActivityStore({ db, eventBus: bus,
     resolveOccupantGeneration: (id) => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
-  // The answer owner is a new seat setting; set it directly so each test reads one path.
+  // The seat's optional answer override; set it directly so each test reads one path. With none, the default person answers.
   const owner = options.owner === undefined ? PERSON : options.owner;
   if (owner) {
     try { db.prepare("UPDATE nodes SET permissions_to = ? WHERE id = ?").run(owner, runner.id); } catch { /* no column: no owner */ }
@@ -104,10 +105,26 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
 }
 
 describe("a runner seat's answered permission path", () => {
-  it("with no one chosen, reads route_unsupported and asks no one", async () => {
-    const f = fixture({ owner: null });
+  it("with no override, asks the default person through the ordinary ask", async () => {
+    const f = fixture({ owner: null, people: ["mike"] });
+    const submitted = await f.submit();
+    expect(submitted).toMatchObject({ status: 200, body: { ok: true, created: true } });
+    expect(f.queueRepo.getById(String(submitted.body.askId))).toMatchObject({ state: "pending", sourceSession: SEAT, destinationSession: PERSON });
+    expect(f.waitsOnPerson()).toBe(true);
+    expect(await f.answer(String(submitted.body.askId), { optionId: "reject" })).toMatchObject({ status: 200 });
+    expect(await f.read(String(submitted.body.askId))).toMatchObject({ body: { state: "answered", optionId: "reject" } });
+  });
+
+  it("with no override and no one to ask, refuses and asks no one", async () => {
+    const f = fixture({ owner: null, people: [] });
     expect(await f.submit()).toMatchObject({ status: 409, body: { code: "route_unsupported" } });
-    expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.destinationSession === PERSON)).toHaveLength(0);
+    expect(f.queueRepo.list({ limit: 100 }).filter((row) => row.tags?.includes("runner-permission"))).toHaveLength(0);
+  });
+
+  it("asks the seat's override when one is set, rather than the default person", async () => {
+    const f = fixture({ owner: OTHER_PERSON, people: ["mike", "dana"] });
+    const submitted = await f.submit();
+    expect(f.queueRepo.getById(String(submitted.body.askId))).toMatchObject({ destinationSession: OTHER_PERSON });
   });
 
   it("asks the chosen person with the agent's offered options, allow_always hidden, and the seat reads needs input", async () => {
@@ -172,15 +189,22 @@ describe("a runner seat's answered permission path", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 
-  it("never takes another person's click, the primary user's or typed words as the answer", async () => {
+  it("never takes another person's click or typed words as the answer", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
     expect((await f.answer(askId, { optionId: "allow" }, OTHER_PERSON)).status).not.toBe(200);
-    await expect(f.contract.act({ verb: "answer", qitemId: askId, actorSession: OTHER_PERSON, questionId: "permission", optionId: "allow",
-      authority: "primary-user" } as never)).rejects.toThrow();
     expect(await f.read(askId)).toMatchObject({ body: { state: "pending" } });
     await f.answer(askId, { decision: "yes go ahead" });
     expect(await f.read(askId)).toMatchObject({ body: { state: "refused", reason: "typed_reply" } });
+  });
+
+  it("takes the primary user's ordinary answer from the terminal, as on any ask", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "answer", qitemId: askId, actorSession: OTHER_PERSON, questionId: "permission", optionId: "allow",
+      authority: "primary-user" } as never);
+    expect(await f.read(askId)).toMatchObject({ body: { state: "answered", optionId: "allow" } });
+    expect(f.rowsToSeat()).toBe(0);
   });
 
   it("withdraws on turn end, and a later answer isn't sent", async () => {
