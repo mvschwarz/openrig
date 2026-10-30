@@ -24,7 +24,10 @@ const POST_TIMEOUT_MS = 2_000;
 const WAIT_SECONDS = 25;
 const READ_TRIES = 3; // reads in a row that get no answer before the runner permits
 // Refusals that say the request certainly isn't the seat's current occupant's live one: cancel it, and hold nothing.
-const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale", "activity_grant_revoked"];
+const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale"];
+// A read's states that end the request, answered cancelled (an `answered` that reaches there names an option dsh didn't
+// offer). Any other state, like an unlisted status, permits.
+const ENDED = ["refused", "withdrawn", "stale", "answered"];
 const CANCELLED = { outcome: { outcome: "cancelled" } };
 const ACP_RESOURCE_NOT_FOUND = -32002;
 
@@ -248,7 +251,7 @@ async function main() {
   const child = spawn(env.OPENRIG_DSH || "dsh", ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
   const peer = new AgentPeer(child, (line) => say(`[dsh] ${line}`));
-  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, queue: [], asks: new Set(), lastActive: 0 };
+  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0 };
   const inflight = new Set();
   const track = (promise) => { inflight.add(promise); promise.finally(() => inflight.delete(promise)); return promise; };
   let agentExited = false;
@@ -306,6 +309,7 @@ async function main() {
 
   const refuse = (why) => {
     state.holding = true;
+    state.refused = true; // the seat's own refusal holds needs input until the next prompt
     say(`[permission] refused: ${why}. The seat reads needs input until the next prompt.`);
     activity.post("Notification", "permission_prompt", { turnId: String(state.turn) });
     return CANCELLED;
@@ -356,12 +360,16 @@ async function main() {
     state.holding = true; // OpenRig recorded the seat's permission prompt when it opened the ask
     say(`[permission] OpenRig asked a person (${askId}); waiting for their answer`);
     return new Promise((resolve) => {
-      let done = false;
+      let done = false; // the agent has its answer
+      let ended = false; // OpenRig was told the request is over
       const ask = { end: (reason) => {
-        if (done) return;
-        done = true;
+        if (ended) return;
+        ended = true;
         state.asks.delete(ask);
         withdraw(askId, reason);
+        if (done) return;
+        done = true;
+        if (!state.refused) state.holding = false; // the turn ended the person's ask: no one is still being asked
         resolve(CANCELLED);
       } };
       state.asks.add(ask);
@@ -373,17 +381,19 @@ async function main() {
           if (read.status === 0 && ++unanswered < READ_TRIES) { await sleep(2_000); continue; }
           if (read.status === 200 && read.body?.state === "pending") { unanswered = 0; continue; }
           done = true;
-          state.asks.delete(ask);
           const answer = read.body ?? {};
           // A person's option, or OpenRig's permit when they closed it without one.
           if ((answer.state === "answered" || answer.state === "permitted") && offered(answer.optionId) && live()) {
+            state.asks.delete(ask);
             state.holding = false;
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
-          } else if (live() && read.status !== 200 && !NOT_LIVE.includes(answer.code)) {
-            // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked.
+          } else if (live() && (read.status === 200 ? !ENDED.includes(answer.state) : !NOT_LIVE.includes(answer.code))) {
+            // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked. The ask stays
+            // tracked, so the turn's end still withdraws it.
             resolve(permit(read.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't answer (${answer.code ?? read.status})`));
           } else {
+            state.asks.delete(ask);
             state.holding = false; // a person said no, or the request is over: no one is still waiting
             say(`[permission] not answered (${answer.reason ?? answer.state ?? answer.code ?? read.status}); answered cancelled`);
             resolve(CANCELLED);
@@ -416,6 +426,7 @@ async function main() {
     state.running = true;
     state.turn += 1;
     state.holding = false;
+    state.refused = false;
     state.cancelRequestedAt = null;
     state.lastActive = 0;
     const turnId = String(state.turn);
