@@ -23,7 +23,8 @@ const ACTIVE_EVERY_MS = 15_000;
 const POST_TIMEOUT_MS = 2_000;
 const WAIT_SECONDS = 25;
 const READ_TRIES = 3; // reads in a row that get no answer before the runner permits
-const GRANT_REFUSALS = [401, 403, 409]; // the seat grant's own refusals: this occupant's request is over
+// Refusals that say the request certainly isn't the seat's current occupant's live one: cancel it, and hold nothing.
+const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_grant_stale", "activity_grant_revoked"];
 const CANCELLED = { outcome: { outcome: "cancelled" } };
 const ACP_RESOURCE_NOT_FOUND = -32002;
 
@@ -312,7 +313,8 @@ async function main() {
 
   // The answered path: OpenRig opens one ask to the default person (or the seat's override, `rig seat
   // set-permissions-to`), and the runner reads the answer back for this same live request. With no one to ask, OpenRig
-  // permits at once, and so does the runner when OpenRig can't answer. Only the seat's opt-in (`--deny`) refuses.
+  // permits at once, and so does the runner when OpenRig can't answer. Only the seat's opt-in (`--deny`) refuses; a
+  // request OpenRig says isn't the current occupant's, or that a person said no to with no reject option, is cancelled.
   const askOwner = async (requestId, toolCall, options) => {
     const turn = state.turn;
     const live = () => state.running && state.turn === turn && !state.cancelRequestedAt && !agentExited;
@@ -344,6 +346,10 @@ async function main() {
     };
     if (!askId) {
       if (submitted.body?.code === "denied_by_seat") return refuse("the seat's operator chose to refuse its permission requests");
+      if (NOT_LIVE.includes(submitted.body?.code)) {
+        say(`[permission] cancelled: OpenRig says this isn't the seat's current request (${submitted.body.code})`);
+        return CANCELLED;
+      }
       return permit(submitted.status === 404 ? "this OpenRig has no answered path"
         : submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't ask anyone (${submitted.body?.code ?? submitted.status})`);
     }
@@ -374,11 +380,12 @@ async function main() {
             state.holding = false;
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
-          } else if (live() && read.status !== 200 && !GRANT_REFUSALS.includes(read.status)) {
+          } else if (live() && read.status !== 200 && !NOT_LIVE.includes(answer.code)) {
             // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked.
             resolve(permit(read.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't answer (${answer.code ?? read.status})`));
           } else {
-            say(`[permission] not answered (${answer.state ?? answer.code ?? read.status}); refused, and the seat reads needs input until the next prompt`);
+            state.holding = false; // a person said no, or the request is over: no one is still waiting
+            say(`[permission] not answered (${answer.reason ?? answer.state ?? answer.code ?? read.status}); answered cancelled`);
             resolve(CANCELLED);
           }
         }

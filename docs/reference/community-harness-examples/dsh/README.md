@@ -48,6 +48,9 @@ without this path, an OpenRig it can't reach, or a refusal other than `--deny`.
 --deny`, or when dsh offered no allow option. A refused request is shown in the pane, and the seat reads needs input
 until the next prompt.
 
+**The runner answers cancelled, holding nothing,** when the person says no and dsh offered no reject option, or when
+OpenRig says the request isn't the seat's current occupant's (for example, after a relaunch).
+
 ## Before you declare resume
 
 The preset leaves `resume` out. The runner reopens a conversation by the method dsh advertises: `session/resume`, or

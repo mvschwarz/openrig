@@ -298,7 +298,8 @@ checked only against a stand-in agent.
 - **Permissions:** it sends each request to OpenRig, which asks the default person or the seat's override.
   - **When no one can be asked, or OpenRig can't answer,** it permits with dsh's own allow option (`allow_once`, else
     `allow_always`), which is OpenRig's default. `allow_always` creates a standing grant in dsh.
-  - **It refuses and holds needs input** only after `--deny`.
+  - **It refuses and holds needs input** only after `--deny`. A person's no when dsh offered no reject option, or a
+    request OpenRig says isn't the current occupant's, is answered cancelled.
 - **Each seat gets its own dsh home,** with dsh's session-log and plugin-list uploads to DeepSeek turned off. Give that
   home credentials, or put a provider key in the seat's environment.
 - **Resume isn't declared.** The runner reopens a conversation by the method dsh advertises, and reports one missing only
