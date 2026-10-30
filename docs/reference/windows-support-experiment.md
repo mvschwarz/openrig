@@ -16,6 +16,7 @@ not activate the running daemon or seats.
 | Seat skills, plugins and workspace catalog | Native path comparisons, record/replay checks, plugin env readback and catalog registration fixtures | Remaining consumers and integration paths still need review |
 | Compaction and restore packets | Native packet discovery, root/grant/prompt alignment; related enforcer checks 63/63 | Real provider compaction/restore acceptance remains incomplete |
 | MCP and local IPC | Actual IPv6 tool call, stdio EOF, separately asserted native forced termination and owned named-pipe drain checks | These checks do not establish whole-runtime acceptance |
+| Native package assembly | Source-stable actual build at 3305fd151, packaged CLI version and actual assembled-plugin version gate | Artifact is dirty=true; clean-head package/install and subsequent-source assembly remain separate |
 | CLI/TUI regression | Isolated check pinned to `a2d903d9b2097e1da2d31b7244d9a79a8d1a7741`: 7,202 tests, 7,031 passed, 94 failed, 77 pending; source stable | TUI: 1,183 passed, zero failed, 21 pending. CLI: 5,848 passed, 94 failed, 56 pending. This older frozen source does not validate subsequent changes |
 | Native platform acceptance | Windows Terminal paths and selected native OS fixtures have individual receipts | Full visual focus, suspend/reboot, all-provider and installed-package acceptance remain incomplete |
 | Runtime-specific upstream limits | Existing Rex refusal and Linux-qualified Herdr behavior are retained | Do not erase those limits or describe an optional patched psmux protocol as stock 3.4.0 support |
@@ -272,6 +273,30 @@ checks pass 11/11 and CLI typecheck passes, with queue bytes unchanged.
 This remains declared proof-note classification, not artifact verification,
 completion or delivery evidence. No heartbeat, message, timer or real queue
 was started or changed.
+
+## Actual native assembly and remaining linked gates (2026-10-30)
+
+The actual package builder completed on Windows at source
+3305fd1511040317bbb0019fd9065b47ea9c5551, from 00:11:40 to 00:12:32 UTC on
+2026-10-30. Head and tracked-diff hash matched before and after. Daemon, UI,
+TUI and CLI compiled and assembled. The artifact correctly reports dirty=true
+with the retained untracked diagnostic; that material was neither read nor
+moved. The packaged wrapper reports 0.7.1 (3305fd15, dirty), and the actual
+assembled openrig-core 0.1.29 passes the released-plugin version gate.
+
+The accompanying packing/content checks report 14 passed and three failed;
+all three failures occur creating host-denied file symlinks and remain
+unverified. This is actual source assembly and dry-run file-selection evidence,
+not clean-head installation, npm publication or runtime activation.
+
+Further entry review found the same linked-path silent-success defect in the
+packaged-plugin version checker, gate verdict consumer and scenario executor.
+Owned junction fixtures reproduce all three returning zero without handling
+invalid input. Real-path entry identity fixes them while imports stay inert.
+Four related script files pass 21/21. The fixtures use a local empty Git repo,
+missing verdict and invalid scenario operation; no real gate is consumed and
+no Docker invocation is made. The assembly above predates these source edits
+and is not presented as their package acceptance.
 
 ## Linked native build and guard entrypoints (2026-10-30)
 

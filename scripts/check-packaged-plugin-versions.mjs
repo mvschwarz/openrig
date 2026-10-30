@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync, renameSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,7 +64,10 @@ export function checkPackagedPluginVersions(packageDir, baseline = lastRelease) 
 // node scripts/check-packaged-plugin-versions.mjs release.tgz --snapshot --out scripts/fixtures/packaged-plugins-last-release.json
 // Check an exact candidate archive without building or executing its contents:
 // node scripts/check-packaged-plugin-versions.mjs candidate.tgz
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+catch { /* Imported without an existing entry file. */ }
+if (invokedDirectly) {
   const [archive, option, outFlag, destination, ...extra] = process.argv.slice(2);
   assert.ok(archive && (!option || option === '--snapshot') && (!outFlag || (option === '--snapshot' && outFlag === '--out' && destination)) && !extra.length,
     'usage: check-packaged-plugin-versions.mjs archive.tgz [--snapshot [--out file]]');

@@ -54,3 +54,31 @@ test('first-run reference guard actually reports missing fixture surfaces throug
     }
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
+
+for (const [script, args, status, diagnostic] of [
+  ['check-packaged-plugin-versions.mjs', [], 1, /usage: check-packaged-plugin-versions/],
+  ['scenario-executor.mjs', ['owned-invalid-operation'], 2, /Expected platform, settle/],
+  ['gate-lane-consume.mjs', ['missing-owned-verdict.json'], 1, /verdict is missing/],
+]) test(`${script} refuses invalid fixture input through linked roots instead of silently succeeding`, async () => {
+  const f = await fixture();
+  try {
+    await copyFile(resolve('scripts', script), join(f.source, 'scripts', script));
+    if (script === 'check-packaged-plugin-versions.mjs') {
+      await mkdir(join(f.source, 'scripts/fixtures'));
+      await copyFile(resolve('scripts/fixtures/packaged-plugins-last-release.json'), join(f.source, 'scripts/fixtures/packaged-plugins-last-release.json'));
+    }
+    if (script === 'gate-lane-consume.mjs') {
+      for (const argv of [['init', '-q'], ['-c', 'user.name=Owned Fixture', '-c', 'user.email=fixture@openrig.invalid', 'commit', '--allow-empty', '-qm', 'owned fixture']]) {
+        const git = spawnSync('git', argv, { cwd: f.source, encoding: 'utf8', windowsHide: true });
+        assert.equal(git.status, 0, git.stderr);
+      }
+    }
+    for (const flags of [[], ['--preserve-symlinks-main']]) {
+      const entry = join(f.alias, 'scripts', script);
+      const run = spawnSync(process.execPath, [...flags, entry, ...args], { cwd: f.source, encoding: 'utf8', windowsHide: true, timeout: 10000 });
+      assert.equal(run.status, status, run.stderr); assert.match(run.stderr, diagnostic);
+      const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `process.argv.length=1;await import(${JSON.stringify(pathToFileURL(entry).href)});`], { encoding: 'utf8', windowsHide: true });
+      assert.equal(imported.status, 0, imported.stderr); assert.equal(imported.stdout + imported.stderr, '');
+    }
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
