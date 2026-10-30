@@ -61,7 +61,7 @@ agent.stdout.on("data", (chunk) => {
     if (msg.id === undefined) continue;
     if (msg.method === "session/request_permission") {
       answer(msg.id, { result: { outcome: breaks.has("allow-permission") ? { outcome: "selected", optionId: msg.params.options[0].optionId } : { outcome: "cancelled" } } });
-      show(`permission refused: ${msg.params.toolCall?.title}`);
+      if (!breaks.has("silent-permission")) show(`permission refused: ${msg.params.toolCall?.title}`);
       attention = true;
       void post("Notification", "permission_prompt");
     } else if (!breaks.has("ignore-unknown")) {

@@ -10,8 +10,8 @@ const RUNNER = resolve(__dirname, "fixtures/runner-conformance/minimal-acp-runne
 const hasTmux = spawnSync("tmux", ["-V"]).status === 0;
 
 type Check = { name: string; ok: boolean; detail?: string };
-type Result = { id: string; status: "pass" | "fail" | "skip"; checks: Check[]; reason?: string };
-type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number } };
+type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?: boolean; checks: Check[]; reason?: string };
+type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
 async function check(args: string[], runnerFlags = ""): Promise<{ code: number; report: Report }> {
   const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
@@ -31,9 +31,22 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
-    expect(report.summary).toEqual({ pass: 11, fail: 0, skip: 0 });
+    expect(report.summary).toEqual({ pass: 11, fail: 0, skip: 0, advisory: 1 });
+    expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
+
+  // Section 9 marks the shutdown duty as proposed, and a runner may list what keeps running in its limits. So the check
+  // reports it on its own, outside pass and fail and the exit status.
+  it("reports an agent left running after the pane closes as an advisory result that doesn't fail the run", async () => {
+    const { code, report } = await check(["--cases", "7b,7c"], " --break leave-agent");
+    const shutdown = report.results.find((r) => r.id === "7c")!;
+    expect(shutdown).toMatchObject({ status: "advisory", met: false });
+    expect(shutdown.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("closing the pane ends the agent process"));
+    expect(report.results.find((r) => r.id === "7b")!.status).toBe("pass");
+    expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
+    expect(code).toBe(0);
+  }, 90_000);
 
   it("skips resume and first input when the preset declares neither, and says why", async () => {
     const { code, report } = await check(["--cases", "6,9"]);
@@ -54,12 +67,12 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["no-sequence", "3", "every post carries the contract's fields"],
     ["allow-permission", "4", "the answer is a refusal, never an allow option"],
     ["stop-while-attention", "4", "no idle Stop or beat while holding that attention"],
+    ["silent-permission", "4", "what was asked is shown in the pane"],
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
     ["idle-on-exit", "7", "no idle Stop after the exit"],
-    ["no-error-post", "7b", "error: a failed session/prompt posts Notification/runtime_error"],
-    ["leave-agent", "7b", "shutdown (proposed, section 9): closing the pane ends the agent process"],
+    ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],
   ])("catches %s in case %s", async (broken, id, name) => {
