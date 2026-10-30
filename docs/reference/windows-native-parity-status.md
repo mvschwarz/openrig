@@ -1,6 +1,7 @@
 # Native Windows parity: implementation and evidence
 
-Status at source commit `c778b2a52` (2026-10-30). This is an implementation
+Initial map at source commit `c778b2a52` (2026-10-30), with later scoped
+updates below through source `8f639d315`. This is an implementation
 coverage map for Draft #1309, not a declaration of complete Windows support.
 The [experiment record](windows-support-experiment.md) retains individual
 reproductions, repairs, results and limitations. Tests linked below are executable
@@ -49,6 +50,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Bundle login-file diagnostics | [CLI](../../packages/cli/test/bundle-login-files.test.ts) and [daemon](../../packages/daemon/test/bundle-login-files.test.ts) pass 45 combined cases using synthetic login fixtures and real owned archives. Native local-path and archive-path diagnostics are both checked, including JSON escaping, explicit opt-in notices and absence of fixture content in diagnostics. | Actual operator credentials are never used; this is not authorization to publish login files or a full bundle-suite result. |
 | Local auth-file assessment | [Auth ops](../../packages/cli/test/codex-auth-ops.test.ts) passes six cases with owned synthetic files: private-file creation and assessment, refusal after a real extra read ACE, malformed JSON and result redaction. The fixture import was corrected and its unsafe-file setup now changes only the DACL through native icacls instead of requiring Set-Acl security privileges. | Login state is injected; actual provider sign-in, existing user credentials and profile switching are not exercised. |
 | External dependency installation | Windows missing CLI requirements `git` and `pwsh` map to explicit WinGet catalog IDs and literal argv, through the existing reviewed-action workflow. Planner/executor/native probe suites pass 38 cases. Manifest hints remain display-only. | Actual WinGet installation, agreement state and package availability are unverified. Unmapped tools and system packages remain manual-only; no elevation, agreement auto-acceptance or reboot is requested. |
+| Compose services | [Native Compose checks](../../packages/daemon/test/windows-compose-services.test.ts) pass five cases: literal Docker argv through an owned Node receiver, HTTP status/redirect/deadline handling, numeric TCP probes and Windows services-file name parsing. | No Docker daemon, containers, actual Compose installation or checkpoint import/export is exercised. |
 
 ## Completion boundary
 
@@ -552,3 +554,19 @@ closing a predecessor. The shutdown regressions also cover bounded drain phases,
 late/repeated shutdown and receipt-write failures. These checks operate only on
 test-owned homes, servers and processes; they do not stop or restart the deployed
 daemon or diagnose a historical abnormal exit.
+
+At source `8f639d315`, ACP native command selection, actual owned process-start
+identity and identity-bound cancellation pass 5/5. A current combined follow-up
+run passes 41/41 across native Compose, idle subset restore, Windows local-owner
+guard/client routing and the TUI local-reader subprocess. These scoped checks do
+not resolve the previously unverified ACP companion cleanup or live-provider,
+installed-TUI and deployment acceptance boundaries.
+
+Reconciliation against the original 223-row finite inventory now finds eight
+changed source hashes, 214 unchanged and one private follow-up withheld without
+opening its source. The changed rows are local-daemon-owner, tmux, external
+install planner, restore orchestrator, successor launcher, startup, local reading
+and community runtime adapter. This supersedes the earlier five-row drift count;
+unchanged hashes do not refresh historical acceptance, and new files outside that
+inventory are not counted as coverage. Current source and report digests are
+retained locally; overlapping scoped test counts are not a total suite result.
