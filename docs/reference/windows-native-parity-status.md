@@ -242,3 +242,15 @@ seat-list order. The native terminal suites pass 19/19; desktop launch remains
 inert, so this is not visible-window or live source-process acceptance. The old
 macOS/POSIX tmux fixtures remain separate from this native coverage.
 
+An updated exact-name reconciliation of the original 94 CLI/TUI failures finds
+46 later scoped passes and 48 without a matching receipt. Renamed tests and
+replacement native scenarios are deliberately not counted as exact matches;
+these historical reports do not establish a current whole-workspace pass.
+
+Context-add directory-link rejection and watch-reference command checks pass
+33/33 together. Windows uses directory junctions for the linked namespace and
+dangling directory leaf; POSIX retains directory symlinks. No outside target is
+written, and the dangling link remains intact. This does not cover file symlinks
+or waive their privilege requirement. The documentation parser now accepts CRLF
+as well as LF, so fenced commands are actually checked on Windows checkouts.
+
