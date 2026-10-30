@@ -36,7 +36,7 @@ export function vendoredCorePluginDir(pluginsDir: string = getDefaultOpenRigPath
 function canonical(path: string): string {
   const absolute = resolve(path);
   let resolved = absolute;
-  try { resolved = realpathSync(absolute); } catch { /* Compare the absolute spelling when not yet present. */ }
+  try { resolved = process.platform === "win32" ? realpathSync.native(absolute) : realpathSync(absolute); } catch { /* Compare the absolute spelling when not yet present. */ }
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 

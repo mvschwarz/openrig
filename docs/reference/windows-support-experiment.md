@@ -2,6 +2,24 @@
 
 ## Current review status (2026-10-30)
 
+### Selected core-plugin identity on Windows
+
+Core-plugin selection now uses native Windows realpath expansion before comparing
+directory identities. An owned plugin fixture reproduced a false absence when
+the selected path used its long spelling and the vendored root used its DOS short
+spelling. The fix covers both Claude and Codex selection and avoids appending the
+same directory twice to the Claude plugin list, while a different directory stays
+distinct. The focused native alias and path-list files pass 3/3 checks; daemon
+type checking passes. No installed plugins, provider homes, or real database were
+read or changed by the new fixture.
+
+The broader core-plugin-load file is not green: the three-file run has 29 passes,
+10 failures and 9 skips. Failures retain Windows-incompatible colon/relative-path
+and mock-path assumptions, unavailable directory-symlink creation, two restore
+warning serialization assertions, and a hook boundary-block byte comparison.
+Those results remain open; the focused selection repair does not establish live
+provider hook loading or complete fresh/restore/compaction acceptance.
+
 ### Windows TUI control identity through directory aliases
 
 Windows TUI control endpoints now hash the physical parent directory identity,
