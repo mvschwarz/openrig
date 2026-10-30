@@ -96,10 +96,14 @@ export async function withGrantsLock<T>(file: string, update: () => T, waitMs = 
 
 function writeGrants(file: string, grants: McpGrant[]): void {
   fs.mkdirSync(nodePath.dirname(file), { recursive: true });
-  const temp = `${file}.${randomUUID()}.tmp`;
-  createPrivateTextFile(temp, `${JSON.stringify({ principals: grants }, null, 2)}\n`);
-  fs.renameSync(temp, file);
-  fs.chmodSync(file, 0o600);
+  const temp = nodePath.join(nodePath.dirname(file), `.openrig-grants-${randomUUID()}.tmp`);
+  try {
+    createPrivateTextFile(temp, `${JSON.stringify({ principals: grants }, null, 2)}\n`);
+    fs.renameSync(temp, file);
+    fs.chmodSync(file, 0o600);
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");

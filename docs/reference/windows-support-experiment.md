@@ -2,6 +2,18 @@
 
 ## Current review status (2026-10-30)
 
+### MCP grant publication staging path
+
+Grant-file updates now use a short UUID sibling staging name instead of appending
+the UUID to the complete destination filename. An owned fixture with a 245-character
+basename reproduced Windows private-file creation failing because the old staging
+path was too long. With the change, adding and revoking a synthetic grant succeeds,
+the final grant list reads back empty, and no staging or lock file remains. Failed
+publication also removes its exact staging file in a finally block. The private
+file creation and final permission handling remain in place. This is a file-update
+check only; no MCP listener, existing credentials, external grant service, or live
+authorization request was used.
+
 ### Direct daemon and log entry aliases
 
 The active daemon and CLI log-tail entry guards now compare physical paths on
