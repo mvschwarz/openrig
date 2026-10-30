@@ -2,6 +2,18 @@
 
 ## Current review status (2026-10-30)
 
+### Long native transcript names survive rotation
+
+A valid 250-character transcript filename could be created but not rotated on
+Windows: appending `.tmp.<pid>` exceeded the filesystem component limit and the
+best-effort tick left the old bytes in place. Native rotation now stages through
+a short unique filename in the same directory, exclusively creates that file,
+and removes its owned staging file when replacement fails. POSIX staging names
+remain unchanged. The owned native reproduction failed before this repair;
+afterward 25 rotation/boundary checks pass, including long-name replacement,
+retained session boundaries and freshness after a refused replacement. Daemon
+TypeScript checking passes. No real session, transcript or capture timer was used.
+
 ### Community npm entries relative to the seat directory
 
 Native community launch now passes the binding's cwd through both ordinary and
