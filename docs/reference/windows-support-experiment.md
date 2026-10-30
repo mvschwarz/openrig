@@ -2,6 +2,23 @@
 
 ## Current review status (2026-10-30)
 
+### Native Slack state replacement filename limit
+
+The durable dead-letter rewrite and channel/thread coverage checkpoints appended
+`.tmp` to their destination filename. An owned native fixture with a valid
+253-character filename reproduced a failed replacement because the staging
+component exceeded the Windows filename limit. All three writers now use a
+short UUID sibling on Windows, retaining the existing private-file creation and
+metadata-preserving replacement helpers. POSIX staging remains unchanged.
+
+The owned fixture covers dead-letter rewrite/empty rewrite and fresh plus repeated
+channel/thread checkpoint saves, new-store readback, and no remaining staging
+files. It failed before the repair and passes afterward. Together with the full
+state-store, channel/thread recovery and concurrent-retry test files, 59 tests
+pass; daemon TypeScript checking passes. No real Slack connection, delivery,
+credential, queue, or running daemon was accessed. Full native integration and
+the broader parity audit remain open.
+
 ### Front-door native commands-directory casing
 
 The paired-TUI path resolver now recognizes the Windows `commands` directory
