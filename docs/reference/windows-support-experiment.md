@@ -2,6 +2,20 @@
 
 ## Current review status (2026-10-30)
 
+### Resume-file path review and diagnostics (2026-10-30)
+
+The resume-token validator's native absolute-path diagnostic now names drive
+roots and UNC paths; its native character diagnostic no longer shows the POSIX
+character list for an ordinary Windows path. Accepted inputs, refusals and token
+redaction are unchanged.
+
+The validator, owned session-file alias fixture and session-fingerprinter files
+pass 61 checks. Coverage includes native path format, physical same-file aliases,
+refusal of a different resume file and a parent-file alias used as a fork child,
+and avoiding an idle-terminal inference from a PowerShell wrapper. UNC format
+acceptance is not a live network-share read. The alias fixture uses owned files
+and synthetic runner state, not actual Pi/OMP conversations.
+
 ### Restore-packet long directory names (2026-10-30)
 
 An owned 240-character packet directory name failed at `mkdtemp` because the

@@ -71,7 +71,9 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
   }
   const windowsPath = platform === "win32" && (/^[A-Za-z]:[\\/]/.test(token) || /^\\\\[^\\]+\\[^\\]+\\/.test(token));
   if (!token.startsWith("/") && !windowsPath) {
-    return { ok: false, error: `${label} session-file token must be an absolute path (starting with '/').` };
+    return { ok: false, error: platform === "win32"
+      ? `${label} session-file token must be an absolute path (a drive-rooted or UNC Windows path, or starting with '/').`
+      : `${label} session-file token must be an absolute path (starting with '/').` };
   }
   if (token.split(windowsPath ? /[\\/]/ : "/").includes("..")) {
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
@@ -81,7 +83,9 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
   if (!(windowsPath ? safeWindowsPath : SESSION_FILE_CHARSET_RE.test(token))) {
     return {
       ok: false,
-      error: `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
+      error: windowsPath
+        ? `${label} session-file token contains disallowed characters or device/stream syntax; use an ordinary absolute Windows session-file path.`
+        : `${label} session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').`,
     };
   }
   if (!token.endsWith(SESSION_FILE_SUFFIX)) {
