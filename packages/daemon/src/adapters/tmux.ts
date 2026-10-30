@@ -405,7 +405,7 @@ export class TmuxAdapter {
    * before env -i. Generated pane metadata must come from this spawn, never daemon TMUX values.
    * Keep the configured default-command and default-shell lookup, including rc functions.
    */
-  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = []): Promise<string[] | null> {
+  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = [], staged?: (file: string) => void): Promise<string[] | null> {
     if (!this.launchEnvironment || !seatEnv.OPENRIG_NODE_ID) return null;
     try {
       const policy = this.launchEnvironment();
@@ -442,6 +442,7 @@ export class TmuxAdapter {
         const file = this.fileOps.tmpName();
         const launch = windowsScopedLaunch(shell, command ?? "", selected, file);
         await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
+        staged?.(file);
         return ["--", ...launch.argv];
       }
       const values = Object.entries(selected)
@@ -463,6 +464,15 @@ export class TmuxAdapter {
       console.warn(`[seat launch] ${warning}`);
       return null;
     }
+  }
+
+  private async discardUnstartedScopedBootstrap(file: string | undefined, error: unknown, duplicateSession = false): Promise<void> {
+    if (!file || !(error instanceof Error)) return;
+    const notStarted = (error as NodeJS.ErrnoException).syscall?.startsWith("spawn")
+      || (duplicateSession && error.message.includes("duplicate session"));
+    // A timeout or transport failure may have launched the consumer. Retain
+    // its file; only positive no-start evidence releases this owned bootstrap.
+    if (notStarted) await this.fileOps.unlink(file).catch(() => {});
   }
 
   private inputGuard?: SeatDeliveryGuard;
@@ -953,12 +963,14 @@ export class TmuxAdapter {
     for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
     const warnings: string[] = [];
-    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings);
+    let bootstrap: string | undefined;
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, file => { bootstrap = file; });
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {
       created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
     } catch (err) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, err, true);
       return classifyWriteError(err);
     }
     // tmux can exit 0 having made nothing: a server that can't create its socket prints its error and quits, and the
@@ -1487,7 +1499,8 @@ export class TmuxAdapter {
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
     const warnings: string[] = [];
-    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings);
+    let bootstrap: string | undefined;
+    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings, file => { bootstrap = file; });
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
@@ -1510,6 +1523,7 @@ export class TmuxAdapter {
       else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, err);
       return classifyWriteError(err);
     }
   }
