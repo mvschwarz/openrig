@@ -40,6 +40,15 @@ source, so no unit-case passes are claimed from it. The installed cc5971d53
 receipt above predates this guard change; subsequent package acceptance remains
 separate. No installed user package or global CLI was modified.
 
+Follow-up isolated the Vitest load failure to this entry's CRLF shebang:
+changing only its working-tree line endings to LF restores all 17/17 ABI unit
+checks. The current Vite loader's hashbang matching does not consume CRLF as
+expected before its transformed wrapper. A narrow .gitattributes rule now
+keeps this exact script LF on Windows; Git reports index/working-tree/attribute
+agreement. The two actual Node entry/import checks still pass 2/2. This
+supersedes the unit-load limitation above without removing the shebang,
+weakening ABI checks or changing dependencies.
+
 ## Native ACP command and process checks (2026-10-30)
 
 The current stdio peer, native npm command selection and native process-identity
