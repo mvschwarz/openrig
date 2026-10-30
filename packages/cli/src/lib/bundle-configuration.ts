@@ -172,7 +172,8 @@ export function stageConfiguration(rigDir: string, rigSpecFile: string, declared
   }
   const stagingDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "rig-configuration-"));
   try {
-    fs.cpSync(rigDir, stagingDir, { recursive: true, dereference: true, filter: (src) => !/(^|[\\/])(\.git|node_modules)$/.test(src) });
+    const excluded = process.platform === "win32" ? /(^|[\\/])(\.git|node_modules)$/i : /(^|[\\/])(\.git|node_modules)$/;
+    fs.cpSync(rigDir, stagingDir, { recursive: true, dereference: true, filter: (src) => !excluded.test(src) });
     const rigSpecPath = nodePath.join(stagingDir, specInRig);
     const doc = parseDocument(fs.readFileSync(rigSpecPath, "utf-8"));
     const pods = doc.get("pods");

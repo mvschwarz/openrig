@@ -27,6 +27,17 @@ describe("advisory bundle check", () => {
   });
   afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
+  it.runIf(process.platform === "win32")("excludes native dependency directory case variants from author scanning", async () => {
+    const ignored = path.join(root, "NODE_MODULES", "fixture");
+    fs.mkdirSync(ignored, { recursive: true }); fs.writeFileSync(path.join(ignored, ".env"), "SYNTHETIC_ONLY=fixture");
+    expect((await checkBundleFolder(root)).checks.filter(c => c.ruleId === "credential_paths" && c.status === "finding")).toEqual([]);
+    const retained = path.join(root, "node_modules-not"); fs.mkdirSync(retained);
+    fs.writeFileSync(path.join(retained, ".env"), "SYNTHETIC_ONLY=fixture");
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({
+      ruleId: "credential_paths", status: "finding", path: path.join("node_modules-not", ".env"),
+    }));
+  });
+
   it("checks mechanical rules while leaving prose and arbitrary secrets explicitly unverified", async () => {
     const result = await checkBundleFolder(root);
     expect(result.standardVersion).toBe("openrig.bundle-standard/v1");

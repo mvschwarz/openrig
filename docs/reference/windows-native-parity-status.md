@@ -57,6 +57,15 @@ terminal behavior remain separate evidence requirements. Existing stop/hold and
 ownership decisions are not changed by implementation or by fixture success.
 There is no completion claim or request to activate an existing deployment here.
 
+Bundle author checking and configuration staging also now apply their existing
+dependency/metadata exclusions case-insensitively on Windows. Two owned-directory
+reproductions failed before this change: dependency case variants entered the copy
+and were scanned by the author check. Four selected [configuration](../../packages/cli/test/bundle-configuration.test.ts)
+and [author-check](../../packages/cli/test/bundle-check.test.ts) cases pass afterward,
+with 23 cases filtered. Similarly named `node_modules-not` directories remain
+included and the source bytes remain unchanged. POSIX matching is unchanged;
+CLI TypeScript passes. This is not complete bundle-suite acceptance.
+
 The offline help resolver also needed a native installation-boundary correction:
 Windows `NODE_MODULES` spellings were treated as source checkouts and could select
 an outside help file first. An owned-directory reproduction failed before the

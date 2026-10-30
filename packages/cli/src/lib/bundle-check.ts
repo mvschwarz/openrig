@@ -134,7 +134,8 @@ export async function checkBundleFolder(folder: string) {
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         if (++visitedFiles > 10_000) throw new Error();
-        if (entry.name === ".git" || entry.name === "node_modules") continue; // Not bundle content.
+        const name = process.platform === "win32" ? entry.name.toLowerCase() : entry.name;
+        if (name === ".git" || name === "node_modules") continue; // Not bundle content.
         const file = path.join(dir, entry.name);
         if (entry.isSymbolicLink()) { add("credential_paths", "not_checked", "Symlink content was not scanned.", path.relative(root, file)); continue; }
         if (entry.isDirectory()) walk(file);
