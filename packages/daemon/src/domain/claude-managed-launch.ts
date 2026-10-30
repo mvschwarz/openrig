@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import type { RigEvent } from "./types.js";
 import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { readPlatformEnv } from "./platform-env.js";
+import { prepareWindowsJobProcess } from "./windows-job-process.js";
 import { recognizedWindowsClaudeScript, resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
 import { SEAT_ENV_KEYS_VAR, parseStoredSeatEnv, validateSeatEnvName } from "./seat-env.js";
@@ -381,10 +382,17 @@ export class ClaudeManagedLaunch {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");
       }
     };
-    const help = await new Promise<string>((resolve, reject) => {
-      execFile(context.executable, [...context.prefix, "--help"], { cwd, env: context.env, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 },
-        (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
-    });
+    const helpArgs = [...context.prefix, "--help"];
+    const probe = this.platform === "win32" ? prepareWindowsJobProcess(context.executable, helpArgs, { cwd, env: context.env }) : undefined;
+    let help: string;
+    try {
+      help = await new Promise<string>((resolve, reject) => {
+        execFile(probe?.file ?? context.executable, probe?.args ?? helpArgs,
+          { cwd, env: context.env, ...probe?.options, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024,
+            ...(probe ? { killSignal: "SIGKILL" as const } : {}) },
+          (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
+      });
+    } finally { probe?.dispose(); }
     assertCurrent();
     validateNativePermissionSelection("claude-code", mode, parseClaudePermissionModes(help));
     const generation = target.generation ?? before.generation;

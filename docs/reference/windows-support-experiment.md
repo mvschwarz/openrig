@@ -2,6 +2,28 @@
 
 ## Current review status (2026-10-30)
 
+### Native managed Claude capability-query descendants
+
+The complete managed-launch module was reviewed. Its native `--help` query used
+direct execFile timeout handling. An owned npm-layout fixture showed that an
+ordinary child was already ended, but a detached, closed-stdio child remained
+alive after the query timed out. That fixture had a finite self-exit and was
+waited out after the failing pre-repair observation; no numeric PID was signaled.
+
+Native capability queries now use the existing background-probe Job Object
+helper, retaining the five-second timeout, isolated capability environment and
+existing refusal message. Persistent seat launches are unchanged. The helper is
+disposed after the query settles; POSIX query execution is unchanged.
+
+The final owned help-query and complete Windows managed-launch test files pass
+(23/23), including detached-descendant termination and successful actual help.
+The first integrated run was 11/23: fixtures expected the direct executable
+instead of the Job helper, or expected short-root spelling. The fixtures now
+inspect the helper's selected command and use native canonical roots. Synthetic
+API-key, permission, binding-change and argv cases pass; no real credential,
+provider, conversation, seat, terminal server or daemon was accessed. Daemon
+TypeScript checking passes. Live provider and full runtime acceptance remain open.
+
 ### Native skill-loadout ownership manifest publication
 
 The loadout reconciler's explicit storage location accepts an ownership-manifest

@@ -11,10 +11,19 @@ import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-confi
 
 vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<typeof import("node:child_process")>(), execFile: vi.fn() }));
 const cleanups: (() => void)[] = [];
+
+function queriedCommand(file: string, args: string[], options: { env?: Record<string, string> }) {
+  const env = options.env ?? {};
+  const count = Number(env.OPENRIG_WINDOWS_PROBE_JOB_COUNT ?? 0);
+  if (!count) return { file, args };
+  const payload = Array.from({ length: count }, (_, index) => env[`OPENRIG_WINDOWS_PROBE_JOB_${index}`]).join("");
+  return JSON.parse(Buffer.from(payload, "base64").toString("utf8")) as { file: string; args: string[] };
+}
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); vi.clearAllMocks(); });
 
 function fixture(selected?: string, seat?: { rigEnv: Record<string, string>; memberEnv: Record<string, string>; sessionMarker: string; corePlugin?: boolean }) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rig-win-managed-"));
+  const created = fs.mkdtempSync(path.join(os.tmpdir(), "rig-win-managed-"));
+  const home = process.platform === "win32" ? fs.realpathSync.native(created) : created;
   cleanups.push(() => fs.rmSync(home, { recursive: true }));
   const cwd = path.join(home, "中文 space"); fs.mkdirSync(cwd);
   const executable = path.join(home, "claude.exe"); fs.writeFileSync(executable, "inert fixture", { mode: 0o700 });
@@ -136,8 +145,9 @@ describe("managed Windows launch", () => {
     "refuses a changed %s after the capability query without returning a launch command", async change => {
       const f = fixture();
       vi.mocked(execFile).mockImplementation(((file: string, args: string[], options: { env: Record<string, string> }, done: (error: null, help: string) => void) => {
-        expect(file).toBe(fs.realpathSync(f.executable));
-        expect(args).toEqual(["--help"]);
+        const selected = queriedCommand(file, args, options);
+        expect(selected.file).toBe(fs.realpathSync(f.executable));
+        expect(selected.args).toEqual(["--help"]);
         expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
         if (change === "binding") f.db.exec("UPDATE bindings SET tmux_pane='%2' WHERE node_id='node'");
         if (change === "executable") fs.appendFileSync(f.executable, "\nchanged while querying");
@@ -164,7 +174,7 @@ describe("managed Windows launch", () => {
     fs.copyFileSync(process.execPath, f.executable);
     const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
     vi.mocked(execFile).mockImplementation(((file: string, args: string[], opts: object, done: (error: Error | null, output: string) => void) => {
-      if (args[0] === "--help") done(null, '--permission-mode <mode> (choices: "auto", "default")');
+      if (queriedCommand(file, args, opts).args[0] === "--help") done(null, '--permission-mode <mode> (choices: "auto", "default")');
       else return native.execFile(file, args, opts, done as never);
     }) as never);
     const privateFile = await writeWindowsPrivateConfig("synthetic-selected-api-key\r\n");
