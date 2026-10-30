@@ -12,9 +12,13 @@ retains the unresolved command rather than guessing the daemon directory.
 
 Eleven owned native environment cases pass, including relative PATH and relative
 command launches from a seat directory distinct from the daemon directory.
-Daemon TypeScript checking passes. The combined community protocol run has 69
-passes and one unavailable real-multiplexer case (`spawn psmux ENOENT`); this is
-not a fully passing community suite or installed-provider acceptance.
+Daemon TypeScript checking passes. The first combined run had 69 passes and one
+unavailable real-multiplexer case (`spawn psmux ENOENT`). That fixture now requires
+an explicitly selected psmux on Windows and isolates its home, configuration and
+registry as well as its namespace. With stock psmux 3.4.0, the same three files
+pass 70/70, including activity selection after replacing an occupant under the
+same session name. This does not prove the whole community suite or installed
+provider acceptance.
 
 ### Native probe lifecycle review
 

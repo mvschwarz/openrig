@@ -425,14 +425,24 @@ describe("the pane reader for a community harness", () => {
 });
 
 describe("activity after the seat's occupant is replaced under the same session name", () => {
-  it("follows the new occupant's own selection: a free-text occupant's quiet screen reads idle, as on main", async () => {
+  it.runIf(process.platform !== "win32" || !!process.env.OPENRIG_TEST_PSMUX)("follows the new occupant's own selection: a free-text occupant's quiet screen reads idle, as on main", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "community-harness-swap-"));
     dirs.push(scratch);
     const socket = join(scratch, "tmux.sock");
     const native = process.platform === "win32";
-    const multiplexer = native ? process.env.OPENRIG_TEST_PSMUX ?? "psmux" : "tmux";
+    const multiplexer = native ? process.env.OPENRIG_TEST_PSMUX! : "tmux";
     const scope = native ? ["-L", basename(scratch)] : ["-S", socket];
-    const tmux = async (...args: string[]) => (await promisify(execFile)(multiplexer, [...scope, ...args], { windowsHide: true, timeout: 10000 })).stdout;
+    const registry = join(scratch, "registry");
+    mkdirSync(registry);
+    // -L alone still shares psmux's registry and orphan reaper with real seats.
+    // Keep all configuration, ownership markers and server discovery in this fixture.
+    const env = native ? {
+      SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot,
+      PATH: dirname(process.execPath), HOME: scratch, USERPROFILE: scratch,
+      APPDATA: scratch, LOCALAPPDATA: scratch, TEMP: scratch, TMP: scratch,
+      PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL",
+    } : process.env;
+    const tmux = async (...args: string[]) => (await promisify(execFile)(multiplexer, [...scope, ...args], { env, cwd: scratch, windowsHide: true, timeout: 10000 })).stdout;
     const db = new Database(join(scratch, "state.db"));
     dbs.push(db);
     db.exec(`CREATE TABLE nodes(id TEXT PRIMARY KEY, runtime TEXT);
