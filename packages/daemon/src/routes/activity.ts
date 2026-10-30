@@ -1,13 +1,13 @@
 import { runtimeSwitchActivityRole } from "./runtime-switch-custody.js";
-import { physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
+import { SessionRegistry, physicalSessionName, sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "../domain/session-registry.js";
 import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
-import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
+import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
 import type { ActivityEvidence, EvidenceRoute } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
@@ -110,6 +110,42 @@ function nextHookSeq(key: string): number {
 
 export const activityRoutes = new Hono();
 
+/** A seat activity grant's post, bound to the grant. A post that names another seat, or claims a generation the grant
+ *  wasn't issued for, is refused; so is a grant whose occupant was replaced (stale) or hasn't registered yet (pending).
+ *  A refusal records nothing, so a missing event stays unknown. Otherwise the seat and generation come from the grant. */
+function bindToGrant(c: Context, store: AgentActivityStore, grant: ActivityGrant, body: Record<string, unknown>):
+  { body: Record<string, unknown> } | { refused: Response } {
+  const refuse = (status: 403 | 409 | 503, code: string, error: string) => ({ refused: c.json({ ok: false, code, error }, status) });
+  const claimedNode = stringOrNull(body.nodeId);
+  const claimedSession = stringOrNull(body.sessionName);
+  if ((claimedNode && claimedNode !== grant.nodeId)
+    || (claimedSession && store.resolveSession({ sessionName: claimedSession })?.nodeId !== grant.nodeId)) {
+    return refuse(403, "activity_grant_wrong_seat", "This activity grant speaks only for its own seat; nothing was recorded.");
+  }
+  const claimedGeneration = stringOrNull(body.generation);
+  if (claimedGeneration && claimedGeneration !== grant.generation) {
+    return refuse(409, "activity_grant_stale", "This post claims a launch generation its grant wasn't issued for; nothing was recorded.");
+  }
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  let standing: ReturnType<typeof grantGeneration>;
+  try {
+    standing = grantGeneration(grant, {
+      current: (nodeId) => registry.currentOccupantTenure(nodeId)?.generationUuid ?? null,
+      registered: (nodeId, generation) => registry.isOccupantGenerationRegistered(nodeId, generation),
+    });
+  } catch {
+    return refuse(503, "generation_resolver_error", "Occupant generation is unavailable.");
+  }
+  if (standing === "stale") {
+    return refuse(409, "activity_grant_stale", "This activity grant's launch generation no longer occupies the seat; nothing was recorded.");
+  }
+  if (standing === "pending") {
+    return refuse(409, "activity_grant_pending", "This activity grant's launch hasn't registered its occupant yet; nothing was recorded.");
+  }
+  const sessionName = claimedSession ?? store.resolveSession({ nodeId: grant.nodeId })?.sessionName ?? null;
+  return { body: { ...body, nodeId: grant.nodeId, generation: grant.generation, ...(sessionName ? { sessionName } : {}) } };
+}
+
 /** The shared front of the Pi usage routes: configuration, the local hook token, a JSON object body, and the
  *  managed Pi seat it names. Returns the response to send on any failure. */
 async function piUsageRequest(c: Context, what: string, needs: (db: SessionRegistry["db"]) => boolean):
@@ -199,12 +235,22 @@ activityRoutes.post("/hooks", async (c) => {
   const authHeader = c.req.header("authorization");
   const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : null;
   const headerToken = c.req.header("x-openrig-activity-token") ?? null;
+  // The principal comes first. The install-wide token speaks for every seat, as before. A seat activity grant speaks
+  // only for its own seat and launch generation, which bindToGrant checks before anything the post claims is accepted.
+  let grant: ActivityGrant | null = null;
   if (bearerToken !== expectedToken && headerToken !== expectedToken) {
-    return c.json({
-      ok: false,
-      code: "activity_hook_unauthorized",
-      error: "Agent activity hook ingestion requires the configured local hook token.",
-    }, 401);
+    const grants = new ActivityGrantStore(store.db);
+    grant = grants.authenticate(bearerToken) ?? grants.authenticate(headerToken);
+    if (!grant) {
+      return c.json({
+        ok: false,
+        code: "activity_hook_unauthorized",
+        error: "Agent activity hook ingestion requires the configured local hook token.",
+      }, 401);
+    }
+    if (grant.revokedAt) {
+      return c.json({ ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was recorded." }, 401);
+    }
   }
 
   let body: Record<string, unknown>;
@@ -213,8 +259,16 @@ activityRoutes.post("/hooks", async (c) => {
   } catch {
     return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
   }
+  if (grant && (body === null || typeof body !== "object" || Array.isArray(body))) {
+    return c.json({ ok: false, code: "invalid_json", error: "Request body must be a JSON object." }, 400);
+  }
 
   if (typeof body.sessionName === "string") body = { ...body, sessionName: physicalSessionName(store.db, body.sessionName) };
+  if (grant) {
+    const bound = bindToGrant(c, store, grant, body);
+    if ("refused" in bound) return bound.refused;
+    body = bound.body;
+  }
 
   // Slice 16: a runtime switch's staged successor (before commit) and retired predecessor (after) don't speak for the
   // seat. The staged successor's native identity is kept on the switch record, which the commit applies.
