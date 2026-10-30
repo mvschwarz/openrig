@@ -16,6 +16,9 @@
 //     hooks/scripts/<file>.cjs       (hook command scripts)
 
 import { describe, it, expect, vi } from "vitest";
+import * as nodeFs from "node:fs";
+import * as nodePath from "node:path";
+import { tmpdir } from "node:os";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
@@ -35,15 +38,19 @@ function mockTmux() {
   } as unknown as ConstructorParameters<typeof ClaudeCodeAdapter>[0]["tmux"];
 }
 
+// This in-memory filesystem uses slash keys; translate native call paths at
+// its boundary rather than requiring production to emit POSIX paths on Windows.
+const virtualPath = (p: string) => process.platform === "win32" ? p.replaceAll("\\", "/") : p;
+
 function mockClaudeFs(files?: Record<string, string>): ClaudeAdapterFsOps & { _store: Record<string, string> } {
   const store: Record<string, string> = { ...files };
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
-    writeFile: (p: string, c: string) => { store[p] = c; },
-    exists: (p: string) => p in store,
+    readFile: (p: string) => { const key = virtualPath(p); if (key in store) return store[key]!; throw new Error(`Not found: ${p}`); },
+    writeFile: (p: string, c: string) => { store[virtualPath(p)] = c; },
+    exists: (p: string) => virtualPath(p) in store,
     mkdirp: () => {},
     copyFile: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(virtualPath(dir) + "/")).map((k) => k.slice(virtualPath(dir).length + 1)),
     _store: store,
   } as ClaudeAdapterFsOps & { _store: Record<string, string> };
 }
@@ -51,11 +58,11 @@ function mockClaudeFs(files?: Record<string, string>): ClaudeAdapterFsOps & { _s
 function mockCodexFs(files?: Record<string, string>): CodexAdapterFsOps & { _store: Record<string, string> } {
   const store: Record<string, string> = { ...files };
   return {
-    readFile: (p: string) => { if (p in store) return store[p]!; throw new Error(`Not found: ${p}`); },
-    writeFile: (p: string, c: string) => { store[p] = c; },
-    exists: (p: string) => p in store,
+    readFile: (p: string) => { const key = virtualPath(p); if (key in store) return store[key]!; throw new Error(`Not found: ${p}`); },
+    writeFile: (p: string, c: string) => { store[virtualPath(p)] = c; },
+    exists: (p: string) => virtualPath(p) in store,
     mkdirp: () => {},
-    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(dir + "/")).map((k) => k.slice(dir.length + 1)),
+    listFiles: (dir: string) => Object.keys(store).filter((k) => k.startsWith(virtualPath(dir) + "/")).map((k) => k.slice(virtualPath(dir).length + 1)),
     _store: store,
   } as CodexAdapterFsOps & { _store: Record<string, string> };
 }
@@ -105,6 +112,42 @@ const OPENRIG_CORE_TREE = {
   "/p/openrig-core/hooks/scripts/activity-relay.cjs": "// relay script body",
   "/p/openrig-core/README.md": "# openrig-core plugin",
 };
+
+it.runIf(process.platform === "win32")("projects the nested synthetic plugin tree through actual native files for both runtimes", async () => {
+  const root = nodeFs.mkdtempSync(nodePath.join(tmpdir(), "native plugin projection "));
+  try {
+    const source = nodePath.join(root, "source"), cwd = nodePath.join(root, "project");
+    nodeFs.mkdirSync(cwd);
+    for (const [file, bytes] of Object.entries(OPENRIG_CORE_TREE)) {
+      const target = nodePath.join(source, file.slice("/p/openrig-core/".length));
+      nodeFs.mkdirSync(nodePath.dirname(target), { recursive: true });
+      nodeFs.writeFileSync(target, bytes);
+    }
+    const files = {
+      readFile: (file: string) => nodeFs.readFileSync(file, "utf8"),
+      writeFile: (file: string, content: string) => nodeFs.writeFileSync(file, content),
+      exists: nodeFs.existsSync,
+      mkdirp: (dir: string) => { nodeFs.mkdirSync(dir, { recursive: true }); },
+      copyFile: nodeFs.copyFileSync,
+      listFiles: (dir: string): string[] => nodeFs.readdirSync(dir, { recursive: true }).map(String)
+        .filter(file => nodeFs.statSync(nodePath.join(dir, file)).isFile()),
+    };
+    for (const [adapter, runtimeDir] of [
+      [new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: files }), ".claude"],
+      [new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: files }), ".codex"],
+    ] as const) {
+      const result = await adapter.project(makePlan([makePluginEntry("openrig-core", source)]), makeBinding(cwd));
+      expect(result.projected, JSON.stringify(result)).toContain("openrig-core");
+      expect(result.failed).toEqual([]);
+      for (const [file, bytes] of Object.entries(OPENRIG_CORE_TREE)) {
+        const relative = file.slice("/p/openrig-core/".length);
+        expect(nodeFs.readFileSync(nodePath.join(cwd, runtimeDir, "plugins", "openrig-core", relative), "utf8")).toBe(bytes);
+        expect(nodeFs.readFileSync(nodePath.join(source, relative), "utf8")).toBe(bytes);
+      }
+      expect(nodeFs.existsSync(nodePath.join(cwd, runtimeDir, "skills", "openrig-core"))).toBe(false);
+    }
+  } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
+});
 
 // ============================================================
 // Claude Code adapter — plugin tree projection

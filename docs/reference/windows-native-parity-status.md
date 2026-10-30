@@ -83,6 +83,16 @@ agent-image and browser-boundary CLI fixtures. Registering their exact bound
 origins per test (and explicitly binding agent-image to loopback) makes those
 five cases pass without changing the fetch guard. This is not CLI-wide acceptance.
 
+The delayed daemon receipt at `d555e26` records 21164 passes, 1638 failures and
+512 skips, with the private warm diagnostic excluded. A later `06cb5bf` receipt
+records 21824 passes, 1210 failures and 528 skips; neither is current acceptance.
+Current scoped reproduction found six plugin-projection failures caused by a
+slash-only in-memory filesystem. Translating native paths at that fixture boundary
+restores its assertions. An additional owned native-filesystem case verifies both
+Claude and Codex nested plugin copies and unchanged source bytes. Together with
+the current activity-rung module, 20 cases pass. No provider or fleet is launched,
+and no POSIX mode result is treated as native DACL evidence.
+
 ## Native scoped-shell implementation checkpoint (2026-10-30)
 
 The initial-shell adapter now prepares a private Windows bootstrap for configured
