@@ -26,6 +26,25 @@ then verifying the requested scope. A frozen regression run is independent of
 ongoing source work; it must finish and confirm source stability before its
 counts are used. No final completion comment has been posted for this review.
 
+## Packed native TUI and delayed terminal input (2026-10-30)
+
+The real package-entry check previously required POSIX execute bits on a JavaScript
+file and a privilege-dependent directory symlink. Windows now uses the declared
+Node entry and an owned directory junction; POSIX keeps its executable-mode check.
+The fixture also consumes rendered stdout rather than leaving a pipe unread.
+
+An actual packed-entry run reached a mouse split 2/22 timeout. Source inspection
+found that the 50 ms bare-Escape timer also flushed already recognized incomplete
+CSI/SS3 sequences, leaking their remaining parameters into command input. Only a
+lone Escape now arms that timer; recognized prefixes retain delayed chunks. The
+fixture retains the intentional lone-Escape timeout contract (20 ms gap immediately
+after Escape, 80 ms after a recognized prefix). Input-stream and adjacent usability
+checks pass 22/22. The complete build, npm pack, extracted Node entry launch and
+all delayed arrow/page/mouse split checks then pass on native Windows. The build
+was based on 109809850 with these working changes and correctly reports dirty=true;
+it is not a clean-head artifact, installed npm shim or visible-terminal acceptance.
+No real daemon, seat, multiplexer session or system clipboard was used.
+
 ## Provider selected PATHEXT (2026-10-30)
 
 The shared native Codex/Claude resolver used a fixed extension order, while
