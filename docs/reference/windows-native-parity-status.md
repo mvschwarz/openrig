@@ -1335,9 +1335,33 @@ The new three-case gate plus the five native Compose cases pass 8/8. The first
 draft of the fixture referred to the wrong launcher method (`startNode`); it was
 corrected to the actual `launchNode` seam before the ordering assertions ran.
 This repairs a coverage omission, not a discovered production service bug.
-Actual Docker/container restoration and authored checkpoint export/import
-commands remain unverified; no Docker daemon, deployed service or existing rig
+Actual Docker/container restoration remains unverified; no Docker daemon, deployed service or existing rig
 was accessed or started.
+
+Follow-up production-call-site searches across daemon, CLI and TUI find
+`runCheckpointExport`/`runCheckpointImport` only at their adapter definitions.
+There is no in-repository caller connecting them to snapshot/restore on any
+platform. The adapter APIs' authored shell commands have not been executed here;
+they are not a demonstrated Windows-specific regression or a completed service
+checkpoint workflow. Adding a new cross-platform workflow is not inferred from
+the native parity audit. This corrects the earlier broad checkpoint caveat above;
+the 44-case checkpoint tests concern persisted metadata, not these unused methods.
+
+## Native script entry identity checks
+
+The new [entry identity fixtures](../../scripts/native-entry-identity.test.mjs)
+pass three Windows cases. They copy the actual docs guard, packaged-plugin
+version checker and gate consumer into owned directories, invoke each through
+its direct path and a directory junction alias, and verify the expected nonzero
+refusal. The docs fixture uses a tracked disallowed path; the other two exercise
+missing archive arguments and absent Git HEAD respectively. Importing each alias
+remains inert. The fixture uses an empty Git configuration and isolated home,
+and creates no commit or shared gate verdict.
+
+These checks found no new production entry-identity defect. They prove those
+entry guards do not silently skip the tested alias invocations; they do not prove
+full archive validation, leak scanning, successful verdict consumption, or
+file-symlink permissions.
 
 ## Native continuity and stopped-seat restore evidence
 
