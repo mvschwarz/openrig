@@ -1347,6 +1347,29 @@ checkpoint workflow. Adding a new cross-platform workflow is not inferred from
 the native parity audit. This corrects the earlier broad checkpoint caveat above;
 the 44-case checkpoint tests concern persisted metadata, not these unused methods.
 
+## Native spawn failure cannot inherit success
+
+At `8ca0059`, three owned missing-executable reproductions failed: the dynamic
+paired-CLI forwarder, classic Windows launch and managed Windows launch all
+could leave a previous `LASTEXITCODE=0` intact after `Process.Start` failed.
+PowerShell printed the error and then the explicit exit-code propagation reported
+success. The two existing successful shim/path cases still passed.
+
+All three renderers now initialize failure status before preparation/start and
+make launch errors terminating with `ErrorActionPreference=Stop`. A successfully
+completed child replaces that status with its actual exit code. Classic and
+managed preference changes stay in their script block; the forwarder runs in
+its generated script scope. The Windows seat-bin identity advances to v5 so
+older active shims are not rewritten.
+
+The failure reproductions and launch/shim checks pass 14/14 after repair. Separate
+synthetic credential/token and native restore-launch regressions pass 22/22.
+The actual managed-child argv/environment check also passes (one selected case,
+34 filtered), preserving the parent environment and literal empty/quoted words.
+Daemon TypeScript passes. These checks use owned missing paths, synthetic data
+and receiver processes; no actual provider, deployed session or credential is
+used, and no process is retried after an unknown launch outcome.
+
 ## Native script entry identity checks
 
 The new [entry identity fixtures](../../scripts/native-entry-identity.test.mjs)

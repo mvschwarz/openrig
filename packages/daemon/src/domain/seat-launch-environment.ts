@@ -147,7 +147,7 @@ export class SeatLaunchEnvironment {
     // New shim content gets a new directory; keep existing daemons' immutable
     // aliases intact instead of refusing or overwriting their older scripts.
     const identity = createHash("sha256").update(cli);
-    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v4");
+    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v5");
     const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", identity.digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {

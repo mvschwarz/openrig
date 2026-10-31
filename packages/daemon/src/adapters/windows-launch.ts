@@ -34,7 +34,8 @@ export function powershellQuote(value: string): string {
 /** A script shim must encode its dynamic $args too: PowerShell 5's native
  * call operator drops empty words and changes embedded quotes. */
 export function renderWindowsArgvForwarder(executable: string, prefix: readonly string[]): string {
-  return `$openrigQuoted = foreach ($openrigWord in (@(${prefix.map(powershellQuote).join(", ")}) + @($args))) {\n`
+  return `$global:LASTEXITCODE = 1\n$ErrorActionPreference = 'Stop'\n`
+    + `$openrigQuoted = foreach ($openrigWord in (@(${prefix.map(powershellQuote).join(", ")}) + @($args))) {\n`
     + String.raw`  '"' + [regex]::Replace([regex]::Replace([string]$openrigWord, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'` + "\n}\n"
     + `$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n$openrigStart.UseShellExecute = $false\n`
     + `$openrigStart.FileName = ${powershellQuote(executable)}\n$openrigStart.Arguments = $openrigQuoted -join ' '\n`
@@ -51,7 +52,7 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
   // Windows PowerShell's native invocation drops empty argv words. Send the
   // literal Windows command line directly to CreateProcess instead, as the
   // managed launch path does, and keep its console handles attached to the pane.
-  return `& {\n$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n`
+  return `& {\n$global:LASTEXITCODE = 1\n$ErrorActionPreference = 'Stop'\n$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n`
     + `$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable!)}\n`
     + `$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n`
     + `${(options.remove ?? []).map(name => `$openrigStart.EnvironmentVariables.Remove(${powershellQuote(name)})\n`).join("")}${assignments}`
@@ -65,7 +66,7 @@ export function renderWindowsManagedLaunch(executable: string, args: readonly st
   const names = [...new Set(inherited)];
   if ([...Object.keys(environment), ...names, ...nonemptyInherited].some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && name.toUpperCase() !== "PROGRAMFILES(X86)")) throw new Error("Invalid managed environment name");
   const entries = Object.entries(environment).map(([key, value]) => `${powershellQuote(key)}=${powershellQuote(value)}`).join("; ");
-  return `& {\n$openrigChildEnv = @{${entries}}\n`
+  return `& {\n$global:LASTEXITCODE = 1\n$ErrorActionPreference = 'Stop'\n$openrigChildEnv = @{${entries}}\n`
     + `$openrigPaneEnv=[Environment]::GetEnvironmentVariables('Process')\nforeach ($openrigName in @(${names.map(powershellQuote).join(", ")})) { if ($openrigPaneEnv.Contains($openrigName)) { $openrigChildEnv[$openrigName] = $openrigPaneEnv[$openrigName] } }\n`
     + `foreach ($openrigName in @(${nonemptyInherited.map(powershellQuote).join(", ")})) { if ($openrigChildEnv.ContainsKey($openrigName) -and [string]::IsNullOrEmpty($openrigChildEnv[$openrigName])) { $openrigChildEnv.Remove($openrigName) } }\n`
     + `$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable)}\n`

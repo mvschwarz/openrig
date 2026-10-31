@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { powershellQuote } from "../src/adapters/windows-launch.js";
+import { powershellQuote, renderWindowsArgvForwarder, renderWindowsLaunch, renderWindowsManagedLaunch } from "../src/adapters/windows-launch.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { windowsArguments } from "../src/adapters/windows-argv.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -35,13 +36,29 @@ it.runIf(process.platform === "win32")("runs the paired CLI from a literal perce
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+it.runIf(process.platform === "win32").each(["forwarder", "classic", "managed"] as const)("a %s spawn failure cannot reuse a previous successful exit code", mode => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "seat-bin-spawn-failure-"));
+  try {
+    const executable = path.join(root, "missing-node.exe"), args = ["owned-cli.mjs"];
+    const command = mode === "forwarder" ? renderWindowsArgvForwarder(executable, args)
+      : mode === "classic" ? renderWindowsLaunch([executable, ...args].map(shellQuote).join(" "))
+      : renderWindowsManagedLaunch(executable, args, root, { SystemRoot: process.env.SystemRoot! }, []);
+    const script = "$global:LASTEXITCODE=0; " + command + "\nexit $LASTEXITCODE";
+    const result = spawnSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10_000 });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).not.toBe(0);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 it.runIf(process.platform === "win32")("preserves empty and quoted arguments through the paired PowerShell CLI shim", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "seat-bin-argv-"));
   try {
     const directory = path.join(root, "paired 中文 & %literal% !bang!"); fs.mkdirSync(directory);
     const cli = path.join(directory, "paired cli.mjs");
     fs.writeFileSync(cli, "console.log(JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()}));process.exitCode=7;");
-    const previous = path.join(root, "run", "seat-bin", createHash("sha256").update(fs.realpathSync(cli)).update("\0windows-seat-bin-v3").digest("hex"));
+    const previous = path.join(root, "run", "seat-bin", createHash("sha256").update(fs.realpathSync(cli)).update("\0windows-seat-bin-v4").digest("hex"));
     fs.mkdirSync(previous, { recursive: true });
     fs.writeFileSync(path.join(previous, "rig.ps1"), "older-running-daemon-shim");
     const seat = new SeatLaunchEnvironment({} as TmuxAdapter, { OPENRIG_HOME: root }, root, cli, undefined, "win32");
