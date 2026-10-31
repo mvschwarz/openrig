@@ -43,7 +43,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Workflow | Implemented scope and evidence entry | Still unverified |
 | --- | --- | --- |
 | Context stores | Overlapping roots retain physical-pack custody across native case aliases; [native custody cases](../../packages/daemon/test/context-pack-store-recursion.test.ts). Full recursion file: 24 passed, three symlink-creation failures (`EPERM`). Library/compose/remove files: 32 passed after separating the non-directory check, one symlink-creation failure. | Symlink-dependent context-store checks and installed delivery. A successful directory-junction case does not establish file-symlink support. |
-| Spec library | Native rename supports long storage names, reserved device names and case-only changes; [service](../../packages/daemon/test/spec-library-service.test.ts), [routes](../../packages/daemon/test/spec-library-routes.test.ts). | Every authored resource/install combination. |
+| Spec library | Native rename supports long storage names, reserved device names and case-only changes; [service](../../packages/daemon/test/spec-library-service.test.ts), [routes](../../packages/daemon/test/spec-library-routes.test.ts). Full service/route files pass 22/22; four workflow scanner/route files pass 57/57, including native folder-alias reconciliation. | Every authored resource/install combination and installed delivery. |
 | Lifecycle compilation | A differently cased reference to the actual mission is accepted; a distinct file is refused; [compiler](../../packages/daemon/test/project-lifecycle-compiler.test.ts). | Real workflow execution and fleet restore. |
 | Culture export and local copy | Contained native aliases copy correctly while outside destination aliases are refused; [export](../../packages/cli/test/export-import.test.ts), [local copy](../../packages/cli/test/windows-native-local-copy.test.ts). | Real remote transfer and every archive/install path. |
 | Local recap handoff | [Recap write](../../packages/cli/test/context-recap-write.test.ts) passes nine cases. Actual Windows write denial on an owned directory triggers delegation to the fixture server; timeout remains unknown and a connection failure retains its cause. The fixture restores its temporary ACL rule in finally. A directory junction checks refusal through a linked namespace. | Actual daemon/seat permissions; file-symlink behavior is not established by the junction case. |
@@ -1766,3 +1766,18 @@ non-directory refusal with unchanged file content. The compose file now reports
 files this is 32 passed and one failed. This adds actual native filesystem
 coverage without substituting junctions, skipping permission failures, or
 claiming installed context delivery.
+
+## Spec library and workflow discovery full-file refresh
+
+At source `301605a`, the complete spec-library service and route files pass
+22/22 on native Windows, with no skips. They include real owned filesystem
+rename checks for reserved names, long names, case changes, mixed-case YAML
+extensions and rollback when an owned Windows reader refuses old-file deletion.
+The complete workflow scanner, workflow routes, workflow-folder route and
+workflow-spec-folder scanner files additionally pass 57/57 with no skips.
+The native folder-alias case checks that removed rows are reconciled without
+deleting neighboring entries. The source review confirms that directory
+classification uses native `path.relative` boundaries and source keys normalize
+Windows path spelling. These checks cover owned files, database fixtures and
+in-process routes; they do not establish every installed authored-resource
+combination or a live deployed daemon's library delivery.
