@@ -84,8 +84,32 @@ jobs:
         run: npx vitest run test/hosted-member-wake.test.ts --maxWorkers=1
       - name: Native TUI pipes, reading and live events
         run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
+      - name: Native scoped shells and paired seat argv
+        working-directory: packages/daemon
+        shell: pwsh
+        run: |
+          $env:OPENRIG_TEST_PWSH = (Get-Command pwsh -CommandType Application).Source
+          node ../../node_modules/vitest/vitest.mjs run test/windows-scoped-launch.test.ts test/seat-launch-environment.test.ts --maxWorkers=1
+      - name: Native Compose and service restore ordering
+        working-directory: packages/daemon
+        run: node ../../node_modules/vitest/vitest.mjs run test/windows-compose-services.test.ts test/windows-service-restore-gate.test.ts --maxWorkers=1
       - name: Native package assembly
         run: npm run build:package
+  installed-package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Native tarball install and authored resource operations
+        env:
+          RUN_TESTBED_PACK_GATE: '1'
+        run: node --test --test-name-pattern=GATE scripts/build-testbed-cli-pack.test.mjs
   regression:
     strategy:
       fail-fast: false
