@@ -1311,6 +1311,34 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Native service recovery gate and checkpoint metadata
+
+A source-frozen run at `3ce8064200da10b33f9f7e8981da08f97131dd55` passes all
+44 cases across native Compose, services snapshot/teardown, service startup,
+replica readiness, checkpoint storage and checkpoint schema tests. HEAD and
+tracked-diff hashes match before/after. These use owned SQLite, native argument
+receivers and loopback HTTP/TCP; Docker and terminal effects are injected. In
+particular, the existing snapshot/restore-named file checks receipts and teardown,
+not a complete service restore by itself.
+
+The added [native restore service gate](../../packages/daemon/test/windows-service-restore-gate.test.ts)
+therefore invokes the actual RestoreOrchestrator with its ServiceOrchestrator
+dependency and a native Node receiver standing in for Docker. Three cases prove
+that `up` and successful status retrieval precede seat launch; failure of either
+step refuses restore before any seat launch. The Windows compose-file path has
+Unicode, spaces, ampersands, percent signs and an apostrophe; the receiver records
+the unchanged argv. Success persists a fresh healthy receipt, failure leaves its
+initial receipt absent, and both retain the historical snapshot bytes. Only a
+synthetic terminal seat and mocked tmux effects are involved.
+
+The new three-case gate plus the five native Compose cases pass 8/8. The first
+draft of the fixture referred to the wrong launcher method (`startNode`); it was
+corrected to the actual `launchNode` seam before the ordering assertions ran.
+This repairs a coverage omission, not a discovered production service bug.
+Actual Docker/container restoration and authored checkpoint export/import
+commands remain unverified; no Docker daemon, deployed service or existing rig
+was accessed or started.
+
 ## Native continuity and stopped-seat restore evidence
 
 At `8da36b5`, the three compaction/stub-runner files above pass all eight cases.
