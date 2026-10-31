@@ -1708,3 +1708,27 @@ They use a fixture npm implementation and do not establish real network installa
 or provider setup acceptance. The first run exposed an uncaptured npm prefix/root
 result; capturing those outputs fixes the observed failure. No user-global install
 was performed for these checks. Existing package-gate evidence remains separate.
+
+## Frozen package and actual native Claude hook refresh
+
+At source `ec96b4f2237c0f73d7ffc52dce133b4e99da744a`, the native package Gate
+passed with an unchanged tracked-source hash before and after execution
+(2026-10-31 00:53:22–00:54:51 UTC). It built and packed the branch, installed
+into an isolated prefix, checked SQLite ABI and loaded the daemon subpath through
+the installed `rig.cmd`. This includes the shipped plugin version `0.1.33` and
+the current native seat-shim resolver. It is package acceptance within that scope,
+not deployment or whole-workspace acceptance. The Gate reported that term leak
+checks were skipped because no rules file was supplied.
+
+An owned initialize-only fixture also exercised the actual native Claude Code
+`2.1.304` executable. Its debug trace identifies the projected PowerShell
+SessionStart command and plugin, with exit status zero. An independent file
+witness confirms execution through the pinned Node and the correct plugin root
+containing Unicode, spaces and `&`. Three owned short/long/Unicode skills were
+discovered; the configured loopback API received zero requests, and the client
+exited zero. The temporary home, plugin and debug log were removed afterward.
+
+An earlier stdin-reading witness produced no file despite a successful hook
+response; its cause remains unproved. The absolute-path witness establishes
+native hook dispatch and path handling only. It does not establish real provider
+conversation, production hook input processing, compaction or restore acceptance.
