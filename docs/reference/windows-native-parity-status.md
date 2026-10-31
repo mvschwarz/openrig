@@ -1936,3 +1936,13 @@ See the [official exec-form hook contract](https://code.claude.com/docs/en/hooks
 Related older upstream [stdin report](https://github.com/anthropics/claude-code/issues/36156)
 and [exec-argument report](https://github.com/anthropics/claude-code/issues/90495)
 concern different versions; neither establishes the root cause of this fixture.
+
+The exec-form change passes 78 related native projection/vendor/core-route/trust
+checks with no skips, plus daemon TypeScript. Its package Gate passes at fixed
+source `41fc05c4551eb9767c8e3374d857900626c89634` (2026-10-31
+01:39:39–01:41:09 UTC), with unchanged tracked source. An actual Claude
+initialize-only witness then imports the package-assembled compiled projector,
+confirms the assembled plugin is `0.1.34`, and receives the complete SessionStart
+event through that projection. This corroborates the packaged compiled path,
+not just the TypeScript implementation. It still makes zero configured API
+requests and does not establish production hook effects or provider continuity.
