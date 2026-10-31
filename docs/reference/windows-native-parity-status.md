@@ -1856,3 +1856,51 @@ overwriting the capture result. The doctor's mocked timeout path confirms the
 warning reaches its JSON output; its test retires only exact captured fixture
 homes because that executor starts no real child. Focused checks and CLI
 TypeScript pass after this diagnostic addition.
+
+## Frozen CLI/TUI and installed capture refresh
+
+The CLI/TUI directory run at `c7b5ebf532e6a6164f3889b260feda1ea3f30b9d`
+completed with unchanged HEAD and tracked-source hash (2026-10-31
+01:20:59–01:31:31 UTC): 522 files, 7,331 tests, 7,218 passed, 19 failed and
+94 skipped. All 19 failures occur at host-denied symlink creation (`EPERM`),
+including fixtures whose expected containment diagnostic is preempted by that
+denial. They remain unverified; the overall exit status is 1, not green.
+
+The ACP connector file is explicitly excluded because its cleanup attempts
+were already exhausted. A `list --filesOnly` preflight and the terminal report
+both confirm its absence using `**/acp-connector.test.ts`. An earlier run's
+project-root-relative exclusion did not match, and its source changed during
+execution; that earlier result is retained only as a mixed-revision diagnostic.
+No further ACP cleanup attempt is justified by this correction.
+
+Two proof permission-bit assertions are now explicitly POSIX-only. The actual
+Windows DACL and private-staging checks remain in the independently passing
+native ACL file; skipping POSIX mode semantics does not waive Windows privacy.
+
+At `f73b678fda5f2d411b8de67fc672c0d958329688`, the refreshed package Gate
+passed with unchanged tracked source (01:32:04–01:33:44 UTC). Besides its
+existing build/install/ABI/CLI checks, it imports the installed capture helper,
+confirms one disposable environment across create/capture/cleanup, and invokes
+the installed doctor/setup executors with an owned environment receiver.
+These checks use no real tmux server or provider. This is separate installed
+evidence, not a claim that the directory run covers every deployed workflow.
+
+Additional complete native service files at `c7b5ebf` pass 14/14 for agent-image
+library operations and 27/27 for starter resolution, native home selection,
+runner-home fallback and built-in policy copies. They use owned registries and
+files; no real user registry, credential or existing endpoint is accessed.
+Policy byte/readonly-attribute checks do not establish cross-user DACL protection.
+
+Four historical tmux-exec test files report 16 POSIX-only skips on Windows.
+An independent actual Node receiver through the production native argv executor
+therefore checks three narrower behaviors: exact 2 MiB stdout, empty/Unicode/
+quoted/metacharacter arguments, and stderr retained separately from simulated
+pane stdout on failure. It passes all three; no real pane or psmux server is
+involved. The skips are not recategorized as passes.
+
+The initialize-only Claude stdin investigation remains inconclusive: an
+immediate file witness confirms the Node hook starts, but its stdin-end witness
+is absent. Explicit PowerShell `$input` forwarding with UTF-8 encoding gives
+the same observation, so that hypothesis does not justify a production change.
+Both owned client runs make zero configured API requests and exit zero. Client
+hook success and process startup still do not prove production hook JSON handling.
