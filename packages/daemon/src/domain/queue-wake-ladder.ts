@@ -444,10 +444,13 @@ function readSuspension(
   const override = process.env[WAKE_SUSPEND_OVERRIDE_ENV];
   if (override) {
     for (const entry of override.split(",")) {
-      const idx = entry.lastIndexOf(":");
-      const session = entry.slice(0, entry.indexOf(":"));
-      const untilIso = entry.slice(entry.indexOf(":") + 1);
-      void idx;
+      // External destinations may contain a colon (`slack:U...@external`),
+      // while an ISO timestamp contains several more. The date boundary is
+      // the unambiguous separator in the documented `<session>:<untilIso>` form.
+      const match = entry.match(/^(.+):(\d{4}-\d{2}-\d{2}(?:T.*|$))$/);
+      if (!match) continue;
+      const session = match[1]!;
+      const untilIso = match[2]!;
       if (session === destination) {
         const until = Date.parse(untilIso);
         if (!Number.isNaN(until) && now.getTime() < until) {

@@ -309,6 +309,15 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(markersOf(baton.qitemId, "ladder-suspend:")[0]).toMatch(/operator/i); // named as the override
   });
 
+  it("DECLARED WINDOW PARSES EXTERNAL DESTINATIONS: a colon in the session does not disable the override", async () => {
+    const baton = await mkBaton("slack:U123@external");
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `slack:U123@external:${new Date(Date.now() + 3600_000).toISOString()}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
   // ── G5: F3 — STORMS AGGREGATE ────────────────────────────────────────────────
 
   it("STORMS AGGREGATE: one dead destination x five stuck batons yields ONE aggregated escalation naming all five, refreshed not duplicated", async () => {
