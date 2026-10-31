@@ -1,4 +1,6 @@
-/** Render the shipped finite Node hook vocabulary for Claude's native shell.
+const NODE_HOOK_FORWARDER = "const{spawnSync}=require('node:child_process');const r=spawnSync(process.env.OPENRIG_NODE||process.execPath,process.argv.slice(1),{stdio:'inherit',windowsHide:true});if(r.error){process.stderr.write(r.error.message+'\\n');process.exit(1)}process.exit(r.status??1);";
+
+/** Render the shipped finite Node hook vocabulary for Claude's native exec form.
  * Callers must retain source/version authority when staging this derived manifest.
  * This accepts the canonical shipped commands only, never arbitrary user shell text.
  */
@@ -16,10 +18,12 @@ export function windowsClaudePluginHooks(source: string): string {
           throw Error("Unsupported Claude plugin hook command; native manifest was not produced");
         }
         const args = match[2]!.trim() ? match[2]!.trim().split(" ") : [];
-        hook.command = "$openrigNode = if ([string]::IsNullOrEmpty($env:OPENRIG_NODE)) { 'node' } else { $env:OPENRIG_NODE }; "
-          + `& $openrigNode (Join-Path $env:CLAUDE_PLUGIN_ROOT '${match[1]}')`
-          + args.map(arg => ` '${arg}'`).join("");
-        hook.shell = "powershell";
+        // Direct execution preserves Claude's JSON stdin on native Windows.
+        // The fixed staging Node boots the launcher; the seat may select its
+        // paired Node via OPENRIG_NODE without depending on PATH or a shell.
+        hook.command = process.execPath;
+        hook.args = ["-e", NODE_HOOK_FORWARDER, "--", "${CLAUDE_PLUGIN_ROOT}/" + match[1], ...args];
+        delete hook.shell;
       }
     }
   }

@@ -22,8 +22,10 @@ it("preserves the complete shipped event/group/metadata vocabulary", () => {
       expect(projected.hooks).toHaveLength(group.hooks.length);
       group.hooks.forEach((hook: any, h: number) => {
         const next = projected.hooks[h];
-        expect({ ...next, command: undefined, shell: undefined }).toEqual({ ...hook, command: undefined, shell: undefined });
-        expect(next.shell).toBe("powershell");
+        expect({ ...next, command: undefined, shell: undefined, args: undefined }).toEqual({ ...hook, command: undefined, shell: undefined, args: undefined });
+        expect(next.shell).toBeUndefined();
+        expect(next.command).toBe(process.execPath);
+        expect(next.args.slice(0, 1)).toEqual(["-e"]);
         count++;
       });
     });
@@ -39,6 +41,22 @@ it.each(["node arbitrary.js", '"${OPENRIG_NODE:-node}" "${CLAUDE_PLUGIN_ROOT}/..
 });
 
 describe.skipIf(process.platform !== "win32")("native Claude plugin manifest commands", () => {
+  it.each([0, 2, 7])("preserves hook exit %s and refuses a missing selected Node", code => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "owned-hook-exit-"));
+    try {
+      const script = path.join(root, "hook.cjs");
+      fs.writeFileSync(script, `process.exit(${code});`);
+      const command = '"${OPENRIG_NODE:-node}" "${CLAUDE_PLUGIN_ROOT}/hook.cjs"';
+      const projected = JSON.parse(windowsClaudePluginHooks(JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command }] }] } })));
+      const hook = projected.hooks.Stop[0].hooks[0];
+      const args = hook.args.map((arg: string) => arg.replaceAll("${CLAUDE_PLUGIN_ROOT}", root));
+      const env = { ...process.env, OPENRIG_NODE: process.execPath };
+      expect(spawnSync(hook.command, args, { env, windowsHide: true, timeout: 5000 }).status).toBe(code);
+      const missing = spawnSync(hook.command, args, { env: { ...env, OPENRIG_NODE: path.join(root, "missing-node.exe") }, encoding: "utf8", windowsHide: true, timeout: 5000 });
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain("ENOENT");
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it("stages a native versioned tree, preserves replaced bytes, and fingerprints actual installed bytes without rewriting them", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "native plugin staging "));
     const assets = path.resolve(import.meta.dirname, "../assets/plugins");
@@ -98,7 +116,6 @@ describe.skipIf(process.platform !== "win32")("native Claude plugin manifest com
     try {
       const native = JSON.parse(windowsClaudePluginHooks(source));
       const original = JSON.parse(source);
-      const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
       const env = { ...process.env };
       for (const key of Object.keys(env)) if (["PATH", "OPENRIG_NODE", "CLAUDE_PLUGIN_ROOT"].includes(key.toUpperCase())) delete env[key];
       env.PATH = kind === "explicit" ? "" : path.dirname(process.execPath);
@@ -112,7 +129,8 @@ describe.skipIf(process.platform !== "win32")("native Claude plugin manifest com
           fs.mkdirSync(path.dirname(script), { recursive: true });
           fs.writeFileSync(script, "let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>process.stdout.write(JSON.stringify({node:process.execPath,args:process.argv.slice(2),input:JSON.parse(s)})))");
           const input = { event, value: "原生 O'Brien %PATH% $HOME" };
-          const run = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", hook.command], {
+          const args = hook.args.map((arg: string) => arg.replaceAll("${CLAUDE_PLUGIN_ROOT}", root));
+          const run = spawnSync(hook.command, args, {
             env, cwd: root, input: JSON.stringify(input), encoding: "utf8", timeout: 5000, windowsHide: true,
           });
           expect(run.error).toBeUndefined();

@@ -1904,3 +1904,35 @@ is absent. Explicit PowerShell `$input` forwarding with UTF-8 encoding gives
 the same observation, so that hypothesis does not justify a production change.
 Both owned client runs make zero configured API requests and exit zero. Client
 hook success and process startup still do not prove production hook JSON handling.
+
+## Actual Claude stdin gap repaired with native exec form
+
+A subsequent comparison using Claude Code `2.1.304` distinguishes the paths:
+the PowerShell shell form starts the owned Node fixture without completing its
+stdin witness, while direct Node exec form receives and parses the complete
+SessionStart JSON (461 bytes). Directly spawning PowerShell also fails to
+complete that witness, so adding a PowerShell argument wrapper is not the fix.
+These are bounded observations for this executable, not a diagnosis of every
+client version or every Windows stdin implementation.
+
+The Windows projection now uses Claude's documented `command` plus `args`
+exec form. The staging Node executable boots a finite Node forwarder, which
+honors the seat's OPENRIG_NODE selection (otherwise its own executable), passes
+the exact script/arguments and inherited stdin without a shell, and returns the
+child's exit code. Spawn failure returns failure rather than falling back or
+reporting success. The staging executable must remain available until the
+projection is refreshed. Canonical shipped command recognition remains closed;
+operator hook text is not translated. Core plugin version is now `0.1.34`.
+
+An actual initialize-only run using this production projection confirms the
+complete JSON event, paired Node and Unicode/metacharacter plugin root, three
+owned discovered skills, zero configured API requests and client exit zero.
+The native fixture exercises all 13 shipped commands and checks exit codes
+0/2/7 plus refusal of a missing selected interpreter. No installed user plugin,
+provider credential, running seat or deployment is changed. Real provider
+conversation, compaction and production hook effects remain separate.
+
+See the [official exec-form hook contract](https://code.claude.com/docs/en/hooks#exec-form-and-shell-form).
+Related older upstream [stdin report](https://github.com/anthropics/claude-code/issues/36156)
+and [exec-argument report](https://github.com/anthropics/claude-code/issues/90495)
+concern different versions; neither establishes the root cause of this fixture.
