@@ -1732,3 +1732,18 @@ An earlier stdin-reading witness produced no file despite a successful hook
 response; its cause remains unproved. The absolute-path witness establishes
 native hook dispatch and path handling only. It does not establish real provider
 conversation, production hook input processing, compaction or restore acceptance.
+
+The OMP resource-discovery gap also has a native loader witness at source
+`08751449a9b87bfaf26426c1a14f10fd4abe9a32`: the published
+`@oh-my-pi/pi-coding-agent@18.5.0` `loadSkillsFromDir` implementation, running
+through Bun `1.4.2` with its matching Windows x64 native addon, discovered all
+three owned short/long/Unicode resources with zero warnings and exit zero.
+The explicit owned directory contains names produced by this branch's resource
+mapper. This exercises the actual package loader, not a reimplementation.
+The package's Bun requirement is `>=1.3.14`; it does not assert compatibility
+with the newer package line requiring Bun `>=1.4.4`. Installation used an
+isolated prefix with lifecycle scripts disabled; the required native addon was
+installed explicitly after the initial optional-dependency omission was observed.
+The prefix and its dedicated npm cache were removed after checking the result.
+No CLI session, login, provider request or global installation occurred. Full
+OMP session/restore acceptance remains separate from this discovery result.
