@@ -1311,7 +1311,27 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
-# Experimental native Windows installer entry
+## Paired local-reader deadline and setup checks
+
+The native `local-reading-process.test.ts` now also runs an owned, deliberately
+stalled Node helper. `readLocal` returns its failure after the existing five-second
+deadline, and the test confirms the direct child has exited using observation
+only. It does not kill a recovered PID or claim descendant-tree containment.
+The paired reader/window test files report 38 passed, zero failed, and nine
+Linux-only `/proc` viewer-discovery cases skipped on Windows. Window calls use
+owned inert CLI fixtures; no desktop window is opened. The four setup test files
+report 117 passed, zero failed; these are injected setup/provider fixtures, not
+global tool installation, login, or actual team startup.
+
+The subsequent native package Gate returned zero after building, packing,
+installing in an isolated prefix, checking SQLite ABI and loading the daemon
+subpath through `rig.cmd`. Its receipt is explicitly **sourceStable=false**:
+the local-reader test was edited during the run, while HEAD remained
+`55ea31bf3adeee178a4ba1c29c38bb84ba33a581`. This is successful execution evidence,
+not a frozen current-HEAD acceptance receipt. A final source-frozen refresh is
+still required after implementation and audit work finishes.
+
+## Experimental native Windows installer entry
 
 The optional POSIX `scripts/install.sh` wrapper has a native Node counterpart:
 

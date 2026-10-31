@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readLocal } from "../src/local-reading.js";
@@ -21,3 +21,18 @@ it("runs the paired local reader with literal native request data and surfaces c
     expect(await readLocal(undefined, request)).toMatchObject({ error: expect.stringContaining("Local reader unavailable") });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("bounds a stalled paired reader and waits for its direct child to exit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "local reader deadline-"));
+  try {
+    const entry = join(root, "index.js"), reader = join(root, "local-reading.js"), pidFile = join(root, "owned-child.pid");
+    writeFileSync(reader, `require('node:fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000);`);
+    const started = Date.now();
+    expect(await readLocal(entry, { op: "roots" })).toMatchObject({ error: "Local reader did not complete" });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+    // Observation only: never kill a PID recovered from a file.
+    expect(() => process.kill(pid, 0)).toThrow();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+}, 15_000);
