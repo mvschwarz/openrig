@@ -54,8 +54,8 @@ export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number; 
   try { if (platform === "win32") probeRoot = mkdtempSync(join(tmpdir(), "openrig-capture-")); }
   catch (err) { return { status: "skipped", detail: `Could not create an isolated capture-probe home: ${errorMessage(err)}` }; }
   const env = probeRoot ? Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-    !["HOME", "USERPROFILE", "PSMUX_DATA_DIR", "TMUX", "TMUX_PANE"].includes(key.toUpperCase()))) : undefined;
-  if (env && probeRoot) Object.assign(env, { HOME: probeRoot, USERPROFILE: probeRoot, PSMUX_DATA_DIR: join(probeRoot, "psmux") });
+    !["HOME", "USERPROFILE", "PSMUX_DATA_DIR", "PSMUX_CONFIG_FILE", "TMUX", "TMUX_PANE"].includes(key.toUpperCase()))) : undefined;
+  if (env && probeRoot) Object.assign(env, { HOME: probeRoot, USERPROFILE: probeRoot, PSMUX_DATA_DIR: join(probeRoot, "psmux"), PSMUX_CONFIG_FILE: "NUL" });
   const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, {
     timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS, ...(env ? { env } : {}),
   });

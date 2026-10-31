@@ -1,7 +1,7 @@
 // #980: setup and doctor check that tmux can serve `capture-pane -p`. The check is the getting-started guide's: a throwaway
 // socket with no config, so the person's own sessions are never touched. Every command is bounded, and the throwaway server
 // always gets a cleanup attempt.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { probeTmuxCapture, TMUX_CAPTURE_PROBE_TIMEOUT_MS } from "../src/tmux-health.js";
 import { doctorExec } from "../src/commands/doctor.js";
 import { defaultDeps } from "../src/commands/setup.js";
@@ -10,8 +10,13 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("probeTmuxCapture", () => {
   it("isolates all native commands in one disposable home without altering the parent", () => {
+    vi.stubEnv("TmUx", "owned-parent-context");
+    vi.stubEnv("TmUx_PaNe", "owned-parent-pane");
+    vi.stubEnv("PsMuX_CoNfIg_FiLe", "owned-parent-config");
     const before = { ...process.env };
     const environments: NodeJS.ProcessEnv[] = [];
     const result = probeTmuxCapture((_cmd, opts) => {
@@ -26,6 +31,8 @@ describe("probeTmuxCapture", () => {
     const env = environments[0]!;
     expect(env.HOME).toBe(env.USERPROFILE);
     expect(env.PSMUX_DATA_DIR).toBe(join(env.HOME!, "psmux"));
+    expect(env.PSMUX_CONFIG_FILE).toBe("NUL");
+    expect(Object.keys(env).filter(key => key.toUpperCase() === "PSMUX_CONFIG_FILE")).toEqual(["PSMUX_CONFIG_FILE"]);
     expect(Object.keys(env).filter(key => ["TMUX", "TMUX_PANE"].includes(key.toUpperCase()))).toEqual([]);
     expect(existsSync(env.HOME!)).toBe(false);
     expect(process.env).toEqual(before);
