@@ -1,0 +1,34 @@
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+// Called only by the opt-in package Gate, with its owned prefix and home.
+const [installed, home] = process.argv.slice(2);
+assert.ok(installed && home, "installed package and owned home are required");
+const load = name => import(pathToFileURL(join(resolve(installed), "daemon/dist/domain", name)).href);
+const { ContextPackLibraryService } = await load("context-packs/context-pack-library-service.js");
+const { SpecLibraryService } = await load("spec-library-service.js");
+const { SpecReviewService } = await load("spec-review-service.js");
+const root = join(resolve(home), "resource library 中文 & % fixture");
+mkdirSync(root);
+const source = join(root, "notes 中文 & %.md");
+writeFileSync(source, "# Owned installed context\n");
+const packs = join(root, "packs");
+const library = new ContextPackLibraryService({ roots: [{ path: packs, sourceType: "user_file" }] });
+const composed = library.composeFromFiles({ outRef: "owned/brief", sources: [{ path: source, label: "notes.md" }] });
+assert.equal(composed.ref, "owned/brief");
+assert.deepEqual(library.scan(), { count: 1, errors: [] });
+assert.equal(library.getByRef("owned/brief").sourcePath, join(packs, "owned", "brief"));
+assert.equal(readFileSync(join(packs, "owned", "brief", "notes.md"), "utf8"), "# Owned installed context\n");
+assert.equal(library.removeByRef("owned/brief").removed, true);
+assert.equal(existsSync(join(packs, "owned", "brief")), false);
+const specs = join(root, "specs"); mkdirSync(specs);
+writeFileSync(join(specs, "original.yaml"), 'name: owned-agent\nversion: "1.0"\ndefaults:\n  runtime: claude-code\nprofiles:\n  default:\n    uses: []\nresources:\n  skills: []\nstartup:\n  files: []\n  actions: []\n');
+const specLibrary = new SpecLibraryService({ roots: [{ path: specs, sourceType: "user_file" }], specReviewService: new SpecReviewService() });
+specLibrary.scan(); assert.equal(specLibrary.list().length, 1);
+const renamed = specLibrary.rename(specLibrary.list()[0].id, "renamed owned agent");
+assert.equal(renamed.ok, true); assert.equal(renamed.entry.name, "renamed owned agent");
+assert.equal(existsSync(join(specs, "original.yaml")), false);
+assert.equal(specLibrary.list().length, 1);
+console.log(JSON.stringify({ contextComposeReadRemove: true, specScanRename: true }));
