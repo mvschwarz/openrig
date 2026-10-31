@@ -1347,6 +1347,37 @@ checkpoint workflow. Adding a new cross-platform workflow is not inferred from
 the native parity audit. This corrects the earlier broad checkpoint caveat above;
 the 44-case checkpoint tests concern persisted metadata, not these unused methods.
 
+## Paired seat CLI hook compatibility after shim changes
+
+Review of the original 26 changed ledger entries found an integration regression:
+the seat-bin generator had advanced through v3–v5 while the shipped
+`rig-command.cjs` recognized only the older v2 direct-Node batch form. With an
+actual generated v5 bin, the hook could not resolve this installation's paired
+CLI. The expanded native fixture reports three failed / three passed before
+repair: v3/v4/v5 fail while v2 and existing npm resolver cases still pass.
+
+The hook now recognizes v2/v3 direct-Node shims and the complete finite v4/v5
+PowerShell bridge forms. It verifies the generated script bytes, version-specific
+directory digest, current Node interpreter and declared OpenRig package entry,
+then invokes Node/CLI directly without executing either shim. Added commands,
+modified sidecars, wrong interpreter/digest and changed package declarations
+remain refused. The tests use real generated shims, Unicode/metacharacter paths,
+literal empty/quoted arguments and child exit code 7. Existing tampering fixtures
+were updated because their old percent/path replacements no longer changed the
+new ASCII bridge.
+
+Four hook/projection/vendor test files pass 40/40 after repair, including the
+actual refocus hook obtaining context from the owned paired receiver. Six selected
+Codex content-trust cases also pass (27 unrelated cases filtered), preserving
+untrusted/modified installation decisions. Node syntax checking passes. Both core
+plugin manifests advance from 0.1.32 to 0.1.33 so the changed shipped hook has a
+new distribution identity. No installed plugin, provider, real seat, credentials
+or live runtime was updated; the final installed-package refresh remains needed.
+
+The 26 changed-entry delta read is now reconciled, including this repaired
+consumer/generator mismatch. It does not convert source-only rows, host-limited
+symlink coverage or remaining full integration requirements into completion.
+
 ## Finite inventory freshness and outside-inventory deltas
 
 A read-only refresh at `e080c22` reconciles 222 public entries from the older
