@@ -1781,3 +1781,24 @@ classification uses native `path.relative` boundaries and source keys normalize
 Windows path spelling. These checks cover owned files, database fixtures and
 in-process routes; they do not establish every installed authored-resource
 combination or a live deployed daemon's library delivery.
+
+## Installed authored-library filesystem operations
+
+The package Gate now invokes an independent Node process that imports the
+context-pack library, spec library and spec reviewer from the actual isolated
+npm installation's `daemon/dist` tree. Under an owned path containing Unicode,
+spaces, `&` and `%`, it composes a context pack, scans and resolves its ref,
+reads its exact member bytes, removes it, and confirms the directory is gone.
+It also scans an authored agent spec, renames it through the installed service,
+and confirms both the new authored name and removal of the old file.
+
+The first run exposed an incorrect probe expectation: composed members have
+generated names such as `source-0001.md`, not the caller's provenance label.
+After correcting that assertion, the full Gate passed at fixed source
+`2b0c31cef0c11a06352cfd8573df35803f94b4ba` (2026-10-31
+01:05:37–01:07:03 UTC), with identical tracked-source hashes before and after.
+Build, pack, isolated installation, these resource operations, SQLite ABI and
+the installed native CLI daemon-subpath command all completed successfully.
+This closes the package-to-library filesystem gap for the checked operations;
+live daemon delivery, every authored combination and fleet activation remain
+outside this fixture. The Gate removes its owned prefix and home in `finally`.
