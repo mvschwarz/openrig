@@ -67,7 +67,7 @@ export interface RouterLinePreview {
 }
 
 export interface SetupDeps {
-  exec: (cmd: string, opts?: { timeoutMs?: number }) => string;
+  exec: (cmd: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => string;
   readFile: (path: string) => string | null;
   writeFile: (path: string, content: string) => void;
   exists: (path: string) => boolean;
@@ -224,10 +224,11 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
 
 export function defaultDeps(): SetupDeps {
   return {
-    exec: (cmd: string, opts?: { timeoutMs?: number }) =>
+    exec: (cmd: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) =>
       execSync(cmd, {
         encoding: "utf-8",
         timeout: opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        ...(opts?.env ? { env: opts.env } : {}),
         stdio: ["pipe", "pipe", "pipe"],
       }),
     readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },

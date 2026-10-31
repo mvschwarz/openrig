@@ -33,7 +33,7 @@ export interface DoctorDeps {
   baseDir: string;
   readFile: (path: string) => string | null;
   /** `timeoutMs` bounds one command; without it a command runs to completion, as before. */
-  exec: (cmd: string, opts?: { timeoutMs?: number }) => string;
+  exec: (cmd: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => string;
   checkPort: (port: number, host: string) => Promise<boolean>;
   configStore: Pick<ConfigStore, "resolve">;
   platform?: NodeJS.Platform;
@@ -468,8 +468,8 @@ function buildCmuxDaemonWarning(deps: DoctorDeps, platform: NodeJS.Platform): Do
 
 /** The standalone doctor's command runner. A command with `timeoutMs` is bounded (the tmux capture probe passes one); others
  *  run to completion, as before. */
-export function doctorExec(c: string, opts?: { timeoutMs?: number }): string {
-  return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
+export function doctorExec(c: string, opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }): string {
+  return execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], ...(opts?.env ? { env: opts.env } : {}), ...(opts?.timeoutMs ? { timeout: opts.timeoutMs } : {}) });
 }
 
 function readTmuxMouseMode(deps: DoctorDeps): "on" | "off" | null {

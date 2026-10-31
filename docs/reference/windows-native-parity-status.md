@@ -1822,3 +1822,28 @@ native failure logs thousands of characters longer before the actual error.
 This diagnostic correction retains the same stores, actions and assertions;
 it does not waive the symlink failures or turn scoped ACL results into a
 full deployment or cross-user permission claim.
+
+## Capture-health probe namespace isolation
+
+Review of the remaining source-only entries found that the Windows capture
+health check supplied `-L` and `NUL` but inherited the caller's HOME and psmux
+data environment. An injected executor confirmed that none of its create,
+capture or cleanup commands supplied a child environment. No real default
+server was accessed to reproduce that omission.
+
+The native probe now creates one temporary home, sets HOME, USERPROFILE and
+PSMUX_DATA_DIR for every command, and removes inherited case variants of those
+keys plus TMUX/TMUX_PANE. Doctor and setup forward this explicit environment
+through their production executors. The parent environment remains unchanged.
+Successful cleanup removes the owned home; unconfirmed termination retains it
+instead of forcing deletion. Temporary-home creation failure reports not checked.
+POSIX command construction remains unchanged.
+
+Focused checks cover the shared child environment, actual doctor/setup receiver
+processes, failed creation with cleanup, and retention after unconfirmed cleanup.
+The corrected stock psmux 3.4.0 fixture also passes with the Windows null device,
+independent home/data directory, capture and cleanup; no default namespace or
+deployment is used. CLI TypeScript passes. The native CI lifecycle step now
+includes this corrected capture check. The concurrent CLI/TUI directory run
+started before this production change, so it cannot be described as a frozen
+acceptance run of this revised source.

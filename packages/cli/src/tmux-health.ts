@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 export interface TmuxProbeResult {
   installed: boolean;
   available: boolean;
@@ -43,10 +47,18 @@ export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
  * Every command is bounded, and the throwaway server always gets a cleanup attempt, even after a create that failed or
  * timed out (it may have started anyway). A throwaway server that won't start is reported as not checked, not a failure.
  */
-export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }) => string,
+export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number; env?: NodeJS.ProcessEnv }) => string,
   socket = `openrig-check-${process.pid}`, platform: string = process.platform): TmuxCaptureResult {
   const emptyConfig = platform === "win32" ? "NUL" : "/dev/null";
-  const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, { timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS });
+  let probeRoot: string | null = null;
+  try { if (platform === "win32") probeRoot = mkdtempSync(join(tmpdir(), "openrig-capture-")); }
+  catch (err) { return { status: "skipped", detail: `Could not create an isolated capture-probe home: ${errorMessage(err)}` }; }
+  const env = probeRoot ? Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !["HOME", "USERPROFILE", "PSMUX_DATA_DIR", "TMUX", "TMUX_PANE"].includes(key.toUpperCase()))) : undefined;
+  if (env && probeRoot) Object.assign(env, { HOME: probeRoot, USERPROFILE: probeRoot, PSMUX_DATA_DIR: join(probeRoot, "psmux") });
+  const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, {
+    timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS, ...(env ? { env } : {}),
+  });
   try {
     try { run("new-session -d -s check"); }
     catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
@@ -57,7 +69,10 @@ export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number }
       return { status: "fail", detail: errorMessage(err).trim() };
     }
   } finally {
-    try { run("kill-server"); } catch { /* no throwaway server is left, or it already exited */ }
+    let stopped = false;
+    try { run("kill-server"); stopped = true; } catch { /* Preserve the owned home when termination is unconfirmed. */ }
+    if (probeRoot && stopped) try { rmSync(probeRoot, { recursive: true, force: true }); }
+    catch { /* A retained owned directory is safer than forcing a live handle. */ }
   }
 }
 
