@@ -1946,3 +1946,20 @@ confirms the assembled plugin is `0.1.34`, and receives the complete SessionStar
 event through that projection. This corroborates the packaged compiled path,
 not just the TypeScript implementation. It still makes zero configured API
 requests and does not establish production hook effects or provider continuity.
+
+## Complete snapshot/restore decision-chain files
+
+At `259ccce`, the complete `restore-orchestrator.test.ts` (315 cases),
+`agentspec-restore.integration.test.ts` (15), and `restore-honesty-d1-d6.test.ts`
+(14) pass on native Windows: 344 passed, zero failed, zero skipped. These use
+real owned test databases and snapshot/startup-context records, with controlled
+runtime/tmux adapters. They add full-file coverage of snapshot selection,
+recorded continuity, carried sources, stopped/held decisions and compensation;
+they do not launch real provider sessions or existing seats.
+
+Tracing the real stub route confirms that complete native launch/readiness
+would enter the managed-runner OS identity and cleanup path. The previously
+recorded three unsuccessful cleanup attempts remain a boundary; this review
+does not authorize a fourth equivalent attempt under a different fixture name.
+The independent spawned stub compaction/restore script witnesses and the
+344 decision-chain cases remain distinct from full native snapshot restoration.
