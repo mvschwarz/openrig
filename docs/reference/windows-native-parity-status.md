@@ -22,7 +22,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 
 | Workflow | Implemented scope and evidence entry | Still unverified |
 | --- | --- | --- |
-| Initial-shell environment policy | Native private bootstrap for PowerShell/pwsh/cmd, selected environment and fresh pane identity; [native scoped launch](../../packages/daemon/test/windows-scoped-launch.test.ts). Stock 3.4.0 empty-server startup, first session and dead-pane respawn pass in an isolated namespace. | Live provider/fleet acceptance, pwsh execution and unsupported shell semantics. Stock psmux's separate `-e` argv visibility limitation remains. |
+| Initial-shell environment policy | Native private bootstrap for PowerShell/pwsh/cmd, selected environment and fresh pane identity; [native scoped launch](../../packages/daemon/test/windows-scoped-launch.test.ts). Stock 3.4.0 empty-server startup, first session, dead-pane respawn and interactive command pass with Windows PowerShell 5 and pwsh 7.6.9 in isolated namespaces. | Live provider/fleet acceptance and unsupported shell semantics. Stock psmux's separate `-e` argv visibility limitation remains. |
 | Pi and OMP | Native executable/npm dispatch and argv-aware protocol fixtures; [native dispatch](../../packages/daemon/test/pi-omp-native-dispatch.test.ts). Earlier reconciliation covered 59 protocol/dispatch cases. | Actual provider conversations, compaction and complete restore. |
 | Community harnesses | Metadata reaches the child; standard npm entries resolve against the seat cwd, including relative PATH and command paths; [native environment](../../packages/daemon/test/community-harness-native-environment.test.ts). Combined protocol/activity run passed 70 cases. | Arbitrary batch launchers are deliberately not translated; installed third-party providers and real restore remain unverified. |
 | ACP | Native command selection and bounded owned process handling; [selection](../../packages/cli/test/acp-native-command-selection.test.ts), [process handling](../../packages/cli/test/windows-acp-process.test.ts). | Live agent/queue acceptance; previously unresolved companion cleanup behavior. |
@@ -1311,6 +1311,31 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Actual pwsh scoped-shell and stock psmux checks
+
+The scoped launch test can now include an explicit portable pwsh through
+`OPENRIG_TEST_PWSH`, retaining Windows PowerShell 5 in the same run. With the
+existing explicit `OPENRIG_TEST_PSMUX` opt-in, each shell gets its own temporary
+HOME/USERPROFILE, psmux registry and random `-L` namespace. Default invocations do
+not download tools or probe a user's psmux server.
+
+An owned run with [official PowerShell 7.6.9](https://github.com/PowerShell/PowerShell/releases/tag/v7.6.9)
+passed all six cases, zero skipped. The downloaded Windows x64 archive matched
+its release SHA-256
+`ce7484804c0f0ad4dda10c958e71acdaf7eebfb22505c1b480f89e0e9f1da94d`.
+The direct-shell cases check environment clearing, selected multiline/Unicode
+values, fresh pane identity, cwd and bootstrap-file removal, plus native cmd
+semantics and unsupported-shell refusal. The two actual stock psmux 3.4.0 cases
+exercise empty-server startup, first session, dead-pane respawn with a routed
+native client, and interactive shell command delivery under Windows PowerShell
+and pwsh respectively. Each named server is stopped by its fixture; the portable
+tool directory was removed afterward. No global PATH/install, existing seat,
+provider access, deployment or team state was changed.
+
+This establishes pwsh behavior for those initial-shell workflows. It does not
+prove live provider launch/compaction, arbitrary shell profiles, complete restore,
+or every generated CLI shim under pwsh.
+
 ## Paired cmd CLI Unicode path execution
 
 Extending the native cmd shim fixture to place the paired CLI in a Chinese path

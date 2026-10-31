@@ -9,12 +9,14 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { windowsScopedLaunch } from "../src/adapters/windows-scoped-launch.js";
 import { powershellQuote } from "../src/adapters/windows-launch.js";
 
+const nativeShells = [join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  ...(process.env.OPENRIG_TEST_PWSH ? [process.env.OPENRIG_TEST_PWSH] : [])];
+
 describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", () => {
-  it("clears unrelated inheritance, preserves pane identity and keeps values off bootstrap argv", () => {
+  it.each(nativeShells)("clears unrelated inheritance, preserves pane identity and keeps values off bootstrap argv: %s", shell => {
     const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-"));
     try {
       const file = join(dir, "private launch.sh"), output = join(dir, "result.json");
-      const shell = join(process.env.SystemRoot!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
       const value = "synthetic ' quote\nUnicode 中文";
       const command = `[IO.File]::WriteAllText(${powershellQuote(output)}, (ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED; pane=$env:TMUX_PANE; cwd=(Get-Location).Path }))`;
       const launch = windowsScopedLaunch(`"${shell}" -NoProfile`, command, { SystemRoot: process.env.SystemRoot, SELECTED: "old", selected: value, TMUX_PANE: "stale" }, file);
@@ -44,11 +46,10 @@ describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", (
   });
 });
 
-it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX)("runs scoped initial shells on an owned stock psmux server", async () => {
+it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX).each(nativeShells)("runs scoped initial shells on an owned stock psmux server: %s", async shell => {
   const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-psmux-"));
   const registry = join(dir, "registry"); mkdirSync(registry);
   const namespace = `scoped-${randomUUID()}`;
-  const shell = join(process.env.SystemRoot!, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const env = { SHELL: shell, SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot, PATH: dirname(shell) + ";" + process.env.SystemRoot + "\\System32", HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir, PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL", UNRELATED: "server-only" };
   const run = promisify(execFile);
   const invoke = async (argv: string[]) => (await run(process.env.OPENRIG_TEST_PSMUX!, ["-L", namespace, ...argv.slice(1)], { env, cwd: dir, timeout: 10000, windowsHide: true })).stdout;
