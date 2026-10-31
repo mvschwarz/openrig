@@ -31,4 +31,28 @@ const renamed = specLibrary.rename(specLibrary.list()[0].id, "renamed owned agen
 assert.equal(renamed.ok, true); assert.equal(renamed.entry.name, "renamed owned agent");
 assert.equal(existsSync(join(specs, "original.yaml")), false);
 assert.equal(specLibrary.list().length, 1);
-console.log(JSON.stringify({ contextComposeReadRemove: true, specScanRename: true }));
+if (process.platform === "win32") {
+  const cliModule = name => import(pathToFileURL(join(resolve(installed), "dist", name)).href);
+  const { probeTmuxCapture } = await cliModule("tmux-health.js");
+  const { doctorExec } = await cliModule("commands/doctor.js");
+  const { defaultDeps } = await cliModule("commands/setup.js");
+  const environments = [];
+  const capture = probeTmuxCapture((_command, options) => {
+    environments.push(options.env);
+    assert.ok(options.env.HOME && existsSync(options.env.HOME));
+    assert.equal(options.env.USERPROFILE, options.env.HOME);
+    assert.equal(options.env.PSMUX_DATA_DIR, join(options.env.HOME, "psmux"));
+    assert.equal(options.env.PSMUX_CONFIG_FILE, "NUL");
+    return "";
+  }, "owned-installed-capture");
+  assert.deepEqual(capture, { status: "pass" });
+  assert.equal(environments.length, 3);
+  assert.ok(environments.every(env => env === environments[0]));
+  assert.equal(existsSync(environments[0].HOME), false);
+  for (const exec of [doctorExec, defaultDeps().exec]) {
+    assert.equal(exec(`"${process.execPath}" -p "process.env.OPENRIG_TEST_CAPTURE_MARKER"`, {
+      timeoutMs: 5000, env: { ...process.env, OPENRIG_TEST_CAPTURE_MARKER: "owned-installed-environment" },
+    }).trim(), "owned-installed-environment");
+  }
+}
+console.log(JSON.stringify({ contextComposeReadRemove: true, specScanRename: true, nativeCaptureEnvironment: process.platform === "win32" }));

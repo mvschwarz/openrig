@@ -173,7 +173,7 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     const resourceResult = execFileSync(process.execPath,
       [join(HERE, "installed-resource-library-probe.mjs"), installed, home],
       { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });
-    assert.deepEqual(JSON.parse(resourceResult), { contextComposeReadRemove: true, specScanRename: true });
+    assert.deepEqual(JSON.parse(resourceResult), { contextComposeReadRemove: true, specScanRename: true, nativeCaptureEnvironment: process.platform === "win32" });
     const nativeHelper = join(installed, "daemon/context-packs/skills/process/systematic-debugging/find-polluter.mjs");
     assert.deepEqual(readFileSync(nativeHelper), readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs")), "installed native helper must match its authored source");
     assert.throws(() => execFileSync(process.execPath, [nativeHelper], { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true }),
