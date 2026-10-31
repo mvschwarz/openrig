@@ -1802,3 +1802,23 @@ the installed native CLI daemon-subpath command all completed successfully.
 This closes the package-to-library filesystem gap for the checked operations;
 live daemon delivery, every authored combination and fleet activation remain
 outside this fixture. The Gate removes its owned prefix and home in `finally`.
+
+## Native atomic replacement and registry write refresh
+
+The complete atomic-text, native-ACL, config-atomic and host-registry-write
+files ran against production source at `2b0c31c` (a documentation-only commit
+followed during execution). They report 56 passed, three failed and nine skipped.
+All three failures occur at file-symlink creation with `EPERM`; all nine skips
+are explicitly POSIX-only checks. The 23 native ACL cases pass, including owned
+seat-skill replacement, plugin migration, ignore-file reconciliation, synthetic
+Slack state, recap archives and native refusal paths. The host-registry writer
+passes all seven cases using owned files, including preservation of invalid
+existing state and loader/write validation parity. No real registry, credential,
+Slack endpoint or seat is used.
+
+The config test matrix now labels `ConfigStore` and `SettingsStore` explicitly.
+Previously `%s` formatted each constructor as its complete class source, making
+native failure logs thousands of characters longer before the actual error.
+This diagnostic correction retains the same stores, actions and assertions;
+it does not waive the symlink failures or turn scoped ACL results into a
+full deployment or cross-user permission claim.
