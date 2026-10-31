@@ -360,6 +360,43 @@ function BlockRenderer({ block, assetBasePath }: { block: Block; assetBasePath?:
 }
 
 // Light inline parser: handles `code`, **bold**, *italic*, [text](url), ![alt](url).
+function sanitizeLinkHref(href: string): string | undefined {
+  if (!href) return undefined;
+  const trimmed = href.trim().replace(/^[\x00-\x20]+/, "");
+  if (trimmed.startsWith("/") || trimmed.startsWith("#") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+    return trimmed;
+  }
+  const colonIndex = trimmed.indexOf(":");
+  if (colonIndex === -1) {
+    return trimmed;
+  }
+  const scheme = trimmed.slice(0, colonIndex).toLowerCase();
+  if (scheme === "http" || scheme === "https" || scheme === "mailto") {
+    return trimmed;
+  }
+  return undefined;
+}
+
+function sanitizeImageSrc(src: string): string | undefined {
+  if (!src) return undefined;
+  const trimmed = src.trim().replace(/^[\x00-\x20]+/, "");
+  if (trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+    return trimmed;
+  }
+  const colonIndex = trimmed.indexOf(":");
+  if (colonIndex === -1) {
+    return trimmed;
+  }
+  const scheme = trimmed.slice(0, colonIndex).toLowerCase();
+  if (scheme === "http" || scheme === "https") {
+    return trimmed;
+  }
+  if (scheme === "data" && trimmed.toLowerCase().startsWith("data:image/")) {
+    return trimmed;
+  }
+  return undefined;
+}
+
 function renderInline(text: string, assetBasePath?: string): React.ReactNode {
   const nodes: React.ReactNode[] = [];
   let i = 0;
@@ -393,11 +430,12 @@ function renderInline(text: string, assetBasePath?: string): React.ReactNode {
     const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
     if (linkMatch) {
       flushPlain(plainStart, i);
+      const safeHref = sanitizeLinkHref(linkMatch[2]!);
       nodes.push(
         <a
           key={key++}
           data-testid="md-inline-link"
-          href={linkMatch[2]}
+          href={safeHref}
           target="_blank"
           rel="noopener noreferrer"
           className="text-blue-700 underline hover:text-blue-900"
@@ -456,14 +494,15 @@ function renderInline(text: string, assetBasePath?: string): React.ReactNode {
   return nodes;
 }
 
-function resolveAssetUrl(src: string, assetBasePath?: string): string {
-  if (!src) return src;
-  if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("data:") || src.startsWith("/")) return src;
-  if (!assetBasePath) return src;
+function resolveAssetUrl(src: string, assetBasePath?: string): string | undefined {
+  const safe = sanitizeImageSrc(src);
+  if (!safe) return undefined;
+  if (safe.startsWith("http://") || safe.startsWith("https://") || safe.startsWith("data:") || safe.startsWith("/")) return safe;
+  if (!assetBasePath) return safe;
   // Treat assetBasePath as a URL prefix; combine carefully so we don't
   // double-slash or strip the path's relative segment.
   const sep = assetBasePath.endsWith("/") ? "" : "/";
-  return `${assetBasePath}${sep}${src}`;
+  return `${assetBasePath}${sep}${safe}`;
 }
 
 // Minimal Fragment-equivalent without importing react/jsx-runtime

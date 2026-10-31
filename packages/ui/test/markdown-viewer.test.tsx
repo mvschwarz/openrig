@@ -82,6 +82,36 @@ describe("UI Enhancement Pack v0 — MarkdownViewer", () => {
     expect(link.getAttribute("href")).toBe("https://example.com/docs");
   });
 
+  it("disallows dangerous script and data schemes in inline links", () => {
+    const md = `[js link](javascript:alert(1)) and [upper](JaVaScRiPt:alert(2)) and [whitespace](  javascript:alert(3)) and [vb](vbscript:msgbox) and [data](data:text/html,<script>alert(1)</script>)`;
+    render(<MarkdownViewer content={md} />);
+    const links = screen.getAllByTestId("md-inline-link") as HTMLAnchorElement[];
+    expect(links).toHaveLength(5);
+    for (const link of links) {
+      expect(link.hasAttribute("href")).toBe(false);
+    }
+  });
+
+  it("preserves safe URL schemes and relative paths in inline links", () => {
+    const md = `[https](https://example.com) [http](http://example.com) [mailto](mailto:dev@openrig.local) [root](/docs) [hash](#section) [relative](./sibling)`;
+    render(<MarkdownViewer content={md} />);
+    const links = screen.getAllByTestId("md-inline-link") as HTMLAnchorElement[];
+    expect(links).toHaveLength(6);
+    expect(links[0]!.getAttribute("href")).toBe("https://example.com");
+    expect(links[1]!.getAttribute("href")).toBe("http://example.com");
+    expect(links[2]!.getAttribute("href")).toBe("mailto:dev@openrig.local");
+    expect(links[3]!.getAttribute("href")).toBe("/docs");
+    expect(links[4]!.getAttribute("href")).toBe("#section");
+    expect(links[5]!.getAttribute("href")).toBe("./sibling");
+  });
+
+  it("neutralizes dangerous script schemes in inline images", () => {
+    const md = `![evil](javascript:alert(1))`;
+    render(<MarkdownViewer content={md} />);
+    const img = screen.getByTestId("md-inline-image") as HTMLImageElement;
+    expect(img.hasAttribute("src")).toBe(false);
+  });
+
   it("renders inline images with relative src resolved against assetBasePath", () => {
     const md = `![diagram](shots/foo.png)`;
     render(<MarkdownViewer content={md} assetBasePath="/api/files/asset?root=ws&path=docs" />);
