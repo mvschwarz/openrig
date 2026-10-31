@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { execFileSync, execFile } from "node:child_process";
+import { execFileSync, execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
@@ -31,6 +31,21 @@ describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", (
   });
   it("retains the diagnostic fallback for unsupported shell semantics", () => {
     expect(() => windowsScopedLaunch("bash.exe", "", {}, "unused")).toThrow("Unsupported native scoped shell");
+  });
+  it("reports an unavailable selected shell and consumes only its owned bootstrap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-missing-"));
+    try {
+      const file = join(dir, "private launch.sh");
+      const shell = join(dir, "missing", "powershell.exe");
+      const launch = windowsScopedLaunch(`"${shell}" -NoProfile`, "", { SystemRoot: process.env.SystemRoot }, file);
+      writeFileSync(file, launch.content);
+      const result = spawnSync(launch.argv[0]!, launch.argv.slice(1),
+        { cwd: dir, env: { SystemRoot: process.env.SystemRoot }, encoding: "utf8", timeout: 15_000, windowsHide: true });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).not.toBe("");
+      expect(existsSync(file)).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("preserves configured cmd startup arguments and explicit command semantics", () => {
     const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-cmd-"));

@@ -1,7 +1,7 @@
 # Native Windows parity: implementation and evidence
 
-Initial map at source commit `c778b2a52` (2026-10-30), with later scoped
-updates below through source `789cd01`. This is an implementation
+Initial map at source commit `c778b2a52` (2026-10-30), with later scoped,
+source-bound updates below. This is an implementation
 coverage map for Draft #1309, not a declaration of complete Windows support.
 The [experiment record](windows-support-experiment.md) retains individual
 reproductions, repairs, results and limitations. Tests linked below are executable
@@ -1348,6 +1348,20 @@ the native parity audit. This corrects the earlier broad checkpoint caveat above
 the 44-case checkpoint tests concern persisted metadata, not these unused methods.
 
 ## Native spawn failure cannot inherit success
+
+Follow-up checks of the private scoped-shell bootstrap found its existing
+terminating-error handling already refuses an unavailable selected shell.
+An actual native fixture now verifies exit status 1 and removal of only its owned
+bootstrap file in that case. With classic/managed/shim tests, the run passes
+18 cases, zero failed; the one stock-psmux opt-in case is skipped in this run.
+The separately recorded six-case Windows PowerShell/pwsh stock check remains
+distinct evidence, not a skipped case silently counted as passed.
+
+The four recently affected standalone script suites were also checked together:
+installer, upgrade inspection/migration plan, script entry aliases and native
+pollution helper pass all 24 cases, zero skipped. Their npm/CLI receivers and
+test files are owned fixtures; this does not replace the installed tarball Gate
+or claim network setup/provider acceptance.
 
 At `8ca0059`, three owned missing-executable reproductions failed: the dynamic
 paired-CLI forwarder, classic Windows launch and managed Windows launch all
