@@ -20,7 +20,7 @@ const composed = library.composeFromFiles({ outRef: "owned/brief", sources: [{ p
 assert.equal(composed.ref, "owned/brief");
 assert.deepEqual(library.scan(), { count: 1, errors: [] });
 assert.equal(library.getByRef("owned/brief").sourcePath, join(packs, "owned", "brief"));
-assert.equal(readFileSync(join(packs, "owned", "brief", "notes.md"), "utf8"), "# Owned installed context\n");
+assert.equal(readFileSync(join(packs, "owned", "brief", "source-0001.md"), "utf8"), "# Owned installed context\n");
 assert.equal(library.removeByRef("owned/brief").removed, true);
 assert.equal(existsSync(join(packs, "owned", "brief")), false);
 const specs = join(root, "specs"); mkdirSync(specs);
