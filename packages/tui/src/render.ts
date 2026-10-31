@@ -709,6 +709,7 @@ function noRigsText(snap: FleetSnapshot, host: FleetSnapshot["hosts"][number], l
     : `  (no rigs served by ${host.name})`;
 }
 
+/** Rig boundaries take a solid rule and pod boundaries a dotted one; RIG repeats on every row so scrolled rows keep it. */
 function instanceContentLines(
   state: ViewState,
   snap: FleetSnapshot,
