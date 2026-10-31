@@ -1347,6 +1347,31 @@ checkpoint workflow. Adding a new cross-platform workflow is not inferred from
 the native parity audit. This corrects the earlier broad checkpoint caveat above;
 the 44-case checkpoint tests concern persisted metadata, not these unused methods.
 
+## Finite inventory freshness and outside-inventory deltas
+
+A read-only refresh at `e080c22` reconciles 222 public entries from the older
+`9bbed` finite candidate ledger: 196 source hashes are unchanged, 26 changed, and
+none missing. It also identifies 35 changed production/authored-helper scripts
+outside that candidate set. Those counts describe freshness and the original
+inventory's limits, not test coverage; outside-inventory does not mean previously
+unread, and unchanged source does not refresh an old acceptance claim.
+
+This pass reads the changed lines in evidence protection, settings browsing,
+projection planning, rig instantiation, runtime-switch materials and cwd
+preparation. The reviewed resource paths consistently use the native directory
+mapping; the other deltas retain native basename/YAML-case handling and named
+absolute-path display with sensitive components withheld. No new defect was
+established in those reviewed lines. This is not a full reread/acceptance of all
+35 outside-inventory modules.
+
+The related scoped suites pass 49/49, zero skipped: image evidence guard 12,
+runtime-switch material planning seven, settings browser 16, and native resource
+projection 14. They use owned files, SQLite and projection fixtures; the settings
+checks refuse external calls. They do not perform an actual runtime switch,
+provider start, complete rig instantiation, remote share access or deployment.
+The current inventory and these results remain separate evidence axes; source-only
+reviews and integration gaps elsewhere are not silently reclassified as complete.
+
 ## Native spawn failure cannot inherit success
 
 Follow-up checks of the private scoped-shell bootstrap found its existing
