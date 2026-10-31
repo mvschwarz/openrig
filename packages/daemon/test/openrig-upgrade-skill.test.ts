@@ -168,8 +168,8 @@ describe("openrig-upgrade stays agent-driven", () => {
     }
   });
 
-  it("ships four bounded helpers and mirrors them byte-for-byte", () => {
-    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs", "migrate-telemetry-state-0.5.9.mjs"]) {
+  it("ships its bounded helpers and command transport and mirrors them byte-for-byte", () => {
+    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs", "migrate-telemetry-state-0.5.9.mjs", "run-rig.mjs"]) {
       const source = path.join(skillRoot, "scripts", helper);
       const mirror = path.join(repoRoot, "skills/_canonical/core/openrig-upgrade/scripts", helper);
       expect(fs.existsSync(source), `missing source helper ${helper}`).toBe(true);

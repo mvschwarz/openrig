@@ -1311,6 +1311,35 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Upgrade helper command paths and packed TUI execution
+
+An owned native reproduction found that PowerShell's direct invocation of
+`rig.cmd` expanded a `%VARIABLE%` sequence inside the installation path a second
+time. The file existed, but both upgrade inspection and telemetry migration's
+read-only inventory reported `The system cannot find the path specified.`
+The regression tests failed 0/2 before repair and pass 2/2 afterward. They cover
+authored/canonical migration scripts, an explicit shim path and PATH lookup,
+Unicode, spaces, ampersands, percent sequences and exclamation marks, and retain
+the caller's working directory and nonzero CLI exit status.
+
+Both callers now share the shipped `run-rig.mjs` transport. It resolves the
+application without executing it, invokes executable files directly, and passes
+batch paths through one environment expansion to `cmd /d /v:off /s /c`.
+The callers' fixed CLI words are validated before that batch invocation; arbitrary
+shell arguments are refused. It does not use `CALL`, change cwd, or alter a user's
+installation. Companion focused upgrade tests pass 3/3 with 47 unrelated cases
+filtered; this is not the full migration-suite result. The skill mirror check
+passes with the new dependency included byte-for-byte.
+
+Separately, the packaged TUI build/extraction/demo-input script passed at frozen
+`f9cab913f7f21d92e8d862e4b8b68864bea22d5d`, with unchanged tracked-diff hash before
+and after. It exercised the packed Node entry and every delayed split of its
+arrow/page/mouse input vectors. Dependencies came from an owned junction to this
+checkout's node_modules, so this is packed-entry/input evidence, not an independent
+installed dependency or interactive desktop acceptance claim. No real daemon,
+provider, team, or desktop window was used. These checks predate the upgrade-path
+repair described above.
+
 ## Paired local-reader deadline and setup checks
 
 The native `local-reading-process.test.ts` now also runs an owned, deliberately
