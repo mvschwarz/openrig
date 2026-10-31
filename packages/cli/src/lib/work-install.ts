@@ -215,45 +215,22 @@ function resolveExplicitSlice(
   return matches[0]!;
 }
 
-export function resolveWorkPosition(opts: {
+export interface WorkProjectOptions {
   workspaceRoot: string;
   catalogPath?: string;
-  contextRoot: string;
-  systemWorldSelection: string;
-  systemWorldSource: SystemWorldSource;
   project?: string;
-  mission?: string;
-  slice?: string;
-  /** Working directory for selection step 4 (the CLI passes --cwd or the process cwd). */
   cwd?: string;
-  /** Calling seat's canonical session, for selection step 3; absent in a plain shell. */
   sessionName?: string;
-}): WorkInstallResult {
+}
+
+/** Catalog/home resolution shared by read-only work consumers and work-install.
+ * No System World, skill selection or projection is performed here. */
+export function resolveWorkProject(opts: WorkProjectOptions, warnings: string[]) {
   if (opts.project !== undefined && !SEGMENT.test(opts.project)) {
     return failure("invalid_project", "project must be a single bounded segment");
   }
-  if (opts.mission !== undefined && !SEGMENT.test(opts.mission)) {
-    return failure("invalid_mission", "mission must be a single bounded segment");
-  }
-  if (opts.slice !== undefined && !SEGMENT.test(opts.slice)) {
-    return failure("invalid_slice", "slice must be a single bounded segment");
-  }
-  if (opts.slice !== undefined && opts.mission === undefined) {
-    return failure("mission_required", "slice requires an exact mission selection");
-  }
-
   const workspaceRoot = canonicalExisting(opts.workspaceRoot);
-  if (!workspaceRoot) {
-    return failure("workspace_root_missing", `workspace root does not exist: ${resolve(opts.workspaceRoot)}`);
-  }
-
-  const warnings: string[] = [];
-  const systemWorld = resolveSystemWorld({
-    contextRoot: opts.contextRoot,
-    selection: opts.systemWorldSelection,
-    source: opts.systemWorldSource,
-  });
-  if (!systemWorld.ok) return failure(systemWorld.error.code, systemWorld.error.message);
+  if (!workspaceRoot) return failure("workspace_root_missing", `workspace root does not exist: ${resolve(opts.workspaceRoot)}`);
   const catalogPath = resolve(opts.catalogPath ?? join(workspaceRoot, "workspace.yaml"));
   let projectId: string | null = null;
   let projectRoot = workspaceRoot;
@@ -302,6 +279,85 @@ export function resolveWorkPosition(opts: {
   if (!missionsRoot) {
     return failure("missions_root_escape", "project.yaml missions.root resolves outside the selected project root");
   }
+
+  return { workspaceRoot, projectId, projectRoot, selectedBy, projectManifest, missionsRoot };
+}
+
+/** A context home is a location, not task ownership or runtime authority. */
+export function resolveWorkContextHome(opts: WorkProjectOptions & { mission?: string; slice?: string }) {
+  const warnings: string[] = [];
+  if (opts.mission !== undefined && !SEGMENT.test(opts.mission)) return failure("invalid_mission", "mission must be a single bounded segment");
+  if (opts.slice !== undefined && !SEGMENT.test(opts.slice)) return failure("invalid_slice", "slice must be a single bounded segment");
+  if (opts.slice !== undefined && opts.mission === undefined) return failure("mission_required", "slice requires an exact mission selection");
+  const project = resolveWorkProject(opts, warnings);
+  if ("error" in project) return project;
+  let home = project.projectRoot;
+  if (opts.mission !== undefined) {
+    const nominal = join(project.missionsRoot, opts.mission);
+    const mission = canonicalExisting(nominal);
+    if (!mission) return failure("mission_not_found", `mission '${opts.mission}' does not exist in the selected project`);
+    if (!inside(project.projectRoot, mission)) return failure("mission_root_escape", "mission resolves outside the selected project root");
+    home = mission;
+    if (opts.slice !== undefined) {
+      let declared: Set<string> | undefined;
+      const manifestPath = join(mission, "mission.yaml");
+      if (existsSync(manifestPath)) {
+        const parsed = readYaml(manifestPath), composition = parsed.value?.["composition"];
+        if (parsed.value && isRecord(composition) && "slices" in composition) {
+          try { declared = new Set(validateMissionComposition(parsed.value, manifestPath).map(member => dirname(member.path))); }
+          catch (error) { return failure("mission_composition_invalid", (error as Error).message); }
+        } else if (!parsed.value) warnings.push(`${parsed.error}; kept conventional slice addresses`);
+      }
+      const slice = resolveExplicitSlice(mission, opts.slice, declared);
+      if ("error" in slice) return slice;
+      home = slice.root;
+    }
+  }
+  return { projectId: project.projectId, projectRoot: project.projectRoot, selectedBy: project.selectedBy, home, warnings };
+}
+
+export function resolveWorkPosition(opts: {
+  workspaceRoot: string;
+  catalogPath?: string;
+  contextRoot: string;
+  systemWorldSelection: string;
+  systemWorldSource: SystemWorldSource;
+  project?: string;
+  mission?: string;
+  slice?: string;
+  /** Working directory for selection step 4 (the CLI passes --cwd or the process cwd). */
+  cwd?: string;
+  /** Calling seat's canonical session, for selection step 3; absent in a plain shell. */
+  sessionName?: string;
+}): WorkInstallResult {
+  if (opts.project !== undefined && !SEGMENT.test(opts.project)) {
+    return failure("invalid_project", "project must be a single bounded segment");
+  }
+  if (opts.mission !== undefined && !SEGMENT.test(opts.mission)) {
+    return failure("invalid_mission", "mission must be a single bounded segment");
+  }
+  if (opts.slice !== undefined && !SEGMENT.test(opts.slice)) {
+    return failure("invalid_slice", "slice must be a single bounded segment");
+  }
+  if (opts.slice !== undefined && opts.mission === undefined) {
+    return failure("mission_required", "slice requires an exact mission selection");
+  }
+
+  const workspaceRoot = canonicalExisting(opts.workspaceRoot);
+  if (!workspaceRoot) {
+    return failure("workspace_root_missing", `workspace root does not exist: ${resolve(opts.workspaceRoot)}`);
+  }
+
+  const warnings: string[] = [];
+  const systemWorld = resolveSystemWorld({
+    contextRoot: opts.contextRoot,
+    selection: opts.systemWorldSelection,
+    source: opts.systemWorldSource,
+  });
+  if (!systemWorld.ok) return failure(systemWorld.error.code, systemWorld.error.message);
+  const project = resolveWorkProject({ ...opts, workspaceRoot }, warnings);
+  if ("error" in project) return project;
+  const { projectId, projectRoot, selectedBy, projectManifest, missionsRoot } = project;
 
   let projectIntent = "SPEC.md";
   let projectIntentSource: WorkInstallSource = "default";
