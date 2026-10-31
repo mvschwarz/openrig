@@ -1,7 +1,7 @@
 # Native Windows parity: implementation and evidence
 
 Initial map at source commit `c778b2a52` (2026-10-30), with later scoped
-updates below through source `8f639d315`. This is an implementation
+updates below through source `789cd01`. This is an implementation
 coverage map for Draft #1309, not a declaration of complete Windows support.
 The [experiment record](windows-support-experiment.md) retains individual
 reproductions, repairs, results and limitations. Tests linked below are executable
@@ -1311,6 +1311,30 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Installed upgrade dependency closure and native drain
+
+The strengthened install Gate passed at frozen
+`789cd01e61d4ce4872296974f43a4181136b679d` (2026-10-31 00:09:37–00:11:11 UTC).
+Before/after HEAD and tracked-diff hashes match. In addition to the native build,
+tarball install, SQLite ABI and actual `rig.cmd` daemon-subpath load, it compares
+installed upgrade inspection, migration and `run-rig.mjs` bytes with their authored
+sources. The installed migration `--help` successfully imports the real sibling
+module without running inventory. This closes the package-dependency omission
+risk introduced by extracting that module; it does not perform a real migration.
+The build still reports dirty metadata because the protected untracked diagnostic
+is retained. No leak-guard term rules were supplied; those term checks are skipped.
+
+At the same source, the native Windows daemon-control and CLI stop-outcome files
+pass all 25 cases. Four native cases exercise capability-directory access checks,
+stale identity refusal, successor capability preservation and an owned child
+crossing production `startServer` shutdown to a matching clean persisted receipt.
+That child uses an isolated home/database, ephemeral listener and fixture startup
+services. The other 21 cases inject lifecycle observations to check failed,
+timed-out, missing/stale receipts, rebound state and repeated-stop behavior.
+This is real native control transport and bounded shutdown-path evidence with
+fixture services, not existing-fleet drainage, actual provider shutdown or a
+deployment restart. Existing stop/hold boundaries remain untouched.
+
 ## Upgrade helper command paths and packed TUI execution
 
 The complete upgrade-helper test file was subsequently run at `826a4da`: 31
