@@ -582,7 +582,7 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(stagingLeftovers()).toEqual([]);
   });
 
-  it("keeps an existing regular artifact's permission bits; a symlinked name gets default permissions", async () => {
+  it.skipIf(process.platform === "win32")("keeps an existing regular artifact's permission bits; a symlinked name gets default permissions", async () => {
     const priv = path.join(proofDir, "private.md");
     fs.writeFileSync(priv, "original\n");
     fs.chmodSync(priv, 0o600);
@@ -605,7 +605,7 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(fs.readFileSync(linkedTarget)).toEqual(png("mode victim"));
   });
 
-  it("creates the staging file no wider than the artifact it replaces", async () => {
+  it.skipIf(process.platform === "win32")("creates the staging file no wider than the artifact it replaces", async () => {
     const priv = path.join(proofDir, "tight.md");
     fs.writeFileSync(priv, "original\n");
     fs.chmodSync(priv, 0o600);
