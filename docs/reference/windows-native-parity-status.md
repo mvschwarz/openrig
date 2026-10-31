@@ -1982,3 +1982,20 @@ the native CI verification step includes this fixture. This is independent of
 the exhausted managed-runner cleanup investigation and does not reopen it.
 The complete native atomic ACL file also passes 23/23 after the correction,
 covering normal native helper compilation and owned file replacement paths.
+
+The subsequent package Gate passes at fixed source
+`0063530baa50b8a458df7398c4931e4eb58f4375` (2026-10-31
+01:50:44–01:52:12 UTC), with unchanged tracked source. Its installed ABI, native
+CLI, context/spec operations and capture-environment checks remain passing after
+the failed-compilation cleanup change.
+
+The finite inventory refresh at that source contains 222 public rows: 30 changed,
+192 unchanged and zero missing, plus 36 changed source/helper files outside the
+old inventory. Seven additional hash changes since the earlier reviewed snapshot
+have explicit fix/evidence reconciliation. One private follow-up remains withheld;
+neither its source nor the protected untracked diagnostic was read for this audit.
+These counts are source freshness and bounded delta coverage, not exhaustive
+feature acceptance or a refresh of all historical behavioral labels. Real-provider
+continuity, remote integration, distinct-user permissions, host-denied symlinks
+and visible desktop acceptance remain separate requirements and are not green
+by inference from local fixtures.
