@@ -174,6 +174,17 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     assert.deepEqual(readFileSync(nativeHelper), readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs")), "installed native helper must match its authored source");
     assert.throws(() => execFileSync(process.execPath, [nativeHelper], { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true }),
       error => error.status === 2 && String(error.stdout).includes("Usage: node find-polluter.mjs"), "installed helper must execute and report invalid invocation honestly");
+    const upgradeScripts = "skills/core/openrig-upgrade/scripts";
+    for (const file of ["inspect-upgrade.mjs", "migrate-telemetry-state-0.5.9.mjs", "run-rig.mjs"]) {
+      assert.deepEqual(readFileSync(join(installed, "daemon/context-packs", upgradeScripts, file)),
+        readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared", upgradeScripts, file)),
+        `installed upgrade dependency ${file} must match its authored source`);
+    }
+    // --help imports the real sibling module but performs no inventory or mutation.
+    const migrationHelp = execFileSync(process.execPath,
+      [join(installed, "daemon/context-packs", upgradeScripts, "migrate-telemetry-state-0.5.9.mjs"), "--help"],
+      { cwd: home, env: { ...env, OPENRIG_RIG_BIN: join(home, "must-not-execute-rig.exe") }, encoding: "utf8", stdio: "pipe", windowsHide: true });
+    assert.match(migrationHelp, /Usage:/, "installed migration helper must load its shipped dependency and print help");
     // Explicitly exercise the installed in-memory SQLite check even when the
     // operator's npm configuration happens to suppress lifecycle scripts.
     execFileSync(process.execPath, [join(installed, "scripts/check-abi.mjs")], { cwd: home, env, stdio: "pipe" });
