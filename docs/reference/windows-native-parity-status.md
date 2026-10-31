@@ -1999,3 +1999,19 @@ feature acceptance or a refresh of all historical behavioral labels. Real-provid
 continuity, remote integration, distinct-user permissions, host-denied symlinks
 and visible desktop acceptance remain separate requirements and are not green
 by inference from local fixtures.
+
+### Actual Pi OAuth conversation continuity (2026-10-31)
+
+The user-selected Pi Codex OAuth provider was exercised with installed Pi 1.4.0,
+provider `openai-codex` and model `gpt-6.1-sol`, in an independent temporary
+session directory. The actual SDK completed two conversation turns, manual
+provider-backed compaction, and reopening the persisted session. A fresh random
+marker survived both the compaction summary and the reopened model's reply.
+The process exited zero at 10:23:50 UTC after starting at 10:23:10 UTC.
+
+The fixture disabled tools, extensions, skills and workspace guidance discovery;
+only synthetic test text was sent. It used the existing provider's normal OAuth
+storage rather than making a credential copy or changing existing seat state.
+This proves the scoped installed-Pi conversation/compaction/reopen path on native
+Windows. It does not prove the OpenRig managed-runner lifecycle or full restore.
+SSH/SFTP recovery verification is deferred by the user and remains unverified.
