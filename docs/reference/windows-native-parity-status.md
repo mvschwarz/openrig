@@ -1313,6 +1313,27 @@ The launch-boundary review found that a native scoped bootstrap was written befo
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
 ## Upgrade helper command paths and packed TUI execution
 
+The complete upgrade-helper test file was subsequently run at `826a4da`: 31
+passed, 17 failed, and two SQLite-tool-dependent cases skipped. Fourteen failures
+occurred at native file/directory symlink creation with `EPERM`, before the
+intended behavior could be exercised. They remain unverified; junctions are not
+substituted for file symlinks. The other three were fault-injection fixtures
+copying the migration script without its newly extracted sibling `run-rig.mjs`.
+The interposed fixture writer now copies that real dependency too. All three
+affected non-symlink cases pass when rechecked (47 unrelated cases filtered).
+The fourth interposed site also keeps the dependency, but its symlink premise
+cannot be exercised on this host. Product safeguards were not weakened.
+
+The two backup cases were then checked using SQLite's official Windows x64
+3.54.1 CLI in an owned temporary directory. The archive's SHA3-256 matched
+`e171f3993a992edf076746926dd52b5e2ebfabaee38818e74987e1d8112ab987`, published
+on the [SQLite download page](https://www.sqlite.org/download.html).
+Both cases pass: the backup retains the fixture row, passes integrity checking,
+leaves source bytes unchanged, and refuses an existing destination. The temporary
+tool was removed afterward. There was no global install/PATH change or live
+database access. These separate rechecks reconcile the observed failures/skips;
+they do not make the full symlink-dependent suite green.
+
 An owned native reproduction found that PowerShell's direct invocation of
 `rig.cmd` expanded a `%VARIABLE%` sequence inside the installation path a second
 time. The file existed, but both upgrade inspection and telemetry migration's

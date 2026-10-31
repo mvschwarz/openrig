@@ -54,6 +54,12 @@ function runJsonFileResult(scriptPath: string, args: string[], env?: NodeJS.Proc
   return { status: result.status, body: JSON.parse(output) };
 }
 
+function writeInterposedHelper(destination: string, source: string): void {
+  // Interpose the migration seam while keeping its real sibling transport.
+  fs.copyFileSync(path.join(skillRoot, "scripts", "run-rig.mjs"), path.join(path.dirname(destination), "run-rig.mjs"));
+  fs.writeFileSync(destination, source);
+}
+
 function writeRigInventory(root: string, entries: Array<Record<string, unknown>>): string {
   if (process.platform === "win32") {
     return writeWindowsNodeFixture(root, "rig", `
@@ -894,7 +900,7 @@ exit 7
     const seam = `  try {\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`;
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    fs.mkdirSync(${JSON.stringify(lateDirectory)});\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `  try {\n    fs.mkdirSync(${JSON.stringify(lateDirectory)});\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
     const result = runJsonFileResult(interposedHelperPath, [
       "--home", prepared.fixture.home,
@@ -922,7 +928,7 @@ exit 7
     const seam = `function copyEntryOpaque(source, destination) {\n  const stat = fs.lstatSync(source);`;
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `function copyEntryOpaque(source, destination) {\n  if (source.endsWith(${JSON.stringify(`${path.sep}b.txt`)})) throw new Error("injected mid-root copy interruption");\n  const stat = fs.lstatSync(source);`));
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `function copyEntryOpaque(source, destination) {\n  if (source.endsWith(${JSON.stringify(`${path.sep}b.txt`)})) throw new Error("injected mid-root copy interruption");\n  const stat = fs.lstatSync(source);`));
 
     const interrupted = runJsonFileResult(interposedHelperPath, [
       "--home", prepared.fixture.home,
@@ -1083,7 +1089,7 @@ exit 7
       const replacement = change === "type"
         ? `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
         : `fs.renameSync(${JSON.stringify(linkPath)}, ${displaced}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
-      fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
+      writeInterposedHelper(interposedHelperPath, source.replace(seam, `  try {\n    ${replacement}\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
 
       const result = runJsonFileResult(interposedHelperPath, [
         "--home", prepared.fixture.home,
@@ -1453,7 +1459,7 @@ exit 7
     const interposedHelperPath = path.join(root, helper);
     const source = fs.readFileSync(helperPath, "utf8");
     expect(source.split(seam)).toHaveLength(2);
-    fs.writeFileSync(interposedHelperPath, source.replace(seam, `    {
+    writeInterposedHelper(interposedHelperPath, source.replace(seam, `    {
       const target = ${JSON.stringify(contextPath)};
       fs.writeFileSync(target, "resumed legacy writer", { mode: 0o600 });
     }
