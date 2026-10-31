@@ -1372,6 +1372,24 @@ provider start, complete rig instantiation, remote share access or deployment.
 The current inventory and these results remain separate evidence axes; source-only
 reviews and integration gaps elsewhere are not silently reclassified as complete.
 
+A subsequent current-hash-bound record at `a103925` accounts for the changed
+lines of all 35 selected outside-inventory files: six planning/protection,
+six native install/receiver, nine CLI integration, five resource/library/hook,
+two runtime projection and seven authored helper/launch-rendering files.
+Some were implemented and verified earlier in this audit; the remaining deltas
+were reread without establishing an additional defect. All hashes still match
+the refresh, and the repository snapshot remains stable during recording.
+
+The additional read confirms WinGet outcomes remain distinct from PATH readiness,
+receiver proof requires stable known console descendants, and queue recovery keeps
+its invocation-local endpoint restoration. Native resource paths use the same
+mapping in projection and replay; platform-derived plugin manifests remain
+separate from authored source. These are changed-line/source conclusions, not new
+test passes or evidence that actual WinGet, console routing, provider hooks,
+cross-host queues or deployed restore were exercised. Full module/integration
+acceptance and reconciliation of the original 26 changed ledger entries remain
+open; the finite delta review does not establish all-feature completeness.
+
 ## Native spawn failure cannot inherit success
 
 Follow-up checks of the private scoped-shell bootstrap found its existing
