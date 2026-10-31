@@ -57,7 +57,7 @@ jobs:
         run: npx vitest run test/public-world-pack.test.ts --maxWorkers=1
       - name: Native bounded runtime verification
         working-directory: packages/daemon
-        run: npx vitest run test/windows-runtime-verifier.test.ts test/windows-probe-job.test.ts --maxWorkers=1
+        run: npx vitest run test/windows-runtime-verifier.test.ts test/windows-probe-job.test.ts test/windows-owned-helper-compile.test.ts --maxWorkers=1
       - name: Generated Claude activity hook and status collector
         working-directory: packages/daemon
         run: npx vitest run test/claude-hook-node-invocation.test.ts -t "native PowerShell fallback|generated status collector" --maxWorkers=1

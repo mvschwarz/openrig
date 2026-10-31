@@ -317,6 +317,20 @@ public static class OpenRigOwnedText {
 
 let executable: string | undefined;
 let compiling: Promise<string> | undefined;
+function retireFailedCompilation(file: string, directory: string, error: unknown): void {
+  if (!error || typeof error !== "object") return;
+  const failure = error as { status?: number; code?: string | number; signal?: string; killed?: boolean; syscall?: string };
+  if (failure.killed || failure.signal || failure.code === "ETIMEDOUT") return;
+  const exited = (typeof failure.status === "number" && failure.status > 0)
+    || (typeof failure.code === "number" && failure.code > 0);
+  const neverStarted = failure.syscall?.startsWith("spawn")
+    && ["ENOENT", "EACCES", "ENOEXEC"].includes(String(failure.code));
+  if (!exited && !neverStarted) return;
+  // These are the exact paths this compilation created. Never recursively
+  // remove an unexpected entry, or discard output after uncertain termination.
+  try { unlinkSync(file); } catch { /* Missing or still held: retain safely. */ }
+  try { rmdirSync(directory); } catch { /* Keep any remaining owned material. */ }
+}
 async function nativeHelperAsync(): Promise<string> {
   if (executable) return executable;
   if (!compiling) compiling = (async () => {
@@ -329,7 +343,7 @@ async function nativeHelperAsync(): Promise<string> {
         { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000 },
         error => error ? reject(error) : resolveRun());
       compiler.stdin!.end(FILE_SOURCE);
-    });
+    }).catch(error => { retireFailedCompilation(file, directory, error); throw error; });
     executable = file;
     process.once("exit", () => {
       try { unlinkSync(file); rmdirSync(directory); } catch { /* retain the exact owned helper if cleanup is unavailable */ }
@@ -363,9 +377,11 @@ function nativeHelper(): string {
   const directory = createWindowsPrivateDirectory(tmpdir());
   const file = join(directory, "owned-text.exe");
   const script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Add-Type -TypeDefinition ([Console]::In.ReadToEnd()) -OutputAssembly $env:OPENRIG_OWNED_TEXT_HELPER -OutputType ConsoleApplication";
-  execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
+  try {
+    execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
+  } catch (error) { retireFailedCompilation(file, directory, error); throw error; }
   executable = file;
   process.once("exit", () => {
     try { unlinkSync(file); rmdirSync(directory); } catch { /* retain the exact owned helper if cleanup is unavailable */ }

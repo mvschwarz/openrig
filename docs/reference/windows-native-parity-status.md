@@ -1963,3 +1963,22 @@ recorded three unsuccessful cleanup attempts remain a boundary; this review
 does not authorize a fourth equivalent attempt under a different fixture name.
 The independent spawned stub compaction/restore script witnesses and the
 344 decision-chain cases remain distinct from full native snapshot restoration.
+
+## Native permission-helper failed compilation cleanup
+
+Full review of `windows-owned-text.ts`, including its C# implementation, found
+that both compilation entry points created their private staging directory before
+registering successful-helper exit cleanup. A controlled nonzero compiler exit
+therefore left its owned partial output and directory. The new four-case fixture
+first reports two passed/two failed, then four passed after the correction.
+
+Confirmed nonzero exits and recognized never-started spawn failures now attempt
+to unlink only that compilation's exact output and remove its empty directory.
+Timeouts, signals, killed processes and unclassified outcomes retain staging;
+the original compilation error is rethrown. Cleanup never recurses through an
+unexpected entry. The fixture uses owned partial files and mocked compilers,
+not a live PowerShell compiler or real auth data. Daemon TypeScript passes, and
+the native CI verification step includes this fixture. This is independent of
+the exhausted managed-runner cleanup investigation and does not reopen it.
+The complete native atomic ACL file also passes 23/23 after the correction,
+covering normal native helper compilation and owned file replacement paths.
