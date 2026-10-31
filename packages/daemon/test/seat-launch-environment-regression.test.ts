@@ -98,14 +98,14 @@ it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate N
   expect(observed.path.split(":").slice(1).join(":")).toBe(userPath);
 });
 
-it("B: the default resolver links this workspace's built CLI, not its PATH-first rig", async () => {
+it.runIf(process.platform !== "win32")("B: the default resolver links this workspace's built CLI, not its PATH-first rig", async () => {
   const f = fixture();
   const launch = new SeatLaunchEnvironment(f.tmux as any, f.env, f.root);
   const rig = (await f.run(await launch.command("seat@rig", "/bin/sh -c 'command -v rig'"))).stdout.trim();
   expect(readlinkSync(rig)).toBe(realpathSync(path.resolve(import.meta.dirname, "../../cli/dist/bin-wrapper.js")));
   expect(f.warn).not.toHaveBeenCalled();
 });
-it("B: a reused link remains rig-only; unexpected contents are preserved and fall back", async () => {
+it.runIf(process.platform !== "win32")("B: a reused link remains rig-only; unexpected contents are preserved and fall back", async () => {
   const f = fixture(), command = "/bin/sh -c 'command -v rig'";
   const rig = (await f.run(await f.launch.command("seat@rig", command))).stdout.trim();
   expect((await f.run(await f.launch.command("seat@rig", command))).stdout.trim()).toBe(rig);

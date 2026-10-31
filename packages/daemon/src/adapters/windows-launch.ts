@@ -31,6 +31,17 @@ export function powershellQuote(value: string): string {
   return "'" + value.replace(/'/g, "''") + "'";
 }
 
+/** A script shim must encode its dynamic $args too: PowerShell 5's native
+ * call operator drops empty words and changes embedded quotes. */
+export function renderWindowsArgvForwarder(executable: string, prefix: readonly string[]): string {
+  return `$openrigQuoted = foreach ($openrigWord in (@(${prefix.map(powershellQuote).join(", ")}) + @($args))) {\n`
+    + String.raw`  '"' + [regex]::Replace([regex]::Replace([string]$openrigWord, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'` + "\n}\n"
+    + `$openrigStart = New-Object System.Diagnostics.ProcessStartInfo\n$openrigStart.UseShellExecute = $false\n`
+    + `$openrigStart.FileName = ${powershellQuote(executable)}\n$openrigStart.Arguments = $openrigQuoted -join ' '\n`
+    + `$openrigStart.WorkingDirectory = (Get-Location).ProviderPath\n`
+    + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n`;
+}
+
 export function renderWindowsLaunch(command: string, env: Readonly<Record<string, string>> = {}, options: { remove?: readonly string[]; beforeStart?: string } = {}): string {
   const [executable, ...args] = parseLiteralLaunchWords(command);
   const assignments = Object.entries(env).map(([key, value]) => {

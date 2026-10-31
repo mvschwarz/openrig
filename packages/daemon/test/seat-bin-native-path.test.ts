@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { powershellQuote } from "../src/adapters/windows-launch.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -30,5 +31,37 @@ it.runIf(process.platform === "win32")("runs the paired CLI from a literal perce
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual(["literal-argument"]);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+it.runIf(process.platform === "win32")("preserves empty and quoted arguments through the paired PowerShell CLI shim", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "seat-bin-argv-"));
+  try {
+    const directory = path.join(root, "paired 中文 & %literal% !bang!"); fs.mkdirSync(directory);
+    const cli = path.join(directory, "paired cli.mjs");
+    fs.writeFileSync(cli, "console.log(JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()}));process.exitCode=7;");
+    const previous = path.join(root, "run", "seat-bin", createHash("sha256").update(fs.realpathSync(cli)).update("\0windows-seat-bin-v2").digest("hex"));
+    fs.mkdirSync(previous, { recursive: true });
+    fs.writeFileSync(path.join(previous, "rig.ps1"), "older-running-daemon-shim");
+    const seat = new SeatLaunchEnvironment({} as TmuxAdapter, { OPENRIG_HOME: root }, root, cli, undefined, "win32");
+    const bin = (seat as unknown as { rigBin(): string }).rigBin();
+    expect(bin).not.toBe(previous);
+    expect(fs.readFileSync(path.join(previous, "rig.ps1"), "utf8")).toBe("older-running-daemon-shim");
+    expect((seat as unknown as { rigBin(): string }).rigBin()).toBe(bin);
+    const args = ["", "literal space", 'embedded"quote', "trailing\\", 'slash\\"quote', "中文 & %literal% !bang!", ""];
+    const cwd = path.join(root, "selected directory"); fs.mkdirSync(cwd);
+    const script = `Set-Location -LiteralPath ${powershellQuote(cwd)}; $words=ConvertFrom-Json $env:OWNED_SEAT_ARGS; & ${powershellQuote(path.join(bin, "rig.ps1"))} @words; exit $LASTEXITCODE`;
+    const result = spawnSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { cwd: root, encoding: "utf8", windowsHide: true, timeout: 10_000, env: { ...process.env, OWNED_SEAT_ARGS: JSON.stringify(args) } });
+    expect(result.status, result.stderr).toBe(7);
+    const actual = JSON.parse(result.stdout);
+    expect(actual.args, result.stdout).toEqual(args);
+    expect(fs.realpathSync.native(actual.cwd)).toBe(fs.realpathSync.native(cwd));
+    const before = fs.readFileSync(path.join(bin, "rig.ps1"));
+    fs.writeFileSync(path.join(bin, "unexpected-tool.exe"), "owned unexpected file");
+    expect(() => (seat as unknown as { rigBin(): string }).rigBin()).toThrow("Seat bin is not rig-only");
+    expect(fs.readFileSync(path.join(bin, "unexpected-tool.exe"), "utf8")).toBe("owned unexpected file");
+    expect(fs.readFileSync(path.join(bin, "rig.ps1"))).toEqual(before);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

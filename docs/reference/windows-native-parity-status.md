@@ -1311,6 +1311,37 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Paired PowerShell CLI argument forwarding
+
+An owned reproduction of the previous seat `rig.ps1` shim shows Windows
+PowerShell 5 dropping empty arguments and changing embedded quotes/backslashes
+while forwarding `@args` through its native call operator. Seven intended words
+arrived as five changed words. The corrected reproduction uses a flat parsed
+array; an earlier diagnostic accidentally wrapped it as a nested array and is
+not used as the product-failure evidence.
+
+The shim now encodes its dynamic words using Windows command-line quoting and
+launches the pinned Node/paired CLI with `ProcessStartInfo.UseShellExecute=false`.
+It preserves the PowerShell filesystem location, inherited handles and child exit
+code. The script has a UTF-8 BOM for Windows PowerShell's non-ASCII path decoding.
+Windows seat-bin identity advances from v2 to v3, leaving existing directories
+unchanged rather than replacing shims another daemon may still use.
+
+Actual native fixtures pass for empty words, embedded quotes, trailing
+backslashes, Unicode and shell metacharacters; the paired CLI itself lives under
+a Unicode/metacharacter path. They also verify directory reuse, preservation of
+the older shim, and refusal without overwriting unexpected bin contents. The cmd
+percent/bang-path test remains passing. The final focused run passes three cases
+with 24 filtered/skipped, and daemon TypeScript passes. No seat, provider or live
+installation was changed.
+
+The broader four-file run before the final BOM/test adjustments recorded 52
+passed, ten failed and 13 pending: eight failures were host file-symlink `EPERM`,
+and two were POSIX `/bin/bash`/symlink-specific fixtures. Those two are now
+explicitly POSIX-only; the native shim reuse/argv checks above are separate
+evidence. This is not a claim that the full four-file suite is green or that
+pwsh/Git Bash behavior was exercised.
+
 ## Installed upgrade dependency closure and native drain
 
 The strengthened install Gate passed at frozen

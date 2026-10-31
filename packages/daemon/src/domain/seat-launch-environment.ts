@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
-import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch } from "../adapters/windows-launch.js";
+import { parseLiteralLaunchWords, powershellQuote, renderWindowsLaunch, renderWindowsArgvForwarder } from "../adapters/windows-launch.js";
 import { CLAUDE_RESUME_LAUNCH_ENV } from "../adapters/claude-resume-launch.js";
 import { resolveWindowsProviderCommand } from "./windows-provider-command.js";
 import { readPlatformEnv } from "./platform-env.js";
@@ -147,7 +147,7 @@ export class SeatLaunchEnvironment {
     // New shim content gets a new directory; keep existing daemons' immutable
     // aliases intact instead of refusing or overwriting their older scripts.
     const identity = createHash("sha256").update(cli);
-    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v2");
+    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v3");
     const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", identity.digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {
@@ -157,7 +157,8 @@ export class SeatLaunchEnvironment {
       if (/[\r\n"]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
       const batchPath = (value: string) => value.replaceAll("%", "%%");
       const shims: Record<string, string> = {
-        "rig.ps1": `& ${powershellQuote(process.execPath)} ${powershellQuote(cli)} @args\nexit $LASTEXITCODE\n`,
+        // Windows PowerShell 5 needs a BOM to decode non-ASCII fixed paths.
+        "rig.ps1": `\uFEFF${renderWindowsArgvForwarder(process.execPath, [cli])}exit $LASTEXITCODE\n`,
         "rig.cmd": `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${batchPath(process.execPath)}" "${batchPath(cli)}" %*\r\n`,
         rig: `#!/bin/sh\nexec ${shellQuote(process.execPath.replace(/\\/g, "/"))} ${shellQuote(cli.replace(/\\/g, "/"))} "$@"\n`,
       };
