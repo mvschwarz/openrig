@@ -203,8 +203,8 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect(service.list().map((e) => e.relativePath).sort()).toEqual(["packs/a", "packs/b"]);
     const a = service.getByRef("packs/a");
     const b = service.getByRef("packs/b");
-    expect(a!.sourcePath.endsWith("packs/a")).toBe(true);
-    expect(b!.sourcePath.endsWith("packs/b")).toBe(true);
+    expect(a!.sourcePath).toBe(join(root, "packs", "a"));
+    expect(b!.sourcePath).toBe(join(root, "packs", "b"));
   });
 
   it("GUARD PROBE 2 (canonical): same ref across roots is last-root-wins EVERYWHERE — one list row, count one, resolve to the last entry", () => {

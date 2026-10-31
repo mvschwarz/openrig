@@ -42,7 +42,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 
 | Workflow | Implemented scope and evidence entry | Still unverified |
 | --- | --- | --- |
-| Context stores | Overlapping roots retain physical-pack custody across native case aliases; [native custody cases](../../packages/daemon/test/context-pack-store-recursion.test.ts). | Complete context-store suite and installed delivery. A successful directory-junction case does not establish file-symlink support. |
+| Context stores | Overlapping roots retain physical-pack custody across native case aliases; [native custody cases](../../packages/daemon/test/context-pack-store-recursion.test.ts). Full recursion file: 24 passed, three symlink-creation failures (`EPERM`). Library/compose/remove files: 32 passed after separating the non-directory check, one symlink-creation failure. | Symlink-dependent context-store checks and installed delivery. A successful directory-junction case does not establish file-symlink support. |
 | Spec library | Native rename supports long storage names, reserved device names and case-only changes; [service](../../packages/daemon/test/spec-library-service.test.ts), [routes](../../packages/daemon/test/spec-library-routes.test.ts). | Every authored resource/install combination. |
 | Lifecycle compilation | A differently cased reference to the actual mission is accepted; a distinct file is refused; [compiler](../../packages/daemon/test/project-lifecycle-compiler.test.ts). | Real workflow execution and fleet restore. |
 | Culture export and local copy | Contained native aliases copy correctly while outside destination aliases are refused; [export](../../packages/cli/test/export-import.test.ts), [local copy](../../packages/cli/test/windows-native-local-copy.test.ts). | Real remote transfer and every archive/install path. |
@@ -1747,3 +1747,22 @@ installed explicitly after the initial optional-dependency omission was observed
 The prefix and its dedicated npm cache were removed after checking the result.
 No CLI session, login, provider request or global installation occurred. Full
 OMP session/restore acceptance remains separate from this discovery result.
+
+## Context-store full-file native verification
+
+The full recursion test file at `fff1fe0` initially reported 23 passed and four
+failed. One failure was a test's POSIX-only `endsWith("packs/a")` expectation
+against a native filesystem path. Comparing each full source path with
+`join(root, "packs", "a")` (and the distinct `b` path) retains the physical
+identity assertion; the file then reported 24 passed and three failures, all
+at symlink creation with `EPERM`. Those cases remain failed, not waived.
+
+The library-service, compose and remove files initially reported 31 passed and
+one symlink-creation failure. The compose case combined symlink refusal with
+non-directory refusal, so the former's setup failure prevented the latter from
+running. Splitting them preserves both checks and independently establishes
+non-directory refusal with unchanged file content. The compose file now reports
+16 passed and one symlink-creation failure; together with the unchanged two other
+files this is 32 passed and one failed. This adds actual native filesystem
+coverage without substituting junctions, skipping permission failures, or
+claiming installed context delivery.
