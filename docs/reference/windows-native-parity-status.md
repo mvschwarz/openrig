@@ -27,7 +27,7 @@ evidence entry points; their presence does not mean every test ran at this head.
 | Community harnesses | Metadata reaches the child; standard npm entries resolve against the seat cwd, including relative PATH and command paths; [native environment](../../packages/daemon/test/community-harness-native-environment.test.ts). Combined protocol/activity run passed 70 cases. | Arbitrary batch launchers are deliberately not translated; installed third-party providers and real restore remain unverified. |
 | ACP | Native command selection and bounded owned process handling; [selection](../../packages/cli/test/acp-native-command-selection.test.ts), [process handling](../../packages/cli/test/windows-acp-process.test.ts). | Live agent/queue acceptance; previously unresolved companion cleanup behavior. |
 | Transcript continuity | Short native staging names, cleanup after partial writes and boundary replay through stock psmux; [long names](../../packages/daemon/test/transcript-long-name-native.test.ts), [write failure](../../packages/daemon/test/transcript-write-failure-native.test.ts), [stock replay](../../packages/daemon/test/transcript-boundary-psmux-native.test.ts). | Live provider output and restart/restore across the complete installed runtime. |
-| Compaction restore hooks | [Real hook round-trip](../../packages/daemon/test/stub-compaction.test.ts) executes shipped packet creation and restore scripts against an owned synthetic transcript, rejects a distinct transcript, delivers once and records the injected clock. Together with the native transcript-alias fixture, five cases pass. The determinism fixture now uses native basename rather than splitting `/`. | Actual provider compaction, full runner restart/restore and installed plugin acceptance. |
+| Compaction restore hooks | [Real hook round-trip](../../packages/daemon/test/stub-compaction.test.ts), [spawned compaction runner](../../packages/daemon/test/stub-runner-compaction-e2e.test.ts) and [spawned restore runner](../../packages/daemon/test/stub-runner-restore-e2e.test.ts) pass eight cases: shipped scripts act on owned synthetic transcripts, reject distinct identity, deliver once and record the injected clock. Native transcript-alias evidence remains separately recorded. | Actual provider compaction, full runner restart/restore and installed plugin acceptance. |
 | Restore replay preconditions | [Preconditions](../../packages/daemon/test/restore-preconditions.test.ts) pass 23 cases, including actual native files under paths with spaces and case aliases: present replay succeeds, removing its file blocks, and removing its owner root adds the owner-root blocker in order. | Full snapshot restore, live runtime and service restoration. |
 
 ## Terminal and interaction
@@ -1311,6 +1311,36 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Native continuity and stopped-seat restore evidence
+
+At `8da36b5`, the three compaction/stub-runner files above pass all eight cases.
+The spawned runner authors its own transcript, executes the real shipped
+precompact hook and restore bridge, produces the packet/seat marker, emits the
+additionalContext directive and stamps one-shot delivery. Identity refusal and
+deterministic clock checks remain. HOME/USERPROFILE are isolated and inherited
+OpenRig/Rigged endpoint/token variables are removed for this run; it does not post
+to the deployed daemon or invoke a provider. This is real subprocess/hook wiring
+with synthetic content, not provider-triggered compaction.
+
+A separate source-frozen run at full HEAD
+`8da36b5b127ef76fef858aa365cb6f7e46ef7706` passes 84/84, zero skipped:
+
+- Native idle subset restore: three injected observation states preserve an
+  existing shell/binding without killing or replacing its session.
+- Restore preconditions: 23 cases, including owned native replay files and path
+  aliases, retain missing-file/owner-root refusal ordering.
+- Stopped-seat contract: 52 owned SQLite/mocked terminal cases retain decision
+  guidance, preview/apply consistency and proved intentional-stop protections.
+- Native Claude restore launch: six real Windows executable/Node and PowerShell
+  fixtures preserve fresh/fork/resume/legacy-resume identities and settings,
+  including explicit restore-read permissions. Provider readiness is injected;
+  these receivers do not start Claude or access credentials.
+
+Before/after HEAD and tracked-diff hashes match for the 84-case run. These checks
+strengthen the native restore seams and Stop invariants; complete snapshot/service
+restoration and actual provider continuity remain unverified. No existing rig,
+seat, queue, Stop/hold record or deployment was changed.
+
 ## Actual pwsh scoped-shell and stock psmux checks
 
 The scoped launch test can now include an explicit portable pwsh through
