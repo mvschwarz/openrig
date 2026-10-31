@@ -147,19 +147,18 @@ export class SeatLaunchEnvironment {
     // New shim content gets a new directory; keep existing daemons' immutable
     // aliases intact instead of refusing or overwriting their older scripts.
     const identity = createHash("sha256").update(cli);
-    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v3");
+    if (this.launchPlatform === "win32") identity.update("\0windows-seat-bin-v4");
     const bin = path.resolve(this.daemonCwd, instanceHome, "run", "seat-bin", identity.digest("hex"));
     mkdirSync(bin, { recursive: true });
     if (this.launchPlatform === "win32") {
       // PowerShell, native cmd and Git Bash each need their own argument-preserving entry.
-      // Batch files double literal percent signs. Disable inherited delayed
-      // expansion so exclamation marks in fixed paths remain literal too.
+      // Keep the batch entry ASCII: cmd decodes script literals using its code
+      // page. %~dp0 expands the Unicode sibling path without decoding it again.
       if (/[\r\n"]/.test(process.execPath + cli)) throw new Error("Unsupported Windows executable path");
-      const batchPath = (value: string) => value.replaceAll("%", "%%");
       const shims: Record<string, string> = {
         // Windows PowerShell 5 needs a BOM to decode non-ASCII fixed paths.
         "rig.ps1": `\uFEFF${renderWindowsArgvForwarder(process.execPath, [cli])}exit $LASTEXITCODE\n`,
-        "rig.cmd": `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"${batchPath(process.execPath)}" "${batchPath(cli)}" %*\r\n`,
+        "rig.cmd": `@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0rig.ps1" %*\r\n`,
         rig: `#!/bin/sh\nexec ${shellQuote(process.execPath.replace(/\\/g, "/"))} ${shellQuote(cli.replace(/\\/g, "/"))} "$@"\n`,
       };
       for (const [name, content] of Object.entries(shims)) {

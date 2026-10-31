@@ -1311,6 +1311,32 @@ A separate bounded Claude SDK initialization with an owned SessionStart plugin d
 The launch-boundary review found that a native scoped bootstrap was written before the terminal request, but its callers did not reclaim it after positive no-start evidence. Seven owned-file cases reproduced four failures before repair (scoped-cleanup-4a8fd74-before.json). The adapter now tracks only the successfully staged native bootstrap and releases it after a client spawn failure, or an explicit duplicate-session refusal during creation. Respawn handles the same spawn-failure boundary. Cleanup failure preserves the original request error.
 
 Timeouts, unknown transport results and successful submissions retain the bootstrap for its consumer; environment-protocol files and unknown mutations retain their existing rules. No broad temp scan or default-server access is added. The new tests use real owned files with injected transport outcomes, including cleanup refusal. Together with native scoped-launch and create-readback files, 14 pass and two are skipped (scoped-cleanup-4a8fd74-native.json); argv/environment regressions pass 11 with five skipped (scoped-cleanup-4a8fd74-regression.json). Daemon TypeScript and documentation checks pass. The installed tarball gate above predates this cleanup change; no actual deployment was modified.
+## Paired cmd CLI Unicode path execution
+
+Extending the native cmd shim fixture to place the paired CLI in a Chinese path
+reproduced a failure at `0eef221`: cmd decoded the UTF-8 batch-file literal using
+its code page, and Node reported a different, mojibake module path as missing.
+The PowerShell variant in the same file still passed. No console code page was
+changed for this reproduction or its repair.
+
+The batch file now contains ASCII only and invokes its Unicode/BOM PowerShell
+sibling through `%~dp0`. That sibling starts the pinned Node/CLI and performs the
+Windows argv encoding described below. The process-local `-ExecutionPolicy
+Bypass` flag matches existing native helper launchers; it does not change a saved
+execution policy or override a machine-enforced policy. No elevation or agent
+permission-policy selection is involved. Inherited delayed expansion is disabled
+inside the batch entry. Windows seat-bin identity advances to v4 so v3 and earlier
+shims remain untouched for their existing users.
+
+Both native fixture cases pass after the change. They check Chinese and literal
+percent/bang installation paths, and exercise cmd-to-PowerShell-to-Node forwarding
+of empty words, spaces, embedded quotes, backslashes, Unicode and a quoted
+ampersand. The child retains the selected directory and exit code 7. Normal cmd
+parsing still applies before a batch file is entered; the shim does not promise
+to undo variable expansion or shell syntax evaluated by its caller. Daemon
+TypeScript and whitespace checks pass. No terminal, provider, live seat or
+installed deployment was used.
+
 ## Paired PowerShell CLI argument forwarding
 
 An owned reproduction of the previous seat `rig.ps1` shim shows Windows

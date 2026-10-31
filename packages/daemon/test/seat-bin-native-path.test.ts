@@ -5,13 +5,14 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { powershellQuote } from "../src/adapters/windows-launch.js";
+import { windowsArguments } from "../src/adapters/windows-argv.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
 it.runIf(process.platform === "win32")("runs the paired CLI from a literal percent and bang path in cmd", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "seat-bin-path-"));
   try {
-    const directory = path.join(root, "paired-%OPENRIG_PATH_DECOY%-!OPENRIG_PATH_DECOY!");
+    const directory = path.join(root, "paired-中文-%OPENRIG_PATH_DECOY%-!OPENRIG_PATH_DECOY!");
     fs.mkdirSync(directory);
     const cli = path.join(directory, "rig.mjs");
     fs.writeFileSync(cli, "console.log(JSON.stringify(process.argv.slice(2)))");
@@ -40,7 +41,7 @@ it.runIf(process.platform === "win32")("preserves empty and quoted arguments thr
     const directory = path.join(root, "paired 中文 & %literal% !bang!"); fs.mkdirSync(directory);
     const cli = path.join(directory, "paired cli.mjs");
     fs.writeFileSync(cli, "console.log(JSON.stringify({args:process.argv.slice(2),cwd:process.cwd()}));process.exitCode=7;");
-    const previous = path.join(root, "run", "seat-bin", createHash("sha256").update(fs.realpathSync(cli)).update("\0windows-seat-bin-v2").digest("hex"));
+    const previous = path.join(root, "run", "seat-bin", createHash("sha256").update(fs.realpathSync(cli)).update("\0windows-seat-bin-v3").digest("hex"));
     fs.mkdirSync(previous, { recursive: true });
     fs.writeFileSync(path.join(previous, "rig.ps1"), "older-running-daemon-shim");
     const seat = new SeatLaunchEnvironment({} as TmuxAdapter, { OPENRIG_HOME: root }, root, cli, undefined, "win32");
@@ -58,6 +59,15 @@ it.runIf(process.platform === "win32")("preserves empty and quoted arguments thr
     const actual = JSON.parse(result.stdout);
     expect(actual.args, result.stdout).toEqual(args);
     expect(fs.realpathSync.native(actual.cwd)).toBe(fs.realpathSync.native(cwd));
+    const cmdArgs = ["", "literal space", 'embedded"quote', "trailing\\", 'slash\\"quote', "中文 & literal !bang!", ""];
+    const throughCmd = spawnSync(path.join(process.env.SystemRoot!, "System32/cmd.exe"),
+      ["/d", "/v:off", "/s", "/c", `""%OWNED_RIG_CMD%" ${windowsArguments(cmdArgs)}"`],
+      { cwd, encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true, timeout: 10_000,
+        env: { ...process.env, OWNED_RIG_CMD: path.join(bin, "rig.cmd") } });
+    expect(throughCmd.status, throughCmd.stderr).toBe(7);
+    const cmdActual = JSON.parse(throughCmd.stdout);
+    expect(cmdActual.args, throughCmd.stdout).toEqual(cmdArgs);
+    expect(fs.realpathSync.native(cmdActual.cwd)).toBe(fs.realpathSync.native(cwd));
     const before = fs.readFileSync(path.join(bin, "rig.ps1"));
     fs.writeFileSync(path.join(bin, "unexpected-tool.exe"), "owned unexpected file");
     expect(() => (seat as unknown as { rigBin(): string }).rigBin()).toThrow("Seat bin is not rig-only");
