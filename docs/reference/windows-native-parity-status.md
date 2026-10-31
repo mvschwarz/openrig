@@ -1847,3 +1847,12 @@ deployment is used. CLI TypeScript passes. The native CI lifecycle step now
 includes this corrected capture check. The concurrent CLI/TUI directory run
 started before this production change, so it cannot be described as a frozen
 acceptance run of this revised source.
+
+The follow-up also pins `PSMUX_CONFIG_FILE=NUL` and tests inherited mixed-case
+tmux/config environment keys. If native termination is unconfirmed or removal
+of the owned home is refused, the helper returns a separate cleanup warning
+containing the retained path. Doctor and setup display that warning without
+overwriting the capture result. The doctor's mocked timeout path confirms the
+warning reaches its JSON output; its test retires only exact captured fixture
+homes because that executor starts no real child. Focused checks and CLI
+TypeScript pass after this diagnostic addition.

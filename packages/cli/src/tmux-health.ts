@@ -35,7 +35,7 @@ export function buildTmuxControlFailure(message: string): { message: string; rea
   };
 }
 
-export type TmuxCaptureResult = { status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string };
+export type TmuxCaptureResult = ({ status: "pass" } | { status: "fail"; detail: string } | { status: "skipped"; detail: string }) & { cleanupWarning?: string };
 
 /** Each probe command's bound: a tmux that hangs instead of crashing must not hang the check that diagnoses it. */
 export const TMUX_CAPTURE_PROBE_TIMEOUT_MS = 5_000;
@@ -59,20 +59,22 @@ export function probeTmuxCapture(exec: (cmd: string, opts: { timeoutMs: number; 
   const run = (args: string) => exec(`tmux -L ${socket} -f ${emptyConfig} ${args}`, {
     timeoutMs: TMUX_CAPTURE_PROBE_TIMEOUT_MS, ...(env ? { env } : {}),
   });
+  let result: TmuxCaptureResult = { status: "skipped", detail: "Capture probe did not complete." };
   try {
     try { run("new-session -d -s check"); }
-    catch (err) { return { status: "skipped", detail: errorMessage(err).trim() }; }
+    catch (err) { return result = { status: "skipped", detail: errorMessage(err).trim() }; }
     try {
       run("capture-pane -p -t check");
-      return { status: "pass" };
+      return result = { status: "pass" };
     } catch (err) {
-      return { status: "fail", detail: errorMessage(err).trim() };
+      return result = { status: "fail", detail: errorMessage(err).trim() };
     }
   } finally {
     let stopped = false;
     try { run("kill-server"); stopped = true; } catch { /* Preserve the owned home when termination is unconfirmed. */ }
     if (probeRoot && stopped) try { rmSync(probeRoot, { recursive: true, force: true }); }
-    catch { /* A retained owned directory is safer than forcing a live handle. */ }
+    catch (err) { result.cleanupWarning = `Capture probe home retained at ${probeRoot}: ${errorMessage(err)}`; }
+    if (probeRoot && !stopped) result.cleanupWarning = `Capture probe termination was not confirmed; isolated home retained at ${probeRoot}.`;
   }
 }
 

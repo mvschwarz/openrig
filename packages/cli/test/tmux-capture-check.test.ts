@@ -56,10 +56,12 @@ describe("probeTmuxCapture", () => {
         if (refuseCleanup) throw Error("owned cleanup unconfirmed");
         return "";
       }, "owned-failure-fixture", "win32");
-      expect(result).toEqual({ status: "skipped", detail: "owned create failed" });
+      expect(result).toMatchObject({ status: "skipped", detail: "owned create failed" });
       expect(environments).toHaveLength(2);
       expect(environments[0]).toBe(environments[1]);
       expect(existsSync(home!)).toBe(refuseCleanup);
+      if (refuseCleanup) expect(result.cleanupWarning).toContain(home!);
+      else expect(result.cleanupWarning).toBeUndefined();
     } finally {
       // The injected executor never starts a process; only its fixture directory exists.
       if (home) rmSync(home, { recursive: true, force: true });

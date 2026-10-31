@@ -202,6 +202,7 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     checks.push({ name: "tmux", status: "pass", message: tmuxProbe.version });
     // #980: a tmux whose server exits on `capture-pane -p` fails every seat at launch.
     const capture = probeTmuxCapture((cmd, opts) => deps.exec(cmd, opts), undefined, platform);
+    if (capture.cleanupWarning) checks.push({ name: "tmux_capture_cleanup", status: "skipped", message: capture.cleanupWarning });
     if (capture.status === "fail") {
       const failure = buildTmuxCaptureFailure(tmuxProbe.version, capture.detail);
       checks.push({ name: "tmux_capture", status: "fail", message: failure.message, reason: failure.reason, fix: failure.fix });
