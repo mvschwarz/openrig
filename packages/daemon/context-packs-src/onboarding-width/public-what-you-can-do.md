@@ -353,7 +353,12 @@ your context, your compaction and your replacement — and it is the only thing 
   announces (a usage-limit dialog, say) escalates once the refusal has held for one retry interval
   (`queue.wake_retry_interval_seconds`, 300 seconds by default). Choice-prompt alerts follow this
   setting and reach a person one at a time per machine; later ones wait as rows while the first
-  seat stays blocked.
+  seat stays blocked. A prompt alert uses a local agent carrier; the operator delivery engine
+  checks the default person's connector readiness before dispatch. An unavailable or uncertain route
+  stays visible with its reason and is re-resolved on later ticks; it is not a posted notice. A
+  configured escalation route still runs first. Findings about an undelivered wake-escalation notice
+  remain visible but do not create another wake escalation. Scheduling notices are sent by OpenRig,
+  while their member rows retain their original senders and obligations.
 - **`rig queue inbox-drop` / `inbox-pending` / `inbox-absorb` / `inbox-deny`** — put something in
   front of a seat that it can *refuse*. Mail, not assignment.
 - **`rig queue outbox-record` / `outbox-list`** — what you dispatched, in a record that survives

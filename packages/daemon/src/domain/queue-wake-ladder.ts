@@ -743,7 +743,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
-      if (!row) continue;
+      if (!row || recoversEscalationNotice(deps, row)) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -1087,7 +1087,15 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
 // must still be locally admissible; cross-host source provenance is not a local destination.
 function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
   const candidates = [resolveOperatorSeat(), source];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  return candidates.find((candidate): candidate is string => Boolean(candidate && !addressedToPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+}
+
+/** A delivery-recovery finding about our own notice stays readable without spawning another notice.
+ * Ordinary human asks still use the existing recovery route; the original obligations are untouched. */
+function recoversEscalationNotice(deps: WakeLadderDeps, row: QueueItem): boolean {
+  const prefix = "stuck-sweep:undelivered-human-notice:";
+  return row.tags?.some(tag => tag.startsWith(prefix)
+    && deps.queueRepo.getById(tag.slice(prefix.length))?.tags?.includes(WAKE_ESCALATION_TAG)) ?? false;
 }
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
@@ -1140,14 +1148,14 @@ async function advancePromptRefusals(
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
-    if (!primary) continue;
+    if (!primary || recoversEscalationNotice(deps, primary)) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
       if (!episode.key.startsWith(`${primary.destinationSession}|`)) continue;
       // Ordinary work shares an episode; consumed recoveries retain independent dispositions.
       const rows = episode.ids.map(id => readCandidate(id, primary.destinationSession)).filter((row): row is QueueItem =>
-        Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
+        Boolean(row && !recoversEscalationNotice(deps, row) && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
           && !closedEpisode(`${PROMPT_EPISODE_TAG}${episode.key}${hasConsumedEscalationHop(deps.db, row.qitemId) ? `|consumed:${row.qitemId}` : ""}`)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
@@ -1591,7 +1599,7 @@ async function ensureEscalationRow(
     ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
   const oneHop = route?.outcome === "routed" && route.owner === orch;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0] ?? OPENRIG_SENDER,
+    sourceSession: OPENRIG_SENDER,
     destinationSession: orch,
     body,
     summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,
