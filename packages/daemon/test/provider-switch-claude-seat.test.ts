@@ -39,6 +39,8 @@ function harness(opts: {
   relaunch?: Relaunched | (() => Promise<Relaunched>);
   exclusive?: (fn: () => Promise<unknown>) => Promise<unknown>;
   effort?: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>>;
+  // What restore's launch-effort seam selected for a relaunch asked to keep an effort (default: the kept one).
+  selected?: { effort: string | null; kept: boolean };
 } = {}) {
   const calls: string[] = [];
   let ref: ClaudeSeatTokenRef | null = opts.ref ?? null;
@@ -61,7 +63,8 @@ function harness(opts: {
     ...(opts.effort === undefined ? {} : { effortChange: async (nodeId: string, pane: string) => { calls.push(`effort ${nodeId} ${pane}`); return opts.effort!; } }),
     relaunchInPane: async (rigId, logicalId, snapshotId, o) => {
       calls.push(`relaunch ${rigId} ${logicalId} ${snapshotId} with ${ref ? ref.label : "no reference"}${o?.effort ? ` keeping effort ${o.effort}` : ""}`);
-      return typeof opts.relaunch === "function" ? opts.relaunch() : opts.relaunch ?? RESUMED;
+      const done = typeof opts.relaunch === "function" ? await opts.relaunch() : opts.relaunch ?? RESUMED;
+      return o?.effort && done.ok ? { ...done, effort: opts.selected ?? { effort: o.effort, kept: true } } : done;
     },
   };
   const claudePrecedence = async (nodeId: string, o?: { storedLogin?: boolean }) => {
@@ -88,6 +91,44 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(result.seat?.effort).toContain("kept the running effort high");
     expect(result.seat?.effort).toContain("the runtime default");
     expect(h.ref()).toMatchObject({ label: "work" });
+  });
+
+  it("says a kept effort was asked for, not done, when the relaunch didn't report resuming, and how the recovery keeps it", async () => {
+    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false },
+      relaunch: { ok: false, effect: "unknown", code: "failed", message: "the seat didn't come back" } });
+    const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(result.outcome).toBe("unknown");
+    expect(h.calls).toContain("relaunch rig-1 dev.a snap-1 with work keeping effort high");
+    expect(result.seat?.restart?.recoveryCommand).toBe("rig launch rig dev.a --snapshot-id snap-1");
+    expect(result.seat?.effort).not.toContain("kept the running effort");
+    expect(result.seat?.effort).toContain("asked to keep the running effort high");
+    expect(result.seat?.effort).toContain("saved effort low");
+    expect(result.seat?.effort).toContain(`rig seat set-effort ${SEAT} high`);
+  });
+
+  it("reports the seat's chosen effort when a choice saved during the switch won at restore's launch-effort seam", async () => {
+    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false }, selected: { effort: "medium", kept: false } });
+    const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(result.outcome).toBe("rebind_in_progress");
+    expect(h.calls).toContain("relaunch rig-1 dev.a snap-1 with work keeping effort high");
+    expect(result.seat?.effort).not.toContain("kept the running effort");
+    expect(result.seat?.effort).toContain("the seat's chosen effort medium");
+    expect(result.seat?.effort).toContain("high");
+  });
+
+  it("words the chosen and unreadable efforts as intended, not applied, when the relaunch didn't report resuming", async () => {
+    const unknown = { ok: false as const, effect: "unknown" as const, code: "failed", message: "the seat didn't come back" };
+    const chosen = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: true }, relaunch: unknown });
+    const c = await chosen.svc.switchAccount(to("work", tokenFile()), chosen.seatRestart, chosen.claudeSeat);
+    expect(c.outcome).toBe("unknown");
+    expect(c.seat?.effort).toContain("chosen effort low");
+    expect(c.seat?.effort).toContain("didn't report resuming");
+    const unread = harness({ effort: null, relaunch: unknown });
+    const u = await unread.svc.switchAccount(to("work", tokenFile()), unread.seatRestart, unread.claudeSeat);
+    expect(u.outcome).toBe("unknown");
+    expect(u.seat?.effort).toContain("couldn't be read");
+    expect(u.seat?.effort).toContain("didn't report resuming");
+    expect(u.seat?.effort).not.toContain("kept");
   });
 
   it("keeps a running --effort that differs from the seat's saved, authored one", async () => {
@@ -208,8 +249,11 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
   });
 
   it("a relaunch that ended the seat's process but didn't resume reads unknown, with the snapshot's recovery and the way back, and isn't retried", async () => {
-    const h = harness({ relaunch: { ok: false, effect: "unknown", code: "failed", message: "The pane couldn't be respawned." } });
+    const h = harness({ relaunch: { ok: false, effect: "unknown", code: "failed", message: "The pane couldn't be respawned." },
+      effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false } });
     const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(r.seat?.effort).toContain("asked to keep the running effort high");
+    expect(r.seat?.effort).not.toContain("kept the running effort");
     expect(r).toMatchObject({ outcome: "unknown", reasons: ["relaunch_failed"], message: expect.stringContaining("may have been ended"), seat: {
       loginChanged: true, undo: `rig provider switch --seat ${SEAT} --stored-login`,
       restart: { recoveryCommand: "rig launch rig dev.a --snapshot-id snap-1", remainingStep: expect.stringContaining(`rig seat stop ${SEAT}`) } } });
@@ -218,9 +262,12 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
   });
 
   it("a relaunch that throws reads unknown, with the snapshot's recovery, instead of rejecting the switch", async () => {
-    const h = harness({ relaunch: async () => { throw new Error("transport failure after the launch request"); } });
+    const h = harness({ relaunch: async () => { throw new Error("transport failure after the launch request"); },
+      effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false } });
     const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
     expect(r).toMatchObject({ outcome: "unknown", reasons: ["relaunch_threw"], seat: { restart: { recoveryCommand: "rig launch rig dev.a --snapshot-id snap-1" } } });
+    expect(r.seat?.effort).toContain("asked to keep the running effort high");
+    expect(r.seat?.effort).toContain(`rig seat set-effort ${SEAT} high`);
   });
 
   it("a token the relaunch couldn't apply is reported: the reference is saved, the token didn't take effect, and the warning is carried", async () => {
