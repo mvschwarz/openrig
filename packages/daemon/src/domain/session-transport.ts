@@ -1740,6 +1740,8 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** Internal: managed lifecycle input must preserve a person's draft even when the optional typing guard is off. */
+  preserveInput?: true;
   /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
@@ -3203,6 +3205,15 @@ export class SessionTransport {
     const cancel = callerSignal(opts);
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
+    const preserveInput = opts?.preserveInput ? async () => {
+      const box = runtime === "claude-code" || runtime === "codex"
+        ? await this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      if (bindingChanged()) throw new DeliveryGuardError("draft_input_changed", "The managed input target changed; no input was written.");
+      if (box?.status !== "empty" && !(box?.status === "likely-suggestion" && box.confidence === "high")) {
+        throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
+          `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
+      }
+    } : undefined;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
     const tagIssued = (error: unknown): never => {
@@ -3214,7 +3225,9 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false,
+          beforePaste: preserveInput ? async () => { await overrideBeforePaste?.(); await preserveInput(); } : overrideBeforePaste });
+        if (preserveInput) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { beforePaste: preserveInput });
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",

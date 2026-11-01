@@ -190,6 +190,10 @@ export function compactResultText(compact: "not_sent" | "submitted_unconfirmed" 
 
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
+    case "draft_input_busy":
+    case "draft_input_unknown":
+    case "draft_input_changed":
+      return `Managed compaction stopped before its next input to preserve the composer in '${sessionName}'. Read rig compact ${shellQuote(sessionName)} --state; explicitly retry once its input box is empty. This attempt will not replay the held input.`;
     case "terminal_policy_refused":
       return `Managed compaction for '${sessionName}' was refused by its terminal policy. Read rig seat status ${shellQuote(sessionName)}; an authorised policy change uses rig seat set-terminal-policy. The existing rig send --dangerously-interact --reason path is unchanged; prompt and interruption guards still apply.`;
     case "terminal_policy_unavailable":
