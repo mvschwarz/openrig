@@ -175,6 +175,8 @@ for(const boundary of ['writeFile','load-buffer','key-list'])it(`actual tmux ada
   if(argv[1]==='paste-buffer')pasted=true;
   return '';
  });
+ vi.spyOn(adapter,'getPaneCursorPosition').mockResolvedValue({x:2,y:2,width:80,height:24});
+ vi.spyOn(adapter,'capturePaneContent').mockResolvedValue('Ready\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n');
  adapter.deliveryGuard=f.guard;(f.transport as any).tmuxAdapter=adapter;
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(commands.filter(c=>c[1]==='paste-buffer')).toHaveLength(boundary==='key-list'?1:0);
