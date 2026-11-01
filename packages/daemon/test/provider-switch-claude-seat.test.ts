@@ -168,11 +168,12 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(h.calls.some((call) => call.startsWith("relaunch"))).toBe(false);
   });
 
-  it("a relaunch refused before the seat was touched puts the reference back, and the seat keeps running as it was", async () => {
+  it("a relaunch refused before the seat was touched puts the reference back, and says the seat is as it was, never that it runs", async () => {
     const before = { label: "personal", tokenFile: tokenFile() };
     const h = harness({ ref: before, relaunch: { ok: false, effect: "none", code: "awaiting-decision", message: "Restore stopped for a decision." } });
     const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
-    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["relaunch_awaiting_decision"], message: expect.stringContaining("keeps running as it was") });
+    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["relaunch_awaiting_decision"], message: expect.stringContaining("as it was before the switch") });
+    expect(r.message).not.toContain("keeps running");
     expect(h.ref()).toEqual(before);
   });
 

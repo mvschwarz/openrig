@@ -85,6 +85,21 @@ describe("resolveIdentityVerifiedClaudeRecord — canonical occupant identity", 
     }
   });
 
+  it("a shell root that only names claude in its arguments isn't counted beside the verified Claude child", async () => {
+    // The shell stays while its second command runs, and its argv still holds the first command's conversation.
+    const wrapped: ProcessRow[] = [
+      { pid: 10, ppid: 1, command: `bash -c claude --resume ${reserveId}; claude --resume ${canonicalId}; wait` },
+      { pid: 20, ppid: 10, command: `claude --resume ${canonicalId} --name ${canonicalSession}` },
+    ];
+    const base = input(`/tmp/${canonicalId}.jsonl`);
+    const out = await resolveIdentityVerifiedClaudeRecord(
+      { ...base, identity: { ...base.identity, evidence: { registeredPane: "%156", observedPid: 20, observedPanePid: 10 } } },
+      { getPanePid: async (target) => target === "%156" ? 10 : null, listProcesses: async () => wrapped, readThreadIdByPid: () => undefined },
+      () => true,
+    );
+    expect(out).toMatchObject({ ok: true, id: canonicalId });
+  });
+
   it("missing, stale, changed, or ambiguous pane identity is explicit and never transcript-recency-selected", async () => {
     const readable = () => true;
     const base = input(`/tmp/${canonicalId}.jsonl`);
