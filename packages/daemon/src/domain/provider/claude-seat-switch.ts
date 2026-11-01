@@ -127,6 +127,15 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   if (!seat.pane) {
     return { outcome: "failed_safely", reasons: ["no_bound_pane"], message: `${input.seat} has no bound tmux pane to relaunch it in. Nothing changed.` };
   }
+  // The relaunch runs the seat's saved effort. A process running with another --effort (launched by hand, or from an
+  // older setting) would come back changed with no one choosing it, so stop and show the difference. A relaunch effort
+  // that is the seat's own explicit choice is the change `rig seat set-effort` asked for, and goes ahead.
+  const effort = await relaunch.effortChange?.(nodeId, seat.pane);
+  if (effort?.running && effort.running !== effort.relaunch && !effort.relaunchIsSeatChoice) {
+    return { outcome: "failed_safely", reasons: ["effort_would_change"],
+      message: `${input.seat} runs with effort ${effort.running}, but relaunching it would use ${effort.relaunch ?? "the runtime default (no --effort)"}. `
+        + `Nothing changed. To keep ${effort.running}, run rig seat set-effort ${input.seat} ${effort.running}, then switch again.` };
+  }
   const snapshot = relaunch.snapshot(rigId, nodeId);
   if (!snapshot.resumes) {
     return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],

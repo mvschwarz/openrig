@@ -57,9 +57,9 @@ export type ClaudeRecordSelection =
   | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
-/** Descendants of `parentPid` whose command matches `matches`, breadth-first. (Deliberately local:
- *  the two existing walkers are module-private in the codex adapter and the refresher; a shared
- *  extraction is a cleanup for calmer water.) */
+/** `parentPid` itself and its descendants whose command matches `matches`, breadth-first: a runtime exec'd at launch
+ *  IS the pane's process. (Deliberately local: the two existing walkers are module-private in the codex adapter and the
+ *  refresher; a shared extraction is a cleanup for calmer water.) */
 function findDescendants(processes: ProcessRow[], parentPid: number, matches: (command: string) => boolean): number[] {
   const byParent = new Map<number, ProcessRow[]>();
   for (const p of processes) {
@@ -67,7 +67,8 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     list.push(p);
     byParent.set(p.ppid, list);
   }
-  const out: number[] = [];
+  const root = processes.find((p) => p.pid === parentPid);
+  const out: number[] = root && matches(root.command) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;

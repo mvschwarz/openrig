@@ -19,7 +19,7 @@ import type { EventBus } from "./event-bus.js";
 import type { SnapshotRepository } from "./snapshot-repository.js";
 import type { SnapshotCapture } from "./snapshot-capture.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
-import type { NodeLauncher } from "./node-launcher.js";
+import { PROCESS_KEPT_LAUNCH_CODES, type NodeLauncher } from "./node-launcher.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
@@ -1349,6 +1349,7 @@ export class RestoreOrchestrator {
         logicalId: node.logicalId,
         status: selectedHistory && launchResult.code === "selection_changed_after_creation" ? "attention_required" : "failed",
         error: launchResult.message,
+        ...(keptPane && PROCESS_KEPT_LAUNCH_CODES.has(launchResult.code) ? { processKept: true as const } : {}),
       };
     }
 

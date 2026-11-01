@@ -504,6 +504,8 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
+  /** An in-place restore failed while the seat's own process still runs: it never ended, so the seat is as it was. */
+  processKept?: true;
   nodeId: string;
   logicalId: string;
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
