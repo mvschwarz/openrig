@@ -170,7 +170,7 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   const prep = outcome.preparation;
   if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
-  const detail = outcome.reason === "preparation_incomplete"
+  const detail = (outcome.reason === "preparation_incomplete" || outcome.reason === "map_complete_seat_never_idle")
     ? manualReasonMessage(sessionName, outcome.reason)
     : outcome.restoreOwed
       ? `/compact was not confirmed (${outcome.reason}) and is never sent again. Its restore steps follow in case it ran; the restore request tells the seat to say so and skip if it didn't compact.`
@@ -196,8 +196,10 @@ function manualReasonMessage(sessionName: string, reason: string): string {
       return `Could not read the selected terminal policy for '${sessionName}'; no new managed compaction is authorised. Inspect rig seat status ${shellQuote(sessionName)}.`;
     case "occupant_generation_unavailable":
       return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
+    case "map_complete_seat_never_idle":
+      return `Compaction for '${sessionName}': map complete, seat never idle within the bounded wait; managed compaction is disarmed. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
     case "preparation_incomplete":
-      return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+      return `The restore map was not completed in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
     case "pane_unknown_protected":
       return `Refused: '${sessionName}' uses draft-aware input protection, and its tmux pane is not recorded. Input to a protected seat needs a known pane, so no preparation or /compact was sent. Both fixes refuse while protection is on, so with the person's agreement turn it off first (rig seat set-typing-guard ${shellQuote(sessionName)} --mode off --reason "<why>") and back on afterwards (--mode draft-aware). To keep the session and resume token, run rig reconcile-session ${shellQuote(sessionName)} --repair-missing-pane --no-launch. Otherwise rig reconcile-session ${shellQuote(sessionName)} --no-launch adopts: a new session row (any running row for the seat is superseded); it re-captures the resume token if it can, and conversation continuity stays unverified. Then explicitly retry rig compact ${shellQuote(sessionName)}; reconciliation does not restart this attempt. If the intended pane cannot be resolved, use rig context get help for operator recovery.`;
     case "preparation_cancelled":
