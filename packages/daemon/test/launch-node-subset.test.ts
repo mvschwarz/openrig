@@ -738,6 +738,55 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
+    it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      const adapter = readyAdapter("claude-code");
+      const onLaunchEffort = vi.fn();
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepEffort: "high", onLaunchEffort });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "high" }), expect.anything());
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "high", source: "kept" });
+      expect(db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeIds[0])).toEqual({ effort: "low", effort_choice: null });
+    });
+
+    it("an explicit effort choice saved after the switch read the seat, during the relaunch's own awaits, wins over the kept effort, and says so", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      // The choice lands while the relaunch is respawning the pane: after the switch read "no choice", before the launch.
+      (tmux as any).respawnPane = vi.fn(async () => {
+        db.prepare("UPDATE nodes SET effort_choice = 'medium' WHERE id = ?").run(nodeIds[0]);
+        return { ok: true as const };
+      });
+      const adapter = readyAdapter("claude-code");
+      const onLaunchEffort = vi.fn();
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepEffort: "high", onLaunchEffort });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "medium" }), expect.anything());
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "medium", source: "seat_choice" });
+      expect(db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeIds[0])).toEqual({ effort: "low", effort_choice: "medium" });
+    });
+
+    it("reports the effort a relaunch without a kept effort selected: a newer explicit choice saved during its awaits", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET effort = 'low', effort_choice = 'low' WHERE id = ?").run(nodeIds[0]);
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      (tmux as any).respawnPane = vi.fn(async () => {
+        db.prepare("UPDATE nodes SET effort_choice = 'medium' WHERE id = ?").run(nodeIds[0]);
+        return { ok: true as const };
+      });
+      const adapter = readyAdapter("claude-code");
+      const onLaunchEffort = vi.fn();
+      await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, onLaunchEffort });
+      expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "medium" }), expect.anything());
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "medium", source: "seat_choice" });
+    });
+
     it("a pane that isn't in the seat's session is left alone, and the seat's records are put back", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
