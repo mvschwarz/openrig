@@ -466,6 +466,7 @@ export function createGuestActivityApp(deps: AppDeps): Hono {
     // Read only by the runner permission routes, the one other thing a grant can do on this router.
     c.set("queueRepo" as never, deps.queueRepo);
     c.set("rigRepo" as never, deps.rigRepo);
+    c.set("streamStore" as never, deps.streamStore);
     await next();
   });
   app.route("/api/activity", guestActivityRoutes);

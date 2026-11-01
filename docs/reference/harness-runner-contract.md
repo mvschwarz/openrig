@@ -198,7 +198,7 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 |---|---|
 | **There's a default person** (chosen with `rig gateway default`, or the only registered person), and no override | They get an ordinary ask in the Feed and on Slack. No setup is needed. |
 | **The seat's operator chose someone** (`rig seat set-permissions-to <seat> --to <person> --reason "…"`) | That person gets the ask instead. |
-| **No one can be asked** | **Permitted at once**, with the agent's own allow option. No ask is opened. That covers: no registered person; several and none the default; the chosen person no longer registered; the people unreadable; or options a person can't be shown (bad ids, or not 2-4). The agent's `allow_once` is used, else its `allow_always`. If the agent offers only `allow_always`, the harness then remembers a permission nobody chose. |
+| **No one can be asked** | **Permitted at once**, with the agent's own allow option. No ask is opened, and OpenRig records the permit (below). That covers: no registered person; several and none the default; the chosen person no longer registered; the people unreadable; or options a person can't be shown (bad ids, or not 2-4). The agent's `allow_once` is used, else its `allow_always`. If the agent offers only `allow_always`, the harness then remembers a permission nobody chose. |
 | **The seat's operator opted in to refusal** (`rig seat set-permissions-to <seat> --deny --reason "…"`) | Refused at once and held as needs input, as in the first version. |
 
 **What the ask shows:**
@@ -217,7 +217,7 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 | replies with just a no ("no", "deny", "reject", "stop" …), or denies it in the Feed | the agent's reject (`reject_once`, else `reject_always`), or, with no reject option, cancelled. A person's no is never a grant |
 | routes or hands it to another person | the ask waits for that person, who gets the same options; their answer counts as if they'd been asked. The handoff itself never permits |
 | routes or hands it to an agent seat | that seat gets no options. The request waits until that row is closed, by the seat or a person. Closed as done without a choice (including a drop), or as failed, is no answer, so it's permitted. Closed as denied (the Feed's deny, `--closure-reason denied`, or the state `denied`) is a no. A row set to the state `canceled` cancels the request, and a further handoff is followed; a person it reaches gets the same options. Or the request waits until the agent's turn ends |
-| closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow |
+| closes it without choosing: drop, approve, or other typed words | no answer, so the default applies: **permitted** with the agent's allow, and OpenRig records the permit (below) |
 | doesn't answer | the request **stays pending and visible** (the seat reads needs input) until the agent's turn ends. It's never timed out into a grant. |
 
 - **An answer reaches only the live request it was asked for,** once. A request from an earlier occupant reads
@@ -225,6 +225,15 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 - **Text typed into the runner's pane, an agent's own text, and `rig send` are never an answer.** While a request waits
   on a person, the seat reads needs input, and sends are normally refused. A send that does get through reaches the
   agent as a prompt.
+- **Each permit OpenRig decides by default is recorded,** once, as a stream item from the seat. That covers no one
+  to ask, and an ask closed without a choice (the row passed to an agent seat included). The record names:
+  - the tool call;
+  - why no person answered, including, for a closed ask, who closed which row and how;
+  - the option the agent got, with its kind. An `allow_always` option is marked as remembered by the agent's harness;
+  - the conversation and request, or the ask.
+
+  Read the records with `rig stream list --tag runner-permission-permit`, or `--source <seat>`. A record wakes no one,
+  and one that can't be written doesn't change the permit.
 
 **The runner's protocol:**
 1. **Submit** the agent's live request to `POST <base>/api/activity/permission-requests`, with the same token or seat
@@ -286,14 +295,16 @@ permission nobody chose. That covers:
   times first);
 - a refusal the table marks "permits", and any status or code this section doesn't list.
 
+Such a permit is the runner's own, so OpenRig has no record of it: the runner prints it in its pane.
+
 **Limits in 0.7.7:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
 - **A colleague's answer is followed on this host.** If the ask is handed to another host, the request waits, shown as
   needs input, until the agent's turn ends.
 - **An override or `--deny` is set with the command above, never in a rig spec.** A spec field is a possible later
   change.
-- **Permits and answers aren't recorded beyond the runner's pane and the ask itself.** A permit with no one to ask
-  opens no ask.
+- **A person's answer is recorded on the ask itself,** and a default permit as the stream item above. That item lasts as
+  long as stream retention keeps it. A permit the runner decides on its own is in its pane only.
 
 ## 8. Resume: exactly the same conversation, or say honestly that you couldn't
 
