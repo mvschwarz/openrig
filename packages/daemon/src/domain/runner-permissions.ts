@@ -35,6 +35,8 @@ const NATIVE_MEANING: Record<string, string> = {
 };
 const WITHDRAW_REASONS = new Set(["turn_cancelled", "turn_ended", "exited"]);
 const MAX_AGENT_TEXT = 500;
+/** The most of a person's own words a read passes back to the runner. */
+const MAX_SAID = 2000;
 const MAX_HANDOFF_HOPS = 10;
 /** The seat setting that opts in to refusing every request; OpenRig's default is to ask a person, or permit. */
 export const PERMISSIONS_DENY = "deny";
@@ -48,6 +50,13 @@ function typedYesOrNo(answer: unknown): "yes" | "no" | null {
   if (!answer || typeof answer !== "object" || (answer as { kind?: unknown }).kind !== "typed-reply") return null;
   const words = String((answer as { text?: unknown }).text ?? "").trim().toLowerCase().replace(/[.!?,;:]+$/, "").replace(/\s+/g, " ");
   return SAID_YES.has(words) ? "yes" : SAID_NO.has(words) ? "no" : null;
+}
+
+/** A person's typed reply that says more than a plain yes or no: their own words, bounded. */
+function typedWords(answer: unknown): string | null {
+  if (!answer || typeof answer !== "object" || (answer as { kind?: unknown }).kind !== "typed-reply" || typedYesOrNo(answer)) return null;
+  const words = String((answer as { text?: unknown }).text ?? "").trim();
+  return words ? clip(words, MAX_SAID) : null;
 }
 
 export type PermissionOwnerRefusal = { ok: false; code: "permissions_to_not_a_person" | "permissions_to_unavailable"; message: string };
@@ -102,8 +111,8 @@ export type SubmitResult =
   | { ok: false; code: SubmitRefusalCode; message: string };
 export type ReadResult =
   | { ok: true; state: "pending" | "withdrawn" | "stale" }
-  | { ok: true; state: "answered" | "permitted"; optionId: string }
-  | { ok: true; state: "refused"; reason: "no_allow_offered" | "said_no" }
+  | { ok: true; state: "answered" | "permitted"; optionId: string; said?: string }
+  | { ok: true; state: "refused"; reason: "no_allow_offered" | "said_no"; said?: string }
   | { ok: false; code: "not_found"; message: string };
 export type WithdrawResult = ReadResult | { ok: false; code: "invalid_permission_request"; message: string };
 
@@ -261,14 +270,14 @@ export class RunnerPermissions {
       if (changedId === askId || changedId === liveId) release();
     });
     try {
-      const now = this.read(seat, askId);
+      const now = this.withWords(askId, this.read(seat, askId));
       if (!now.ok || now.state !== "pending" || waitMs <= 0) return now;
       const asked = this.deps.queueRepo.getById(askId)!;
       liveId = this.liveEnd(asked)?.qitemId ?? askId;
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([changed, new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); })]);
       if (timer) clearTimeout(timer);
-      return this.read(seat, askId);
+      return this.withWords(askId, this.read(seat, askId));
     } finally {
       unsubscribe();
     }
@@ -285,6 +294,15 @@ export class RunnerPermissions {
     // A handoff this host can't follow leaves its rows as they are; the runner just stops waiting.
     if (live) this.close(live, WITHDRAWN_NOTE, reason);
     return { ok: true, state: "withdrawn" };
+  }
+
+  /** A person who closed the ask with their own words, not a choice or a plain yes or no: the read passes them back as
+   *  `said`, from the row that holds the answer, for the runner to give the agent. The outcome and option are unchanged. */
+  private withWords(askId: string, result: ReadResult): ReadResult {
+    if (!result.ok || !(result.state === "permitted" || (result.state === "refused" && result.reason === "no_allow_offered"))) return result;
+    const asked = this.deps.queueRepo.getById(askId);
+    const said = typedWords((asked ? this.liveEnd(asked) : null)?.humanAnswers?.[QUESTION_ID]);
+    return said ? { ...result, said } : result;
   }
 
   /** A person who routes or hands the ask to a colleague means the colleague decides: follow each handoff (a handed-off

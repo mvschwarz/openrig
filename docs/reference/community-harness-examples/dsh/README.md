@@ -37,6 +37,10 @@ The runner submits each request to OpenRig, which asks one person:
 
 That person answers one of the options dsh offered, and the runner gives that answer to the same live request, once.
 
+**When the person answers in their own words** rather than with a choice, a yes or a no, OpenRig permits by default and
+passes their words back as `said`. The runner gives dsh its option as usual, shows the words in the pane, and sends
+them to dsh as its next prompt, after the current turn. The words are never the answer.
+
 **When no one can be asked, the request is permitted** with dsh's own allow option: `allow_once` when dsh offers it,
 else `allow_always`. That's OpenRig's default. The runner does the same when OpenRig can't answer: an older OpenRig
 without this path, an OpenRig it can't reach, or a refusal other than `--deny`.

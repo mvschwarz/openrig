@@ -133,8 +133,8 @@ function askState(h, entry) {
   const script = h.asks.script;
   if (entry.withdrawn) return script.late ?? { state: "withdrawn" };
   if (script.answer && Date.now() >= entry.created + (script.answer.afterMs ?? 0)) {
-    const { state, optionId, reason } = script.answer;
-    return { state, ...(optionId ? { optionId } : {}), ...(reason ? { reason } : {}) };
+    const { state, optionId, reason, said } = script.answer;
+    return { state, ...(optionId ? { optionId } : {}), ...(reason ? { reason } : {}), ...(said ? { said } : {}) };
   }
   return { state: "pending" };
 }
@@ -477,6 +477,8 @@ const cases = {
     const outcomes = [
       ["permitted at submit", { submit: { permitted: true } }, "allow-once"],
       ["permitted at read", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once" } }, "allow-once"],
+      // A person's own words come back beside the outcome, and never change the option delivered.
+      ["permitted at read, with the person's words", { answer: { afterMs: 300, state: "permitted", optionId: "allow-once", said: "only the notes file" } }, "allow-once"],
       ["duplicate_request", { submit: { status: 409, code: "duplicate_request" } }, "allow-once"],
       ["activity_grant_pending", { submit: { status: 409, code: "activity_grant_pending" } }, "allow-once"],
       ["activity_grant_revoked", { submit: { status: 401, code: "activity_grant_revoked" } }, "allow-once"],
@@ -547,6 +549,22 @@ const cases = {
       if (reason === "turn_ended") r.check(`${label}: nothing is held once the ask is withdrawn`,
         await waitFor(() => nonExitStops(h, withdrawn?.at ?? 0).length > 0, scale(3000)), "no Stop after the withdraw");
     }
+    return r;
+  },
+
+  // Section 7: a person who answers in their own words gets them passed on. OpenRig carries them as the read's `said`, and
+  // a runner gives them to the agent as its next prompt, after the turn, never as the answer. A runner that drops them
+  // still keeps the contract, so the result is advisory.
+  async "4c"() {
+    const r = result("4c", "The person's words: a read's said becomes the agent's next prompt (advisory)", { proposed: true });
+    const said = "Only the notes file, please. Leave the rest alone.";
+    const h = await launch("4c", { scenario: { turns: [{ permission: true }, {}] },
+      asks: { answer: { afterMs: 300, state: "permitted", optionId: "allow-once", said } } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    h.paste(message(h, "edit the notes"));
+    if (!r.check("the first turn ends", await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(6000)), "no Stop/end_turn")) return r;
+    const next = await waitFor(() => h.prompts()[1], scale(4000));
+    r.check("the person's words are the agent's next prompt", next?.includes(said), `prompts: ${JSON.stringify(h.prompts())}`);
     return r;
   },
 
@@ -663,7 +681,7 @@ const cases = {
   },
 };
 
-const order = ["1", "1b", "2", "3", "4", "4b", "5", "6", "7", "7b", "7c", "8", "9"];
+const order = ["1", "1b", "2", "3", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }
