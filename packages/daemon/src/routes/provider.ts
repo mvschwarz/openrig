@@ -127,8 +127,8 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const node = result.launched?.find((n) => n.logicalId === logicalId);
       if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [] };
       // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat; a launch that failed
-      // while the seat's own process still runs left it as it was too.
-      const untouched = node?.processKept === true || (!node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached"));
+      // before its takeover stopped anything left it as this attempt found it too.
+      const untouched = node?.nothingStopped === true || (!node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached"));
       return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot." };
     },
   };

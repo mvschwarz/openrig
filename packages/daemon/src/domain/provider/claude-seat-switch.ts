@@ -150,7 +150,7 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   if (!relaunched.ok && relaunched.effect === "none") {
     relaunch.setTokenRef(nodeId, before);
     return { outcome: "failed_safely", reasons: [`relaunch_${relaunched.code.replace(/-/g, "_")}`], seat: report,
-      message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it keeps running as it was, with its token reference as it was.` };
+      message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it's as it was before the switch, with its token reference as it was.` };
   }
   report.loginChanged = true;
   if (!relaunched.ok) {

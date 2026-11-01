@@ -59,8 +59,9 @@ export type ClaudeRecordSelection =
   | { ok: false; reason: string };
 
 /** `parentPid` itself and its descendants whose command matches `matches`, breadth-first: a runtime exec'd at launch
- *  IS the pane's process. (Deliberately local: the two existing walkers are module-private in the codex adapter and the
- *  refresher; a shared extraction is a cleanup for calmer water.) */
+ *  IS the pane's process. A shell at the root isn't one, even when its arguments name the runtime: `bash -c` keeps its
+ *  whole script in argv while a later command runs. (Deliberately local: the two existing walkers are module-private in
+ *  the codex adapter and the refresher; a shared extraction is a cleanup for calmer water.) */
 function findDescendants(processes: ProcessRow[], parentPid: number, matches: (command: string) => boolean): number[] {
   const byParent = new Map<number, ProcessRow[]>();
   for (const p of processes) {
@@ -69,7 +70,8 @@ function findDescendants(processes: ProcessRow[], parentPid: number, matches: (c
     byParent.set(p.ppid, list);
   }
   const root = processes.find((p) => p.pid === parentPid);
-  const out: number[] = root && matches(root.command) ? [root.pid] : [];
+  const rootArgv0 = basename((root?.command.trim().split(/\s+/)[0] ?? "").replace(/^-/, "").replace(/^['"]|['"]$/g, ""));
+  const out: number[] = root && !isShellForeground(rootArgv0) && matches(root.command) ? [root.pid] : [];
   const queue = [parentPid];
   while (queue.length > 0) {
     const pid = queue.shift()!;
