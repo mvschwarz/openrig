@@ -149,3 +149,43 @@ it("refuses a non-exec child whose process changes between the two samples", asy
   let reads = 0;
   expect(await verifyClaudePaneProcess(nonExecInput(() => nonExec(reads++ === 0 ? {} : { pid: 24 })))).toBeNull();
 });
+
+// #2341, the reported frame: the native installer's `~/.local/bin/claude` is a symlink to `versions/<ver>`, and a managed
+// launch freezes its realpath. The live Claude can still spell argv[0] through the link, with the OS name `claude`; the
+// OS's own executable path says it runs exactly the frozen file.
+const link = "/home/user/.local/bin/claude";
+const installed = "/home/user/.local/share/claude/versions/2.1.316";
+function throughLink(patch: Partial<NativeProcessRow> = {}): NativeProcessRow[] {
+  return [
+    { pid: 30, ppid: 1, pgid: 30, tpgid: 32, executableName: "fish", command: "-fish", startedAt },
+    { pid: 31, ppid: 30, pgid: 31, tpgid: 32, executableName: "fish", command: "fish", startedAt },
+    { pid: 32, ppid: 31, pgid: 32, tpgid: 32, executableName: "claude", executablePath: installed, command: `${link} ${launched}`, startedAt, ...patch },
+  ];
+}
+const linkInput = (list: () => NativeProcessRow[], extra: Record<string, unknown> = {}) =>
+  input(list, { tmux: { getPanePid: async () => 30 }, selectedExecutable: installed, scriptLaunch: false, ...extra });
+
+it("proves a Claude spelled through the installer's symlink when the OS says it runs the frozen file", async () => {
+  expect((await verifyClaudePaneProcess(linkInput(() => throughLink())))?.process.pid).toBe(32);
+  expect((await verifyClaudePaneRuntime(linkInput(() => throughLink())))?.process.pid).toBe(32);
+});
+
+const linkRefused: [string, Partial<NativeProcessRow> | ((r: NativeProcessRow[]) => NativeProcessRow[])][] = [
+  ["another install's binary", { executablePath: "/home/user/.local/share/claude/versions/2.1.315" }],
+  ["no readable OS path", { executablePath: undefined }],
+  ["a relative OS path", { executablePath: "home/user/.local/share/claude/versions/2.1.316" }],
+  ["an OS path with a dot segment", { executablePath: "/home/user/.local/share/claude/versions/../versions/2.1.316" }],
+  ["another conversation", { command: `${link} --permission-mode auto --session-id 00000000-0000-4000-8000-000000000002 --name seat@rig` }],
+  ["an argv[0] that isn't Claude", { command: `/usr/bin/node ${launched}` }],
+  ["a process outside the foreground group", { pgid: 88 }],
+  ["a second candidate", r => [...r, { ...r[2]!, pid: 33 }]],
+];
+it.each(linkRefused)("still refuses a symlink-spelled process with %s", async (_name, patch) => {
+  const list = () => typeof patch === "function" ? patch(throughLink()) : throughLink(patch);
+  expect(await verifyClaudePaneProcess(linkInput(list))).toBeNull();
+});
+
+it("refuses a symlink-spelled process that changes between the two samples", async () => {
+  let reads = 0;
+  expect(await verifyClaudePaneProcess(linkInput(() => throughLink(reads++ === 0 ? {} : { pid: 34 })))).toBeNull();
+});
