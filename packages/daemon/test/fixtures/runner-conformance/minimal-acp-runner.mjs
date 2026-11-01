@@ -17,6 +17,8 @@ const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
 // With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
 let deferredWithdraw = null;
+// --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
+let stoppedEarly = false;
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
@@ -155,6 +157,7 @@ async function onPermission(msg) {
   // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
   attention = true;
   if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
+  if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
   live = ask;
@@ -216,6 +219,7 @@ async function prompt(text) {
   busy = true;
   cancelSent = false;
   turn += 1;
+  stoppedEarly = false;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
   await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
@@ -225,7 +229,7 @@ async function prompt(text) {
     if (!breaks.has("no-error-post")) await post("Notification", "runtime_error");
   } else {
     const reason = breaks.has("cancelled-always") && cancelSent ? "cancelled" : res.result.stopReason;
-    if (!attention || breaks.has("stop-while-attention")) await post("Stop", reason);
+    if ((!attention || breaks.has("stop-while-attention")) && !stoppedEarly) await post("Stop", reason);
   }
   if (deferredWithdraw) {
     const { askId, reason } = deferredWithdraw;
