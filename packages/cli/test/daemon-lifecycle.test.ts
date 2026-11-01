@@ -80,6 +80,29 @@ function writtenState(deps: LifecycleDeps): DaemonState {
   return JSON.parse(call[1] as string) as DaemonState;
 }
 
+it.each(["matching", "different", "missing"])("matches native shutdown by request identity despite cross-process clock skew: %s", async mode => {
+  const previousUrl = process.env.OPENRIG_URL;
+  process.env.OPENRIG_URL = "http://127.0.0.1:7555";
+  const state: DaemonState = { pid: 555, port: 7555, db: "test.db", startedAt: "2026-01-01T00:00:00Z" };
+  const requestId = "a".repeat(32);
+  const callbackTime = new Date(Date.now() - 7).toISOString();
+  const receipt = { schema: "openrig.daemon-shutdown/v1", pid: state.pid, startedAt: callbackTime,
+    completedAt: callbackTime, outcome: "clean", phase: "complete", failures: [],
+    ...(mode === "missing" ? {} : { requestId: mode === "matching" ? requestId : "b".repeat(32) }) };
+  const deps = mockDeps({
+    exists: p => p === STATE_FILE || p.endsWith("daemon-shutdown.json"),
+    readFile: p => p === STATE_FILE ? JSON.stringify(state) : p.endsWith("daemon-shutdown.json") ? JSON.stringify(receipt) : null,
+    isProcessAlive: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+    requestStop: vi.fn(async () => ({ requestId })),
+    fetch: vi.fn().mockResolvedValueOnce({ ok: true }).mockRejectedValue(Object.assign(new Error("refused"), { code: "ECONNREFUSED" })),
+  });
+  try {
+    if (mode === "matching") { await expect(stopDaemon(deps)).resolves.toBe("stopped"); expect(deps.removeFile).toHaveBeenCalledWith(STATE_FILE); }
+    else { await expect(stopDaemon(deps)).rejects.toThrow("no matching shutdown receipt"); expect(deps.removeFile).not.toHaveBeenCalled(); }
+    expect(deps.kill).not.toHaveBeenCalled();
+  } finally { if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl; }
+});
+
 describe("Daemon Lifecycle", () => {
   // A started child whose own endpoint names its PID and reports `hosts`; `probe` scripts each later
   // request: "ok" answers, any other value throws with that error code.

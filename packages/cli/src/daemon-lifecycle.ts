@@ -217,7 +217,7 @@ export interface StartOptions {
 }
 
 export interface LifecycleDeps {
-  requestStop?: (state: DaemonState) => Promise<void>;
+  requestStop?: (state: DaemonState) => Promise<void | { requestId: string }>;
   /** Required by startDaemon; read-only lifecycle consumers need no launch capability. */
   acquireStartLock?: () => DaemonStartLock;
   spawn: (cmd: string, args: string[], opts: {
@@ -982,10 +982,11 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   let notBefore = Date.parse(state.startedAt);
   // Only a signalling stop names a request time: this process's clock just before kill, not delivery.
   let requested = "";
+  let requestId: string | undefined;
   if (pidState !== "dead") {
     notBefore = Date.now();
     requested = `; ${deps.requestStop ? "graceful stop" : "SIGTERM"} requested at ${new Date(notBefore).toISOString()}`;
-    if (deps.requestStop) await deps.requestStop(state);
+    if (deps.requestStop) requestId = (await deps.requestStop(state))?.requestId;
     else deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
@@ -1003,7 +1004,7 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   if (effect !== "refused") throw new Error(`Daemon stop verification is unverified: ${observation}; state preserved.`);
 
   const { receipt, receiptPath } = readShutdownReceipt(deps, stateFile);
-  if (!receiptMatchesState(receipt, state, notBefore)) {
+  if (requestId ? receipt?.pid !== state.pid || receipt.requestId !== requestId : !receiptMatchesState(receipt, state, notBefore)) {
     throw new Error(`Daemon process stopped; ${observation}; drain completion unverified (no matching shutdown receipt); state preserved. Inspect ${path.join(path.dirname(stateFile), "daemon.log")}.`);
   }
   if (!isCleanShutdown(receipt)) {

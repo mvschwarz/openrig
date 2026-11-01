@@ -11,7 +11,7 @@ const read = (file: string): any => { try { return JSON.parse(readFileSync(file,
 
 /** Windows SIGTERM force-terminates Node. This instance capability requests the
  * same bounded drain used by POSIX signals, without accepting an HTTP command. */
-export async function startWindowsDaemonControl(home: string, shutdown: () => void): Promise<() => Promise<void>> {
+export async function startWindowsDaemonControl(home: string, shutdown: (requestId?: string) => void): Promise<() => Promise<void>> {
   const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
   try {
     await promisify(execFile)(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
@@ -37,7 +37,8 @@ export async function startWindowsDaemonControl(home: string, shutdown: () => vo
       const expected = Buffer.from(record.token);
       if (request.pid !== record.pid || state?.pid !== record.pid || request.startedAt !== state.startedAt
         || token.length !== expected.length || !timingSafeEqual(token, expected)) { socket.destroy(); return; }
-      socket.end("accepted\n", () => setImmediate(shutdown));
+      if (request.requestId !== undefined && !/^[a-f0-9]{32}$/.test(request.requestId)) { socket.destroy(); return; }
+      socket.end("accepted\n", () => setImmediate(() => shutdown(request.requestId)));
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(record.pipe, () => { server.removeListener("error", reject); resolve(); }); });
@@ -49,11 +50,12 @@ export async function startWindowsDaemonControl(home: string, shutdown: () => vo
   }));
 }
 
-export async function requestWindowsDaemonStop(home: string, state: { pid: number; startedAt: string }): Promise<void> {
+export async function requestWindowsDaemonStop(home: string, state: { pid: number; startedAt: string }): Promise<{ requestId: string }> {
   const record: ControlRecord | null = read(path.join(home, FILE));
   if (record?.schema !== "openrig.windows-control/v1" || record.pid !== state.pid
     || !/^\\\\\.\\pipe\\openrig-[a-f0-9]{16}-\d+-[a-f0-9]{48}$/.test(record.pipe)
     || !/^[a-f0-9]{64}$/.test(record.token)) throw new Error("Windows drain channel unavailable; no termination sent");
+  const requestId = randomBytes(16).toString("hex");
   await new Promise<void>((resolve, reject) => {
     const socket = createConnection(record.pipe);
     let settled = false;
@@ -61,8 +63,9 @@ export async function requestWindowsDaemonStop(home: string, state: { pid: numbe
     socket.setTimeout(2000, () => finish(false));
     socket.on("error", () => finish(false));
     socket.on("end", () => finish(false));
-    socket.on("connect", () => socket.write(JSON.stringify({ pid: state.pid, startedAt: state.startedAt, token: record.token }) + "\n"));
+    socket.on("connect", () => socket.write(JSON.stringify({ pid: state.pid, startedAt: state.startedAt, token: record.token, requestId }) + "\n"));
     let response = "";
     socket.on("data", chunk => { response += chunk.toString(); if (response.length > 64) finish(false); else if (response.includes("\n")) finish(response === "accepted\n"); });
   });
+  return { requestId };
 }

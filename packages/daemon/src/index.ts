@@ -331,6 +331,9 @@ export async function startServer(port?: number) {
     bindPlan,
   });
 
+  let lifecycleReady = process.platform !== "win32";
+  deps.startupReady = () => lifecycleReady;
+
   // Multi-bind via N serve() instances sharing the same Hono app.
   // Hono's serve() targets a single host:port; for multi-bind we spawn
   // one per host. The contextMonitor + watchdog scheduler only start
@@ -452,7 +455,8 @@ export async function startServer(port?: number) {
   disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
-  if (process.platform === "win32") closeWindowsControl = await startWindowsDaemonControl(OPENRIG_HOME, () => shutdown("Windows control"));
+  if (process.platform === "win32") closeWindowsControl = await startWindowsDaemonControl(OPENRIG_HOME, requestId => shutdown("Windows control", requestId));
+  lifecycleReady = true;
 
   // Backward-compatible single-server return (callers that just need a
   // handle reference; multi-bind shutdown is wired via signal handlers).

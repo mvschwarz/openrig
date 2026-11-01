@@ -18,6 +18,18 @@ function seedRigWithNodes(db: Database.Database, name: string, nodeCount: number
 }
 
 describe("OPR.0.4.3.21 — /healthz enrichment", () => {
+  it("does not report startup ready before native lifecycle control is available", async () => {
+    const db = createFullTestDb();
+    let ready = false;
+    const { app } = createTestApp(db, { appDeps: { startupReady: () => ready } });
+    try {
+      const pending = await app.request("/healthz");
+      expect(pending.status).toBe(503);
+      expect(await pending.json()).toEqual({ status: "starting", pid: process.pid });
+      ready = true;
+      expect((await app.request("/healthz")).status).toBe(200);
+    } finally { db.close(); }
+  });
   it("reports process identity without requiring the event-loop monitor", async () => {
     const db = createFullTestDb();
     const { app } = createTestApp(db);

@@ -33,10 +33,10 @@ describe.skipIf(process.platform !== "win32")("native Windows drain request", ()
       expect(existsSync(ready), `fixture exit=${child.exitCode}; ${diagnostics}`).toBe(true);
       const state = JSON.parse(readFileSync(ready, "utf8"));
       const exited = once(child, "exit");
-      await requestWindowsDaemonStop(home, state);
+      const proof = await requestWindowsDaemonStop(home, state);
       const [code] = await exited;
       expect(code).toBe(0);
-      expect(JSON.parse(readFileSync(path.join(home, "daemon-shutdown.json"), "utf8"))).toMatchObject({ pid: child.pid, outcome: "clean", phase: "complete" });
+      expect(JSON.parse(readFileSync(path.join(home, "daemon-shutdown.json"), "utf8"))).toMatchObject({ pid: child.pid, outcome: "clean", phase: "complete", requestId: proof.requestId });
       expect(existsSync(path.join(home, "windows-control/daemon-control.json"))).toBe(false);
       expect(readFileSync(path.join(home, `measurements-${child.pid}.jsonl`), "utf8")).toContain("shutdown.consumer");
     } finally {

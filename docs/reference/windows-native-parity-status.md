@@ -2214,3 +2214,42 @@ terminal/server, attach/help, process identity, restore trust, compaction and
 fixture boundaries. This does not rerun or renew the earlier real-provider,
 installed-package or remote lifecycle acceptance claims against the new base.
 No deployment was changed by this rebase.
+
+### Remote lifecycle repairs and remaining provider dependency (2026-11-02)
+
+Remote shutdown logs established a clean receipt whose callback timestamp was
+seven milliseconds before the CLI's request timestamp. Matching a native stop
+now uses a random per-request ID carried through the authenticated instance
+pipe into the receipt, rather than cross-process wall-clock ordering. PID,
+capability and boot-state validation remain required; missing or different
+request IDs do not prove that request's drain. POSIX and legacy callers retain
+their existing time-based checks. HTTP health stays at 503/starting until the
+Windows control capability has been published, preventing premature CLI success.
+
+Two real remote startup/stop rounds returned only after control readiness,
+preserved the queue and produced matching request-bound clean receipts. These
+supersede the earlier missing-receipt result for the repaired path. The remote
+witness uses the original `c1ae79f` checkout plus the exact lifecycle patch;
+local build/type checks use the rebased main tree.
+
+The remote SSH process belonged to a kill-on-close Job with explicit breakaway
+allowed (observed flags 0x2800). Native daemon startup over Windows SSH now
+re-execs only its finite startup CLI using CREATE_BREAKAWAY_FROM_JOB, then runs
+the existing startup identity/lock checks normally. It retains stdout/stderr,
+native argv, cwd and the caller's TEMP/TMP; the recursion marker is not passed
+to the daemon or seats. No task scheduler, service or WMI fallback is installed.
+A real SSH start returned; after disconnect, separate SSH invocations read the
+still-running daemon and unchanged queue, then stopped it cleanly. PID absence,
+zero listeners and removal of matching state were verified. No original team
+was started. This supersedes the earlier SSH-disconnect survival failure for
+the repaired tested host.
+
+The five selected lifecycle files pass 135 tests without skips; workspace type
+checks pass. A proposed prohibited-job fixture failed to establish its expected
+host precondition and was withdrawn after bounded investigation, so denial by
+every nested-job policy remains unverified. Native startup errors have no broker
+fallback. Actual remote Pi 1.4.0 Codex OAuth readiness reported ready, but the
+first isolated, tools-disabled provider request failed with `refresh_token_reused`
+(401). That account needs a fresh interactive Pi login before remote provider
+continuity/full-session restore can be completed. No credential was printed or
+copied. ACP companion cleanup remains separately unresolved.

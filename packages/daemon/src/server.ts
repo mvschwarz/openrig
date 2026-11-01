@@ -390,6 +390,8 @@ export interface AppDeps {
    * evidence (loop lag / last-tick age / utilization / healthy verdict).
    */
   eventLoopMonitor?: import("./domain/event-loop-monitor.js").EventLoopMonitor;
+  /** Bound HTTP is not startup-ready until native lifecycle control is published. */
+  startupReady?: () => boolean;
   /**
    * OPR.0.4.3.21 — request-duration recorder for the expensive topology
    * routes. Optional (same rationale). When present, one timing middleware is
@@ -724,6 +726,7 @@ export function createApp(deps: AppDeps): Hono {
   app.use("/api/*", hostReadThrough());
 
   app.get("/healthz", (c) => {
+    if (deps.startupReady?.() === false) return c.json({ status: "starting", pid: process.pid }, 503);
     // OPR.0.4.3.21 — enrich the health surface with event-loop wedge evidence
     // when the monitor is wired. Process identity is additive with or without the monitor.
     // OPR.0.4.4.11 FR-7 — a STAMPED build additionally carries
