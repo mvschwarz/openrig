@@ -349,16 +349,17 @@ your context, your compaction and your replacement — and it is the only thing 
   `rig config set queue.wake_human_rung explicit-only` (default `always`) keeps that post
   for rows addressed to a person (an `@external` address or a registered human); the rest stop at
   `rig view show escalations`. A seat stuck at a prompt only a person can clear still reaches one,
-  and an unreadable human registry posts everything. A seat held at a choice prompt that no hook
+  and an unreadable human registry keeps every row eligible for that last step; it does not
+  establish that a channel can deliver. A seat held at a choice prompt that no hook
   announces (a usage-limit dialog, say) escalates once the refusal has held for one retry interval
   (`queue.wake_retry_interval_seconds`, 300 seconds by default). Choice-prompt alerts follow this
   setting and reach a person one at a time per machine; later ones wait as rows while the first
-  seat stays blocked. A prompt alert uses a local agent carrier; the operator delivery engine
-  checks the default person's connector readiness before dispatch. An unavailable or uncertain route
-  stays visible with its reason and is re-resolved on later ticks; it is not a posted notice. A
-  configured escalation route still runs first. Findings about an undelivered wake-escalation notice
-  remain visible but do not create another wake escalation. Scheduling notices are sent by OpenRig,
-  while their member rows retain their original senders and obligations.
+  seat stays blocked. Escalations aren't posted while the person's channel can't take them. They stay visible
+  as rows with a reason and are tried again later. The configured escalation route still runs first.
+  An older, unaccepted alert addressed to a person is kept on the same row and rerouted locally;
+  a delivery already accepted by the gateway keeps its existing route. Findings about an undelivered
+  wake-escalation notice stay visible without creating another wake escalation. Scheduling notices
+  are sent by OpenRig; their member rows keep their original senders and obligations.
 - **`rig queue inbox-drop` / `inbox-pending` / `inbox-absorb` / `inbox-deny`** — put something in
   front of a seat that it can *refuse*. Mail, not assignment.
 - **`rig queue outbox-record` / `outbox-list`** — what you dispatched, in a record that survives

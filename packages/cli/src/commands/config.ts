@@ -96,7 +96,8 @@ Keys:
                          wake_retry_interval_seconds, wake_retry_cap, wake_unconfirmed_window_minutes,
                          wake_swap_grace_seconds (S01 wake-or-escalate ladder),
                          wake_human_rung (always | explicit-only — post agent-to-agent escalations to a person;
-                           explicit-only keeps agent work visible; permission prompts still reach a person,
+                           explicit-only posts rows addressed to a person; other agent work stays visible,
+                           permission prompts still reach a person,
                            choice prompts follow this setting; unavailable human delivery stays a visible row;
                            an unreadable registry does not suppress eligibility; delivery still needs a ready route)
   retention.*            enabled, transitions_days, watchdog_days,

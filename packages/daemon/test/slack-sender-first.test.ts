@@ -49,7 +49,7 @@ describe("a wake-rung escalation names the seat the work is waiting on", () => {
     try {
       const sent: Array<Record<string, unknown>> = [];
       const engine = makeOperatorDeliveryEngine({ home, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry,
-        queueRepo: { transitionLog: { latestOwnerNotificationForQitem: () => null }, db: undefined } as never,
+        queueRepo: { transitionLog: { latestOwnerNotificationForQitem: () => null, hasOwnerNotificationReceipt: () => false }, listTransitions: () => [], db: undefined } as never,
         dispatch: (_op, _ref, payload) => { sent.push(payload as Record<string, unknown>); return { ok: true, decisionId: "d" } as never; } });
       await engine.dispatchEscalation({ qitemId: "q-stuck", body: "Please review.", tags: [], ...row } as QueueItem, "unclaimed");
       return sent[0]!;

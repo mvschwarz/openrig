@@ -23,6 +23,8 @@ import {
 } from "./delivery-rules-engine.js";
 
 export interface OperatorDeliveryEngine {
+  /** Read durable pre-marker custody without dispatching or rechecking readiness. */
+  hasAcceptedEscalation?: (row: QueueItem) => boolean;
   dispatchEscalation: (
     row: QueueItem,
     reason: string,
@@ -66,16 +68,31 @@ export function makeOperatorDeliveryEngine(deps: {
   gatewayState?: () => string;
   readiness?: (human: HumanFragment) => Promise<{ ready: boolean; reason: string }>;
 }): OperatorDeliveryEngine {
+  const notificationKeyFor = (row: QueueItem): string => {
+    const owner = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
+    return owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
+  };
+  const resolvedFor = (row: QueueItem, key: string): string | null => {
+    if (deps.queueRepo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key)) return "posted";
+    return deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith("delivery-termination:")
+      && t.transitionNote.split(/\s+/).includes(`notification_key=${key}`)) ? "terminated" : null;
+  };
   return {
+    hasAcceptedEscalation: row => {
+      const key = notificationKeyFor(row);
+      return resolvedFor(row, key) !== null || new DispatchBuffer(deps.home).pending()
+        .some(d => d.decisionId === `operator:${key}`);
+    },
     async dispatchEscalation(row: QueueItem, _reason: string) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
       // only the current qitemId:transitionId key; a baton row with no owner
       // transition gets the stable synthetic operator-rung episode).
-      const owner = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
-      const notificationKey = owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
+      const notificationKey = notificationKeyFor(row);
 
       const decisionId = `operator:${notificationKey}`;
       const accepted = () => new DispatchBuffer(deps.home).pending().some(d => d.decisionId === decisionId);
+      const resolved = resolvedFor(row, notificationKey);
+      if (resolved) return { decision: resolved, resolved: true, dispatched: true, notificationKey, decisionId };
       // An accepted decision belongs to the gateway even if registry access or
       // routing changes before the ladder records its dispatch marker.
       if (accepted()) return { decision: "accepted-pending", resolved: false, dispatched: true, notificationKey, decisionId };

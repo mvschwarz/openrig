@@ -1083,11 +1083,25 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
   return true;
 }
 
+/** Carrier selection skips positively identified people; missing registry data does not turn an agent into a person. */
+function knownPerson(deps: WakeLadderDeps, destination: string): boolean {
+  if (parseSessionName(destination).kind === "external") return true;
+  try {
+    const registry = (deps.loadHumanRegistry ?? (() => loadHumanRegistry()))();
+    return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  } catch { return false; }
+}
+
+function gatewayOwnsEscalation(deps: WakeLadderDeps, row: QueueItem): boolean {
+  return readLadder(deps.db, row.qitemId, 0).opEngineDispatched
+    || Boolean(deps.deliveryEngine?.hasAcceptedEscalation?.(row));
+}
+
 // The operator engine owns actual human delivery. Its non-nudged queue carrier
 // must still be locally admissible; cross-host source provenance is not a local destination.
 function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
   const candidates = [resolveOperatorSeat(), source];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && !addressedToPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  return candidates.find((candidate): candidate is string => Boolean(candidate && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
 }
 
 /** A delivery-recovery finding about our own notice stays readable without spawning another notice.
@@ -1361,7 +1375,7 @@ async function advancePromptRefusals(
       members.splice(i, 1);
     }
     if (!members.length && !group.jobs.size && !group.hookReview) continue;
-    const orch = openEscalationOwner(deps.db, `prompt-destination:${dest}`) ?? resolveOrch(dest);
+    const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const toOperator = orch === null || orch === dest;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -1405,6 +1419,11 @@ async function advancePromptRefusals(
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
     const view = readLadder(deps.db, row.qitemId, 0);
+    // A crash can leave a durable gateway decision without its ladder marker. Reconcile that custody before any wake.
+    if (!view.opEngineDispatched && deps.deliveryEngine?.hasAcceptedEscalation?.(row)) {
+      if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
+      continue;
+    }
     // The explicit-only floor stopped this alert without a person. If the seat's prompt now needs one (a permission prompt
     // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
     const floorOnly = view.exhausted && !view.opEngineDispatched
@@ -1560,10 +1579,13 @@ async function refreshEscalationRowIfExists(
 }
 
 /** Existing recovery custody takes precedence over a newly resolved topology fallback. */
-function openEscalationOwner(db: Database.Database, dedupTag: string): string | null {
-  return (db.prepare(`SELECT destination_session FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+function openEscalationOwner(deps: WakeLadderDeps, dedupTag: string): string | null {
+  const found = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
     AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
-    .get(dedupTag) as { destination_session: string } | undefined)?.destination_session ?? null;
+    .get(dedupTag) as { qitem_id: string } | undefined;
+  const row = found ? deps.queueRepo.getById(found.qitem_id) : null;
+  // An unaccepted legacy person carrier is not an orchestrator; reselect the existing fallback/visible route.
+  return row && (!knownPerson(deps, row.destinationSession) || gatewayOwnsEscalation(deps, row)) ? row.destinationSession : null;
 }
 
 async function ensureEscalationRow(
@@ -1584,6 +1606,12 @@ async function ensureEscalationRow(
     )
     .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (existing) {
+    const row = deps.queueRepo.getById(existing.qitem_id);
+    if (row && knownPerson(deps, row.destinationSession) && !gatewayOwnsEscalation(deps, row)) {
+      deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch)
+        ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession) : orch,
+        "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness");
+    }
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }

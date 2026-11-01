@@ -204,6 +204,76 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.getById(notice.qitemId)!.state).toBe("pending");
   });
 
+  it("an unreadable human registry still permits a valid agent carrier", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      await refusal(); const posts: unknown[] = [];
+      await tick(engine(posts, false), { loadHumanRegistry: () => ({ ok: false, error: "no registered people" }) });
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.destinationSession).toBe("ops@fixture");
+      expect(posts).toEqual([]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([
+    { choice: true, orchMarker: false }, { choice: true, orchMarker: true },
+    { choice: false, orchMarker: false }, { choice: false, orchMarker: true },
+  ])("an unaccepted old human carrier is repaired in place ($choice/$orchMarker)", async ({ choice, orchMarker }) => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (${choice ? "selection_prompt" : "target_needs_input"}). No text was sent.`);
+    let ready = false; const posts: unknown[] = [];
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: "not-ready" }));
+    await tick(port, { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    if (!orchMarker) db.prepare("DELETE FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'escalation-rung: orchestrator%'").run(old.qitemId);
+    ready = choice; // a choice must not use restored readiness to bypass explicit-only
+    const wakes: string[] = [];
+    await tick(port, { humanRung: "explicit-only", loadHumanRegistry: () => registry, now: new Date(Date.now() + 240_000),
+      attemptWake: async (_id, target) => { wakes.push(target); return "failed:fixture"; } });
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.qitemId).toBe(old.qitemId);
+    expect(alerts()[0]!.body).toBe(old.body);
+    expect(alerts()[0]!.destinationSession).not.toBe("human-owner@external");
+    expect(wakes).toEqual([]); expect(posts).toEqual([]);
+    expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+    if (!choice) {
+      ready = true; await tick(port, { humanRung: "explicit-only", now: new Date(Date.now() + 360_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()[0]!.qitemId).toBe(old.qitemId);
+    }
+  });
+
+  it.each([false, true, "posted", "terminated"] as const)("an accepted old human carrier is not rerouted or woken (marker=%s)", async marker => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+    await tick(engine([], false), { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    db.prepare("DELETE FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'escalation-rung: orchestrator%'").run(old.qitemId);
+    const buffer = new DispatchBuffer(home);
+    const dispatcher = new GatewayDispatcher({ buffer, send: () => { throw new Error("fixture interrupted after persistence"); } });
+    dispatcher.onCapability({ kind: "capability", connectorId: "fixture", platform: "slack", protocolVersion: 1, ops: ["post_message"] });
+    const accepting = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+      readiness: async () => ({ ready: true, reason: "fixture" }), dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
+    const accepted = await accepting.dispatchEscalation(repo.getById(old.qitemId)!, "permission prompt");
+    expect(accepted.dispatched).toBe(true); const pending = buffer.pending(); expect(pending).toHaveLength(1);
+    if (marker === true) repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "wake-ladder@system",
+      transitionNote: `escalation-rung: operator dispatched-to-engine decision=accepted-pending resolved=false notification_key=${accepted.notificationKey} decision_id=${accepted.decisionId}` });
+    if (marker === "posted" || marker === "terminated") {
+      buffer.ack(pending[0]!.decisionId);
+      repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "gateway@system",
+        transitionNote: `${marker === "posted" ? "slack-owner-notification-posted" : "delivery-termination:"} notification_key=${accepted.notificationKey}` });
+    }
+    const expectedPending = buffer.pending();
+    const readReady = vi.fn(async () => ({ ready: false, reason: "unavailable after acceptance" }));
+    const send = vi.fn(() => { throw new Error("must not dispatch again"); }); const wakes = vi.fn(async () => "failed:fixture");
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry }, readiness: readReady, dispatch: send });
+    await tick(port, { humanRung: "explicit-only", loadHumanRegistry: () => registry, now: new Date(Date.now() + 240_000), attemptWake: wakes });
+    expect(repo.getById(old.qitemId)!.destinationSession).toBe("human-owner@external");
+    expect(repo.getById(old.qitemId)!.body).toBe(old.body);
+    expect(buffer.pending()).toEqual(expectedPending); expect(wakes).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled(); expect(readReady).not.toHaveBeenCalled();
+  });
+
   it("an invalid sender does not turn an explicit-only choice alert into a human post", async () => {
     const row = await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
     const staleSource = "sender@remote@retired-host";
