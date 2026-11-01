@@ -2069,3 +2069,32 @@ temporary native-private access-token file was removed. This supersedes the
 forced-teardown limit for that specific Pi input/resume fixture, not ACP cleanup,
 psmux-pane attachment or full snapshot restore. The related three-file run passed
 125 tests with 12 platform skips before the added EOF-specific regression.
+
+### Actual local Pi snapshot recovery and native launch repairs (2026-11-01)
+
+An independent one-seat instance exposed three further native launch defects:
+stock psmux rejected the Windows-only `ProgramFiles(x86)` name when duplicated
+in its `-e` transport; managed-runner identity did not recognize the generated
+scoped PowerShell parent; and Pi's routed launch/resume used `node` rather than
+the pinned absolute executable. The fixes preserve the Windows-only name in
+the private bootstrap, recognize only that fixed generated loader and its unique
+later shell, and retain the pinned executable through the routing wrapper.
+Stock scoped-launch checks pass 5/5, managed/scoped-parent checks 36/36, and the
+native dispatch test moves from 3 passes/1 failure to 4 passes.
+
+Using the real daemon, stock psmux, installed Pi CLI and real Codex OAuth access,
+the owned rig then received one multiline message and persisted the provider's
+marker reply. An explicit snapshot was captured, the rig was stopped, and
+restore attempt 140 completed `fully_restored`. The restored runner had a new
+launch ID but the same session ID and file; a new provider reply recalled the
+pre-snapshot marker. The original test queue row remained exactly once, with
+unchanged body, and SQLite integrity passed. The independent daemon stopped
+cleanly and its temporary access-token file was removed. No production seat was
+used. Earlier empty/unpersisted fixture snapshots correctly refused continuity;
+those refusals are not counted as successful restores.
+
+This closes the tested local Pi session/queue snapshot and real psmux multiline
+delivery paths. It does not establish a combined Docker checkpoint restore,
+other providers' full lifecycle, cross-user access, ACP companion cleanup or
+SSH/SFTP. The deployed main instance retains the local policies and protected
+paused-seat state; no original team was resumed for these checks.
