@@ -216,13 +216,24 @@ function decide(command, policy, depth = 0) {
       if (decide(inner, policy, depth + 1) === "ask") return "ask";
     }
   }
+  if (findAsk(main, policy)) return "ask";
   const parsed = words(main.trim());
+  const tokens = normalize(parsed.commands[0] || [], true);
+  if (!parsed.simple || tokens.some(t => !t.literal)) return undefined;
+  return prefixes(policy.allow).some(prefix => prefixEnd(tokens, prefix) !== undefined) ? "allow" : undefined;
+}
+
+// The ask scan decide() runs over a parsed command, factored out so the error
+// fallback below can reuse the exact same tokenization, prefix and help
+// logic instead of a second, cruder matcher.
+function findAsk(text, policy) {
+  const parsed = words(text.trim());
   const asks = prefixes(policy.ask);
   const askExecutables = new Set(asks.map(prefix => prefix[0]));
   // Retain comment text for asks too: a # inside backticks or ${...} must not
   // hide a later command. Keep the comment-aware scan as well, so quotes in a
   // real comment cannot swallow the following line. Allow parsing is unchanged.
-  for (const command of [...parsed.commands, ...words(main.trim(), false).commands]) {
+  for (const command of [...parsed.commands, ...words(text.trim(), false).commands]) {
     // ponytail: ask conservatively at every word position rather than owning a
     // second shell grammar for wrappers/control flow. Unquoted prose may ask;
     // quoted messages remain single words, and literal heredoc bodies are gone.
@@ -231,13 +242,39 @@ function decide(command, policy, depth = 0) {
       const tokens = normalize(command.slice(i));
       for (const prefix of asks) {
         const end = prefixEnd(tokens, prefix);
-        if (end !== undefined && !helpOnly(tokens, end)) return "ask";
+        if (end !== undefined && !helpOnly(tokens, end)) return true;
       }
     }
   }
-  const tokens = normalize(parsed.commands[0] || [], true);
-  if (!parsed.simple || tokens.some(t => !t.literal)) return undefined;
-  return prefixes(policy.allow).some(prefix => prefixEnd(tokens, prefix) !== undefined) ? "allow" : undefined;
+  return false;
+}
+
+// Ask-only fallback for a command decide() could not judge: never emits
+// "allow" — a repaired or unparseable parse is trusted only to ask. Total:
+// any throw inside the scan degrades to no decision, never a crash.
+function conservativeAsk(command, policy) {
+  try {
+    if (decide(command, policy) === "ask") return "ask";
+  } catch { /* the words-level scan below reuses the same helpers */ }
+  try {
+    return findAsk(command, policy) ? "ask" : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Recover the command string from input that failed JSON.parse (a truncated
+// stream still holds the complete command when its closing quote survived).
+// Only the string is recovered here; whether it requests a lifecycle action
+// is decided by decide()/findAsk as usual — never by this scan.
+function extractCommandText(raw) {
+  const match = /"command"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(raw);
+  if (!match) return undefined;
+  try {
+    return JSON.parse(`"${match[1]}"`);
+  } catch {
+    return undefined;
+  }
 }
 
 module.exports = { decide };
@@ -246,17 +283,37 @@ if (require.main === module) {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", chunk => { raw += chunk; });
   process.stdin.on("end", () => {
+    const emit = (decision) => {
+      try {
+        process.stdout.write(JSON.stringify({ hookSpecificOutput: {
+          hookEventName: "PreToolUse", permissionDecision: decision,
+          permissionDecisionReason: decision === "ask"
+            ? "This rig lifecycle command needs confirmation. Use --help or -h to read its help."
+            : "This command matches the OpenRig session launch allowance.",
+        } }));
+      } catch { /* No decision: retain Claude's own permission handling. */ }
+    };
+    // No ask list, no identifiable lifecycle intent: retain Claude's handling.
+    let policy;
     try {
-      const input = JSON.parse(raw);
+      policy = JSON.parse(Buffer.from(process.argv[2], "base64").toString("utf8"));
+    } catch { return; }
+    let input = null;
+    try { input = JSON.parse(raw); } catch { /* recovered below */ }
+    if (input !== null && typeof input === "object") {
       if (input.tool_name !== "Bash" || typeof input.tool_input?.command !== "string") return;
-      const policy = JSON.parse(Buffer.from(process.argv[2], "base64").toString("utf8"));
-      const decision = decide(input.tool_input.command, policy);
-      if (decision) process.stdout.write(JSON.stringify({ hookSpecificOutput: {
-        hookEventName: "PreToolUse", permissionDecision: decision,
-        permissionDecisionReason: decision === "ask"
-          ? "This rig lifecycle command needs confirmation. Use --help or -h to read its help."
-          : "This command matches the OpenRig session launch allowance.",
-      } }));
-    } catch { /* No decision: retain Claude's own permission handling. */ }
+      let decision;
+      try { decision = decide(input.tool_input.command, policy); }
+      catch { decision = conservativeAsk(input.tool_input.command, policy); }
+      if (decision) emit(decision);
+      return;
+    }
+    // Unparseable input: ask only when the recovered command identifiably
+    // requests a lifecycle action. Anything else keeps current behavior
+    // (no output), including a hook that never starts or times out, which
+    // no code inside this file can intercept.
+    const recovered = extractCommandText(raw);
+    if (recovered === undefined) return;
+    if (conservativeAsk(recovered, policy) === "ask") emit("ask");
   });
 }

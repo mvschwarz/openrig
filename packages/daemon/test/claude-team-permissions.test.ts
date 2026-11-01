@@ -191,4 +191,52 @@ describe("Claude team command permissions", () => {
       expect(readFileSync(copy)).toEqual(readFileSync(asset));
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  // #1531: when the hook input never parses (truncated stream), the error
+  // path must fail closed to ask for lifecycle commands — reusing decide()'s
+  // own parsing — while help invocations still get no decision.
+  describe("unparseable hook input fails closed to ask for lifecycle commands", () => {
+    function runHook(raw: string) {
+      const args = operationalLaunchArgs("claude-code", { teamPermissionDefault: true });
+      const hook = JSON.parse(args[1]).hooks.PreToolUse[0].hooks[0];
+      return spawnSync("/bin/sh", ["-c", hook.command], { input: raw, encoding: "utf8" });
+    }
+    function askDecision(raw: string) {
+      const result = runHook(raw);
+      expect(result.status, result.stderr).toBe(0);
+      if (result.stdout === "") return undefined;
+      return JSON.parse(result.stdout).hookSpecificOutput.permissionDecision as string;
+    }
+    it.each([
+      '{"tool_name":"Bash","tool_input":{"command":"rig down example"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig down example"}}GARBAGE',
+      '{"tool_name":"Bash","tool_input":{"command":"command rig down example"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig down example && rig down --help"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig -- down example"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig down \\"x\\""',
+    ])("asks on truncated input: %s", raw => {
+      expect(askDecision(raw)).toBe("ask");
+    });
+    it.each([
+      '{"tool_name":"Bash","tool_input":{"command":"rig down --help"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig down --help example"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig --host remote down --help"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig send worker \'rig down --help\'"',
+      '{"tool_name":"Bash","tool_input":{"command":"npm install"',
+      '{"tool_name":"Bash","tool_input":{"command":"rig down',
+      '{"tool_name":"Bash","tool_input":{',
+      "not json at all",
+    ])("emits no decision on truncated input: %s", raw => {
+      expect(askDecision(raw)).toBeUndefined();
+    });
+    it("uses the existing hook output contract for the fallback ask", () => {
+      const result = runHook('{"tool_name":"Bash","tool_input":{"command":"rig down example"');
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ hookSpecificOutput: {
+        hookEventName: "PreToolUse", permissionDecision: "ask",
+        permissionDecisionReason: expect.stringContaining("confirmation"),
+      } });
+      expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toBeUndefined();
+    });
+  });
 });
