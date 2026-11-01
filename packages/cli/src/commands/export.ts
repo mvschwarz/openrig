@@ -48,9 +48,16 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
 
   cmd
     .argument("<rig>", "Rig name or ID to export")
-    .option("-o, --output <path>", "Output file path", "rig.yaml")
+    .option("-o, --output <path>", "Output file path; an existing file is replaced only when named here", "rig.yaml")
     .action(async (rigId: string, opts: { output: string }) => {
       const deps = getDeps();
+      // rig.yaml is also the name of an authored spec, and an export doesn't carry all of one (comments, a summary,
+      // startup it couldn't read back). Only a path the person named may replace a file, as copyCulture keeps one.
+      if (cmd.getOptionValueSource("output") === "default" && (deps.exists ?? fs.existsSync)(opts.output)) {
+        console.error(`${opts.output} already exists, so nothing was exported or changed. Name a new file with -o <path>, or replace this one with -o ${opts.output}.`);
+        process.exitCode = 1;
+        return;
+      }
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (!daemonStatusGuard(status)) return;

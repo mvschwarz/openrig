@@ -262,6 +262,30 @@ describe("rig export + import", () => {
     expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
   });
 
+  it("export: keeps an existing rig.yaml unless it is named with -o", async () => {
+    const writeFile = vi.fn();
+    const exists = vi.fn((p: string) => p === "rig.yaml");
+    const run = async (...args: string[]) => {
+      const program = new Command();
+      program.addCommand(exportCommand(exportDeps({ writeFile, exists })));
+      return captureLogs(() => program.parseAsync(["node", "rig", "export", "rig-1", ...args]));
+    };
+    const exitCode = process.exitCode;
+    try {
+      const logs = await run();
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(logs.join("\n")).toContain("rig.yaml already exists, so nothing was exported or changed");
+      process.exitCode = undefined;
+
+      await run("-o", "rig.yaml");
+      expect(writeFile).toHaveBeenCalledWith("rig.yaml", expect.any(String));
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      process.exitCode = exitCode;
+    }
+  });
+
   it("export: warns when culture_file or startup files do not resolve relative to output directory", async () => {
     const writeFile = vi.fn();
     const exists = vi.fn((p: string) => !p.includes("missing-culture.md") && !p.includes("missing-start.md") && !p.includes("optional-start.md"));
