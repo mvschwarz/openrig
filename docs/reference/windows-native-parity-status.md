@@ -2015,3 +2015,37 @@ storage rather than making a credential copy or changing existing seat state.
 This proves the scoped installed-Pi conversation/compaction/reopen path on native
 Windows. It does not prove the OpenRig managed-runner lifecycle or full restore.
 SSH/SFTP recovery verification is deferred by the user and remains unverified.
+
+### Deployed native acceptance (2026-11-01)
+
+The existing local deployment now uses public source `3e48a2e` plus retained
+private policy overlays at runtime commit `940b64d`. Its actual daemon started,
+answered `/healthz`, stopped with a clean shutdown receipt, and restarted.
+The database integrity check passed; 301 local-overlay tests passed. The earlier
+recorder failure did not reproduce with the deployment's dedicated temporary
+directory; its original cause is not established. Paused-seat checks found no
+potentially active protected sessions. Two stale active parked-owner consumers
+were stopped; their readback showed no new firing.
+
+The user confirmed that the newly opened deployment TUI window renders normally.
+Keyboard navigation and full page coverage remain separate checks.
+
+The production Compose adapter exercised a real Docker 29.4.1 engine using an
+owned project, existing Python image and loopback-only HTTP port. Start, status,
+HTTP, logs and down/up recreation with retained named-volume contents passed.
+The owned containers and volume were removed. This is service lifecycle and
+volume continuity, not checkpoint export/import or full OpenRig restore.
+
+The production Pi runner with installed Pi 1.4.0 and Codex OAuth reached READY,
+delivered actual synthetic input to the provider, then resumed the same session
+file and recalled the exact random marker. An initially incorrect fixture used
+an OMP-only environment credential name; the passing fixture used Pi's supported
+seat-local auth storage, with only a short-lived access token and native private
+ACL. The token file was removed after stopping the owned tree. Teardown was
+forced and does not establish graceful runner cleanup, terminal-pane delivery,
+compaction through the runner or full snapshot restore.
+
+Fresh native file and directory symlink attempts both failed with `EPERM`.
+The installed WinGet binary runs (`1.29.380`); actual package installation and
+agreement/alias behavior remain unverified. Distinct-user permission checks,
+exhausted ACP cleanup, full restore and remote integration remain open.
