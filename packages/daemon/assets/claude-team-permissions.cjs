@@ -282,9 +282,19 @@ function extractCommandText(raw) {
 // Recover the tool name the same way, so the unparseable path applies the
 // same Bash-only check as the parsed path below. A name that cannot be
 // recovered is not Bash: the hook stays silent and Claude's own permission
-// handling applies, as for any other non-Bash input.
+// handling applies, as for any other non-Bash input. Only a name ahead of
+// the tool_input region counts: a "tool_name":"Bash" fragment after the
+// command — inside a later field, or a key ordered after tool_input — is
+// data, not the payload's tool identity. tool_name precedes tool_input in
+// hook payloads, so bounding the scan there loses no legitimate recovery;
+// anchoring to the payload's first key instead would, since real payloads
+// carry session_id/cwd/hook_event_name ahead of tool_name.
 function extractToolName(raw) {
-  const match = /"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(raw);
+  const inputAt = raw.indexOf('"tool_input"');
+  const commandAt = raw.indexOf('"command"');
+  const bounds = [inputAt, commandAt].filter((at) => at !== -1);
+  const scope = bounds.length === 0 ? raw : raw.slice(0, Math.min(...bounds));
+  const match = /"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(scope);
   if (!match) return undefined;
   try {
     return JSON.parse(`"${match[1]}"`);

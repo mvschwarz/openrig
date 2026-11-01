@@ -244,8 +244,18 @@ describe("Claude team command permissions", () => {
       '{"tool_input":{"command":"rig down example"',
       // A tool name cut off mid-token never recovers, whatever follows it.
       '{"tool_input":{"command":"rig down example"},"tool_name":"Bas',
+      // A "tool_name":"Bash" fragment after the command is data, not the
+      // payload's tool identity: no tool name ahead of tool_input, and a
+      // tool_name key ordered after tool_input, must both stay silent.
+      '{"tool_input":{"command":"rig down example"},"note": "tool_name":"Bash"',
+      '{"tool_input":{"command":"rig down example"},"tool_name":"Bash"',
     ])("emits no decision when truncated input is not identifiably Bash: %s", raw => {
       expect(askDecision(raw)).toBeUndefined();
+    });
+    it("still asks when leading payload fields precede the tool name", () => {
+      // Real hook payloads carry session_id/cwd/hook_event_name ahead of
+      // tool_name: recovery must not require tool_name to be the first key.
+      expect(askDecision('{"session_id":"abc","transcript_path":"/t.jsonl","cwd":"/proj","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
     });
     it("still asks on truncated Bash input once the tool identity is checked", () => {
       expect(askDecision('{"tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
