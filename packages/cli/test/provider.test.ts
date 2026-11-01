@@ -392,4 +392,11 @@ describe("rig provider switch --seat tells the person what follows", () => {
     expect(after.logs).toContain("recovery: rig launch rig dev.a --snapshot-id snap-1");
     expect(after.logs).toContain("If the pane shows no running Claude, stop the seat first.");
   });
+
+  it("a Claude seat's switch prints which effort its relaunch used, and why", async () => {
+    const effort = "kept the running effort high: the seat has no effort choice of its own.";
+    const kept = switchDeps(async () => ({ status: 200, data: { outcome: "rebind_in_progress", message: "Relaunched dev-a@rig in its own pane.",
+      seat: { account: "work", tokenFile: "/tokens/work", conversation: "conv-1", loginChanged: true, tokenApplied: true, effort, undo: null, peers: [] } } }));
+    expect((await run(["switch", "--seat", "dev-a@rig", "--to-account", "work", "--token-file", "/tokens/work"], kept)).logs).toContain(`effort: ${effort}`);
+  });
 });

@@ -196,6 +196,17 @@ describe("provider routes", () => {
       expect(leased).toEqual([[node.id]]);
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toEqual({ ok: true, status: "resumed", warnings: ["dev-a@fixture-rig: a launch warning"] });
       expect(launchSingleNode).toHaveBeenCalledWith(rig.id, "dev.a", expect.objectContaining({ snapshotId: "snap-1", keepPane: true }));
+      expect(launchSingleNode).not.toHaveBeenCalledWith(rig.id, "dev.a", expect.objectContaining({ keepEffort: expect.anything() }));
+      // The launch's selection is heard on every relaunch, with or without a kept effort.
+      expect(launchSingleNode).toHaveBeenLastCalledWith(rig.id, "dev.a", expect.objectContaining({ onLaunchEffort: expect.any(Function) }));
+      launchSingleNode.mockImplementationOnce((async (_rigId: string, _logicalId: string, o: { onLaunchEffort?: (e: { effort: string | null; source: string }) => void }) => {
+        o.onLaunchEffort?.({ effort: "medium", source: "seat_choice" });
+        return launched;
+      }) as never);
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1", { effort: "high" }))
+        .toMatchObject({ ok: true, status: "resumed", effort: { effort: "medium", source: "seat_choice" } });
+      expect(launchSingleNode).toHaveBeenLastCalledWith(rig.id, "dev.a", expect.objectContaining({ snapshotId: "snap-1", keepPane: true, keepEffort: "high",
+        onLaunchEffort: expect.any(Function) }));
       expect(tmux.killSession).not.toHaveBeenCalled();
       // Restore's stops before it touches the seat leave it unchanged; anything else after the launch began is unknown.
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", error: "decide first" }] };
