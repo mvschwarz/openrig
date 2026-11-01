@@ -225,12 +225,14 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
 - **Text typed into the runner's pane, an agent's own text, and `rig send` are never an answer.** While a request waits
   on a person, the seat reads needs input, and sends are normally refused. A send that does get through reaches the
   agent as a prompt.
-- **Each permit OpenRig decides by default is recorded,** once, as a stream item from the seat. That covers no one
-  to ask, and an ask closed without a choice (the row passed to an agent seat included). The record names:
+- **From 0.7.9, each permit OpenRig decides by default is recorded,** once, as a stream item from the seat. That covers
+  no one to ask, and an ask closed without a choice (the row passed to an agent seat included). The record names:
   - the tool call;
   - why no person answered, including, for a closed ask, who closed which row and how;
   - the option the agent got, with its kind. An `allow_always` option is marked as remembered by the agent's harness;
   - the conversation and request, or the ask.
+
+  For an ask opened before 0.7.9, the record may omit the option kind and whether the harness remembers it.
 
   Read the records with `rig stream list --tag runner-permission-permit`, or `--source <seat>`. A record wakes no one,
   and one that can't be written doesn't change the permit.
@@ -296,7 +298,7 @@ its pane. That covers:
   times first);
 - a refusal the table marks "permits", and any status or code this section doesn't list.
 
-**Limits in 0.7.8:**
+**Limits of this path:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
 - **A colleague's answer is followed on this host.** If the ask is handed to another host, the request waits, shown as
   needs input, until the agent's turn ends.
