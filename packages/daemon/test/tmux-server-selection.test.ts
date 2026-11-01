@@ -127,7 +127,7 @@ describe("durable tmux server selection", () => {
     expect(moved).toMatchObject({ mode: "isolated", migrationPending: false, blockingSessions: [] });
     expect(moved.socketPath).not.toBe(oldSocket);
     expect(moved.executionArgs).toEqual(["-S", moved.socketPath]);
-    expect(fs.readFileSync(path.join(home, "tmux-server.json"), "utf8")).toContain(moved.socketPath!);
+    expect(JSON.parse(fs.readFileSync(path.join(home, "tmux-server.json"), "utf8")).socketPath).toBe(moved.socketPath!);
   });
 
   it("retains a pending pin when isolation is cancelled from a different launching server", async () => {

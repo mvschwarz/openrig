@@ -27,13 +27,14 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
   // tmux puts the socket path first, as is: keep any whitespace in it.
   const socket = env["TMUX"]?.replace(/,\d+,\d+$/, "");
   if (!socket?.trim()) return [];
+  const socketPaths = socket.startsWith("/") ? path.posix : path;
   const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!customTmpdir && uid !== undefined) {
-    const standardDirs = [path.join("/tmp", `tmux-${uid}`), path.join(realpath("/tmp"), `tmux-${uid}`)];
-    const socketDirs = [path.dirname(socket), realpath(path.dirname(socket))];
+    const standardDirs = [socketPaths.join("/tmp", `tmux-${uid}`), socketPaths.join(realpath("/tmp"), `tmux-${uid}`)];
+    const socketDirs = [socketPaths.dirname(socket), realpath(socketPaths.dirname(socket))];
     if (socketDirs.some((dir) => standardDirs.includes(dir))) {
-      const name = path.basename(socket);
+      const name = socketPaths.basename(socket);
       return name === "default" ? [] : ["-L", name];
     }
   }

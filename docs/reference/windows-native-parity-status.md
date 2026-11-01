@@ -2197,3 +2197,20 @@ no listener, but reported no matching clean-shutdown receipt. That final drain
 is unverified. No remote provider credentials were read or copied, and no remote
 real-provider continuity or full-session restore is claimed. The owned daemon
 and listener are stopped; existing teams were not started.
+
+### Rebased main integration (2026-11-02)
+
+The Windows branch was rebased onto upstream main
+`860d352556986151eed96d0cc8af62cfed8a5520`. Integration retains main's explicit
+tmux-server selection and attachment metadata alongside native psmux routing,
+the shell-independent attach probe alongside literal socket whitespace, and
+main's process/restore diagnostics alongside native executable identity checks.
+The projected plugin fingerprint uses the expected shipped bytes after strict
+comparison, preserving the source-authority check.
+
+All workspace type checks pass. Latest receipts across 21 selected integration
+files report 730 passed, zero failed and six skipped; these cover the reconciled
+terminal/server, attach/help, process identity, restore trust, compaction and
+fixture boundaries. This does not rerun or renew the earlier real-provider,
+installed-package or remote lifecycle acceptance claims against the new base.
+No deployment was changed by this rebase.

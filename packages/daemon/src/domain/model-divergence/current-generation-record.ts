@@ -145,7 +145,7 @@ export async function paneClaudeSessionIdArgument(
   const panePid = await deps.getPanePid(sessionTarget);
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
+  const claudePids = findDescendants(processes, panePid, (command, row) => row.platform === "win32" ? nativeExecutableIs(row, "claude") : commandNamesClaude(command));
   if (claudePids.length === 0) return { ok: false, reason: `no claude process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   for (const pid of claudePids) {
@@ -209,7 +209,7 @@ export async function resolveIdentityVerifiedClaudeRecord(
   }
 
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
+  const claudePids = findDescendants(processes, panePid, (command, row) => row.platform === "win32" ? nativeExecutableIs(row, "claude") : commandNamesClaude(command));
   if (claudePids.length === 0) {
     return { ok: false, reason: `no claude process under verified pane ${binding.tmuxPane}` };
   }

@@ -202,9 +202,9 @@ describe("Attach CLI", () => {
   });
 
   it("resolveAttachContext passes native context arguments without shell quoting", () => {
-    const execute = vi.fn(() => "%42 @12 owned session");
+    const execute = vi.fn((_file: string, args: string[]) => args.at(-1) === "#{socket_path}" ? "/owned/socket " : "%42 @12 owned session");
     expect(withTmuxPane("%42", () => resolveAttachContext(undefined, execute))).toEqual({
-      attachmentType: "tmux", tmuxSession: "owned session", tmuxWindow: "@12", tmuxPane: "%42",
+      attachmentType: "tmux", tmuxSession: "owned session", tmuxWindow: "@12", tmuxPane: "%42", tmuxSocketPath: "/owned/socket ",
     });
     expect(execute).toHaveBeenCalledWith("tmux", ["display-message", "-p", "-t", "%42", "#{pane_id} #{window_id} #{session_name}"]);
   });

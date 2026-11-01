@@ -42,7 +42,9 @@ export function resolveAttachContext(tmuxExec?: TmuxExecFn, fileExec: TmuxFileEx
       const [, resolvedPane, tmuxWindow, tmuxSession] = match;
       // Read the socket separately: tmux replaces control-character delimiters,
       // and session names and socket paths may both contain literal spaces.
-      const tmuxSocketPath = tmuxExec(`tmux display-message -p -t ${shellQuote(resolvedPane!)} '#{socket_path}'`).replace(/\r?\n$/, "");
+      const tmuxSocketPath = (tmuxExec
+        ? tmuxExec(`tmux display-message -p -t ${shellQuote(resolvedPane!)} '#{socket_path}'`)
+        : fileExec("tmux", ["display-message", "-p", "-t", resolvedPane!, "#{socket_path}"])).replace(/\r?\n$/, "");
       return { attachmentType: "tmux", tmuxSession: tmuxSession!, tmuxWindow, tmuxPane: resolvedPane!,
         ...(tmuxSocketPath ? { tmuxSocketPath } : {}) };
     }

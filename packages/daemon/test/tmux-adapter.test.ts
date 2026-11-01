@@ -1395,8 +1395,8 @@ describe("TmuxAdapter", () => {
       expect(exec.mock.calls.map((c) => c[0])).toEqual([
         "tmux show-environment -g",
         "tmux set-environment -t %3 -r CLAUDECODE",
-        "tmux set-environment -t %3 -r HERDR_PANE_ID",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
+        "tmux set-environment -t %3 -r HERDR_PANE_ID",
         "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
       ]);
     });

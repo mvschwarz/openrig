@@ -614,11 +614,15 @@ export class TmuxAdapter {
     private exec: ExecFn,
     private fileOps: TmuxFileOps = defaultTmuxFileOps(),
     private argvExec?: ArgvExecFn,
-    serverArgs: readonly string[] = [],
-    private terminalKind: "tmux" | "psmux" = "tmux",
-  ) { this.serverArgs = [...serverArgs]; }
+    serverArgs: readonly string[] | "tmux" | "psmux" = [],
+    terminalKind: "tmux" | "psmux" = "tmux",
+  ) {
+    this.serverArgs = typeof serverArgs === "string" ? [] : [...serverArgs];
+    this.terminalKind = typeof serverArgs === "string" ? serverArgs : terminalKind;
+  }
 
   private readonly serverArgs: readonly string[];
+  private readonly terminalKind: "tmux" | "psmux";
 
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
@@ -722,7 +726,7 @@ export class TmuxAdapter {
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
     try {
-      if (process.platform === "win32") {
+      if (this.isNativeWindows) {
         if (await this.getDefaultShell()) return { ok: true };
         // psmux hides its warm standby unless exit-empty is disabled there.
         // A queued command is routed to that standby before it has a session.
