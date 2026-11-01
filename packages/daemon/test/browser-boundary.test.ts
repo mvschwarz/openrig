@@ -9,7 +9,7 @@ import {
   type BrowserBoundaryOptions,
 } from "../src/middleware/browser-boundary.js";
 
-const SELF = "openrig-vm.taile8a08.ts.net";
+const SELF = "openrig-vm.tailnet-example.ts.net";
 
 function guarded(opts: Partial<BrowserBoundaryOptions> = {}) {
   const lines: string[] = [];
@@ -76,7 +76,7 @@ describe("target-name rule", () => {
   it("refuses unknown, peer-suffix and malformed names with zero handler effects", async () => {
     const g = guarded({ discoverSelfNames: async () => [SELF] });
     await new Promise((r) => setTimeout(r, 10));
-    for (const host of ["evil.example:7433", "other-vm.taile8a08.ts.net:7433", "taile8a08.ts.net", `${SELF}.evil.example`]) {
+    for (const host of ["evil.example:7433", "other-vm.tailnet-example.ts.net:7433", "tailnet-example.ts.net", `${SELF}.evil.example`]) {
       const r = await g.send({ host });
       expect(r.status, host).toBe(403);
       expect(r.body.code).toBe("untrusted_host");

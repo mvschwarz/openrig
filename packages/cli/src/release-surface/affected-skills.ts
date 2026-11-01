@@ -8,8 +8,7 @@
 // with 13.1's deterministic half. 13.3 (the dispatcher that WRITES skill
 // updates) decides invocation; this stays invocation-agnostic.
 //
-// Join grammar - ADVISOR-RATIFIED (qitem-20260608235706-64ba9ef2; see the slice
-// governance-watch.md SHARP WATCH #1):
+// Join grammar (reviewed):
 //  - Skill tokens are stored WITHOUT the `rig ` prefix, in 13.1's command-path
 //    grammar (`scope slice create`, `queue create`). We strip a leading `rig `
 //    defensively so a skill written either way still matches.

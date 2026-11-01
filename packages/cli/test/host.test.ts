@@ -6,6 +6,8 @@ import { Command } from "commander";
 import { hostCommand, doctorLegs, postureCheck, type DoctorDeps, type CheckRow } from "../src/commands/host.js";
 import type { HostEntry } from "../src/host-registry.js";
 import type { CrossHostResult } from "../src/cross-host-executor.js";
+import { ConfigStore } from "../src/config-store.js";
+import { configCommand } from "../src/commands/config.js";
 
 // OPR.0.4.4.13 FR-1 — rig host add / list. Registry path is steered via
 // OPENRIG_HOME so tests never touch the operator's real ~/.openrig.
@@ -50,6 +52,38 @@ describe("rig host add/list", () => {
     expect(exitCode).toBeUndefined();
     expect(out.join("\n")).toContain("Added host 'vps-1' (ssh)");
     expect(out.join("\n")).toContain("rig host doctor vps-1");
+    expect(out.join("\n")).toContain("Remote FEED requires an HTTP host entry");
+    expect(out.join("\n")).not.toContain("rig config set feed.subscriptions.");
+  });
+
+  it.each(["laptop", "laptop.prod-1"])("HTTP add advertises a working opt-in command for %s", async (id) => {
+    const configPath = path.join(dir, "config.json");
+    const store = new ConfigStore(configPath);
+    store.set("feed.subscriptions.progress", "false");
+    const before = fs.readFileSync(configPath, "utf8");
+    const { out, exitCode } = await capture(() => run(["add", "--id", id, "--transport", "http", "--url", "http://laptop:7433"]));
+    expect(exitCode).toBeUndefined();
+    expect(fs.readFileSync(configPath, "utf8")).toBe(before);
+
+    const nextStep = out.map((line) => line.trim()).find((line) => line.startsWith("rig config set "));
+    expect(nextStep).toBeDefined();
+    const program = new Command().addCommand(configCommand(configPath));
+    const applied = await capture(() => program.parseAsync(["node", ...nextStep!.split(/\s+/)]));
+    expect(applied.exitCode).toBeUndefined();
+    expect(applied.err).toEqual([]);
+    const saved = new ConfigStore(configPath);
+    expect(saved.get(`feed.subscriptions.${id}.enabled`)).toBe(true);
+    expect(saved.get("feed.subscriptions.progress")).toBe(false);
+    expect(saved.get("feed.subscriptions.other-host.enabled")).toBe(false);
+  });
+
+  it("an HTTP host with a reserved feed name stays registered without an unusable command", async () => {
+    const { out, exitCode } = await capture(() => run(["add", "--id", "progress", "--transport", "http", "--url", "http://laptop:7433"]));
+    expect(exitCode).toBeUndefined();
+    expect(fs.readFileSync(path.join(dir, "hosts.yaml"), "utf8")).toContain("id: progress");
+    expect(out.join("\n")).toContain("reserved by feed settings");
+    expect(out.join("\n")).not.toContain("rig config set feed.subscriptions.");
+    expect(fs.existsSync(path.join(dir, "config.json"))).toBe(false);
   });
 
   it("add surfaces the loader's own validation error at add-time (both bearers)", async () => {
@@ -60,7 +94,9 @@ describe("rig host add/list", () => {
 
   it("list renders pointers and NEVER a resolved secret value (qa1 hygiene guard)", async () => {
     vi.stubEnv("FACTORY_TOKEN", "super-secret-bearer-value");
-    await capture(() => run(["add", "--id", "f1", "--transport", "http", "--url", "http://100.64.0.9:7433", "--bearer-env", "FACTORY_TOKEN"]));
+    const added = await capture(() => run(["add", "--id", "f1", "--transport", "http", "--url", "http://100.64.0.9:7433", "--bearer-env", "FACTORY_TOKEN", "--json"]));
+    expect(JSON.parse(added.out.join("\n"))).toMatchObject({ ok: true, entry: { id: "f1" } });
+    expect(added.err).toEqual([]);
     const { out } = await capture(() => run(["list"]));
     const text = out.join("\n");
     expect(text).toContain("env:FACTORY_TOKEN");
@@ -235,7 +271,7 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
       if (cmd.includes("ss -tln")) return okRun(`LISTEN 0 511 ${addr}:7433 0.0.0.0:*`);
       return okRun("");
     });
-    const inRange = await postureCheck(sshHost, mk("100.103.199.127"));
+    const inRange = await postureCheck(sshHost, mk("100.88.0.21"));
     expect(inRange.find((r) => r.step === "daemon-bind-not-public")!.status).toBe("pass");
     const outOfRange = await postureCheck(sshHost, mk("100.1.2.3"));
     expect(outOfRange.find((r) => r.step === "daemon-bind-not-public")!.status).toBe("fail");
@@ -338,6 +374,26 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     expect(code).toBe(1);
     expect(err.join("\n")).toContain("registry:");
     expect(err.join("\n")).toContain("unknown host id 'nope'");
+  });
+
+  it("doctor's reply route reads the same hosts.yaml and host-bindings.json rig send does", async () => {
+    const { replyRouteFromDisk } = await import("../src/commands/host.js");
+    const { resolveCrossHostTarget } = await import("../src/cross-host-target.js");
+    fs.writeFileSync(path.join(dir, "hosts.yaml"), [
+      "hosts:",
+      "  - id: old-box-b",
+      "    transport: http",
+      "    url: http://10.0.0.9:7433",
+      "  - id: box-b",
+      "    transport: http",
+      "    url: http://10.0.0.5:7433",
+    ].join("\n") + "\n");
+    // Both aliases learned one identity; hosts.yaml order, not sidecar order, picks the entry.
+    const learned = { hostId: "host-0b0b0b0b", firstObservedAt: "x", lastObservedAt: "x" };
+    fs.writeFileSync(path.join(dir, "host-bindings.json"), JSON.stringify({ version: 1, bindings: { "box-b": learned, "old-box-b": learned } }));
+    expect(replyRouteFromDisk("host-0b0b0b0b")?.id).toBe("old-box-b");
+    expect(resolveCrossHostTarget("pm@some-rig@host-0b0b0b0b", undefined)).toMatchObject({ ok: true, sugarHost: "old-box-b" });
+    expect(replyRouteFromDisk("host-unknown")).toBeNull();
   });
 
   // seed a registry for the doctor CLI test above

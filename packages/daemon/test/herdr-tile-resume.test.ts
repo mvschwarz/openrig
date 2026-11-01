@@ -7,7 +7,7 @@ import { shellQuote } from "../src/adapters/shell-quote.js";
 // `layout.apply` echoes the applied tree with a `pane_id` on each leaf.
 import { describe, expect, it } from "vitest";
 import { composeView, type ViewMemberInput } from "../src/domain/terminal/view-composer.js";
-import { HerdrAdapter } from "../src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANES_UNCONFIRMED_NOTE } from "../src/domain/terminal/herdr-adapter.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { ComposedView } from "../src/domain/terminal/terminal-provider.js";
 import type { HostEntry } from "../src/domain/hosts/hosts-registry-reader.js";
@@ -119,6 +119,16 @@ describe("Herdr tiles carry their reattach command, so a Herdr restart brings th
     expect(reports().map((r) => [r["pane_id"], (r["resume_argv"] as string[])[7]])).toEqual([["w1:p1", "a@r"], ["w1:p3", "c@r"]]);
   });
 
+  it("does not register restart commands for unconfirmed panes", async () => {
+    const { adapter, reports, sleeps } = herdr({ liveLabels: () => [] });
+    const result = await adapter.openView(compose(member("dev-impl@r", "claude-code")));
+    expect(result.opened).toEqual([]);
+    expect(result.degraded).toEqual([expect.objectContaining({ seat: "dev-impl@r", code: "pane_unconfirmed" })]);
+    expect(result.notes).toContain(HERDR_PANES_UNCONFIRMED_NOTE);
+    expect(reports()).toEqual([]);
+    expect(sleeps).toEqual([]);
+  });
+
   it("a report Herdr refuses for another reason isn't retried: the seat stays opened and a note says to reopen after a restart", async () => {
     const { adapter, attempts } = herdr({ report: () => "invalid_resume_argv" });
     const res = await adapter.openView(compose(member("dev-impl@r", "claude-code")));
@@ -188,6 +198,6 @@ describe("the composer gives a local tile the same attach as an argv", () => {
       expect(v.opened[index]!.paneCommand).toBe(argv.map(shellQuote).join(" "));
     }
     expect(v.opened[2]!.attachArgv).toBeUndefined();
-    expect(v.opened[2]!.paneCommand).toContain("ssh 'admin@vm1.local'");
+    expect(v.opened[2]!.paneCommand).toContain("ssh -t 'admin@vm1.local'");
   });
 });

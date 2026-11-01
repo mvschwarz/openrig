@@ -84,6 +84,11 @@ function buildOpenRigPayload(providerPayload, env = process.env, now = () => new
     generation,
     hookEvent,
     subtype,
+    // Claude's main session omits agent_id; subagents and in-process teammates carry it.
+    // Keep that distinction for permission completion, without forwarding tool inputs/results.
+    ...(runtime === "claude-code" && (hookEvent === "Notification" || hookEvent === "PostToolBatch")
+      && (providerPayload.agent_id == null || firstString(providerPayload.agent_id))
+      ? { hookAgentId: firstString(providerPayload.agent_id) } : {}),
     turnId: firstString(providerPayload.turn_id, providerPayload.turnId),
     occurredAt: now().toISOString(),
     relayRoute: argv.includes("--from-plugin") ? "plugin" : "managed",

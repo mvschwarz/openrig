@@ -250,3 +250,39 @@ describe("current proof readiness and retained declared state", () => {
     expect(reconcileMissionStatus("active", [row], NOW, { state: "ready", revision: "accepted", historicalStatus: "active" })).toMatchObject({ state: "active", label: "declared active · proof ready" });
   });
 });
+
+
+describe("accepted proof on authored-complete missions (#2230)", () => {
+  const doneSlice = slice({ status: "done", readiness: { configured: true, state: "ready", revision: "slice-accepted" } });
+
+  it.each(["complete", "completed", "done", "shipped", "Complete"])("shows authored %s normally after proof acceptance", (word) => {
+    expect(reconcileMissionStatus(word, [doneSlice], NOW, { state: "ready", revision: "accepted", historicalStatus: word }))
+      .toEqual({ state: "shipped", label: word, source: "authored" });
+  });
+
+  it.each(["unknown", "not-ready", "legacy"])("keeps the declared qualifier when proof is %s", (state) => {
+    expect(reconcileMissionStatus("complete", [doneSlice], NOW, { state, revision: "pending", historicalStatus: "complete" }).label)
+      .toBe(`declared complete · proof ${state}`);
+  });
+
+  it.each(["active", "paused"])("does not promote authored %s from proof readiness alone", (word) => {
+    expect(reconcileMissionStatus(word, [doneSlice], NOW, { state: "ready", revision: "accepted", historicalStatus: word }).label)
+      .toBe(`declared ${word} · proof ready`);
+  });
+
+  it("keeps mixed accepted and pending slice proof visibly unfinished", () => {
+    const pending = slice({ name: "pending", status: "done", readiness: { configured: true, state: "not-ready", revision: "pending" } });
+    expect(reconcileMissionStatus("complete", [doneSlice, pending], NOW, { state: "not-ready", revision: "mixed" }).label)
+      .toBe("declared complete · proof not-ready");
+  });
+
+  it("retains the ordinary authored label when no proof checklist is configured", () => {
+    expect(reconcileMissionStatus("complete", [slice({ status: "done" })], NOW, { state: "ready", revision: "legacy" }))
+      .toEqual({ state: "shipped", label: "complete", source: "authored" });
+  });
+
+  it("does not invent a completion declaration for an unauthored mission", () => {
+    expect(reconcileMissionStatus(null, [doneSlice], NOW, { state: "ready", revision: "accepted" }))
+      .toEqual({ state: "active", label: "proof ready", source: "derived" });
+  });
+});

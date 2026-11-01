@@ -1,5 +1,5 @@
 // OPR.0.5.3.7 R2 — tests for the package-time context-pack generator.
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
@@ -18,6 +18,15 @@ const { EXCLUDES } = await import(pathToFileURL(join(HERE, "mirror-skills.mjs"))
 const REAL_SKILLS = join(REPO, "packages/daemon/specs/agents/shared/skills");
 const REAL_PLUGIN_SKILLS = join(REPO, "packages/daemon/assets/plugins/openrig-core/skills");
 const REAL_STATIC_PACKS = join(REPO, "packages/daemon/context-packs-src");
+// The leak guard's term lists live outside the repository: the static-pack runs name a fixture file holding the terms
+// these tests plant.
+const LEAK_RULES_DIR = mkdtempSync(join(tmpdir(), "packs-leak-rules-"));
+const LEAK_RULES = join(LEAK_RULES_DIR, "rules.json");
+writeFileSync(LEAK_RULES, JSON.stringify({
+  path_prefixes: ["private-root/"], seat_and_rig_patterns: ["@private-rig"], host_patterns: ["private-host"],
+  charged_terms: ["private-term"], internal_path_globs: ["**/internal/**"], allowed_context_substrings: ["do not ship"],
+}));
+after(() => rmSync(LEAK_RULES_DIR, { recursive: true, force: true }));
 
 // Independent computation of the mirror's exclude-only ship set on a real tree —
 // the discriminator that catches any narrowing of the projection (r2 HIGH-1).
@@ -281,6 +290,7 @@ function runWithStatic(source, staticSource, out, args = []) {
       ...process.env,
       OPENRIG_SKILLS_SOURCE: source,
       OPENRIG_STATIC_PACKS_SOURCE: staticSource,
+      OPENRIG_LEAK_GUARD_RULES: LEAK_RULES,
       OPENRIG_PACKS_OUT: out,
       OPENRIG_PACKAGE_VERSION: "0.5.3",
     },
@@ -290,7 +300,7 @@ function runWithStatic(source, staticSource, out, args = []) {
 function staticWorldPack(root, rel, { withCharged = false } = {}) {
   const dir = join(root, rel);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "a.md"), `# A\n\nalpha body${withCharged ? " for the founder" : ""}\n`);
+  writeFileSync(join(dir, "a.md"), `# A\n\nalpha body${withCharged ? " for the private-term" : ""}\n`);
   writeFileSync(join(dir, "b.md"), "# B\n\nbeta body\n");
   writeFileSync(
     join(dir, "manifest.yaml"),
@@ -358,11 +368,11 @@ function expectStaticLeakFailure(base, mutate, label) {
   assert.ok(failed, `${label}: must fail the build`);
 }
 
-test("STATIC PACK LEAK GUARD runs the FULL committed authority: charged term, path prefix, AND seat/rig identity each FAIL THE BUILD", () => {
+test("STATIC PACK LEAK GUARD runs the full term lists: charged term, path prefix, AND seat/rig identity each FAIL THE BUILD", () => {
   for (const [label, content] of [
-    ["charged term", "# A\n\nalpha body for the founder\n"],
-    ["internal path prefix", "# A\n\nsee openrig-work/skills for the library\n"],
-    ["instance seat/rig identity", "# A\n\nroute it to dev50@v-openrig-build when done\n"],
+    ["charged term", "# A\n\nalpha body for the private-term\n"],
+    ["internal path prefix", "# A\n\nsee private-root/skills for the library\n"],
+    ["instance seat/rig identity", "# A\n\nroute it to dev50@private-rig when done\n"],
   ]) {
     const base = mkdtempSync(join(tmpdir(), "s05-leak-"));
     try {
@@ -378,7 +388,7 @@ test("STATIC PACK SIDECARS are part of the leak boundary regardless of suffix", 
   try {
     expectStaticLeakFailure(
       base,
-      (dir) => writeFileSync(join(dir, "PROVENANCE.yaml"), "source: openrig-work/rigs/private\n"),
+      (dir) => writeFileSync(join(dir, "PROVENANCE.yaml"), "source: private-root/rigs/private\n"),
       "renamed provenance sidecar",
     );
   } finally {
@@ -396,7 +406,7 @@ test("STATIC SOURCE provenance sidecars cannot hide beside, rather than inside, 
     staticWorldPack(staticSrc, "world/install");
     writeFileSync(
       join(staticSrc, "PROVENANCE-world-install.yaml"),
-      "source: openrig-work/rigs/private\n",
+      "source: private-root/rigs/private\n",
     );
 
     let failure;
@@ -408,7 +418,7 @@ test("STATIC SOURCE provenance sidecars cannot hide beside, rather than inside, 
     assert.ok(failure, "a root-level provenance sidecar must be inside the scanned boundary");
     assert.equal(failure.status, 1);
     assert.match(String(failure.stderr), /PROVENANCE-world-install\.yaml/);
-    assert.match(String(failure.stderr), /openrig-work\//i);
+    assert.match(String(failure.stderr), /private-root\//i);
     assert.ok(!existsSync(out), "no projection may be written after provenance refusal");
   } finally {
     rmSync(base, { recursive: true, force: true });

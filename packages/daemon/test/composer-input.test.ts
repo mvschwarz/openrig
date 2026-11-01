@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
+import { annotateInputBox, classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
 import { composerContainsOwnedText, ownCollapsedPaste, type ComposerSnapshot } from "../src/domain/composer-prompts.js";
+import { codexTwoRowComposer } from "./fixtures/codex-two-row-composer.js";
 
 function claude(body: string, cursor?: { x: number; y: number }, width = 80): ComposerSnapshot {
   const rows = body.split("\n");
@@ -10,6 +11,46 @@ function claude(body: string, cursor?: { x: number; y: number }, width = 80): Co
 }
 
 describe("cursor-bound composer input", () => {
+  it.each(["", "\x1b[2mAsk Codex to do anything\x1b[22m"])("reads a supported two-row Codex footer without losing empty-input evidence (%s)", body => {
+    const frame = codexTwoRowComposer(body);
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "empty", cursor: { x: 2, y: 6, width: 42, height: 10 } });
+    if (!body) expect(annotateInputBox(frame.screen, frame.cursor, "codex")).toMatchObject({ status: "empty", confidence: "high" });
+  });
+
+  it.each(["a real draft", "Ask Codex to do anything", "\n", "draft\n› nested prompt"])("keeps authored input with the same two-row footer (%s)", body => {
+    const frame = codexTwoRowComposer(body);
+    expect(inspectComposerInput(frame, "codex").state).toBe("text");
+  });
+
+  it("does not turn capture's unstyled placeholder heuristic into authority to close a tile", () => {
+    const frame = codexTwoRowComposer("Ask Codex to do anything");
+    expect(annotateInputBox(frame.screen, frame.cursor, "codex")).toMatchObject({ status: "empty", confidence: "high" });
+    expect(inspectComposerInput(frame, "codex").state).toBe("text");
+    const moved = codexTwoRowComposer("\x1b[2mAsk Codex to do anything\x1b[22m"); moved.cursor.x = 4;
+    expect(inspectComposerInput(moved, "codex").state).toBe("text");
+  });
+
+  it("keeps competing cursor-bound prompts ambiguous under the supported footer", () => {
+    const frame = codexTwoRowComposer("\n› "); frame.cursor.y = 7; frame.cursor.x = 4;
+    expect(inspectComposerInput(frame, "codex")).toMatchObject({ state: "unknown", unknownReason: "ambiguous_composer" });
+  });
+
+  it("does not read a numbered choice as an empty composer under the supported footer", () => {
+    expect(inspectComposerInput(codexTwoRowComposer("1. Approve action"), "codex").state).toBe("unknown");
+  });
+
+  it.each([
+    ["missing separator", (frame: ComposerSnapshot) => { frame.screen = frame.screen.replace("\n\n  Model", "\n  Model"); }],
+    ["unknown hint", (frame: ComposerSnapshot) => { frame.screen = frame.screen.replace("? for shortcuts                ⚠ 1 · f2", "unrecognized footer"); }],
+    ["third footer row", (frame: ComposerSnapshot) => { frame.screen += "  unexpected footer\n"; frame.cursor.height++; }],
+    ["copy mode", (frame: ComposerSnapshot) => { frame.inMode = true; }],
+    ["incomplete frame", (frame: ComposerSnapshot) => { frame.cursor.height = 8; }],
+    ["cursor outside composer", (frame: ComposerSnapshot) => { frame.cursor.y = 0; }],
+  ] as const)("keeps %s unknown with a two-row Codex footer", (_label, change) => {
+    const frame = codexTwoRowComposer(); change(frame);
+    expect(inspectComposerInput(frame, "codex").state).toBe("unknown");
+  });
+
   it("keeps nested prompt examples inside the current draft, including when its head is clipped", () => {
     const body = "intro\n────────────────────\n❯ \n────────────────────\n? for shortcuts\n────────────────────\n❯ ";
     const snapshot = claude(body, { x: 4, y: 8 });

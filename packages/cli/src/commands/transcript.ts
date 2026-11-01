@@ -76,7 +76,7 @@ OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 — relaunch it to restore scrollback.
       const requestedLines = Number.isNaN(tailLines) || tailLines < 1 ? 50 : tailLines;
       const apiPath = useGrep
         ? `/api/transcripts/${encodeURIComponent(session)}/grep?pattern=${encodeURIComponent(opts.grep!)}`
-        : `/api/transcripts/${encodeURIComponent(session)}/tail?lines=${isNaN(tailLines) ? 50 : tailLines}`;
+        : `/api/transcripts/${encodeURIComponent(session)}/tail?lines=${requestedLines}`;
 
       // --- Cross-host path (CLI-direct GET to the remote daemon's shipped
       // transcript routes — the SAME paths the local path builds, origin

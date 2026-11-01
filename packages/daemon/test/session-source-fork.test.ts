@@ -474,7 +474,8 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
       // read for its start time, supplies the new id (the launch verifies both).
       listProcesses: () => [
         { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000", command: "-zsh" },
-        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex fork PARENT-THREAD-ABC" },
+        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000",
+          command: "codex fork PARENT-THREAD-ABC", argv: ["codex", "fork", "PARENT-THREAD-ABC"] },
       ],
       readThreadIdByPid: (pid, identity) => (pid === 901 && identity && captureThreadId ? captureThreadId : undefined),
       sleep: async () => {},
@@ -584,7 +585,8 @@ describe("CodexRuntimeAdapter.launchHarness fork branch", () => {
       fsOps: makeMinimalCodexFs(),
       listProcesses: () => [
         { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000", command: "-zsh" },
-        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "codex fork PARENT-THREAD-ABC" },
+        { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000",
+          command: "codex fork PARENT-THREAD-ABC", argv: ["codex", "fork", "PARENT-THREAD-ABC"] },
       ],
       readThreadIdByPid: (pid, identity) => (pid === 901 && identity ? "NEW-THREAD-AFTER-TRUST" : undefined),
       sleep: async () => {},

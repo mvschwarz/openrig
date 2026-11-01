@@ -77,7 +77,8 @@ describe("bounded queue route to topology/Pulse render", () => {
       expect(text).not.toContain("none in the served bounded lists");
       expect(text).toMatch(/unknown|not in sample/);
     }
-    expect(f.calls.filter(c => c.startsWith("/api/queue/list"))).toHaveLength(16);
+    // Four open-queue lists at each scope, plus the agent page's recently finished list.
+    expect(f.calls.filter(c => c.startsWith("/api/queue/list"))).toHaveLength(17);
   });
 
   it("complete empty data stays empty without a sample warning", async () => {

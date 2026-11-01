@@ -188,4 +188,17 @@ describe("Transcript CLI", () => {
     // grep mode: should show matched lines, not tail content
     expect(output).toContain("decision made");
   });
+
+  it("sends exactly 50 lines for non-positive --tail values", async () => {
+    for (const tail of ["0", "-1"]) {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "transcript", "dev-impl@long-rig", `--tail=${tail}`]);
+      });
+      // The fixture generates exactly as many lines as the request asks for:
+      // line 49 present and line 50 absent pins the wire value at lines=50.
+      const output = logs.join("\n");
+      expect(output).toContain("long line 49");
+      expect(output).not.toContain("long line 50");
+    }
+  });
 });

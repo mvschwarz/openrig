@@ -201,6 +201,45 @@ describe("completed human answer interrupted before ask close", () => {
     expect(f.snapshot().replies.some(row => row.body.startsWith("A genuinely new follow-up"))).toBe(true);
   });
 
+  it("an event absorbed into a re-park's answer is not sent when it is retried after the ask closes", async () => {
+    const f = await fixture();
+    // The ask is parked on its person, and its question posts (the receipt the Slack poster writes) at `ts`.
+    const park = (ts: string) => {
+      f.repo.update({ qitemId: f.ask.qitemId, actorSession: ASKER, state: "blocked", blockedOn: PERSON, summary: "Still need your call",
+        evidenceRef: "/fixture/decision", transitionNote: "parked on its person" });
+      const key = f.repo.currentHumanRequiredEpisode(f.ask.qitemId)!.key;
+      f.repo.update({ qitemId: f.ask.qitemId, actorSession: "daemon@kernel",
+        transitionNote: `slack-owner-notification-posted notification_key=${key} level=ALERT kind=human-required message_ts=${ts} thread_ts=${ts}` });
+    };
+    park("5.5");
+    await f.typedSlack("Episode A", false, "6.6");
+    expect(f.snapshot()).toMatchObject({ askState: "in-progress", replyCount: 1 });
+    park("7.7");
+    // B's answer is durable and its resume hasn't happened yet.
+    f.resolveHumanReply.mockImplementationOnce(async () => { throw new Error("before resume"); });
+    expect(await f.typedSlack("Episode B", false, "8.8")).toMatchObject({ disposition: "dead-lettered", reason: "resolve_failed" });
+    expect(f.snapshot()).toMatchObject({ askState: "blocked", replyCount: 2 });
+    // C is absorbed into B and resumes the ask, then stops before its seen mark.
+    const mark = f.seen.mark.bind(f.seen);
+    vi.spyOn(f.seen, "mark").mockImplementation((id, status) => {
+      if (id === "CTEST:9.9") throw new Error("before final seen append");
+      mark(id, status);
+    });
+    await expect(f.typedSlack("Words the person was told were not sent", false, "9.9")).rejects.toThrow("before final seen append");
+    vi.mocked(f.seen.mark).mockRestore();
+    expect(f.acknowledgements.at(-1)).toContain("No new reply was sent");
+    expect(f.snapshot()).toMatchObject({ askState: "in-progress", replyCount: 2 });
+    f.repo.update({ qitemId: f.ask.qitemId, actorSession: PERSON, state: "done", closureReason: "no-follow-on", transitionNote: "decided" });
+    const closed = f.snapshot();
+    const resolveCalls = f.resolveHumanReply.mock.calls.length;
+    await f.typedSlack("Words the person was told were not sent", false, "9.9");
+    expect(f.snapshot()).toMatchObject({ askState: "done", committedReplyCount: 2, replies: closed.replies, replyCount: 2, nudgeCount: closed.nudgeCount });
+    expect(f.resolveHumanReply).toHaveBeenCalledTimes(resolveCalls);
+    expect(f.seen.load().has("CTEST:9.9")).toBe(true);
+    await f.typedSlack("A genuinely new follow-up", false, "10.1");
+    expect(f.snapshot()).toMatchObject({ replyCount: 3, nudgeCount: closed.nudgeCount + 1 });
+  });
+
   it("an absorbed event recorded before an interrupted close can still finish that close", async () => {
     const f = await fixture();
     const close = vi.spyOn(f.repo, "resolveDirectHumanReply").mockImplementation(() => { throw new Error("before close"); });

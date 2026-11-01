@@ -25,7 +25,7 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,304 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release.
+These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts.
 
 ## Reading this reference
 
@@ -354,6 +354,23 @@ the sections that were not read are `null`.
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
 
+Registration makes a host visible in topology; remote FEED attention remains opt-in.
+The human-readable success output of `host add` and `host pair` now includes the FEED
+next step alongside the existing `host doctor` suggestion. For an HTTP entry named
+`laptop`, run this on the local instance to include its attention items:
+
+```sh
+rig config set feed.subscriptions.laptop.enabled true
+```
+
+The key uses the registry id, including any dots, and defaults to `false`. Registration
+does not change that setting. SSH entries instead explain that FEED needs an HTTP entry;
+ids reserved by feed settings (such as `progress`) get a different-id suggestion rather
+than an invalid command. `--json` keeps its single JSON result without these hints.
+The host CLI tests execute the advertised command against an isolated config and cover
+registration, reserved names and JSON output; pairing responses are simulated, so they
+do not establish connectivity to a live peer.
+
 ### ps
 
 | Invocation | Aliases | Declared options |
@@ -376,7 +393,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--cloud-grants <url>`<br>`--cloud-grant-header-file <path>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>`<br>`--grant-service <url>`<br>`--grant-service-header-file <path>`<br>`--oauth-resource <url>`<br>`--oauth-issuer <url>` |
 | `rig mcp token` | — | — |
 | `rig mcp token add <name>` | — | `--seat <session>` **required**<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
 | `rig mcp token list` | — | `--json` |
@@ -468,7 +485,7 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig slack` | — | — |
-| `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reactions <mode>`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig slack status` | — | `--json` |
 | `rig slack manifest` | — | `--url`<br>`--json` |
 | `rig slack verify` | — | `--json` |
@@ -777,8 +794,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider accounts` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider bindings` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
-| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--json` |
-| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--json` |
+| `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--json` |
+| `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>`<br>`--token-file <path>`<br>`--api-key-file <path>`<br>`--stored-login`<br>`--force-unsafe`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--reason <text>`<br>`--model <id>`<br>`--codex-config-profile <name>`<br>`--dry-run`<br>`--json` |
 | `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
 | `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
@@ -969,7 +986,7 @@ for input and receipt examples, rollback, and snapshot behavior.
 | `rig seat set-effort <seat>` | — | `--effort <level>`<br>`--clear`<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat effort <seat>` | — | `--json` |
 | `rig seat set-model <seat>` | — | `--model <id>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
-| `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
+| `rig seat set-runtime <seat>` | — | `--runtime <runtime>`<br>`--reason <text>`<br>`--model <id>`<br>`--effort <level>`<br>`--codex-config-profile <name>`<br>`--clear-account-home`<br>`--account-home <path>`<br>`--token-file <path>`<br>`--account-label <label>`<br>`--permission-mode <mode>`<br>`--confirm-timeout <seconds>`<br>`--dry-run`<br>`--confirm <switch-id>`<br>`--note <text>`<br>`--recover`<br>`--json` |
 | `rig seat set-cwd <seat>` | — | `--cwd <directory>` **required**<br>`--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat launch <seat>` | — | `--fresh` **required**<br>`--reason <text>`<br>`--plan`<br>`--stop`<br>`--operator <address>`<br>`--json` |
 | `rig seat restart <seat>` | — | `--keep-conversation` **required**<br>`--reason <text>`<br>`--plan`<br>`--verify`<br>`--expect-account <text>`<br>`--operator <address>`<br>`--host <id>`<br>`--json` |

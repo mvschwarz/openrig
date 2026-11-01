@@ -156,6 +156,17 @@ describe("Capture CLI", () => {
       expect(out).toEqual(["Do you want to\n"]);
       expect(err).toEqual([`[rig capture: small@my-rig: ${SMALL_PANE_HINT}]`]);
     });
+
+    it("sends 20 lines for non-positive --lines values", async () => {
+      for (const lines of ["0", "-1"]) {
+        const before = requests.length;
+        await captureLogs(async () => {
+          await makeCmd().parseAsync(["node", "rig", "capture", "tall@my-rig", `--lines=${lines}`]);
+        });
+        expect(requests.length).toBeGreaterThan(before);
+        expect(requests[requests.length - 1]!.lines).toBe(20);
+      }
+    });
   });
 
   describe("--readable reads a small seat at a readable size", () => {

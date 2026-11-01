@@ -278,7 +278,7 @@ export function Feed() {
   // currentSeqs. Queue-derived synthetic cards carry seq=-1, which
   // would pin min-seq at -1 and prevent the auto-prune for
   // event-derived dismissals (guard re-verify-2
-  // qitem-20260518192210 CLEANUP-1). eventDerivedSeqsForPrune
+  // CLEANUP-1). eventDerivedSeqsForPrune
   // filters them OUT — their dismissal lives in useDismissedCardIds.
   const rawCardSeqs = useMemo(() => eventDerivedSeqsForPrune(rawCards), [rawCards]);
   const rawCardIds = useMemo(() => rawCards.map((c) => c.id), [rawCards]);

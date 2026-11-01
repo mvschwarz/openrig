@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { TmuxAdapter, defaultTmuxFileOps } from "../src/adapters/tmux.js";
 import type { ExecFn, TmuxResult, TmuxFileOps, ArgvExecFn } from "../src/adapters/tmux.js";
+import { DeliveryGuardError, type SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
 // These existing tests assert logical tmux commands. Model source-file consumption here;
 // tmux-credential-environment tests observe the raw process boundary and real tmux instead.
@@ -532,6 +533,93 @@ describe("TmuxAdapter", () => {
       if (!result.ok) {
         expect(result.code).toBe("session_not_found");
       }
+    });
+  });
+
+  // #2090, reported by @Mydudeclaps. tmux 3.7 and 3.8 refuse every send-keys, `-l` included, while the target client
+  // is read-only (`tmux attach -r`): cmd_send_keys_exec checks CLIENT_READONLY before it reads a key. load-buffer and
+  // paste-buffer have no such check. This mock refuses send-keys the way that source does.
+  describe("sendKeys under a read-only tmux client", () => {
+    const TARGET = { nodeId: "n1", session: "dev@rig", occupant: "o1", pane: "%1" };
+
+    function readOnlyTmux() {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.startsWith("tmux send-keys")) throw new Error(`Command failed: ${cmd}\nclient is read-only`);
+        if (cmd.startsWith("tmux list-panes")) return "%1|0|/w|80|24|1\n";
+        return "";
+      });
+      const writeFile = vi.fn(async () => {});
+      const files: TmuxFileOps = { writeFile, unlink: async () => {}, tmpName: () => "/tmp/cr.txt", bufferName: () => "cr" };
+      return { exec, writeFile, files, cmds: () => exec.mock.calls.map(([cmd]) => cmd) };
+    }
+
+    function guard(beforeInput: (identity: string, submit?: boolean) => Promise<void>) {
+      return {
+        maybeTarget: () => TARGET, target: () => TARGET, ownsLifecycle: () => false,
+        checkInput: vi.fn(), noteSubmitted: vi.fn(), notePasted: async () => {}, attachInputInspection: () => {},
+        input: (_name: string, fn: () => Promise<unknown>) => fn(), humanInput: (_name: string, fn: () => Promise<unknown>) => fn(),
+        needsInputCheck: () => true, beforeInput: vi.fn(beforeInput),
+      };
+    }
+
+    it.each(["Enter", "C-m"])("a lone %s reaches the pane as a carriage return through the unbracketed paste", async (key) => {
+      const tmux = readOnlyTmux();
+      expect(await new TmuxAdapter(tmux.exec, tmux.files).sendKeys("dev@rig", [key])).toEqual({ ok: true });
+      expect(tmux.writeFile).toHaveBeenCalledWith("/tmp/cr.txt", "\r", { mode: 0o600, flag: "wx" });
+      expect(tmux.cmds()).toEqual([
+        `tmux send-keys -t 'dev@rig' '${key}'`,
+        "tmux load-buffer -b 'cr' '/tmp/cr.txt'",
+        "tmux paste-buffer -t 'dev@rig' -b 'cr' -d -r",
+      ]);
+    });
+
+    it.each([{ keys: ["C-c", "Enter"] }, { keys: ["Enter", "Enter"] }, { keys: ["C-c"] }])("other key lists keep the refusal ($keys)", async ({ keys }) => {
+      const tmux = readOnlyTmux();
+      expect(await new TmuxAdapter(tmux.exec, tmux.files).sendKeys("dev@rig", keys))
+        .toMatchObject({ ok: false, message: expect.stringContaining("client is read-only") });
+      expect(tmux.cmds().filter(cmd => !cmd.startsWith("tmux send-keys"))).toEqual([]);
+    });
+
+    it("another refusal of a lone Enter is not retried", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => { throw new Error(`Command failed: ${cmd}\ncan't find session: dev@rig`); });
+      expect(await new TmuxAdapter(exec).sendKeys("dev@rig", ["Enter"])).toMatchObject({ ok: false, code: "session_not_found" });
+      expect(exec).toHaveBeenCalledOnce();
+    });
+
+    it("the paste waits for the same checks to pass again, then records the submit", async () => {
+      const tmux = readOnlyTmux();
+      const adapter = new TmuxAdapter(tmux.exec, tmux.files);
+      const seat = guard(async () => {});
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      const beforeKeys = vi.fn(async () => {}); const beforeInput = vi.fn();
+      expect(await adapter.sendKeys("dev@rig", ["Enter"], beforeInput, { beforeKeys })).toEqual({ ok: true });
+      expect(seat.beforeInput.mock.calls).toEqual([["dev@rig", true], ["dev@rig", true]]);
+      expect(beforeKeys).toHaveBeenCalledTimes(2);
+      expect(beforeInput).toHaveBeenCalledTimes(2);
+      expect(seat.checkInput).toHaveBeenCalledTimes(2);
+      expect(seat.noteSubmitted).toHaveBeenCalledOnce();
+      expect(tmux.cmds().filter(cmd => !cmd.startsWith("tmux list-panes"))).toEqual([
+        "tmux send-keys -t '%1' 'Enter'",
+        "tmux load-buffer -b 'cr' '/tmp/cr.txt'",
+        "tmux paste-buffer -t '%1' -b 'cr' -d -r",
+      ]);
+    });
+
+    it("input that changes between the refusal and the paste stops the carriage return", async () => {
+      const tmux = readOnlyTmux();
+      const adapter = new TmuxAdapter(tmux.exec, tmux.files);
+      let checks = 0;
+      const seat = guard(async () => {
+        checks += 1;
+        if (checks === 2) throw new DeliveryGuardError("draft_present", "Someone started typing; no input written.");
+      });
+      adapter.deliveryGuard = seat as unknown as SeatDeliveryGuard;
+      expect(await adapter.sendKeys("dev@rig", ["Enter"]))
+        .toEqual({ ok: false, code: "draft_present", message: "Someone started typing; no input written." });
+      expect(checks).toBe(2);
+      expect(tmux.cmds().some(cmd => cmd.startsWith("tmux paste-buffer"))).toBe(false);
+      expect(tmux.cmds()).toContain("tmux delete-buffer -b 'cr'");
+      expect(seat.noteSubmitted).not.toHaveBeenCalled();
     });
   });
 

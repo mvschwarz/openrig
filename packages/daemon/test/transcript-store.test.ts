@@ -545,6 +545,16 @@ describe("TranscriptStore", () => {
       expect(store.readTail("long-rig", "dev@long-rig", 1)).toBe(output + "\n");
     });
 
+    it.each(["\n", ""])("readTail preserves a megabyte line across many UTF-8 chunks (ending %j)", (ending) => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("long-rig");
+      const filePath = store.getTranscriptPath("long-rig", "dev@long-rig");
+      const output = JSON.stringify({ result: Array.from({ length: 64 }, (_, i) => `${i}:${"é界🙂".repeat(1800)}`).join("") });
+      writeFileSync(filePath, ["earlier output", output, ...Array(7).fill("user@example.test rigged %")].join("\n") + ending);
+
+      expect(store.readTail("long-rig", "dev@long-rig", 1)).toBe(output + "\n");
+    });
+
     it("readTail handles multibyte UTF-8 characters at chunk boundaries", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("utf8-rig");

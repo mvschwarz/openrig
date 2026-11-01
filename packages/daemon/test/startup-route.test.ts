@@ -101,7 +101,8 @@ describe("startup consent and effect boundary", () => {
       appDeps: {
         listProcesses: async () => [
           { pid: 900, ppid: 1, command: "/bin/zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
-          { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
+          { pid: 901, ppid: 900, command: "codex --model anthropic/claude-3.5-sonnet",
+            argv: ["codex", "--model", "anthropic/claude-3.5-sonnet"], pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:01 2000" },
         ],
       },
     });

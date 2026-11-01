@@ -462,7 +462,7 @@ export class ClaimService {
     const input = { target, tmux: this.tmuxAdapter, listProcesses: this.listProcesses };
     try {
       if (runtime === "claude-code") return !!await verifyClaudePaneRuntime(input);
-      if (runtime === "codex") return !!await verifyCodexPaneProcess(input);
+      if (runtime === "codex") return !!await verifyCodexPaneProcess({ ...input, requireArgv: true });
     } catch { /* unproven */ }
     return false;
   }

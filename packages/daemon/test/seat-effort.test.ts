@@ -279,10 +279,10 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     sessionRegistry.updateResumeToken(session.id, "codex_id", "019a-thread", "scrape");
     return node;
   }
-  function running(args: string) {
+  function running(args: string, argv = ["/usr/local/bin/codex", ...args.split(" ")]) {
     rows = [
       { pid: 100, ppid: 1, pgid: 100, tpgid: 200, executableName: "bash", command: "-bash", startedAt: LSTART },
-      { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "codex", command: `/usr/local/bin/codex ${args}`, startedAt: LSTART },
+      { pid: 200, ppid: 100, pgid: 200, tpgid: 200, executableName: "codex", command: `/usr/local/bin/codex ${args}`, argv, startedAt: LSTART },
     ];
   }
 
@@ -338,6 +338,53 @@ describe("SeatLifecycleService.effortReport: four values, each from its own sour
     expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "observed", value: "low", outcome: "accepted" } });
     logsThread = undefined;
     expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "not_verified" } });
+  });
+
+  it("joins the exact Codex argv after a spaced profile without attributing an option value as the conversation", async () => {
+    codexSeat({ authored: "low" });
+    transcript = file("rollout-spaced.jsonl", [
+      { type: "turn_context", timestamp: at(5), payload: { turn_id: "a1", effort: "low" } },
+      { type: "event_msg", timestamp: at(7), payload: { type: "task_complete", turn_id: "a1" } },
+    ]);
+    const expected = "019a-thread";
+    const correct = ["/usr/local/bin/codex", "-p", "managed work", "resume", expected];
+    running(correct.slice(1).join(" "), correct);
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "observed", value: "low" } });
+    const wrong = ["/usr/local/bin/codex", "resume", "--add-dir", `/tmp/${expected}`, "019b-other"];
+    running(wrong.slice(1).join(" "), wrong);
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({ observed: { state: "not_verified" } });
+  });
+
+  it.each([null, undefined, [], ["codex", "resume", "019a-thread", "bad\0argument"], ["node", "resume", "019a-thread"]])(
+    "keeps effort unknown when the selected Codex has no usable exact argv: %j", async argv => {
+      codexSeat({ authored: "high" });
+      running(`-c model_reasoning_effort="high" resume 019a-thread`);
+      rows[1]!.argv = argv;
+      logsThread = "019a-thread";
+      transcript = file("opaque-rollout.jsonl", [
+        { type: "turn_context", timestamp: at(5), payload: { turn_id: "a1", effort: "high" } },
+        { type: "event_msg", timestamp: at(7), payload: { type: "task_complete", turn_id: "a1" } },
+      ]);
+      expect(await service.effortReport("dev-codex@eff")).toMatchObject({
+        ok: true, emitted: { state: "unknown" }, observed: { state: "not_verified" },
+      });
+    });
+
+  it("keeps native effort unverified when a readable child sits below an opaque Codex launcher", async () => {
+    codexSeat({ authored: "high" });
+    running(`-c model_reasoning_effort="high" resume 019a-thread`);
+    rows[0]!.tpgid = 200;
+    rows[1]!.ppid = 150;
+    rows.splice(1, 0, { pid: 150, ppid: 100, pgid: 200, tpgid: 200, executableName: "codex",
+      command: "codex -m configured-model", argv: null, startedAt: LSTART });
+    logsThread = "019a-thread";
+    transcript = file("opaque-launcher-rollout.jsonl", [
+      { type: "turn_context", timestamp: at(5), payload: { turn_id: "a1", effort: "high" } },
+      { type: "event_msg", timestamp: at(7), payload: { type: "task_complete", turn_id: "a1" } },
+    ]);
+    expect(await service.effortReport("dev-codex@eff")).toMatchObject({
+      ok: true, emitted: { state: "unknown" }, observed: { state: "not_verified" },
+    });
   });
 
   it("joins a Claude process to its sidecar session by argv, or by a recorded resume rotation", async () => {

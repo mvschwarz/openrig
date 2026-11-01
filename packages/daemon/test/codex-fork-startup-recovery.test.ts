@@ -58,7 +58,8 @@ describe("late Codex fork identity", () => {
     pidOnlyRecord = false;
     processRows = [
       { pid: 900, ppid: 1, pgid: 900, tpgid: 901, executableName: "sh", startedAt: STARTED, command: "sh" },
-      { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: STARTED, command: `codex fork ${PARENT}` },
+      { pid: 901, ppid: 900, pgid: 901, tpgid: 901, executableName: "codex", startedAt: STARTED,
+        command: `codex fork ${PARENT}`, argv: ["codex", "fork", PARENT] },
     ];
     tmux = {
       hasSession: vi.fn(async () => true),
@@ -177,12 +178,12 @@ describe("late Codex fork identity", () => {
     await orch.startNode(input);
     threadId = CHILD;
     const child = processRows[1]!;
-    if (shape === "different parent") child.command = `codex fork ${CHILD}`;
-    if (shape === "resume") child.command = `codex resume ${PARENT}`;
-    if (shape === "fresh") child.command = "codex";
+    if (shape === "different parent") { child.command = `codex fork ${CHILD}`; child.argv = ["codex", "fork", CHILD]; }
+    if (shape === "resume") { child.command = `codex resume ${PARENT}`; child.argv = ["codex", "resume", PARENT]; }
+    if (shape === "fresh") { child.command = "codex"; child.argv = ["codex"]; }
     if (shape === "background") child.pgid = 800;
     if (shape === "sibling") processRows.push({ ...child, pid: 902 });
-    if (shape === "helper") { child.command = `helper codex fork ${PARENT}`; child.executableName = "helper"; }
+    if (shape === "helper") { child.command = `helper codex fork ${PARENT}`; child.argv = ["helper", "codex", "fork", PARENT]; child.executableName = "helper"; }
     if (shape === "missing start") delete child.startedAt;
     expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: false, startupStatus: "attention_required" });
     expect(tmux.sendText).not.toHaveBeenCalled();
@@ -193,9 +194,9 @@ describe("late Codex fork identity", () => {
     threadId = CHILD;
     const child = processRows[1]!;
     if (shape === "reused PID") pidOnlyRecord = true;
-    if (shape === "different parent") child.command = `codex fork ${CHILD}`;
+    if (shape === "different parent") { child.command = `codex fork ${CHILD}`; child.argv = ["codex", "fork", CHILD]; }
     if (shape === "background") child.pgid = 800;
-    if (shape === "helper") { child.command = `helper codex fork ${PARENT}`; child.executableName = "helper"; }
+    if (shape === "helper") { child.command = `helper codex fork ${PARENT}`; child.argv = ["helper", "codex", "fork", PARENT]; child.executableName = "helper"; }
     readinessSeconds = 1;
     const result = await orch.startNode(input);
     expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
@@ -209,7 +210,8 @@ describe("late Codex fork identity", () => {
     await orch.startNode(input);
     threadId = CHILD;
     processRows[1]!.command = `codex -c example=fork -s workspace-write fork --add-dir /fixture/queue ${PARENT}`;
-    processRows.push({ ...processRows[1]!, pid: 902, ppid: 901, command: "codex" });
+    processRows[1]!.argv = ["codex", "-c", "example=fork", "-s", "workspace-write", "fork", "--add-dir", "/fixture/queue", PARENT];
+    processRows.push({ ...processRows[1]!, pid: 902, ppid: 901, command: "codex", argv: ["codex"] });
     expect(await lifecycle().continueStartup("builder@fork-recovery")).toMatchObject({ ok: true, continuityOutcome: "forked" });
     expect(identityReads.at(-1)).toEqual([902, STARTED]);
     expect(tmux.sendText).toHaveBeenCalledTimes(1);

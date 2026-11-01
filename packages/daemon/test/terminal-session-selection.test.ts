@@ -53,14 +53,17 @@ async function serve(socket: string): Promise<Request[]> {
   return requests;
 }
 
-async function fixture() {
+async function fixture(options: { xdg?: boolean; configuredSession?: string; socketOverride?: boolean } = {}) {
   // Keep socket names short and inside the runner's permitted IPC directory.
   const root = fs.mkdtempSync(path.join(tmpdir(), "hs-")); roots.push(root); vi.stubEnv("HOME", root);
-  const base = path.join(root, ".config", "herdr");
+  const configHome = path.join(root, options.xdg ? "xdg" : ".config");
+  const base = path.join(configHome, "herdr");
   const paths = { configured: path.join(root, "configured.sock"), default: path.join(base, "herdr.sock"),
     prod: path.join(base, "sessions", "prod", "herdr.sock"), stage: path.join(base, "sessions", "stage", "herdr.sock") };
   const hits = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([name, socket]) => [name, await serve(socket)]))) as Record<keyof typeof paths, Request[]>;
-  const env = { HERDR_SOCKET_PATH: paths.configured, HERDR_SESSION: "daemon-configured" };
+  const env = { HOME: root, XDG_CONFIG_HOME: options.xdg ? configHome : undefined,
+    HERDR_SOCKET_PATH: options.socketOverride === false ? undefined : paths.configured,
+    HERDR_SESSION: options.configuredSession ?? "daemon-configured" };
   const providers = createHerdrProviders(env);
   const cmux: TerminalProvider = {
     name: "cmux", status: async () => ({ provider: "cmux", available: true, capabilities: {} }), liveness: async () => ({ alive: true }),
@@ -73,7 +76,7 @@ async function fixture() {
     resolveSessionProvider: (name, session) => name === "herdr" ? providers.sessionProvider(session) : null,
     viewsStore: { get: () => null, list: () => [] }, listRigNames: () => ["build", "prod", "stage"],
     listRigSeats: name => name === "kernel" ? [] : ["build", "prod", "stage"].includes(name) ? rows(name) : null,
-    listPodSeats: () => null, listScopeSeats: () => rows("build"), resolveHost: () => null, hasSession: () => true,
+    listPodSeats: () => null, resolveHost: () => null, hasSession: () => true,
   });
   const app = new Hono(); app.use("*", async (c, next) => { c.set("terminalService" as never, service); await next(); });
   app.route("/api/terminal", terminalRoutes()); app.route("/api/rigs/:rigId/terminal", rigTerminalRoutes);
@@ -86,6 +89,40 @@ const layouts = (requests: Request[]) => requests.filter(request => request.meth
 // Real Hono/service/provider/socket wiring, with a synthetic Herdr protocol peer.
 // These checks prove endpoint routing, not desktop rendering by the Herdr app.
 describe.skipIf(process.platform === "win32")("per-request Herdr session selection", () => {
+  it("default selection without a socket override uses the configured session under XDG_CONFIG_HOME", async () => {
+    const f = await fixture({ xdg: true, configuredSession: "prod", socketOverride: false });
+    expect(await (await f.open({ view: "prod" })).json()).toMatchObject({ ok: true });
+    expect(layouts(f.hits.prod)).toHaveLength(2);
+    expect(f.hits.configured).toEqual([]);
+    expect(f.hits.default).toEqual([]);
+    expect(f.hits.stage).toEqual([]);
+  });
+
+  it("named and explicit default requests keep the daemon's custom config home", async () => {
+    const f = await fixture({ xdg: true });
+    // Later mutations must not redirect a lazily created session provider.
+    f.env.XDG_CONFIG_HOME = "/not-the-startup-config-home";
+    const named = await (await f.open({ view: "prod", session: "prod" })).json();
+    expect(named).toMatchObject({ ok: true, session: "prod" });
+    expect(layouts(f.hits.prod)).toHaveLength(2);
+    expect(await (await f.open({ view: "build", session: "default" })).json()).toMatchObject({ ok: true, session: "default" });
+    expect(layouts(f.hits.default)).toHaveLength(2);
+    expect(f.hits.configured).toEqual([]);
+    expect(f.hits.stage).toEqual([]);
+  });
+
+  it("selecting the configured name preserves its explicit socket without aliasing other sessions", async () => {
+    const f = await fixture({ xdg: true, configuredSession: "prod" });
+    expect(await (await f.open({ view: "prod", session: "prod" })).json()).toMatchObject({ ok: true, session: "prod" });
+    expect(layouts(f.hits.configured)).toHaveLength(2);
+    expect(f.hits.prod).toEqual([]);
+    expect(await (await f.open({ view: "stage", session: "stage" })).json()).toMatchObject({ ok: true, session: "stage" });
+    expect(layouts(f.hits.stage)).toHaveLength(2);
+    expect(await (await f.open({ view: "prod", session: "missing" })).json()).toMatchObject({ ok: false, code: "herdr_unavailable", opened: [] });
+    expect(layouts(f.hits.configured)).toHaveLength(2);
+    expect(f.hits.default).toEqual([]);
+  });
+
   it("concurrent requests use separate sessions while the daemon's configured endpoint remains intact", async () => {
     const f = await fixture();
     f.env.HERDR_SOCKET_PATH = "/not-the-configured-socket"; f.env.HERDR_SESSION = "changed-after-startup";

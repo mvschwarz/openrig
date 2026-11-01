@@ -191,11 +191,11 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.5/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -330,6 +330,16 @@ the saved non-interruptive choice, made during the restore, or after it restored
 every seat while those seats still run the sessions it started, reports that
 restore's outcome instead of starting another. Explicitly repeating the saved
 `--non-interruptive` or `--no-non-interruptive` choice also joins that restore.
+
+`rig start --last` restores a rig unless every seat it launched was stopped on
+purpose with `rig down` or `rig seat stop`. A rig whose stop was never recorded
+counts as last running: one taken down with `rig down` before OpenRig 0.6.12, or
+one whose seats exited or were lost without `rig down`. So does a rig with no snapshot
+whose saved state can be restored. To keep such a rig down, run `rig down <rig>`
+once, by rig id when names are shared; it records the stop, and `--last` then
+leaves the rig down. `--last` never selects the kernel. Under `--no-kernel`
+(`OPENRIG_NO_KERNEL=1`) the daemon skips the kernel's automatic restore too;
+bring it back with `rig up kernel --existing`.
 
 An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
 restore to finish, then replaces only the named seats that still hold the exact
@@ -499,7 +509,12 @@ rig terminal open saved:kernel --provider herdr --json
 rig terminal open saved:kernel --provider cmux --json
 ```
 
-Use `rig terminal status --json` to inspect provider availability and liveness.
+Use `rig terminal status --json` to inspect provider availability, liveness and the
+daemon's effective tmux server. To keep managed seats out of your personal tmux
+session list, opt into [an isolated server](tmux-servers.md) with
+`rig config set terminal.tmux_server isolated`; existing live seats defer the
+switch until they are stopped and the daemon restarts.
+
 To keep rigs in separate Herdr sessions, select one explicitly:
 `rig terminal open future-prod-rig --provider herdr --session future-prod`.
 `--session default` selects Herdr's default session; omitting the option keeps
@@ -838,12 +853,46 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Claude resume did not finish within Ns; Claude may still be starting, so the launch was kept" | A restored Claude seat was not interactive when the wait ended. Its pane and resume token are kept. Look at the pane; once Claude is up, run `rig seat clear-attention <seat>`. The wait is about `runtime.readiness_timeout_seconds` in total for each seat (default 30 s), counting the first 3.2 s, and the time adds up seat by seat in a restore. Raising the setting for slow fresh launches lengthens it. If `rig up` or `rig launch` times out at 120 s, that is not a rollback: check `rig ps` before running it again. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | Kernel seats fail within a second of the first start, and tmux reports "server exited unexpectedly" | Check that your tmux can capture a pane, then start the failed seats again; see the tmux check below this table. |
-| Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
+| Shared terminal is absent | Check the kernel's `operator.human` terminal separately from its agents; recover only that seat as described below. Standalone `rig tui` remains available while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when all of its seats were lost; check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when that start finds all of its seats lost; a kernel that was already down before the reboot stays down, and `rig start` names `rig up kernel --existing`. Check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
+
+**When the shared kernel dashboard is missing.** The dashboard runs in the
+kernel's `operator.human` terminal seat. Restoring the operator, advisor and
+queue worker does not also restore an unselected terminal. Read
+`rig ps --nodes --rig kernel --json` and use the terminal's registered
+`canonicalSessionName` for the `operator.human` row. Replace `<dashboard-session>`
+in the commands below with that name. Check the actual pane with
+`rig capture "<dashboard-session>"`: a persisted running row alone does not prove
+that its tmux session is alive.
+A daemon or transport error is not proof that the terminal is absent.
+
+- If only the viewing window closed and the TUI is still running, reopen it
+  with `rig terminal open saved:kernel --window`.
+- If the TUI exited but its terminal shell remains, run `rig tui` once in that
+  existing pane. A fresh seat is unnecessary.
+- If the terminal session itself is absent, start only that existing seat:
+
+  ```sh
+  rig seat launch "<dashboard-session>" --fresh --reason "recover missing shared kernel dashboard"
+  ```
+
+  The terminal has no agent conversation to resume. Its fresh-start action
+  runs `rig tui` after the shell is ready; sibling agent sessions stay
+  unchanged. This command intentionally omits `--stop`, so it refuses to
+  replace a live occupant. Check the result before repeating it, then run
+  `rig capture "<dashboard-session>"` to confirm the TUI and
+  `rig ps --nodes --rig kernel --full` to check the seats. Once the dashboard
+  is running, open its view with `rig terminal open saved:kernel --window`.
+
+Opening `saved:kernel` places a view of existing sessions; it cannot create a
+missing terminal. Whole-kernel recovery is for the all-seats-lost case in the
+table, and `rig up kernel --existing` refuses a kernel with live sessions.
+A retained `excluded_from_subset` reason may come from an earlier subset
+restore; inspect its event before attributing it to the latest reboot.
 
 **When the kernel's seats all fail at the first start.** A report on Oracle Linux 10
 ([#980](https://github.com/mvschwarz/openrig/issues/980)) traced this to the distribution's packaged tmux, whose

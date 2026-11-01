@@ -94,6 +94,15 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it("identifies the account home selected by a switch rather than the native default", async () => {
+    const deps = makeDeps({ status: 200, data: { ...STATUS, runtime_home: {
+      variable: "CODEX_HOME", home: "/accounts/api", source: "account-switch",
+    } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]).then(() => undefined));
+    expect(result.logs.join("\n")).toContain("/accounts/api (the seat's selected account home;");
+    expect(result.logs.join("\n")).not.toContain("the native default");
+  });
+
   it("prints the daemon's managed restore delivery failure", async () => {
     const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
     const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
@@ -731,6 +740,27 @@ describe("rig seat status", () => {
     // The fresh path DID deliver context — the surface must say so, not deny it.
     expect(output).toContain("The captured startup context (restore packet) was delivered to the successor.");
     expect(output).not.toContain("No conversation continuity, startup context delivery,");
+  });
+
+  it("handover fresh human output says an unconfirmed restore packet was sent, not that nothing was delivered", async () => {
+    const reason = "the input box could not be observed";
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      restorePacket: { status: "unconfirmed", reason },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "fresh", "--reason", "context-wall"]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined(); // the handover still succeeded
+    expect(output).toContain("Seat handover complete: dev-impl@seat-rig");
+    expect(output).toContain(`its submission is unconfirmed: ${reason}.`);
+    expect(output).toContain("Check the successor's screen before sending the context again");
+    expect(output).not.toContain("No conversation continuity, startup context delivery,");
+    expect(output).not.toContain("restore packet) was delivered");
   });
 
   it("handover surfaces a loud step-named failure (successor_create_failed)", async () => {

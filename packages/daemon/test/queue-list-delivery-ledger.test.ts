@@ -177,6 +177,13 @@ describe("queue list: delivery ledgers", () => {
       return id;
     }
 
+    it("#2286 lists the receipt committed during registry loading and uses it for the waiting view", async () => {
+      const id = await askPostedDuringRegistryLoad();
+      const item = repo.list({ limit: 1000 }).find(row => row.qitemId === id)!;
+      expect(item.deliveryOutcome).toBe("posted");
+      expect(item.waiting?.nextBackstop.mechanism).toBe("none (posted to the human; awaiting their decision)");
+    });
+
     it("reads the receipt in its ledger", async () => {
       const id = await askPostedDuringRegistryLoad();
       expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("posted");

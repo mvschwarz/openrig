@@ -1,10 +1,11 @@
 // OPR.0.4.6.02 C3 — the `rig terminal` command family (the TUI-1 opaque verb +
-// the operator's terminal-provider-ride entry). Three subcommands, all hitting
+// the operator's terminal-provider-ride entry). The subcommands read
 // the ONE canonical daemon composer (`/api/terminal/...`):
 //
 //   rig terminal open <view> [--provider herdr|cmux|rex] [--json]
 //   rig terminal views [--json]
 //   rig terminal status [--provider herdr|cmux|rex] [--json]
+//   rig terminal attach <session> [--read-only]
 //
 // `<view>` resolves daemon-side: a rig name (per-rig derived) | `mission:<id>` |
 // `slice:<id>` (derived) | a saved-view id. The result is the ONE shared
@@ -17,22 +18,34 @@
 // exit 0 unless the daemon is unreachable.
 
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { openTerminalWindow, type WindowDeps } from "../terminal-window.js";
+import { assertLocalTmux, attachTmux, isLocalTmuxHost, readTmuxServerArgs, type TmuxAttachment } from "../tmux-attachment.js";
 
-export interface TerminalDeps extends StatusDeps { windowDeps?: WindowDeps }
+export interface TerminalDeps extends StatusDeps {
+  windowDeps?: WindowDeps;
+  attachTmux?: (target: TmuxAttachment) => Promise<number>;
+}
+export interface FollowControls {
+  enabled: boolean; maxTiles?: number; graceMs?: number; focusRetentionMs?: number;
+  pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[]; suppressionMs?: number;
+}
 
 /** The one shared open-result shape (mirrors the daemon `OpenViewResult`). */
 export interface OpenViewResult {
+  workspaceId?: string;
+  following?: { id: string; enabled: boolean; state: "following" | "empty" | "retained" | "disabled";
+    maxTiles: number; tiles: Array<{ key: string; seat: string; departedAt?: number; reason?: string }>;
+    events: string[]; overflow: Array<{ key: string; seat: string; reason: string }>; nextAt?: number };
   provider: string;
   session?: string;
   ok: boolean;
   opened: string[];
   absent: { seat: string; host: string | null; reason: string }[];
-  degraded: { seat: string; host: string; reason: string }[];
+  degraded: { seat: string; host: string; reason: string; code?: "pane_unconfirmed" }[];
   pages: number;
   error?: string;
   code?: string;
@@ -76,14 +89,19 @@ function humanOpen(r: OpenViewResult): string {
         ? `Terminal window requested. Reused ${target} workspace ${r.reusedWorkspace.id} for view ${JSON.stringify(r.reusedWorkspace.view)}.`
         : tiled > 0
           ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${target}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-          : `No tiles opened in ${target}.`,
+          : `No tiles ${r.degraded.some(d => d.code === "pane_unconfirmed") ? "confirmed" : "opened"} in ${target}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
   if (r.space) lines.push(`  ${r.provider} session: ${JSON.stringify(r.space.label)} (${r.space.id}).`);
   if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
+  if (r.following) {
+    lines.push(`  Following: ${r.following.state}; tile limit ${r.following.maxTiles}.`);
+    for (const tile of r.following.tiles) if (tile.reason) lines.push(`  ${tile.seat}: ${tile.reason}`);
+    for (const hidden of r.following.overflow) lines.push(`  ${hidden.seat}: ${hidden.reason}`);
+  }
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
-  for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — skipped (${d.host}): ${d.reason}`);
+  for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — ${d.code === "pane_unconfirmed" ? "unconfirmed" : "skipped"} (${d.host}): ${d.reason}`);
   for (const n of r.notes ?? []) lines.push(`  note: ${n}`);
   return lines.join("\n");
 }
@@ -95,7 +113,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
   } else {
     console.log(humanOpen(r));
   }
-  if (status >= 400 || (r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
+  if (status >= 400 || (r.following ? !r.ok : r.opened.length === 0 && !(r.ok && r.reusedWorkspace))) {
     process.exitCode = status >= 500 ? 2 : 1;
   }
 }
@@ -113,27 +131,43 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
 
   cmd
     .command("open")
-    .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
+    .argument("<view>", "a rig name, pod:<rig>/<pod>, seat:<rig>/<logical-id>, mission:<id>, slice:<id>, qitem:<id> (current local obligation owners), or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--provider <name>", "herdr, cmux or rex: open in the running provider without a desktop window; each open adds a new workspace (inside Herdr, --window reuses a matching one); tmux requires --window. Inside Rex, the default opens in Rex")
     .option("--session <name>", "Herdr session on the daemon's host; --session default selects Herdr's default session")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--expected-plan <id>", "Open only if the view still matches this preview")
+    .option("--follow", "Keep one qitem:<id>, slice:<id-or-name> or mission:<id> workspace following current obligation owners (Linux Herdr 0.9.5/protocol 22)")
+    .option("--no-follow", "Stop following and keep the existing workspace and tiles as a fixed layout")
+    .option("--max-tiles <count>", "Following tile limit, 1–256; explicitly raise it to show more members", Number)
+    .option("--pin <seats...>", "Retain these following tiles after they leave the task")
+    .option("--unpin <seats...>", "Remove pins from these following tiles")
+    .option("--suppress <seats...>", "Temporarily hide these following tiles; agents keep running")
+    .option("--unsuppress <seats...>", "Show these following members again")
+    .option("--suppression-ms <ms>", "Suppression duration, default 60000, at most 86400000", Number)
+    .option("--grace-ms <ms>", "Departure grace, default 4000, at most 60000", Number)
+    .option("--focus-retention-ms <ms>", "Extra focused-reading retention, default 12000, at most 300000", Number)
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
+    .action(async (view: string, opts: { provider?: string; session?: string; json?: boolean; window?: boolean; expectedPlan?: string;
+      follow?: boolean; maxTiles?: number; pin?: string[]; unpin?: string[]; suppress?: string[]; unsuppress?: string[];
+      suppressionMs?: number; graceMs?: number; focusRetentionMs?: number }) => {
       const deps = getDeps();
       const session = opts.session?.trim();
+      const { maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } = opts;
+      const hasControls = [maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs].some(v => v !== undefined);
+      const following: FollowControls | undefined = opts.follow !== undefined || hasControls
+        ? { enabled: opts.follow !== false, maxTiles, pin, unpin, suppress, unsuppress, suppressionMs, graceMs, focusRetentionMs } : undefined;
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
-        if (opts.window || !opts.provider) {
-          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan, session);
+        if (following?.enabled !== false && (opts.window || !opts.provider)) {
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan, session, following);
           printOpen(opts.json ?? false, result, 200);
           return;
         }
         let expectedPlan = opts.expectedPlan;
         if (session !== undefined) {
-          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider)}&session=${encodeURIComponent(session)}`);
+          const preview = await client.get<{ session?: string; planId?: string; error?: string }>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=${encodeURIComponent(opts.provider ?? "herdr")}&session=${encodeURIComponent(session)}`);
           if (preview.status >= 400 || preview.data.session !== session || typeof preview.data.planId !== "string") {
             printResult(opts.json ?? false, { error: preview.data.error ?? "The daemon did not confirm the requested Herdr session. Update the daemon before opening a named session.", code: "terminal_session_unconfirmed" }, preview.status >= 400 ? preview.status : 409); return;
           }
@@ -143,7 +177,8 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           expectedPlan = preview.data.planId;
         }
         const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(session !== undefined ? { session } : {}), ...(expectedPlan !== undefined ? { expectedPlan } : {}) };
-        const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
+        const res = await client.post<OpenViewResult>(following ? "/api/terminal/follow" : "/api/terminal/open",
+          { ...body, ...following }, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS, ...(following ? { headers: terminalAuthHeaders() } : {}) });
         if (session !== undefined && res.status < 400 && res.data?.session !== session) {
           printResult(opts.json ?? false, { ...res.data, ok: false, code: "terminal_session_unconfirmed",
             error: "The open response did not confirm the requested Herdr session. Its outcome is unknown; inspect that session before retrying." }, 409); return;
@@ -187,6 +222,32 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
           printResult(opts.json ?? false, { error: "The daemon did not confirm the requested Herdr session. Update the daemon before inspecting a named session.", code: "terminal_session_unconfirmed" }, 409); return;
         }
         printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd.command("attach <session>")
+    .description("Attach this terminal to a session on the selected daemon's tmux server")
+    .option("--read-only", "View the session without sending input")
+    .action(async (session: string, opts: { readOnly?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async client => {
+        try {
+          if (client.baseUrl && !isLocalTmuxHost(client.baseUrl)) {
+            throw new Error("Terminal attachment uses local tmux; run this command on the selected daemon's machine.");
+          }
+          const response = await client.get<{ tmux?: { mode?: "inherit" | "isolated"; serverArgs?: unknown } }>("/api/terminal/status");
+          if (response.status >= 400) throw new Error(`Cannot read the tmux server (HTTP ${response.status}).`);
+          if (response.data.tmux?.serverArgs === undefined) {
+            throw new Error("This daemon cannot report its tmux server. Update and restart it before using terminal attach.");
+          }
+          await assertLocalTmux(client, response.data.tmux.mode);
+          process.exitCode = await (deps.attachTmux ?? attachTmux)({
+            session, serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs), readOnly: opts.readOnly ?? false,
+          });
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exitCode = 1;
+        }
       });
     });
 

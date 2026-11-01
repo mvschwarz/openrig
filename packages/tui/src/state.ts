@@ -26,6 +26,7 @@ import { SECTION_REGISTRY, SYSTEM_SECTIONS } from "./sections.js";
 import { scopesExplorerRows } from "./scopes/scopes-model.js";
 import { GRAPH_STYLE_NAMES } from "./topology/render-graph.js";
 import { rowStatusGlyph } from "./topology/glyphs.js";
+import { hostLabel } from "./topology/host-label.js";
 
 export function defaultSections(): SectionDef[] {
   return SECTION_REGISTRY.map((section) => ({ ...section }));
@@ -670,7 +671,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       const expanded = new Set(state.expanded);
       for (const host of snap.hosts) {
         rows.push({
-          label: `  ▾ ${host.name}${host.reachable ? "" : " (unreachable)"}`,
+          label: `  ▾ ${hostLabel(host)}${host.reachable ? "" : " (unreachable)"}`,
           action: { type: "drill", resource: "host", name: host.name },
           key: `host:${host.name}`,
         });

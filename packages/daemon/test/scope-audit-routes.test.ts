@@ -262,6 +262,32 @@ describe("GET /api/scope/audit", () => {
     expect(bare!.findings.some((f) => f.kind === "missing_progress")).toBe(true);
   });
 
+  // Parity with the CLI audit (#1016): `rig scope slice create` numbers past 99, so the route accepts the 100-… and
+  // 1000-… directories it makes. A single-digit or non-numeric name is still flagged.
+  async function directoryNamingFinding(name: string): Promise<boolean> {
+    const missionDir = path.join(missionsRoot, "numbered-mission");
+    fs.mkdirSync(path.join(missionDir, "slices", name), { recursive: true });
+    fs.writeFileSync(path.join(missionDir, "README.md"), "---\nid: OPR.99.0.1\n---\n# numbered\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "PROGRESS.md"), "# Progress\n", "utf8");
+    fs.writeFileSync(path.join(missionDir, "slices", name, "README.md"),
+      "---\nid: OPR.99.0.1.100\nprogress_rail: readme-only\n---\n# numbered slice\n", "utf8");
+
+    const res = await app.request("/api/scope/audit?mission=numbered-mission");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { slices: Array<{ name: string; findings: Array<{ kind: string; message: string }> }> };
+    const slice = body.slices.find((s) => s.name === name);
+    expect(slice).toBeDefined();
+    return slice!.findings.some((f) => f.kind === "id_convention_violation" && f.message.startsWith("Directory "));
+  }
+
+  it.each(["99-last-two-digit", "100-hundredth", "1000-thousandth"])("accepts the generated slice directory %s", async (name) => {
+    expect(await directoryNamingFinding(name)).toBe(false);
+  });
+
+  it.each(["9-single", "bad-name"])("still flags a malformed slice directory %s", async (name) => {
+    expect(await directoryNamingFinding(name)).toBe(true);
+  });
+
   it("orphan_progress: slice with PROGRESS.md but no README.md", async () => {
     const missionDir = path.join(missionsRoot, "test-mission");
     fs.mkdirSync(missionDir, { recursive: true });

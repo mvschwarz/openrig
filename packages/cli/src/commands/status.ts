@@ -20,7 +20,9 @@ export interface StatusDeps {
 function formatSnapshotAge(snapshotAt: string | null): string {
   if (!snapshotAt) return "none";
   const now = Date.now();
-  const then = new Date(snapshotAt).getTime();
+  // Snapshot times are SQLite `datetime('now')` stamps: UTC written without a zone, which Date reads as local time.
+  const then = Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(snapshotAt)
+    ? `${snapshotAt.replace(" ", "T")}Z` : snapshotAt);
   const diffMs = now - then;
   const diffMin = Math.floor(diffMs / 60_000);
   if (diffMin < 1) return "just now";

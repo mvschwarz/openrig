@@ -48,7 +48,7 @@ states.
 ## Don't use this when
 
 - The operation is single-command and deterministic — use `openrig-user` skill for CLI surface
-- The work is operator-level configuration of OpenRig itself — use `openrig-operator`
+- The work is operator-level configuration or troubleshooting of OpenRig itself — run `rig context get help`
 - The work is rig spec authoring — use `openrig-architect`
 
 ## Failure modes (4)
@@ -120,7 +120,7 @@ different claims; don't conflate.
 ## See also
 
 - `openrig-user` skill — CLI surface for `rig up / down / restore / etc.`
-- `openrig-operator` skill — operator-level discipline for OpenRig itself
+- `rig context get help` — the help guide for the installed version, for when OpenRig itself isn't working
 - `seat-continuity-and-handover` skill — sub-primitive: occupant-creation modes for restore (`resume` / `rebuild` / `fresh` / `failed`)
 - `session-source-fork` skill — `forked` continuity outcome for fork-based restore
 - `permission-and-capability-preflight` skill — provider-auth blocker → escalation path

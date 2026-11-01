@@ -24,7 +24,7 @@ import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_
 import { identityPrincipalSchema } from "../src/db/migrations/140_identity_principal.js";
 
 const ALICE = JSON.stringify({ source: "file", id: "alice" });
-const CLOUD = JSON.stringify({ source: "cloud", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 });
+const GRANT_SERVICE = JSON.stringify({ source: "grant-service", id: "cus_VVMAexample01", grant: "8977f2dc0000aaaa1111bbbb", version: 6 });
 
 /** A request as resolveRecordedIdentity reads it: its headers and its TCP peer. */
 function request(headers: Record<string, string>, peer: string | null = "127.0.0.1"): Context {
@@ -51,10 +51,10 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     const attributed = { provenance: "transport:v1" as const };
     expect(resolveRecordedIdentity(request(direct), attributed)).toEqual({ identityProvenance: "principal:v1", identityPrincipal: ALICE });
     expect(resolveRecordedIdentity(request(direct, "::ffff:127.0.0.1"), attributed).identityProvenance).toBe("principal:v1");
-    expect(resolveRecordedIdentity(request({ ...direct, "X-OpenRig-Principal": CLOUD }, "::1"), attributed).identityPrincipal).toBe(CLOUD);
+    expect(resolveRecordedIdentity(request({ ...direct, "X-OpenRig-Principal": GRANT_SERVICE }, "::1"), attributed).identityPrincipal).toBe(GRANT_SERVICE);
 
     const unchanged: Array<[string, Context, { provenance: "transport:v1" | "claimed:v1" | "origin-unknown:v1" }, string]> = [
-      ["a remote peer", request(direct, "100.95.124.51"), attributed, "transport:v1"],
+      ["a remote peer", request(direct, "192.0.2.10"), attributed, "transport:v1"],
       ["no socket", request(direct, null), attributed, "transport:v1"],
       ["a relayed hop", request({ ...direct, "X-OpenRig-Relay": "host-b", "X-OpenRig-Provenance": "transport:v1" }), attributed, "relay:v1"],
       ["an unknown origin", request({ ...direct, "X-OpenRig-Origin-Unknown": "true" }), { provenance: "origin-unknown:v1" }, "origin-unknown:v1"],
@@ -72,11 +72,13 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
   it("accepts only the closed shape and never stores more than it names", () => {
     for (const bad of [
       "not json", "[]", "null", JSON.stringify({ source: "env", id: "x" }), JSON.stringify({ source: "file", id: "" }),
-      JSON.stringify({ source: "file", id: "x", token: "orm_secret" }), JSON.stringify({ source: "cloud", id: "x", grant: 5 }),
+      JSON.stringify({ source: "file", id: "x", token: "orm_secret" }), JSON.stringify({ source: "grant-service", id: "x", grant: 5 }),
+      // No other name stands in for a source, a retired one included.
+      JSON.stringify({ source: "legacy-service", id: "x" }),
       JSON.stringify({ source: "file", id: "x".repeat(600) }),
     ]) expect(parseIdentityPrincipal(bad)).toBeNull();
-    expect(parseIdentityPrincipal(JSON.stringify({ version: 6, grant: "g", id: "cus_x", source: "cloud" })))
-      .toBe(JSON.stringify({ source: "cloud", id: "cus_x", grant: "g", version: 6 }));
+    expect(parseIdentityPrincipal(JSON.stringify({ version: 6, grant: "g", id: "cus_x", source: "grant-service" })))
+      .toBe(JSON.stringify({ source: "grant-service", id: "cus_x", grant: "g", version: 6 }));
   });
 
   it("keeps a principal only beside principal:v1, and a principal:v1 without one records the seat's stamp", () => {
@@ -133,10 +135,10 @@ describe("principal:v1: the adapter's caller, only on a direct attributed reques
     expect(stamps(created.qitemId)).toEqual([expect.objectContaining({ p: "principal:v1", who: ALICE, note: "created" })]);
 
     // The successor's created transition and the source close are the request's own; the wake it stages is not.
-    expect((await post(`/${created.qitemId}/handoff`, { toSession: "impl@team", nudge: false }, as("lead@team", CLOUD))).status).toBe(201);
-    expect(stamps(created.qitemId).at(-1)).toMatchObject({ p: "principal:v1", who: CLOUD });
+    expect((await post(`/${created.qitemId}/handoff`, { toSession: "impl@team", nudge: false }, as("lead@team", GRANT_SERVICE))).status).toBe(201);
+    expect(stamps(created.qitemId).at(-1)).toMatchObject({ p: "principal:v1", who: GRANT_SERVICE });
     const successor = db.prepare("SELECT qitem_id AS id FROM queue_items WHERE handed_off_from = ?").get(created.qitemId) as { id: string };
-    expect(stamps(successor.id)[0]).toMatchObject({ p: "principal:v1", who: CLOUD });
+    expect(stamps(successor.id)[0]).toMatchObject({ p: "principal:v1", who: GRANT_SERVICE });
     for (const wake of db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM outbox_entries").all()) {
       expect(wake).toEqual({ p: "transport:v1", who: null });
     }

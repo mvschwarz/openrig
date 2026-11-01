@@ -38,12 +38,14 @@ describe("buildRealDeps runAction verb->rig map", () => {
     expect(calls[0]).toEqual(["up", "/t/spec.yaml", "--json", "--yes", "--cwd", "/scratch/seat"]);
   });
 
-  it("maps send to `rig send <to> <text> --json` (recipient from payload.to or the seat)", async () => {
+  it.each([undefined, false, true])("maps send with verify=%s to the requested CLI mode", async (verify) => {
     const calls: string[][] = [];
     const runRig = vi.fn(async (args: string[]) => { calls.push(args); return ok(); });
     const deps = buildRealDeps({ daemon: fakeDaemon(), rigBin: "/bin/rig", topologyPath: "/t/spec.yaml", runRig });
-    await deps.runAction("send", { to: "a@r", text: "hello" }, undefined);
-    expect(calls[0]).toEqual(["send", "a@r", "hello", "--json"]);
+    await deps.runAction("send", { to: "a@r", text: "hello", ...(verify === undefined ? {} : { verify }) }, undefined);
+    expect(calls[0]).toEqual(verify === true
+      ? ["send", "a@r", "hello", "--json", "--verify"]
+      : ["send", "a@r", "hello", "--json"]);
   });
 
   it("maps restart <seat> to `rig launch <rigId> <seat> --json` after up captured the rigId", async () => {

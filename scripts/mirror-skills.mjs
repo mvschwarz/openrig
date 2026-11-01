@@ -18,6 +18,7 @@ import {
   buildInternalLeakMessage,
   scanInternalLeaks,
 } from "./internal-leak-scanner.mjs";
+import { readMirrorRules } from "./leak-guard-rules.mjs";
 
 // Each shipped skill has one editable home in this repo: its copy under
 // packages/daemon/specs/agents/shared/skills/ when it has a spec edge, otherwise its copy under
@@ -571,7 +572,7 @@ function readGeneratedCheckInputs() {
     layout: readJson(join(repoRoot, "scripts/skill-edge-layout.generated.json")),
     digests: readJson(join(repoRoot, "scripts/skill-edge-digests.generated.json")),
     membership: readJson(join(repoRoot, "scripts/product-public-skills.generated.json")),
-    rules: readJson(join(repoRoot, "scripts/internal-tokens.generated.json")),
+    rules: readMirrorRules(),
   };
 }
 
@@ -581,7 +582,7 @@ function readJson(path) {
 
 function defaultGenerateControlPlaneJson() {
   const repoRoot = process.cwd();
-  // Membership, rules and layout come from the product JSON; old YAML selectors are ignored.
+  // Membership and layout come from the product JSON; old YAML selectors are ignored.
   execFileSync(
     process.execPath,
     [
@@ -607,7 +608,7 @@ function defaultReadAuthoringInputs() {
     membership: readJson(
       join(repoRoot, "scripts/product-public-skills.generated.json"),
     ),
-    rules: readJson(join(repoRoot, "scripts/internal-tokens.generated.json")),
+    rules: readMirrorRules(),
     layout: readJson(
       join(repoRoot, "scripts/skill-edge-layout.generated.json"),
     ),

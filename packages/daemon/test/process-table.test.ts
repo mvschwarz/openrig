@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readProcessTable, readProcTable } from "../src/domain/process-table.js";
-import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
+import { claudeCommandSessionToken, listNativeProcesses, processArgv, verifyCodexPaneProcess, verifyPaneIdleShell } from "../src/domain/native-process-lineage.js";
 import { defaultListProcessesStrict } from "../src/domain/resume-metadata-refresher.js";
 import { restoreProc, serveProcRoot, writeFakeProc } from "./helpers/fake-proc.js";
 
@@ -34,6 +34,22 @@ const stat = (pid: number, comm: string, state: string, ppid: number, pgrp: numb
   `${pid} (${comm}) ${state} ${ppid} ${pgrp} ${pgrp} 34816 ${tpgid} 4194560 1 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 1000 200 18446744073709551615\n`;
 
 describe("readProcTable", () => {
+  it("carries exact Codex argv from the same fake /proc sample, including a spaced value and empty arg", async () => {
+    const token = "00000000-0000-7000-8000-000000000001";
+    const root = fakeProc(0, {
+      41: { stat: stat(41, "codex", "S", 1, 41, 41, 0),
+        cmdline: `codex\0-p\0managed work\0resume\0${token}\0\0` },
+    });
+    serveProcRoot(root);
+    const [row] = await listNativeProcesses();
+    expect(row?.argv).toEqual(["codex", "-p", "managed work", "resume", token, ""]);
+    expect((await verifyCodexPaneProcess({ target: "%1", tmux: { getPanePid: async () => 41 },
+      expectedToken: token, requireResume: true }))?.process.pid).toBe(41);
+    fs.writeFileSync(path.join(root, "41", "cmdline"), `codex resume ${token}\0`);
+    expect((await listNativeProcesses())[0]?.argv).toEqual([`codex resume ${token}`]);
+    expect(await verifyCodexPaneProcess({ target: "%1", tmux: { getPanePid: async () => 41 },
+      expectedToken: token, requireResume: true })).toBeNull();
+  });
   it("gives the rows ps prints: brackets for a process without a command line, ps's escapes, lstart in local time", async () => {
     vi.stubEnv("TZ", "UTC");
     const btime = Date.UTC(2026, 9, 6, 9, 0, 0) / 1000;

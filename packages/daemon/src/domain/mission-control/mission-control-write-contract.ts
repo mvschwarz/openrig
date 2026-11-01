@@ -87,6 +87,9 @@ export interface MissionControlActionInput {
   /** OPR.0.4.4.19 FR-7 — required for `resolve`: the human's non-empty
    *  decision text. Lands durably in queue_transitions.transition_note. */
   decision?: string;
+  /** For `resolve` of a decision parked on the person it asked, from Slack: their typed words, also stored as its answer in
+   *  the same transaction as the resume. Set in process only; the route never passes it. */
+  answerText?: string;
   /** For `answer`: the question and option the person chose. Without them, `decision` is their typed answer. */
   questionId?: string;
   optionId?: string;
@@ -435,6 +438,8 @@ export class MissionControlWriteContract {
         // human-decision ceremony; typed gates record satisfaction evidence. Emits
         // queue.updated (the P2 refresh-after-action contract). The repository
         // clears blocked_on on exit; the audit's beforeState retains the park.
+        // A typed answer commits with the resume, so neither can land without the other.
+        if (humanPark && input.answerText !== undefined) this.queueRepo.recordParkedTypedReply(input.qitemId, input.answerText);
         const updateResult = this.queueRepo.updateWithinTransaction({
           qitemId: input.qitemId,
           actorSession: input.actorSession,

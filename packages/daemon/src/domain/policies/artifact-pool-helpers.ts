@@ -39,7 +39,9 @@ export interface ArtifactPoolSpec {
    * When true, artifacts whose frontmatter cannot be parsed are still
    * included with empty frontmatter. Default false: malformed frontmatter
    * causes the artifact to be excluded (matches POC behavior so that
-   * agents do not get woken about half-written drafts).
+   * agents do not get woken about half-written drafts). An opening `---`
+   * with no closing `---` line counts as malformed, including Markdown
+   * whose first line is a `---` horizontal rule; `true` still includes it.
    */
   include_malformed_frontmatter?: boolean;
 }
@@ -92,7 +94,7 @@ function readFrontmatter(filePath: string): {
   }
   const close = /\n---(?:\n|$)/.exec(text.slice(FRONTMATTER_OPEN.length - 1));
   if (!close) {
-    return { raw, frontmatter: {}, frontmatter_parse_error: null };
+    return { raw, frontmatter: {}, frontmatter_parse_error: "frontmatter closing delimiter is missing" };
   }
   const block = text.slice(FRONTMATTER_OPEN.length, FRONTMATTER_OPEN.length - 1 + close.index);
   let parsed: unknown;

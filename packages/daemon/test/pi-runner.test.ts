@@ -953,6 +953,43 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("e3");
   });
 
+  it("#2117: a catch-up Pi refuses for a saved cursor it doesn't hold is history sync, and the cursor is re-read from history", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-9" }, { catchUpSince: "ui-old" });
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-catch-up", command: "get_entries", success: false, error: "Entry not found: ui-old",
+    }));
+    // No runner ERROR line, which the pane-marker readiness fallback would read as a runner error.
+    expect(f.lines.some((line) => line.includes("[pi-runner] ERROR"))).toBe(false);
+    expect(f.lines).toContainEqual(expect.stringContaining("History catch-up didn't run (Entry not found: ui-old)"));
+    expect(f.rpc.at(-1)).toEqual({ type: "get_entries", id: "pi-runner-cursor-refresh" });
+    expect(f.sidecars.at(-1)).toMatchObject({ ready: true, lastEntryId: "ui-old" });
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-cursor-refresh", success: true, data: { entries: [{ id: "h1" }, { id: "h7" }] },
+    }));
+    expect(f.sidecars.at(-1)).toMatchObject({ ready: true, lastEntryId: "h7" });
+  });
+
+  it("#2117: on Pi, an event's own id never becomes the cursor; an explicit entryId still does", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-9" }, { catchUpSince: "e5" });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "bash_execution_update", id: "rpc-bash-1", delta: "x" }));
+    core.handlePiLine(JSON.stringify({ type: "extension_ui_request", id: "ui-1", method: "setStatus", statusKey: "k", statusText: "t" }));
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
+    core.handlePiLine(JSON.stringify({ type: "agent_start", entryId: "entry-8" }));
+    expect(f.sidecars.at(-1)!.lastEntryId).toBe("entry-8");
+  });
+
   it("an empty/id-less entries response leaves the cursor untouched (never regresses)", () => {
     const f = fakeIo();
     const core = new RunnerCore(f.io, { sessionName: SESSION, launchId: "launch-9" }, { catchUpSince: "e5" });

@@ -44,7 +44,7 @@ describe("control-plane JSON generator", () => {
     const root = tempRoot();
     const input = seedGeneratorInput(root);
     seedEdges(root);
-    const sourcePaths = [input.membershipPath, input.denylistPath, input.layoutPath];
+    const sourcePaths = [input.membershipPath, input.layoutPath];
     const sourceBytes = sourcePaths.map((path) => readFileSync(path));
 
     await generator.generateControlPlaneJson(input);
@@ -53,7 +53,6 @@ describe("control-plane JSON generator", () => {
     expect(readGenerated(input.outputDir)).toEqual(first);
     expect(sourcePaths.map((path) => readFileSync(path))).toEqual(sourceBytes);
     expect(first.membership.product_public.clean).toEqual(["alpha"]);
-    expect(first.denylist.allowed_context_lines).toEqual(["  Generic <path> placeholder"]);
     expect(first.layout.skills.alpha).toEqual({ edges: ["canonical", "plugin", "spec"], category: "core" });
     expect(first.digests.edges.plugin["alpha/SKILL.md"]).toBe(sha256("# Plugin alpha\n"));
   });
@@ -177,12 +176,15 @@ describe("control-plane JSON generator", () => {
   it("reports malformed product policy with its product path", async () => {
     const generator = await loadGenerator();
     const input = seedGeneratorInput(tempRoot());
-    const original = readFileSync(input.membershipPath);
     write(input.membershipPath, JSON.stringify({ version: 0 }));
     await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/product-public-skills\.generated\.json.*product_public/);
-    writeFileSync(input.membershipPath, original);
-    write(input.denylistPath, JSON.stringify({ charged_terms: "not-an-array" }));
-    await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/internal-tokens\.generated\.json.*charged_terms/);
+  });
+
+  it("refuses a denylist input: the leak guard's term lists come from a local file", async () => {
+    const generator = await loadGenerator();
+    const input = seedGeneratorInput(tempRoot());
+    await expect(generator.generateControlPlaneJson({ ...input, denylistPath: join(input.repoRoot, "denylist.json") }))
+      .rejects.toThrow(/OPENRIG_LEAK_GUARD_RULES/);
   });
 
   it("rejects edge file symlinks before digesting outside-root bytes", async () => {
@@ -205,18 +207,6 @@ describe("control-plane JSON generator", () => {
     expect(
       existsSync(join(input.outputDir, "skill-edge-digests.generated.json")),
     ).toBe(false);
-  });
-
-  it("rejects malformed optional exact-line allowances", async () => {
-    const generator = await loadGenerator();
-    const root = tempRoot();
-    const input = seedGeneratorInput(root);
-    seedEdges(root);
-    const original = JSON.parse(readFileSync(input.denylistPath, "utf8"));
-    for (const value of [null, "text", [42], [""], ["two\nlines"], ["two\rlines"]]) {
-      write(input.denylistPath, JSON.stringify({ ...original, allowed_context_lines: value }));
-      await expect(generator.generateControlPlaneJson(input)).rejects.toThrow(/allowed_context_lines/);
-    }
   });
 
   it("rejects edge directory symlinks before traversal or digesting outside-root bytes", async () => {
@@ -290,30 +280,22 @@ function seedEdges(root: string): void {
 function seedGeneratorInput(root: string): {
   repoRoot: string;
   membershipPath: string;
-  denylistPath: string;
   layoutPath: string;
   outputDir: string;
 } {
   const scripts = join(root, "scripts");
   const membershipPath = join(scripts, "product-public-skills.generated.json");
-  const denylistPath = join(scripts, "internal-tokens.generated.json");
   const layoutPath = join(scripts, "skill-edge-layout.generated.json");
   write(membershipPath, JSON.stringify({
     version: 0,
     product_public: { clean: ["alpha"], ship_after_fix: [], ship_misses_add: [], sanitize_borderlines_ship: [] },
     vendored_ship_with_provenance: [], not_public: {}, pending_author_public: [],
   }));
-  write(denylistPath, JSON.stringify({
-    version: 1, path_prefixes: [], seat_and_rig_patterns: [], host_patterns: [], charged_terms: [],
-    frontmatter_drop_keys: [], internal_path_globs: [],
-    section_fence: { begin: "<!-- internal:begin -->", end: "<!-- internal:end -->" },
-    allowed_context_substrings: [], allowed_context_lines: ["  Generic <path> placeholder"],
-  }));
   write(layoutPath, JSON.stringify({
     version: 0, edges: edgeConfig(),
     skills: { alpha: { edges: ["canonical", "plugin", "spec"], category: "core" } },
   }));
-  return { repoRoot: root, membershipPath, denylistPath, layoutPath, outputDir: join(root, "export") };
+  return { repoRoot: root, membershipPath, layoutPath, outputDir: join(root, "export") };
 }
 
 function edgeConfig(): Record<string, unknown> {
@@ -336,18 +318,10 @@ function edgeConfig(): Record<string, unknown> {
 function readGenerated(output: string): Record<string, any> {
   return {
     membership: readJson(join(output, "product-public-skills.generated.json")),
-    denylist: readJson(join(output, "internal-tokens.generated.json")),
     layout: readJson(join(output, "skill-edge-layout.generated.json")),
     digests: readJson(join(output, "skill-edge-digests.generated.json")),
   };
 }
-
-it("the committed internal-token mirror covers the whole substrate shared-docs class", () => {
-  const generated = readJson(join(REPO_ROOT, "scripts/internal-tokens.generated.json"));
-  const legacyPrefix = ["code", "substrate", "shared-docs", ""].join("/");
-  expect(generated.path_prefixes).toContain("substrate/shared-docs/");
-  expect(generated.path_prefixes).not.toContain(legacyPrefix);
-});
 
 function readJson(path: string): any {
   return JSON.parse(readFileSync(path, "utf8"));

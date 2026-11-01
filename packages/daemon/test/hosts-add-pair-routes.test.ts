@@ -34,16 +34,20 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { isHumanSeatSessionRef, parseSessionName } from "../src/domain/session-name.js";
 import { addHostEntry as daemonAddHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
 import { addHostEntry as cliAddHostEntry } from "../../cli/src/host-registry.js";
+import { updateHostEntry as daemonUpdateHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
+import { removeHostEntry as daemonRemoveHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
 import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
+import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { hostsRoutes } from "../src/routes/hosts.js";
 
 const BEARER = "test-bearer-token-fixture";
 
 const human = { entityId: "alex", address: "alex@external", class: "human" } as HumanFragment;
-function buildApp(queueRepo: QueueRepository, bearerToken: string | null, humanRegistry: () => LoadResult = () => ({ ok: true, entities: [human] })): Hono {
+function buildApp(queueRepo: QueueRepository, bearerToken: string | null, humanRegistry: () => LoadResult = () => ({ ok: true, entities: [human] }), settingsStore?: { resolveOne: (k: string) => { value?: unknown } }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("queueRepo" as never, queueRepo);
+    c.set("settingsStore" as never, settingsStore);
     await next();
   });
   app.route("/api/hosts", hostsRoutes({ bearerToken, humanRegistry }));
@@ -181,6 +185,179 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     expect(existsSync(join(home, "hosts.yaml"))).toBe(false);
   });
 
+  // ------------------------------------------------------------------------
+  // issue #2128 (maintainer-approved boundary): POST /api/hosts/update + /remove
+  // ------------------------------------------------------------------------
+
+  it("POST /api/hosts/update edits fields keeping id+transport fixed, returns previous+entry", async () => {
+    const add = await app.request("/api/hosts/add", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local", user: "admin", notes: "old" }),
+    });
+    expect(add.status).toBe(200);
+
+    const res = await app.request("/api/hosts/update", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ id: "vm-a", target: "vm-b.local", user: "bob", notes: "moved" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { entry: { id: string; transport: string; target: string; user: string; notes: string }; previous: { id: string; transport: string } };
+    expect(body.entry).toMatchObject({ id: "vm-a", transport: "ssh", target: "vm-b.local", user: "bob", notes: "moved" });
+    expect(body.previous).toMatchObject({ id: "vm-a", transport: "ssh" });
+    const yaml = readFileSync(join(home, "hosts.yaml"), "utf8");
+    expect(yaml).toContain("vm-b.local");
+    expect(yaml).toContain("user: bob");
+    expect(yaml).toContain("notes: moved");
+  });
+
+  it("POST /api/hosts/update cannot change the id (the body id SELECTS the entry; a rename attempt names it unknown)", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    // body.id is the SELECTOR — sending a different id targets a host that
+    // does not exist; vm-a is untouched (id+transport fixed by construction).
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "renamed", target: "x" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("unknown host id 'renamed'");
+    const yaml = readFileSync(join(home, "hosts.yaml"), "utf8");
+    expect(yaml).toContain("id: vm-a");
+    expect(yaml).not.toContain("renamed");
+  });
+
+  it("POST /api/hosts/update refuses fixed transport change", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "http" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("transport fixed");
+  });
+
+  it("POST /api/hosts/update refuses unknown field for the transport", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", url: "http://x" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("not editable");
+  });
+
+  it("POST /api/hosts/update with no changes is refused", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toMatch(/no changes/i);
+  });
+
+  it("POST /api/hosts/update clears optional fields with empty strings", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local", user: "admin", notes: "old" }) });
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", user: "", notes: "" }) });
+    expect(res.status).toBe(200);
+    const yaml = readFileSync(join(home, "hosts.yaml"), "utf8");
+    expect(yaml).not.toMatch(/user:/);
+    expect(yaml).not.toMatch(/notes:/);
+    expect(yaml).toContain("target: vm-a.local");
+  });
+
+  it("POST /api/hosts/update refuses an invalid required value and leaves bytes untouched", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const before = readFileSync(join(home, "hosts.yaml"), "utf8");
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", target: "" }) });
+    expect(res.status).toBe(400);
+    expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe(before);
+  });
+
+  it("POST /api/hosts/update on an unknown host id names it and lists known ids", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "nope", target: "x" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("unknown host id 'nope'");
+    expect(body.message).toContain("Known host ids");
+  });
+
+  it("POST /api/hosts/update refuses to touch an INVALID registry (never clobber)", async () => {
+    writeFileSync(join(home, "hosts.yaml"), "hosts: [not-valid-yaml");
+    const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", target: "x" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("refusing to modify an invalid registry");
+    expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe("hosts: [not-valid-yaml");
+  });
+
+  it("POST /api/hosts/remove deletes only the registry entry, returns previous entry", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-b", transport: "http", url: "http://vm-b" }) });
+
+    const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { entry: { id: string } };
+    expect(body.entry).toMatchObject({ id: "vm-a", transport: "ssh" });
+
+    const loaded = await app.request("/api/hosts", { headers: auth });
+    const body2 = await loaded.json() as { hosts: Array<{ id: string }> };
+    expect(body2.hosts.map(h => h.id)).toEqual(["vm-b"]);
+  });
+
+  it("POST /api/hosts/remove refuses an unknown id", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "nope" }) });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string; message: string };
+    expect(body.message).toContain("unknown host id 'nope'");
+  });
+
+  it("POST /api/hosts/remove on an INVALID registry refuses and clobbers nothing", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    writeFileSync(join(home, "hosts.yaml"), "hosts: [not-valid-yaml");
+    const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+    expect(res.status).toBe(400);
+    expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe("hosts: [not-valid-yaml");
+  });
+
+  it("POST /api/hosts/update and /remove are bearer-gated (401 without the token)", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const bare = { "Content-Type": "application/json" };
+    const r1 = await app.request("/api/hosts/update", { method: "POST", headers: bare, body: JSON.stringify({ id: "vm-a", target: "x" }) });
+    const r2 = await app.request("/api/hosts/remove", { method: "POST", headers: bare, body: JSON.stringify({ id: "vm-a" }) });
+    expect(r1.status).toBe(401);
+    expect(r2.status).toBe(401);
+  });
+
+  it("POST /api/hosts/update and /remove work without a bearer when the daemon runs tokenless", async () => {
+    const tdb = createDb();
+    migrate(tdb, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    const tokenlessApp = buildApp(new QueueRepository(tdb, new EventBus(tdb), { validateRig: () => true }), null);
+    await tokenlessApp.request("/api/hosts/add", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const up = await tokenlessApp.request("/api/hosts/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "vm-a", target: "vm-b.local" }) });
+    const rm = await tokenlessApp.request("/api/hosts/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "vm-a" }) });
+    expect(up.status).toBe(200);
+    expect(rm.status).toBe(200);
+    tdb.close();
+  });
+
+  it("POST /api/hosts/update / /remove are idempotent against re-running against the same registry", async () => {
+    await app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    const u1 = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", notes: "once" }) });
+    const u2 = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", notes: "once" }) });
+    expect(u1.status).toBe(200);
+    expect(u2.status).toBe(200);
+    const r1 = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+    const r2 = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(400); // idempotent-ish: removing again names the unknown id
+  });
+
+  // rev1-r1 D (updated for #2128 boundary): POST /add + pair handshake still
+  // remain the named family; update/remove were added as a deliberately
+  // bounded extension — their routes exist with the same bearer gating.
+  it("update/remove routes exist beside add + pair (the family now: add, update, remove, pair-request x2)", async () => {
+    const update = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "none", target: "x" }) });
+    expect(update.status).toBe(400); // route exists → not 404
+    const remove = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "none" }) });
+    expect(remove.status).toBe(400); // route exists → not 404
+  });
+
   it("the write seam is bearer-gated (401 without the token when one is configured)", async () => {
     const res = await app.request("/api/hosts/add", {
       method: "POST",
@@ -190,12 +367,13 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     expect(res.status).toBe(401);
   });
 
-  // rev1-r1 D: P1's "no generic registry-write route" pinned as a
-  // NEGATIVE — the surface is exactly add + the pair handshake; anything
-  // remove/edit-shaped does not exist.
-  it("R1-D: no generic registry-write route exists (remove/edit/PUT/DELETE all 404)", async () => {
+// rev1-r1 D (updated for #2128 boundary): P1's "no generic registry-write
+  // route" still holds for GENERIC verbs — PUT/DELETE/PATCH keep 404. The
+  // surface is now add + update + remove + the pair handshake (the issue's
+  // maintainer-approved boundary), still bearer-gated; there is no
+  // REST-generic resource route and no /edit alias.
+  it("R1-D: no GENERIC registry-write route exists (PUT/DELETE/PATCH all 404; only named add/update/remove verbs)", async () => {
     for (const [method, url] of [
-      ["POST", "/api/hosts/remove"],
       ["POST", "/api/hosts/edit"],
       ["PUT", "/api/hosts"],
       ["PUT", "/api/hosts/vps-a"],
@@ -409,6 +587,85 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(new Set(issued.map((r) => r.pairId)).size).toBe(25);
   });
 });
+
+describe("issue #2128 boundary — selection reporting and secret-field refusal at the daemon door", () => {
+    let db: Database.Database;
+    let home: string;
+    let savedHome: string | undefined;
+
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), "mh1-hosts-edit-remove-"));
+      savedHome = process.env["OPENRIG_HOME"];
+      process.env["OPENRIG_HOME"] = home;
+      db = createDb();
+      migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueItemSummarySchema, queueItemEvidenceRefSchema]);
+    });
+
+    afterEach(() => {
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+      if (savedHome === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = savedHome;
+    });
+
+    const auth = { Authorization: `Bearer ${BEARER}`, "Content-Type": "application/json" };
+
+    function makeApp(selected: string): Hono {
+      const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const fakeStore: SettingsStore = { resolveOne: (k) => ({ value: k === "host.selected" ? selected : undefined }) };
+      return buildApp(repo, BEARER, () => ({ ok: true, entities: [human] }), fakeStore);
+    }
+
+    function seed(app: Hono) {
+      return app.request("/api/hosts/add", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", transport: "ssh", target: "vm-a.local" }) });
+    }
+
+    it("POST /api/hosts/update reports wasSelected true for the selected host", async () => {
+      const app = makeApp("vm-a");
+      await seed(app);
+      const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", target: "vm-b.local" }) });
+      expect(res.status).toBe(200);
+      expect((await res.json() as { wasSelected: boolean }).wasSelected).toBe(true);
+    });
+
+    it("POST /api/hosts/update reports wasSelected false for an unselected host", async () => {
+      const app = makeApp("other-host");
+      await seed(app);
+      const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", target: "vm-b.local" }) });
+      expect(res.status).toBe(200);
+      expect((await res.json() as { wasSelected: boolean }).wasSelected).toBe(false);
+    });
+
+    it("POST /api/hosts/remove reports wasSelected true for the selected host and leaves the pointer", async () => {
+      const app = makeApp("vm-a");
+      await seed(app);
+      const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a" }) });
+      expect(res.status).toBe(200);
+      expect((await res.json() as { wasSelected: boolean }).wasSelected).toBe(true);
+      const listed = await app.request("/api/hosts", { headers: auth });
+      expect((await listed.json() as { selected: string }).selected).toBe("vm-a"); // unchanged: the route never rewrites the pointer
+    });
+
+    it("POST /api/hosts/update refuses secret-shaped fields with no_secret_values and writes nothing", async () => {
+      const app = makeApp("other-host");
+      await seed(app);
+      const before = readFileSync(join(home, "hosts.yaml"), "utf8");
+      const res = await app.request("/api/hosts/update", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", target: "vm-b.local", token: "s3cr3t-value" }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { error: string }).error).toBe("no_secret_values");
+      expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe(before);
+    });
+
+    it("POST /api/hosts/remove refuses secret-shaped fields with no_secret_values and writes nothing", async () => {
+      const app = makeApp("other-host");
+      await seed(app);
+      const before = readFileSync(join(home, "hosts.yaml"), "utf8");
+      const res = await app.request("/api/hosts/remove", { method: "POST", headers: auth, body: JSON.stringify({ id: "vm-a", token: "s3cr3t-value" }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { error: string }).error).toBe("no_secret_values");
+      expect(readFileSync(join(home, "hosts.yaml"), "utf8")).toBe(before);
+    });
+  });
 
 describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's write seam, B1)", () => {
   let db: Database.Database;

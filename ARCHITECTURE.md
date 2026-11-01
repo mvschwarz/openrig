@@ -290,9 +290,10 @@ packages.
   package, and the daemon copies its Markdown files to `$OPENRIG_HOME/reference/` when it
   starts. Files in `docs/as-built/` carry a `last-verified-against-source` commit in their
   frontmatter.
-- **Internal-leak guard** (`scripts/internal-leak-scanner.mjs`, with rules in
-  `scripts/internal-tokens.generated.json`). It refuses maintainer-internal names and paths in
-  content that ships. It runs in `generate-context-packs.mjs` (static pack sources, on every
+- **Internal-leak guard** (`scripts/internal-leak-scanner.mjs`). Its term lists come from an
+  optional local file that `OPENRIG_LEAK_GUARD_RULES` names (`scripts/leak-guard-rules.mjs`);
+  without one the term checks are skipped and every other check runs, and the release-time
+  substance gate requires it. It runs in `generate-context-packs.mjs` (static pack sources, on every
   `npm test`), in the full skill mirror apply (each public skill), in `scripts/build-package.sh`
   (the daemon `specs/` tree before it is copied into the package), and in the release-time
   substance gate (`scripts/check-substance-gate.mjs`, `npm run gate:substance`) over the packed

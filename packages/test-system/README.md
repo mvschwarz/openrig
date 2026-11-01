@@ -66,8 +66,9 @@ The remaining historical markers after their assertions are not executable proof
 The runner (`packages/daemon/scripts/run-scenarios.mjs`, over
 `packages/daemon/test/helpers/scenario-*.ts`) and its hermetic env-helper exist. The stub
 runs the four emit behaviors only from a per-seat launch script (`env.stub_scripts`); the
-step verbs `emit`, `restore`, `mutate` and `policy` parse, but the runner throws
-`UnboundActionError` when it reaches one. In CI, `queue-baton-survives-restart` runs with
+step verbs `restore`, `mutate` and `policy` are refused at load time (`UNBOUND_STEP_VERB`
+— the format names them but the runner has no shipped binding), and a non-`refocus` `emit`
+behavior throws `UnboundActionError` when the runner reaches it. In CI, `queue-baton-survives-restart` runs with
 its seed, and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` run
 healthy only (see [ci/README.md](ci/README.md)). The other ten historical scenarios are
 not yet runnable as meaningful checks, and `down-stops-every-seat` and

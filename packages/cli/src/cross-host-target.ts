@@ -72,7 +72,9 @@ export function resolveCrossHostTarget(
   const suffix = rawTarget.slice(lastAt + 1);
 
   const unregisteredHint = suffix.length > 0
-    ? `no registered host '${suffix}' — if '${suffix}' was meant as a host, check \`rig host ls\``
+    ? `no registered host '${suffix}' — if '${suffix}' is another machine's self-id (the address a cross-host message shows), `
+      + `run \`rig host doctor <alias>\` for that machine's entry if it uses http (it learns the id), or set \`hostId: ${suffix}\` on that entry in hosts.yaml (any transport); `
+      + `\`rig host ls\` lists the registered hosts`
     : undefined;
 
   if (suffix.length === 0 || base.length === 0) {

@@ -321,7 +321,7 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
       expect(row.executes).toBe(true);
     }
     for (const source of ["fresh", "rebuild", "fork:dev-impl@seat-rig"]) {
-      seedSeat();
+      seedSeat({ resumeToken: "native-abc" });
       const planned = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source, dryRun: true });
       expect(planned.ok).toBe(true);
       if (!planned.ok || !("plan" in planned)) throw new Error("expected plan");

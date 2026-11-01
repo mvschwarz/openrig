@@ -27,6 +27,10 @@
       "types": "./dist/gateway-human-registry-surface.d.ts",
       "import": "./dist/gateway-human-registry-surface.js"
     },
+    "./rosters": {
+      "types": "./dist/rosters-surface.d.ts",
+      "import": "./dist/rosters-surface.js"
+    },
     "./gateway-protocol": {
       "types": "./dist/gateway-protocol-surface.d.ts",
       "import": "./dist/gateway-protocol-surface.js"

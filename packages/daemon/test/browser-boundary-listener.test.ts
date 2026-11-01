@@ -15,7 +15,7 @@ import { remoteJsonRequest } from "../src/domain/hosts/remote-daemon-http.js";
 import { DaemonClient as CliDaemonClient } from "../../cli/src/client.js";
 import { DaemonClient as TuiDaemonClient } from "../../tui/src/daemon-client.js";
 
-const SELF = "openrig-vm.taile8a08.ts.net";
+const SELF = "openrig-vm.tailnet-example.ts.net";
 type Server = ReturnType<typeof serve>;
 
 function listen(app: Hono, hostname: string): Promise<{ server: Server; port: number }> {
@@ -92,7 +92,7 @@ describe("mirror of the server.ts order on a real listener: boundary, then termi
     expect(upper.status).toBe(400);
     expect(dotted.status).toBe(200);
     expect(handled - before).toBe(6);
-    for (const host of [`evil.example:${port}`, `other-vm.taile8a08.ts.net:${port}`]) {
+    for (const host of [`evil.example:${port}`, `other-vm.tailnet-example.ts.net:${port}`]) {
       const r = await raw(port, { Host: host });
       expect(r.status, host).toBe(403);
       expect(JSON.parse(r.body).code).toBe("untrusted_host");

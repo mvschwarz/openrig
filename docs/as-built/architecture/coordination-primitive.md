@@ -178,15 +178,58 @@ the destination's orchestrator when one is derivable, otherwise to the
 destination itself, and that seat may be dead. Overdue claims go to their
 destination. Repeated detections reuse the existing finding without changing
 its route; when the source condition resolves, the sweep closes its own finding.
+Previously, falling out of a reporting query could itself close a delivery or
+unclaimed finding. An unconfirmed retry, a fresh human-notification post window,
+an unreadable human registry or a larger reporting-age setting could therefore
+look like successful recovery. These findings now require source evidence:
+closure, pickup or parking of the work, a verified/accepted wake, or a posted
+notification for the current human recipient and episode, as appropriate to the
+finding. `delivered-ack-pending`, `indeterminate:…`, missing results and unrelated
+legacy human receipts do not prove resolution. Uncertainty keeps an existing
+finding open without itself sending another wake or creating another finding.
+A verified wake resolves a wake failure, not an unclaimed obligation: delivery
+does not prove pickup.
+
+A legacy human notice with no owner-notification history can still resolve from
+the existing item-scoped posted ledger when its recipient is confirmed human.
+This covers older pending asks and parks without inventing an episode that was
+never recorded. A registered alias needs a readable registry to establish its
+human recipient; reserved human references remain known during an outage.
+Legacy receipts carry no recipient key, so a destination reroute requires a new
+matching notification episode. A legacy park is accepted only when no earlier
+notice or reroute predates it, and later history contains only receipts or
+asking-agent reroutes within that park. A re-park, an exit from the park or an
+ambiguous append cannot establish the same recipient without owner history;
+the finding waits for a new matching episode or other source resolution.
+Rerouting only the asking agent within an otherwise unchanged park preserves
+its human recipient (`blockedOn`).
+Modern notifications still require their current episode, and an unrelated
+legacy human receipt cannot resolve an agent wake.
+
+A known hold still leaves recovery with the existing mechanism: an ask on
+Steering without an alert, a wake held by the seat typing guard, or a live
+quiet-release job. Its closure note names that disposition rather than claiming
+delivery or pickup. An unreadable quiet hold is not positive closure evidence.
+Claimed work in either `pending` or `in-progress` uses the same pickup derivation;
+returning a row to `pending` while retaining its claim no longer hides a later
+stall or closes its existing stalled-claim finding. A retained failed wake cannot
+override that pickup evidence. The agent's claim still does not establish delivery
+of a separate notification to a person.
+
 That automatic closure records `stuck-sweep@system` as the actor in both the
-transition and the `queue.updated` audit event. Previously it credited the
-finding's source agent with the detector's action. The finding's source,
+transition and the `queue.updated` audit event, with the source evidence in the
+delivery and unclaimed-obligation closure notes. Previously it credited the finding's source agent
+with the detector's action. The finding's source,
 destination and claim remain its existing ownership records; the underlying work
 is not reassigned, and existing transition history is not rewritten.
 
-`queue-stuck-sweep.test.ts` checks this with migrated SQLite: pending and claimed
-findings close once, their transition and event name the sweep, and ownership
-stays intact. The posted-human-notice case also checks the actor while leaving
+`queue-stuck-sweep-resolution.test.ts` checks unconfirmed retries, retained
+claims, current human-notification episodes and registry outages with migrated
+SQLite, including positive recovery controls and no repeated send on an
+unresolved retry. `quiet-hold-custody.test.ts` checks existing findings with
+readable and unreadable quiet custody. `queue-stuck-sweep.test.ts` checks that
+pending and claimed findings close once, name the sweep in their transition and
+event, and keep their ownership. The posted-human-notice case also checks the actor while leaving
 the person's original ask open. These checks exercise the detector and queue
 repository, not a live agent or connector.
 

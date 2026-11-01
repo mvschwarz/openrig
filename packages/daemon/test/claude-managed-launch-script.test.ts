@@ -13,11 +13,11 @@ const open: Database.Database[] = [];
 afterEach(() => { for (const db of open.splice(0)) db.close(); });
 
 // `file` is the exact bytes of `claude` on the daemon's PATH; it must be a script, which runs on every platform.
-async function prepared(file: string, link?: boolean) {
+async function prepared(file: string, link?: boolean, recordedExecutable?: boolean, isolatedHome?: boolean) {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "claude-script-launch-")));
   const cwd = path.join(root, "seat"); const bin = path.join(root, "bin");
   mkdirSync(cwd); mkdirSync(bin); mkdirSync(path.join(root, "home"));
-  const target = path.join(link ? root : bin, link ? "real-claude" : "claude");
+  const target = path.join(link || recordedExecutable ? root : bin, link || recordedExecutable ? "real-claude" : "claude");
   writeFileSync(target, file); chmodSync(target, 0o755);
   if (link) symlinkSync(target, path.join(bin, "claude"));
   const db = new Database(":memory:"); open.push(db);
@@ -27,7 +27,10 @@ async function prepared(file: string, link?: boolean) {
   db.prepare("INSERT INTO nodes VALUES ('node','claude-code',?)").run(cwd);
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation-1',1)");
   const managed = new ClaudeManagedLaunch(db, { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home") }, {});
-  return { managed: await managed.prepare({ nodeId: "node" }, "auto"), target };
+  const selectedHome = path.join(root, "selected-account");
+  if (isolatedHome) mkdirSync(selectedHome);
+  return { managed: await managed.prepare({ nodeId: "node", ...(recordedExecutable ? { executable: target } : {}),
+    ...(isolatedHome ? { accountHome: selectedHome } : {}) }, "auto"), target, resolver: managed, selectedHome };
 }
 const printsHelp = `printf '%s\\n' '${HELP}'\n`;
 
@@ -41,6 +44,16 @@ it("reports it through a symlink, whose realpath is the frozen executable", asyn
   const { managed, target } = await prepared(`#!/bin/sh\n${printsHelp}`, true);
   expect(managed.executable).toBe(target);
   expect(managed.executableIsScript).toBe(true);
+});
+
+it.each([false, true])("continues with the recorded executable outside daemon PATH and isolated home=%s", async isolated => {
+  const { managed, target, resolver, selectedHome } = await prepared(`#!/bin/sh\n${printsHelp}`, false, true, isolated);
+  if (isolated) expect(managed.configDir).toBe(selectedHome);
+  expect(managed.executable).toBe(target);
+  expect(managed.command(["--resume", "same-conversation"])).toContain(target);
+  await expect(resolver.prepare({ nodeId: "node" }, "auto")).rejects.toThrow("unavailable on the intended PATH");
+  writeFileSync(target, `#!/bin/sh\n${printsHelp}\n# changed`);
+  expect(() => managed.assertCurrent()).toThrow("context changed");
 });
 
 // Not through prepare(): it runs `--help` on the file first, and a file with no #! at byte 0 can't be exec'd on every

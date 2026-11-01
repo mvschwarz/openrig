@@ -21,15 +21,6 @@ const REQUIRED_MEMBERSHIP_CATEGORIES = [
   "ship_misses_add",
   "sanitize_borderlines_ship",
 ];
-const REQUIRED_DENYLIST_ARRAYS = [
-  "path_prefixes",
-  "seat_and_rig_patterns",
-  "host_patterns",
-  "charged_terms",
-  "frontmatter_drop_keys",
-  "internal_path_globs",
-  "allowed_context_substrings",
-];
 
 export async function generateControlPlaneJson({
   repoRoot,
@@ -40,7 +31,6 @@ export async function generateControlPlaneJson({
 }) {
   const policyFiles = [
     ["product-public-skills.generated.json", membershipPath],
-    ["internal-tokens.generated.json", denylistPath],
     ["skill-edge-layout.generated.json", layoutPath],
   ].map(([name, override]) => {
     const source = resolve(repoRoot, "scripts", name);
@@ -49,16 +39,17 @@ export async function generateControlPlaneJson({
     }
     return { name, source };
   });
-  [membershipPath, denylistPath, layoutPath] = policyFiles.map(({ source }) => source);
+  if (denylistPath !== undefined) {
+    throw new Error("The leak guard's term lists come from the local file OPENRIG_LEAK_GUARD_RULES names; --denylist is no longer supported.");
+  }
+  [membershipPath, layoutPath] = policyFiles.map(({ source }) => source);
   const membership = readJson(membershipPath);
-  const denylist = readJson(denylistPath);
   const layout = readJson(layoutPath);
   validateMembership(membership, membershipPath);
-  validateDenylist(denylist, denylistPath);
   const digests = buildEdgeDigests({ repoRoot, layout });
 
   mkdirSync(outputDir, { recursive: true });
-  // These three files are authority, despite their historical .generated names.
+  // These two files are authority, despite their historical .generated names.
   // Export exact bytes if requested; an in-place refresh never rewrites them.
   for (const { name, source } of policyFiles) {
     const destination = resolve(outputDir, name);
@@ -194,33 +185,6 @@ function validateMembership(value, sourcePath) {
   }
   if (!isStringArray(value.pending_author_public)) {
     invalid(sourcePath, "pending_author_public must be an array");
-  }
-}
-
-function validateDenylist(value, sourcePath) {
-  if (!isObject(value)) invalid(sourcePath, "denylist must be an object");
-  for (const field of REQUIRED_DENYLIST_ARRAYS) {
-    if (Object.hasOwn(value, field) && !isStringArray(value[field])) {
-      invalid(sourcePath, `${field} must be an array`);
-    }
-  }
-  for (const field of REQUIRED_DENYLIST_ARRAYS) {
-    if (!isStringArray(value[field])) {
-      invalid(sourcePath, `${field} must be an array`);
-    }
-  }
-  if (Object.hasOwn(value, "allowed_context_lines") && (
-    !isStringArray(value.allowed_context_lines) ||
-    value.allowed_context_lines.some((line) => line === "" || /[\r\n]/.test(line))
-  )) {
-    invalid(sourcePath, "allowed_context_lines must be an array of nonempty single-line strings");
-  }
-  if (
-    !isObject(value.section_fence) ||
-    typeof value.section_fence.begin !== "string" ||
-    typeof value.section_fence.end !== "string"
-  ) {
-    invalid(sourcePath, "section_fence.begin and section_fence.end are required");
   }
 }
 

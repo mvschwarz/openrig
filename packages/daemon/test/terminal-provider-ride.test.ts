@@ -94,15 +94,26 @@ describe("view-composer partition vectors", () => {
     expect(v.opened[0]!.readOnly).toBe(true);
   });
 
-  it("ssh host → ssh '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
+  it("an isolated view resolves the remote daemon's server with a terminal and preserves read-only", () => {
+    const rw = composeView("v", [member({ seat: "s@r", host: "vm1", tmuxSession: "s@r" })], { ...ctxWith([SSH_HOST]), localTmuxServerMode: "isolated" });
+    expect(rw.opened[0]!.paneCommand).toBe("ssh -t 'admin@vm1.local' 'env OPENRIG_HOST_SELECTED=local rig terminal attach -- '\"'\"'s@r'\"'\"''");
+
+    const ro = composeView("v", [member({ seat: "s@r", host: "vm1", readOnly: true })], { ...ctxWith([SSH_HOST]), localTmuxServerMode: "isolated" });
+    expect(ro.opened[0]!.paneCommand).toBe("ssh -t 'admin@vm1.local' 'env OPENRIG_HOST_SELECTED=local rig terminal attach --read-only -- '\"'\"'s@r'\"'\"''");
+
+    const nouser = composeView("v", [member({ seat: "s@r", host: "vm2" })], { ...ctxWith([SSH_HOST_NO_USER]), localTmuxServerMode: "isolated" });
+    expect(nouser.opened[0]!.paneCommand).toBe("ssh -t '10.0.0.9' 'env OPENRIG_HOST_SELECTED=local rig terminal attach -- '\"'\"'s@r'\"'\"''");
+  });
+
+  it("inherited ssh host → ssh -t '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
     const rw = composeView("v", [member({ seat: "s@r", host: "vm1", tmuxSession: "s@r" })], ctxWith([SSH_HOST]));
-    expect(rw.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(rw.opened[0]!.paneCommand).toBe(`ssh -t ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
 
     const ro = composeView("v", [member({ seat: "s@r", host: "vm1", readOnly: true })], ctxWith([SSH_HOST]));
-    expect(ro.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", true).map(shellQuote).join(" "))}`);
+    expect(ro.opened[0]!.paneCommand).toBe(`ssh -t ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", true).map(shellQuote).join(" "))}`);
 
     const nouser = composeView("v", [member({ seat: "s@r", host: "vm2" })], ctxWith([SSH_HOST_NO_USER]));
-    expect(nouser.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('10.0.0.9')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(nouser.opened[0]!.paneCommand).toBe(`ssh -t ${shellQuote('10.0.0.9')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
   });
 
   // Guard G1 — the ssh destination is STRUCTURED registry data injected into a
@@ -113,7 +124,7 @@ describe("view-composer partition vectors", () => {
     const v = composeView("v", [member({ seat: "s@r", host: "evil", tmuxSession: "s@r" })], ctxWith([NASTY]));
     expect(v.opened).toHaveLength(1);
     // single-quoted, embedded quote POSIX-escaped ('\'') — metacharacters are literal.
-    expect(v.opened[0]!.paneCommand).toBe(`ssh ${shellQuote("u'x@a b; rm -rf /")} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(v.opened[0]!.paneCommand).toBe(`ssh -t ${shellQuote("u'x@a b; rm -rf /")} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
     // the dangerous run never becomes its own shell word:
     expect(v.opened[0]!.paneCommand).not.toContain("; rm -rf / tmux");
   });
@@ -452,6 +463,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
         requests.push({ method, params });
         if (opts?.respond) return opts.respond(method, params);
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ tab_id: "wG:t2", label: pane.label }] };
         return { type: "layout_apply", layout: { workspace_id: "wG", tab_id: "wG:t2" } };
       },
     };
@@ -503,7 +515,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.pages).toBe(1);
     // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
     // this create reply carries no default tab id).
-    // #707: the applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
+    // The applied page is followed by one pane.list read confirming its labelled seat.
     // #1604: the open workspaces are read first, so a re-open can be numbered.
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "layout.apply", "pane.list", "tab.focus"]);
     expect(requests[1]!.params).toEqual({ focus: false, label: "v" });
@@ -545,8 +557,9 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "t" });
     const res = await adapter.openView(view);
-    expect(res.ok).toBe(true);
-    expect(res.opened).toEqual(["a@r"]);
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded).toEqual([expect.objectContaining({ seat: "a@r", code: "pane_unconfirmed" })]);
     // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
     expect(requests.map((r) => r.method)).toEqual(["workspace.list", "workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
     expect((requests[4]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
@@ -584,10 +597,11 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
         if (method === "workspace.create") return { type: "workspace_created", workspace_id: "wG" };
+        if (method === "pane.list") return { type: "pane_list", panes: [{ tab_id: "wG:t2", label: pane.label }] };
         if (method !== "layout.apply") return { type: "ok" };
         applies += 1;
         if (applies === 2) throw new Error("herdr error: bad tree");
-        return { type: "layout_apply" };
+        return { type: "layout_apply", layout: { tab_id: "wG:t2" } };
       },
     });
     const adapter = new HerdrAdapter({ transportFactory: () => transport });

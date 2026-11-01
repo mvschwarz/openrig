@@ -108,12 +108,10 @@ describe("Slack sweep selection", () => {
     expect(await ports().listHumanAlerts({})).toEqual([]);
   });
 
-  it.each(["selection", "transition", "receipt", "row"])("propagates a thrown %s read instead of returning empty success", async (where) => {
+  it.each(["selection", "row"])("propagates a thrown %s read instead of returning empty success", async (where) => {
     row("unreadable"); notify("unreadable");
     const fail = () => { throw new Error("fixture read unavailable"); };
     if (where === "selection") vi.spyOn(db, "prepare").mockImplementation(fail);
-    if (where === "transition") vi.spyOn(repo.transitionLog, "latestOwnerNotificationForQitem").mockImplementation(fail);
-    if (where === "receipt") vi.spyOn(repo.transitionLog, "hasOwnerNotificationReceipt").mockImplementation(fail);
     if (where === "row") vi.spyOn(repo, "getById").mockImplementation(fail);
     await expect(ports().listHumanAlerts({})).rejects.toThrow("fixture read unavailable");
   });

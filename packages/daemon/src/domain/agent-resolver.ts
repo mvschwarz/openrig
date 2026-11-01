@@ -98,7 +98,7 @@ export function assertShippableSubstance(sources: readonly ShippableSubstanceSou
       findings.push({
         path: normalizedPath,
         kind: "internal-path",
-        detail: "contains substrate/shared-docs/",
+        detail: "contains a private shared-docs path",
       });
     }
     if (declaresLoreTaxonomy(normalizedPath, text)) {

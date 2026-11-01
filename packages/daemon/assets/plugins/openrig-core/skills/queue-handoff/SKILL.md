@@ -31,7 +31,11 @@ without an owner.
   receiver gets a wake-ping plus the durable queue item.
 - **Blocked on another agent's work.** Use `rig queue block <id> --on <child>`
   (or `rig queue update <id> --state blocked --blocked-on <child>`). The item
-  stays active and returns to pending when its blocker completes.
+  stays active and returns to pending when its blocker completes. Waiting on
+  something outside the queue, such as CI or a long job? Park the row:
+  `rig queue block <id> --on external:<what> --wake-after <duration>
+  --continuation "<what resumes>"`. It stays yours and reads parked, not
+  stalled, and the timer wakes you.
 - **Escalating to the human.** Make the escalation a durable attention
   item, not just a chat message.
 
@@ -127,6 +131,10 @@ inverted the default-nudge polarity.
 - **Close what you hold.** A row you claimed ends in a handoff or an `update --state done --closure-reason …`; `rig queue overdue` lists claimed rows past their deadline.
 - **Use the write's response.** Read the row back only when the response doesn't show what you need (an indeterminate outcome, a field the compact output left out, downstream wake or pickup, a team custody rule): openrig-user, "After a queue write".
 - **Brief for the model that will read it.** Before handing a peer open-ended work, check which model it runs: `delegating-work`, "Check what kind of agent you're handing it to".
+
+**Write so the receiver can act after one read.** Open with the request, decision or change that affects their next step. Use full words and ordinary spacing. Keep the limits that change that step in the message; link the supporting detail. Put reference IDs and paths after the action. Send an additional message when it changes what the receiver should do. Put the complete request near the start of the task body; its summary helps discovery and does not replace reading the body.
+
+This is writing guidance, not a delivery filter or length limit. Preserve uncertainty and limits that affect the action. Necessary early references, acknowledgements, requested progress updates and completion returns remain allowed. The sender judges how much context is useful.
 
 ## Queue-body hygiene (token + parse safety)
 

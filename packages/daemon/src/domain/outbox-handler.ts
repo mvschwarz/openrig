@@ -1,3 +1,4 @@
+import type { ExpectedConversation } from "./expected-conversation.js";
 import type Database from "better-sqlite3";
 
 /**
@@ -114,12 +115,36 @@ export class OutboxHandler {
    *  era-stamp column, so the writer degrades (omits it) instead of throwing. */
   private readonly hasIdentityProvenanceColumn: boolean;
   private readonly hasIdentityPrincipalColumn: boolean;
+  private readonly hasGuardDeliveryColumn: boolean;
 
   constructor(db: Database.Database) {
     this.db = db;
     const columns = (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).map((col) => col.name);
     this.hasIdentityProvenanceColumn = columns.includes("identity_provenance");
     this.hasIdentityPrincipalColumn = columns.includes("identity_principal");
+    this.hasGuardDeliveryColumn = columns.includes("guard_delivery");
+  }
+
+  /** The optional original-conversation constraint shares the existing durable delivery receipt. */
+  expectedIdentity(outboxId: string): ExpectedConversation | undefined {
+    if (!this.hasGuardDeliveryColumn) return undefined;
+    const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(outboxId) as { guard_delivery: string | null } | undefined;
+    return row?.guard_delivery ? JSON.parse(row.guard_delivery).expectedIdentity : undefined;
+  }
+
+  bindExpectedIdentity(input: OutboxRecordInput & { outboxId: string }, expected: ExpectedConversation): void {
+    if (!this.hasGuardDeliveryColumn) throw new OutboxHandlerError("expected_identity_unavailable", "The durable conditional-delivery schema is unavailable.");
+    this.db.transaction(() => {
+      const prior = this.getById(input.outboxId), bound = this.expectedIdentity(input.outboxId);
+      if (prior && (prior.senderSession !== input.senderSession || prior.destinationSession !== input.destinationSession || prior.body !== input.body)
+        || bound && ["nodeId", "sessionName", "runtime", "nativeId"].some(key => bound[key as keyof ExpectedConversation] !== expected[key as keyof ExpectedConversation]))
+        throw new OutboxHandlerError("delivery_identity_conflict", "This delivery ID already selects different input or an original conversation.");
+      if (!prior) this.record(input);
+      const row = this.db.prepare("SELECT guard_delivery FROM outbox_entries WHERE outbox_id=?").get(input.outboxId) as { guard_delivery: string | null };
+      const receipt = row.guard_delivery ? JSON.parse(row.guard_delivery) : { ids: [input.outboxId] };
+      this.db.prepare("UPDATE outbox_entries SET guard_delivery=? WHERE outbox_id=?")
+        .run(JSON.stringify({ ...receipt, expectedIdentity: expected }), input.outboxId);
+    })();
   }
 
   record(input: OutboxRecordInput): OutboxEntry {
@@ -204,13 +229,18 @@ export class OutboxHandler {
   assertRetentionCapacity(nodeId: string, body: string): void {
     // Provisional bounded defaults. Historical/retired rows and already committed
     // overflow are deliberately not evicted to make these active quotas fit.
-    const usage = this.db.prepare(`SELECT count(*) AS count, coalesce(sum(length(CAST(body AS BLOB))),0) AS bytes
-      FROM outbox_entries WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`)
-      .get(nodeId) as { count: number; bytes: number };
+    const usage = this.retentionUsage(nodeId);
     const size = Buffer.byteLength(body, "utf8");
     if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
       throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
     }
+  }
+
+  /** Current active quota inputs; reading them neither retires nor retries retained custody. */
+  retentionUsage(nodeId: string): { count: number; bytes: number } {
+    return this.db.prepare(`SELECT count(*) AS count, coalesce(sum(length(CAST(body AS BLOB))),0) AS bytes
+      FROM outbox_entries WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`)
+      .get(nodeId) as { count: number; bytes: number };
   }
 
   retire(outboxId: string, actor: string, reason: string): OutboxEntry {

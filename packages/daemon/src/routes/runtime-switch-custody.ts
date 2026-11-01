@@ -9,7 +9,7 @@ export interface RuntimeSwitchCustodyRefusal {
 }
 
 /**
- * Slice 16's narrow check (founder decision-20261014-0454-1214-successor-first: extra generation checks narrowed to
+ * Slice 16's narrow check (the successor-first decision: extra generation checks narrowed to
  * the switch itself). While a runtime switch is in progress, and after it commits, two processes may act as one seat.
  * Only the generations a switch record names are refused, and only on the seat it names:
  * - after commit, the predecessor's generation (`occupant_retired_by_switch`);

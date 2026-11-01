@@ -85,7 +85,7 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
     it("matches CGNAT IPv4 100.64.0.0/10 — second octet 64..127 inclusive", () => {
       expect(isTailscaleBind("100.64.0.0")).toBe(true);
       expect(isTailscaleBind("100.64.0.5")).toBe(true);
-      expect(isTailscaleBind("100.95.124.51")).toBe(true);
+      expect(isTailscaleBind("100.88.0.20")).toBe(true);
       expect(isTailscaleBind("100.127.255.255")).toBe(true);
     });
 
@@ -179,16 +179,16 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
     });
 
     // Scenario 2: Tailscale IPv4 bind, no bearer → OK
-    it("(2) tailscale IPv4 100.95.124.51 with no bearer → OK", async () => {
+    it("(2) tailscale IPv4 100.88.0.20 with no bearer → OK", async () => {
       await expect(
-        assertBindAuthInvariant({ host: "100.95.124.51", bearerToken: null }),
+        assertBindAuthInvariant({ host: "100.88.0.20", bearerToken: null }),
       ).resolves.toBeUndefined();
     });
 
     // Scenario 3: Tailscale magicDNS hostname → OK (DNS resolves to tailscale IP)
     it("(3) magicDNS hostname that resolves to tailscale IP → OK", async () => {
       const dns = await import("node:dns");
-      const spy = vi.spyOn(dns.promises, "lookup").mockResolvedValue({ address: "100.95.124.51", family: 4 } as unknown as never);
+      const spy = vi.spyOn(dns.promises, "lookup").mockResolvedValue({ address: "100.88.0.20", family: 4 } as unknown as never);
       try {
         await expect(
           assertBindAuthInvariant({ host: "host.tail-scale-net.ts.net", bearerToken: null }),
@@ -283,9 +283,9 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
       const result = findTailscaleIpInInterfaces({
         lo0: [iface({ address: "127.0.0.1", internal: true })],
         en0: [iface({ address: "192.168.1.5" })],
-        utun4: [iface({ address: "100.95.124.51" })],
+        utun4: [iface({ address: "100.88.0.20" })],
       });
-      expect(result).toBe("100.95.124.51");
+      expect(result).toBe("100.88.0.20");
     });
 
     it("returns the tailscale ULA IPv6 when only the IPv6 tailnet address is present", () => {
@@ -306,7 +306,7 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
     it("skips internal interfaces (loopback) even if the address looked CGNAT-shaped", () => {
       // Defense in depth: an internal flag should win over IP match.
       const result = findTailscaleIpInInterfaces({
-        lo0: [iface({ address: "100.95.124.51", internal: true })],
+        lo0: [iface({ address: "100.88.0.20", internal: true })],
       });
       expect(result).toBeNull();
     });

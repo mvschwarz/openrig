@@ -121,6 +121,31 @@ describe("custody of asks held for quiet hours", () => {
     expect(ladderTouched(row)).toBe(false);
   });
 
+  it.each([false, true])("an existing finding needs readable quiet custody before closing (unreadable: %s)", async (unreadable) => {
+    const row = await held();
+    // A finding from before the hold: its continued existence is independent of
+    // whether this pass would report the now-held source as a new failure.
+    const finding = await repo.create({ sourceSession: "asker@r", destinationSession: "orch@r", body: "prior wake failure", nudge: false,
+      tags: ["stuck-sweep-finding", `stuck-sweep:undelivered-wake:${row.qitemId}`, `recovery-for:${row.qitemId}`] });
+    let prepare: ReturnType<typeof vi.spyOn> | undefined;
+    if (unreadable) {
+      const original = db.prepare.bind(db);
+      prepare = vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
+        if (sql.includes("SELECT 1 FROM watchdog_jobs WHERE policy = 'quiet-release'")) throw new Error("fixture custody read failed");
+        return original(sql);
+      }) as typeof db.prepare);
+    }
+    try {
+      await sweep();
+      expect(repo.getById(finding.qitemId)?.state).toBe(unreadable ? "pending" : "done");
+      if (!unreadable) expect(repo.listTransitions(finding.qitemId).at(-1)?.transitionNote).toContain("held by quiet-release job");
+      expect(posts).toHaveLength(0);
+      expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", claimedAt: null });
+    } finally {
+      prepare?.mockRestore();
+    }
+  });
+
   it("a hold whose release job was stopped from outside (the only way one loses its job) is found, by the sweep and by the ladder", async () => {
     const row = await held();
     asBaton(row);

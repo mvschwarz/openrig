@@ -120,6 +120,11 @@ or **"Not tested by OpenRig"**, which means exactly that. You're welcome to run 
 
 ## 6. Submit it to openrig.dev/rigs
 
+Before you submit, run `rig bundle check` on the folder at the commit you'll submit. openrig-registry's registry check
+runs the same check, with the latest published OpenRig, on the folder at your `ref`, and any finding fails it. A team
+made with `rig export` has no README of its own: add one and declare it in `rig.yaml` as `docs: [{ path: README.md }]`
+(see [section 1](#1-lay-out-the-folder)).
+
 Open a pull request to [mvschwarz/openrig-registry](https://github.com/mvschwarz/openrig-registry) that adds one file,
 `registry/submissions/<your-team>.yaml`, with three fields: `repository` (your GitHub repository URL), `folder` (the
 folder holding `rig.yaml`, or `.` for the repository root) and `ref` (a branch, tag or commit). No pull requests? Open

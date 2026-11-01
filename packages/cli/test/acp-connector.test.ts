@@ -122,6 +122,26 @@ describe("rig acp run", () => {
     expect(q.task().notes.join("\n")).toMatch(/cancel requested at \S+; upstream inference and spend are unknown/);
   });
 
+  it("keeps waiting for cancellation when recording the cancel request fails", async () => {
+    const q = memoryQueue("scenario:slow");
+    const update = q.queue.update;
+    q.queue.update = async (id, change) => {
+      if (/^ACP run \S+: cancel requested at/.test(change.note)) throw new Error("queue unavailable");
+      return update(id, change);
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let cancel!: () => void;
+    const cancelRequested = new Promise<void>((resolve) => { cancel = resolve; });
+    const outcome = await runAcpAssignment(q.queue, options({
+      cancelRequested,
+      progress: (line) => { if (line.startsWith("step ")) cancel(); },
+    }));
+    expect(outcome.kind).toBe("cancelled");
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("queue unavailable"));
+    expect(outcomeNote(q)).toContain("outcome cancelled");
+    errors.mockRestore();
+  });
+
   it("closes an unanswered permission row as stale when the turn is cancelled, and tells the agent cancelled", async () => {
     const q = memoryQueue("scenario:permission");
     let cancel!: () => void;

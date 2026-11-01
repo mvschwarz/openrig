@@ -9,6 +9,8 @@ import { lstartToMinTs } from "./codex-thread-id.js";
 export interface ReconcileResult {
   checked: number;
   detached: number;
+  /** The sessions this reconcile marked detached. */
+  detachedSessionIds: string[];
   /** Not on this daemon's tmux server, yet the seat's last observed process is still running: most likely on a tmux
    *  server this daemon can't see (it didn't inherit the seats' TMUX). Left as they were, never detached, so nothing
    *  relaunches them. `parent` is that process's immediate parent when the process table shows it; it may be the tmux
@@ -58,6 +60,7 @@ export class Reconciler {
 
     let checked = 0;
     let detached = 0;
+    const detachedSessionIds: string[] = [];
     const unseen: ReconcileResult["unseen"] = [];
     const errors: { sessionId: string; error: string }[] = [];
     let table: Promise<ProcessTableRow[] | null> | null = null;
@@ -105,8 +108,10 @@ export class Reconciler {
             });
           });
           const persistedEvent = txn();
-          this.eventBus.notifySubscribers(persistedEvent);
+          // Detached once the transaction commits, even if notifying afterwards throws.
           detached++;
+          detachedSessionIds.push(session.id);
+          this.eventBus.notifySubscribers(persistedEvent);
         } catch (err) {
           errors.push({
             sessionId: session.id,
@@ -116,7 +121,7 @@ export class Reconciler {
       }
     }
 
-    return { checked, detached, unseen, errors };
+    return { checked, detached, detachedSessionIds, unseen, errors };
   }
 
   /** The seat's last observed process, as a conservative hint that it still runs, not proof of identity: the last pid

@@ -16,6 +16,7 @@
 import type { AgentRow, ExplorerRow, FleetSnapshot } from "./types.js";
 import type { MarkSeg } from "./topology/runtime-marks.js";
 import { rowStatusGlyph } from "./topology/glyphs.js";
+import { hostExplorerLabel } from "./topology/host-label.js";
 
 interface KeyParts {
   kind: string;
@@ -60,9 +61,12 @@ function keyDepth(row: ExplorerRow): number {
 
 /** the label with its legacy indent + list glyph stripped; pod/folder rows
  * keep their GENUINE ▾/▸ (they really collapse), hosts/rigs lose theirs */
-function contentOf(row: ExplorerRow, parsed: KeyParts, snap: FleetSnapshot): string {
+function contentOf(row: ExplorerRow, parsed: KeyParts, snap: FleetSnapshot, width: number): string {
   const stripped = row.label.replace(/^\s+/, "");
-  if (parsed.kind === "host") return `⊕ ${stripped.replace(/^[▾⌄] /, "")}`;
+  if (parsed.kind === "host") {
+    const host = snap.hosts.find(host => row.key === `host:${host.name}`);
+    return `⊕ ${host ? hostExplorerLabel(host, width - 2) : stripped.replace(/^[▾⌄] /, "")}`;
+  }
   if (parsed.kind === "rig") return `${rigPresence(parsed, snap) === null ? "?" : "▦"} ${stripped.replace(/^[▾⌄] /, "")}`;
   if (parsed.kind === "pod") return stripped.replace(/^[▾▸] /, (m) => m.startsWith("▾") ? "⌄ " : "› ").replace(/ \(\d+\)$/, ""); // count moves to meta
   if (parsed.kind === "scopes-mission") return stripped.replace(/^[▾▸] /, (m) => m.startsWith("▾") ? "⌄ " : "› ");
@@ -172,9 +176,9 @@ function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: n
     const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "┃ " : "  ")).join("");
     const branch = isLast[i] ? "┗━ " : "┣━ ";
     const parsed = parseKey(row.key)!;
-    const content = contentOf(row, parsed, snap);
-    const meta = metaOf(row, snap);
     const prefix = ` ${guides}${branch}`;
+    const content = contentOf(row, parsed, snap, width - prefix.length);
+    const meta = metaOf(row, snap);
     // S19 round-4 (guard finding 4): agent rows carry a STATUS BADGE run so
     // the served-truth glyph paints its activity ROLE (color is for status —
     // the one colored thing on the row; non-status icons stay monochrome)

@@ -16,6 +16,12 @@ type: `openrig-urgent`, `urgent-only` and `sends-only`. Sibling seats keep their
 
 Lifecycle work is refused at `openrig-urgent` and `urgent-only`, as at `hold`.
 
+A terminal member (`runtime: terminal`) defaults to `sends-only`, which holds OpenRig's own notices. Set one
+to `off` and those notices, such as park reminders and other watchdog messages, type into whatever the pane
+is running, and a shell prompt runs each line as a command, From and To lines included: OpenRig doesn't check
+a terminal pane's foreground process. `openrig-urgent` and `draft-aware` type only into a recognized empty agent composer, so
+a shell prompt holds them. Keep the default for a seat that may fall back to a shell.
+
 Runtime permissions are separate. Recipient and interactive-prompt checks still
 apply. `--raw` and `--force` do not bypass the typing guard. A deliberate
 `--dangerously-interact --reason` remains available at every interruption level

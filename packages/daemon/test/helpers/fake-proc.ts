@@ -16,6 +16,8 @@ export interface FakeProcess {
   startedAt: string;
   /** The command line, its arguments joined by spaces; empty for a kernel thread. */
   command: string;
+  /** Exact cmdline arguments when a test needs argv boundaries. */
+  argv?: string[];
 }
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -26,13 +28,13 @@ export function writeFakeProc(processes: FakeProcess[]): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "fake-proc-"));
   roots.push(root);
   fs.writeFileSync(path.join(root, "stat"), "cpu  1 2 3\nbtime 0\n");
-  for (const { pid, ppid, pgid, tpgid, name, startedAt, command } of processes) {
+  for (const { pid, ppid, pgid, tpgid, name, startedAt, command, argv } of processes) {
     const ticks = Date.parse(startedAt) / 10;
     if (!Number.isInteger(ticks)) throw new Error(`not an lstart: ${startedAt}`);
     fs.mkdirSync(path.join(root, String(pid)));
     fs.writeFileSync(path.join(root, String(pid), "stat"),
       `${pid} (${name}) S ${ppid} ${pgid} ${pgid} 34816 ${tpgid} 4194560 1 0 0 0 0 0 0 0 20 0 1 0 ${ticks} 1000 200\n`);
-    fs.writeFileSync(path.join(root, String(pid), "cmdline"), command ? `${command}\0` : "");
+    fs.writeFileSync(path.join(root, String(pid), "cmdline"), argv ? `${argv.join("\0")}\0` : command ? `${command}\0` : "");
   }
   return root;
 }

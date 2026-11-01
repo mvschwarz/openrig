@@ -140,10 +140,16 @@ describe("queue writes refused for a host token the daemon doesn't know", () => 
       ["SSH-declared host", { status: 502, data: { error: "remote_queue_write_failed", hostId: "ssh-1", failureClass: "unsupported-transport", detail: "ssh" } }],
       ["unreadable registry", { status: 502, data: { error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "registry", detail: "not found" } }],
       ["unknown rig", { status: 400, data: { error: "unknown_destination_rig", message: "no rig 'portfolio'" } }],
+      // #2276: the daemon validates a new row's human-facing fields before its first write.
+      ["missing human-route fields", { status: 400, data: { error: "human_route_fields_required", message: "requires evidence_ref", missingFields: ["evidence_ref"] } }],
+      ["an invalid human notification", { status: 400, data: { error: "invalid_human_notification", message: "humanAlert is true or false." } }],
+      ["invalid human questions", { status: 400, data: { error: "invalid_human_questions", message: "humanQuestions require a human destination" } }],
+      ["a reply-to on a decision", { status: 400, data: { error: "reply_to_requires_update", message: "replyTo is accepted only with humanIntent update" } }],
+      ["a reply-to naming no row", { status: 400, data: { error: "reply_to_not_found", message: "replyTo names no qitem on this host" } }],
     ];
     for (const [label, reply] of PROVEN) {
       it(`says it for ${label}, with stdout and exit unchanged`, async () => {
-        const to = label === "unknown rig" ? "ops@portfolio" : "dev@rig-b@host-unknown";
+        const to = (reply as { status: number }).status === 400 ? "ops@portfolio" : "dev@rig-b@host-unknown";
         await run(["create", "--destination", to, "--body", "b", "--summary", "s"], [reply]);
         const r = reply as { status: number; data: unknown };
         expect(stdout).toEqual([JSON.stringify(r.data)]);
@@ -159,6 +165,7 @@ describe("queue writes refused for a host token the daemon doesn't know", () => 
       ["a remote's refusal", { status: 502, data: { error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "remote-error", remoteStatus: 400, detail: "HTTP 400" } }],
       ["an auth failure", { status: 502, data: { error: "remote_queue_write_failed", hostId: "vps-b", failureClass: "auth-failed", detail: "401" } }],
       ["an internal error", { status: 500, data: { error: "internal_error", message: "boom" } }],
+      ["a 400 this list doesn't name", { status: 400, data: { error: "summary_evidence_not_persistable", message: "x" } }],
     ];
     for (const [label, reply] of UNPROVEN) {
       it(`never says it after ${label}`, async () => {
@@ -167,6 +174,17 @@ describe("queue writes refused for a host token the daemon doesn't know", () => 
         expect(process.exitCode).toBe((reply as { status: number }).status >= 500 ? 2 : 1);
       });
     }
+
+    it("a decision row to a person without its evidence says no row was created, right after the request ID (#2276)", async () => {
+      const refused = { status: 400, data: { error: "human_route_fields_required", message: "Human-routed qitems require evidence_ref", missingFields: ["evidence_ref"] } };
+      await run(["create", "--destination", "ops@portfolio", "--body", "b", "--summary", "s"], [refused]);
+      const lines = stderr.filter((l) => l.startsWith("Queue create request ID:") || l.startsWith("No row was created: "));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^Queue create request ID: qitem-[0-9]{14}-[0-9a-f]{16} \(not proof of persistence\)/);
+      expect(lines[1]).toBe("No row was created: the daemon refused it before writing anything (human_route_fields_required).");
+      expect(stdout).toEqual([JSON.stringify(refused.data)]);
+      expect(process.exitCode).toBe(1);
+    });
 
     it("never says it when the connection drops (the write may have committed)", async () => {
       await expect(run(["create", "--destination", "dev@rig-b@vps-b", "--body", "b", "--summary", "s"], [new DaemonConnectionError("socket hang up")]))

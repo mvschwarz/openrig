@@ -80,7 +80,7 @@ async function describeLineageFailure(input: {
     const rows = pid ? await Promise.resolve((input.listProcesses ?? listNativeProcesses)()).catch((): NativeProcessRow[] => []) : [];
     if (!pid || !rows.some((row) => row.pid === pid)) return "The pane's process could not be found in the process listing (the listing may have failed), so the runtime could not be verified";
     const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows };
-    const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact })
+    const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact, requireArgv: true })
       : input.variant === "claude_conversation" ? !!await observeClaudePaneProcess({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation })
       : input.variant === "claude_runtime" ? !!await observeClaudePaneRuntime(observation)
       : !!(input.expectedToken && findExactNativeResumeProcess(rows, pid, "claude-code", input.expectedToken, input.rotation));
@@ -148,6 +148,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
    *  A caller that re-runs the check in a polling loop passes false until the attempt whose text it shows. */
   explainFailure?: boolean;
   now?: () => Date;
+  /** Selected-history restore fences its exact launched binding after awaited observations. */
+  assertCurrent?: () => boolean;
 }): Promise<PaneIdentityReconcileResult> {
   const observedAt = (input.now ?? (() => new Date()))().toISOString();
   const identityStore = new SeatIdentityStore(input.db);
@@ -158,6 +160,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     return { ok: false, detail: `tmux pane lookup failed: ${(error as Error).message}` };
   }
   if (panes.length !== 1) {
+    if (input.assertCurrent && !input.assertCurrent()) return { ok: false, detail: "Selected seat changed during native proof" };
     const registeredPane = input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null;
     identityStore.upsert({
       nodeId: input.nodeId,
@@ -205,7 +208,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     runtimeMatch = "match";
     const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
-      requireResume: input.requireExactResumeLineage === true });
+      requireResume: input.requireExactResumeLineage === true, requireArgv: true });
     const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
     if (native?.panePid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (claudeProcessProof) {
@@ -271,6 +274,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   // Persist the replacement pane before the verdict so both records describe
   // the same current binding. A non-green verdict remains applicable and
   // therefore keeps the public topology in attention_required.
+  if (input.assertCurrent && !input.assertCurrent()) return { ok: false, detail: "Selected seat changed during native proof" };
   input.sessionRegistry.updateBinding(input.nodeId, {
     tmuxSession: input.sessionName,
     tmuxPane: pane.id,
@@ -419,7 +423,11 @@ export class SeatAttentionReconciler {
     // The latest runtime hook still says the seat waits on a person (an approval, a picker, an elicitation) and nothing
     // newer was recorded. A prompt declined or answered with no hook after it reads that way for good, and sends stay
     // refused while the pane can't show the prompt ended. Only someone who saw it end can say so.
-    const hook = agentActivityStore.getLatestForNode({ nodeId: session.nodeId, sessionName });
+    const hook = agentActivityStore.getLatestForNode({
+      nodeId: session.nodeId,
+      sessionName,
+      order: session.runtime === "claude-code" ? "source" : "arrival",
+    });
     const hookClassActive = latestHookWaitsOnPerson(hook, session.runtime) || latestHookPermissionPending(hook, session.runtime);
 
     if (!startupClassActive && !derivedOutcome && !identityClassActive && !hookClassActive) {
@@ -609,6 +617,7 @@ export class SeatAttentionReconciler {
     const activity = agentActivityStore.getLatestForNode({
       nodeId: session.nodeId,
       sessionName,
+      order: session.runtime === "claude-code" ? "source" : "arrival",
     });
 
     if (activity && activity.stale !== true && POSITIVE_STATES.has(activity.state)) {

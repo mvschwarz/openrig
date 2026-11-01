@@ -179,7 +179,11 @@ export async function runAcpAssignment(queue: AcpQueue, options: AcpRunOptions):
       if (turnOver || cancelRequestedAt) return;
       cancelRequestedAt = new Date().toISOString();
       peer.notify("session/cancel", { sessionId });
-      await queue.update(row.qitemId, { note: `ACP run ${options.runId}: cancel requested at ${cancelRequestedAt}; upstream inference and spend are unknown unless the provider shows them` });
+      try {
+        await queue.update(row.qitemId, { note: `ACP run ${options.runId}: cancel requested at ${cancelRequestedAt}; upstream inference and spend are unknown unless the provider shows them` });
+      } catch (error) {
+        console.error(`[rig acp] could not record the cancel request: ${String(error)}`);
+      }
     });
     // A detach settles the turn here even when the agent keeps its stdout open after stdin closes.
     const detached = new Promise<never>((_, reject) => {

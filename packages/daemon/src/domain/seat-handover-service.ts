@@ -4,6 +4,7 @@ import { lstartToMinTs } from "./codex-thread-id.js";
 import type Database from "better-sqlite3";
 import { readSeatEffort } from "./seat-effort.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -29,6 +30,7 @@ import { findOtherSessionOwner } from "./session-owner.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
+import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste, STARTUP_UNCONFIRMED_REASON } from "./startup-submission-evidence.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -80,6 +82,7 @@ export interface SeatHandoverMutationResult {
     startupContextDelivered: boolean;
     provenanceRecordWritten: false;
   };
+  restorePacket?: { status: "unconfirmed"; reason: string };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
    *  rebuild: EXACTLY which durable artifacts primed the successor, which
    *  declared addresses were gaps, and (when the chain is empty) the named
@@ -99,6 +102,16 @@ export type SeatHandoverResult =
   | { ok: false; code: "discovered_not_found"; message: string; guidance: string }
   | { ok: false; code: "tmux_probe_failed" | "handover_commit_failed" | "successor_create_failed" | "context_delivery_failed"; message: string; guidance: string }
   | Extract<SeatStatusResult, { ok: false }>;
+
+type ClaudeRestorePacketObservation =
+  | { state: "clear" }
+  | { state: "staged" }
+  | { state: "unverified"; reason: "unobservable" | "unclear"; settling: boolean };
+
+type RestorePacketDelivery =
+  | { ok: true; confirmation: "confirmed" }
+  | { ok: true; confirmation: "unconfirmed"; reason: string }
+  | { ok: false; message: string };
 
 interface NodeRow {
   id: string;
@@ -194,7 +207,7 @@ interface SeatHandoverServiceDeps {
    */
   authoredRecapResolver?: (seatRef: string) => { address: string; chainLength: number } | { absentReason: string };
   /**
-   * S19 (territory ruling qitem-20260827001530, EXACT bounds): ONE narrow call into the
+   * S19 (territory ruling, EXACT bounds): ONE narrow call into the
    * activity oracle at the completion/rebind commit point so seat-keyed activity state
    * treats the cutover as its own visible event and the successor's rung inventory
    * starts unpromoted (never inheriting the retiree's rung authority). Optional: absent
@@ -291,6 +304,13 @@ export class SeatHandoverService {
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
       if (planResult.ok) {
+        // A preview must not approve a fork source the real run refuses: resolve it the same way.
+        const parsed = parseHandoverSource(input.source);
+        const status = this.statusService.getStatus(input.seatRef);
+        if (parsed.ok && parsed.source.mode === "fork" && parsed.source.ref && status.ok) {
+          const fork = this.resolveForkSource(parsed.source.ref, this.lookupNode(status.status).runtime);
+          if (!fork.ok) return fork;
+        }
         return { ok: true, plan: planResult.plan };
       }
       switch (planResult.code) {
@@ -392,33 +412,9 @@ export class SeatHandoverService {
     // mid-swap abort for a condition knowable up front.
     let forkSource: { kind: "native_id"; value: string; pendingIdAllowed: true } | null = null;
     if (parsed.source.mode === "fork") {
-      const forkRef = parsed.source.ref ?? latestSession.session_name;
-      const discovery = discoverResumeToken(this.db, forkRef);
-      if (!discovery.ok) {
-        return {
-          ok: false,
-          code: discovery.failure.code === "session_not_found" ? "fork_source_not_found" : "resume_token_unavailable",
-          message: discovery.failure.message,
-          guidance: "Fork needs a resolvable native conversation id. Inspect the source session with: rig ps --nodes",
-        };
-      }
-      if (!discovery.result.nativeId) {
-        return {
-          ok: false,
-          code: "resume_token_unavailable",
-          message: `No native resume id is discoverable for fork source "${forkRef}" — the conversation may not have produced output yet. No successor was created and the seat is untouched.`,
-          guidance: "Retry after the source session has a native conversation id, or use --source fresh.",
-        };
-      }
-      if (node.runtime && discovery.result.runtime && node.runtime !== discovery.result.runtime) {
-        return {
-          ok: false,
-          code: "runtime_mismatch",
-          message: `Seat expects runtime "${node.runtime}", but fork source "${forkRef}" is "${discovery.result.runtime}".`,
-          guidance: "Fork from a source session that runs the seat's runtime.",
-        };
-      }
-      forkSource = { kind: "native_id", value: discovery.result.nativeId, pendingIdAllowed: true };
+      const fork = this.resolveForkSource(parsed.source.ref ?? latestSession.session_name, node.runtime);
+      if (!fork.ok) return fork;
+      forkSource = { kind: "native_id", value: fork.nativeId, pendingIdAllowed: true };
     }
 
     // Already-created successor: route straight through the discovered->commit
@@ -480,8 +476,10 @@ export class SeatHandoverService {
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
     let permissionOverride: ReturnType<NativePermissionStore["launchOverride"]>;
+    let claudeMcp: ClaudeMcp | undefined;
     try {
       permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, node.runtime ?? "");
+      claudeMcp = node.runtime === "claude-code" ? readSeatClaudeMcp(this.db, node.id) : undefined;
     } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
       guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
     const effectivePosture = permissionOverride.launchPosture ?? successorPosture;
@@ -536,7 +534,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), claudePermissions: permissionOverride.claudePermissions, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), claudePermissions: permissionOverride.claudePermissions, claudeMcp, codexPermissions: permissionOverride.codexPermissions, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -562,6 +560,7 @@ export class SeatHandoverService {
     //    continuity verify (a blank occupant is a relaunch, not a handover).
     //    discovered is operator-prepared and needs no delivery.
     let contextDelivered = false;
+    let restorePacket: SeatHandoverMutationResult["restorePacket"];
     // OPR.0.5.3.5 mini-req 7 — the authored recap pointer leg, resolved through the injected
     // reader; every outcome labeled (present with chain depth / named absence / omitted when
     // the resolver itself is absent).
@@ -577,6 +576,7 @@ export class SeatHandoverService {
       // packet as a NAMED line, never a silent omission.
       const resolved = "recap" in predecessorRecapResolution ? predecessorRecapResolution : null;
       const delivered = await this.deliverRestorePacket(launch.tmuxSession, {
+        runtime: node.runtime,
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
@@ -598,7 +598,11 @@ export class SeatHandoverService {
           guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
         };
       }
-      contextDelivered = true;
+      if (delivered.confirmation === "unconfirmed") {
+        restorePacket = { status: "unconfirmed", reason: delivered.reason };
+      } else {
+        contextDelivered = true;
+      }
     }
 
     // OPR.0.5.5.5 — per-source execution outcome, recorded on the result so the
@@ -689,6 +693,7 @@ export class SeatHandoverService {
       reason,
       operator,
       contextDelivered,
+      restorePacket,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
       launchToken,
@@ -717,6 +722,7 @@ export class SeatHandoverService {
     reason: string;
     operator: string | null;
     contextDelivered: boolean;
+    restorePacket?: SeatHandoverMutationResult["restorePacket"];
     /** Launch-scraped resume token for a fresh successor (persisted at commit). */
     launchToken: { token: string; resumeType?: string } | null;
     /** Source-bound generation reserved before a fresh successor started; null for discovered seats. */
@@ -825,6 +831,7 @@ export class SeatHandoverService {
       operator: input.operator,
       discovered,
       contextDelivered: input.contextDelivered,
+      restorePacket: input.restorePacket,
       launchToken: input.launchToken,
       occupantGeneration: input.occupantGeneration,
       appliedLaunch: input.appliedLaunch,
@@ -967,6 +974,7 @@ export class SeatHandoverService {
   private async deliverRestorePacket(
     successorSession: string,
     info: {
+      runtime: string | null;
       seatRef: string;
       reason: string;
       departingSession: string;
@@ -979,7 +987,7 @@ export class SeatHandoverService {
       authoredRecap?: { address: string; chainLength: number };
       authoredRecapAbsentReason?: string;
     },
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
     const sent = await this.tmuxAdapter.sendText(successorSession, packet);
     if (!sent.ok) {
@@ -995,7 +1003,72 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    return { ok: true };
+    if (info.runtime === "claude-code") {
+      const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
+      if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
+      if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"
+        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+
+      // Retry only when full-text captures show this exact packet still in Claude's composer.
+      await this.sleep(200);
+      const beforeRetry = await this.readClaudeRestorePacketComposer(successorSession, packet);
+      if (beforeRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
+      if (beforeRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: beforeRetry.reason === "unobservable"
+        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+
+      const retry = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
+      if (!retry.ok) {
+        return { ok: false, message: (retry as { message?: string }).message ?? "retry submit failed" };
+      }
+      const afterRetry = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
+      if (afterRetry.state === "clear") return { ok: true, confirmation: "confirmed" };
+      if (afterRetry.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterRetry.reason === "unobservable"
+        ? STARTUP_UNCONFIRMED_REASON.unobservable : STARTUP_UNCONFIRMED_REASON.unclear };
+      return { ok: false, message: STARTUP_UNCONFIRMED_REASON.staged };
+    }
+    return { ok: true, confirmation: "confirmed" };
+  }
+
+  private async waitForClaudeRestorePacketComposer(
+    session: string,
+    packet: string,
+  ): Promise<ClaudeRestorePacketObservation> {
+    let consecutiveStaged = 0;
+    let lastUnverified: ClaudeRestorePacketObservation = { state: "unverified", reason: "unobservable", settling: false };
+    for (let attempt = 0; attempt < 26; attempt++) {
+      const state = await this.readClaudeRestorePacketComposer(session, packet);
+      if (state.state === "clear") return state;
+      if (state.state === "staged") {
+        consecutiveStaged += 1;
+        if (consecutiveStaged >= 2) return state;
+      } else {
+        consecutiveStaged = 0;
+        lastUnverified = state;
+        if (!state.settling) return state;
+      }
+      if (attempt < 25) await this.sleep(200);
+    }
+    return lastUnverified;
+  }
+
+  private async readClaudeRestorePacketComposer(
+    session: string,
+    packet: string,
+  ): Promise<ClaudeRestorePacketObservation> {
+    let pane: string | null;
+    try {
+      // The predecessor's retained scrollback can still contain a Claude
+      // composer. Only the visible screen is evidence about this successor.
+      pane = await this.tmuxAdapter.capturePaneScreen(session);
+    } catch {
+      return { state: "unverified", reason: "unobservable", settling: false };
+    }
+    if (!pane?.trim()) return { state: "unverified", reason: "unobservable", settling: false };
+    const staged = inspectStartupStagedText(pane, packet, "claude-code");
+    if (staged === "clear" || staged === "staged") return { state: staged };
+    const collapsedPaste = startupOwnCollapsedPaste(pane, packet, "claude-code");
+    const noInputLine = startupNoInputLine(pane, "claude-code");
+    return { state: "unverified", reason: noInputLine ? "unobservable" : "unclear", settling: collapsedPaste || noInputLine };
   }
 
   private checkRuntimeMismatch(nodeRuntime: string | null, discoveredRuntime: string): SeatHandoverResult | null {
@@ -1008,6 +1081,37 @@ export class SeatHandoverService {
       message: `Seat expects runtime "${nodeRuntime}", but discovered successor is "${discoveredRuntime}".`,
       guidance: "Use a discovered successor with a matching runtime hint.",
     };
+  }
+
+  /** The fork source's native conversation id, or the refusal the handover returns. The dry run asks the same question. */
+  private resolveForkSource(forkRef: string, runtime: string | null | undefined):
+    { ok: true; nativeId: string } | Extract<SeatHandoverResult, { ok: false }> {
+    const discovery = discoverResumeToken(this.db, forkRef);
+    if (!discovery.ok) {
+      return {
+        ok: false,
+        code: discovery.failure.code === "session_not_found" ? "fork_source_not_found" : "resume_token_unavailable",
+        message: discovery.failure.message,
+        guidance: "Fork needs a resolvable native conversation id. Inspect the source session with: rig ps --nodes",
+      };
+    }
+    if (!discovery.result.nativeId) {
+      return {
+        ok: false,
+        code: "resume_token_unavailable",
+        message: `No native resume id is discoverable for fork source "${forkRef}" — the conversation may not have produced output yet. No successor was created and the seat is untouched.`,
+        guidance: "Retry after the source session has a native conversation id, or use --source fresh.",
+      };
+    }
+    if (runtime && discovery.result.runtime && runtime !== discovery.result.runtime) {
+      return {
+        ok: false,
+        code: "runtime_mismatch",
+        message: `Seat expects runtime "${runtime}", but fork source "${forkRef}" is "${discovery.result.runtime}".`,
+        guidance: "Fork from a source session that runs the seat's runtime.",
+      };
+    }
+    return { ok: true, nativeId: discovery.result.nativeId };
   }
 
   private lookupNode(status: SeatStatus): NodeRow {
@@ -1036,6 +1140,7 @@ export class SeatHandoverService {
     operator: string | null;
     discovered: ReturnType<DiscoveryRepository["getDiscoveredSession"]> & NonNullable<unknown>;
     contextDelivered: boolean;
+    restorePacket?: SeatHandoverMutationResult["restorePacket"];
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
     appliedLaunch: AppliedLaunchObservation | null;
@@ -1139,6 +1244,7 @@ export class SeatHandoverService {
         source: input.reportedSource.raw,
         reason: input.reason,
         operator: input.operator,
+        ...(input.restorePacket ? { restorePacket: input.restorePacket } : {}),
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
       });
@@ -1219,6 +1325,7 @@ export class SeatHandoverService {
         eventSeq: committed.event.seq,
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
+        ...(input.restorePacket ? { restorePacket: input.restorePacket } : {}),
         sideEffects: {
           departingSessionKilled: false,
           startupContextDelivered: input.contextDelivered,

@@ -81,6 +81,7 @@ export class CodexResumeAdapter {
     seatCodexHome?: string,
     // The seat's own permission envelope, read live; it replaces the posture decision, as on the pod-aware path.
     codexPermissions?: CodexMemberPermissions,
+    beforeNativeDispatch?: () => boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -143,9 +144,13 @@ export class CodexResumeAdapter {
     ) + ownRoots.filter((root): root is string => !!root).map((root) => ` --add-dir ${shellQuote(root)}`).join("");
 
     const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", codexHome ? `CODEX_HOME=${shellQuote(codexHome)}` : ""].filter(Boolean);
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
+    const staged = this.options.seatLaunchEnvironment
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex", ...(seatCodexHome ? { codexHome: seatCodexHome } : {}) })
-      : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd);
+      : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd;
+    if (beforeNativeDispatch && !beforeNativeDispatch()) return { ok: false, code: "attention_required", message: "Selected history changed during Codex resume preparation; no native command was sent." };
+    const textResult = beforeNativeDispatch
+      ? await this.tmux.sendShellCommand(tmuxSessionName, staged, () => { if (!beforeNativeDispatch()) throw new Error("Selected history changed before Codex resume input"); })
+      : await this.tmux.sendShellCommand(tmuxSessionName, staged);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }

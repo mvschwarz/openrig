@@ -3,7 +3,7 @@ import { assessLocalDaemonOwner, ForeignLocalDaemonError, type LocalDaemonOwner 
 export { ForeignLocalDaemonError } from "./local-daemon-owner.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
-import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
+import { getOpenRigHome, readOpenRigEnv, readOpenRigUrl } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { FETCH_HEADERS_TIMEOUT_MS, nodeHttpFetch } from "./long-request-fetch.js";
 
@@ -154,8 +154,8 @@ interface DaemonClientOptions {
   /** The seat this client acts as, for a client built per authenticated caller; default: the process env. */
   sessionName?: string;
   /** With sessionName: the caller whose grant the MCP adapter checked, sent as X-OpenRig-Principal (JSON of its source,
-   *  id and, for a Cloud grant, grant id and version; never a credential). */
-  principal?: { source: "file" | "cloud"; id: string; grant?: string; version?: number | string };
+   *  id and, for a grant-service grant, grant id and version; never a credential). */
+  principal?: { source: "file" | "grant-service"; id: string; grant?: string; version?: number | string };
 }
 
 /** Routing state published by daemon start, not a health check or sibling-home discovery. */
@@ -187,6 +187,29 @@ export class DaemonClient {
   private originUnknown = false;
   private readonly sessionName?: string;
   private readonly principal?: DaemonClientOptions["principal"];
+
+  /** Isolated terminal tools require this home's durable identity, even on loopback. */
+  async isLocalInstance(): Promise<boolean> {
+    if (this.remoteTarget) return false;
+    const origin = (await import("./local-origin.js")).readLocalOrigin();
+    return !!origin && await this.matchesInstanceIdentity(origin);
+  }
+
+  private async matchesInstanceIdentity(origin: string): Promise<boolean> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const target = await Promise.race([
+        (async () => {
+          const res = await this.fetchImpl(`${this.baseUrl.replace(/\/+$/, "")}/healthz`, { signal: controller.signal });
+          return res.ok ? (await res.json() as { selfHostId?: unknown }).selfHostId : undefined;
+        })(),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(this.timeoutMs, 1000)); }),
+      ]);
+      return target === origin;
+    } catch { return false; }
+    finally { clearTimeout(timer); controller.abort(); }
+  }
 
   private async identityHeaders(): Promise<Record<string, string>> {
     const { headers, local } = await this.senderHeaders();
@@ -230,7 +253,7 @@ export class DaemonClient {
     const localHeaders = senderIdentityHeaders(undefined, this.sessionName);
     const session = localHeaders[SENDER_IDENTITY_HEADER];
     if (!session || session.split("@").length >= 3) return { headers: localHeaders, local: false };
-    const directTarget = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+    const directTarget = readOpenRigUrl();
     if (!this.remoteTarget && !directTarget) return { headers: localHeaders, local: true };
     // Imported here, not at the top: it loads better-sqlite3 and yaml, which only a seat on a direct endpoint needs.
     const origin = this.originSelfHostId ?? (await import("./local-origin.js")).readLocalOrigin();
@@ -256,7 +279,7 @@ export class DaemonClient {
     if (baseUrl) {
       this.baseUrl = baseUrl;
     } else {
-      const envUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
+      const envUrl = readOpenRigUrl();
       if (envUrl) {
         this.baseUrl = envUrl;
       } else {

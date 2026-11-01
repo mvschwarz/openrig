@@ -90,7 +90,10 @@ export interface RigNode {
 export interface HostNode {
   /** Stable transport key (`local` for this daemon); separate from display identity. */
   id?: string;
+  /** Stable host identity used by navigation and command targets. */
   name: string;
+  /** Operator-configured name for presentation, never a routing key. */
+  displayName?: string;
   reachable: boolean;
   rigs: RigNode[];
 }

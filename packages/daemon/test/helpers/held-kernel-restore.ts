@@ -90,7 +90,7 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
   }
   const snapshot = snapshotCapture.captureSnapshot(rig.id, "manual");
   live.clear();
-  await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id);
+  const detachedAtStart = new Set((await new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }).reconcile(rig.id)).detachedSessionIds);
 
   if (opts.automaticReject) vi.spyOn(restoreOrchestrator, "restore").mockImplementationOnce(async () => {
     entered(); await gate;
@@ -98,7 +98,7 @@ export async function heldRestore(opts: { at: "create" | "launch"; launchFails?:
   });
 
   let automatic!: Promise<{ errors: string[] }>;
-  const tracker = await bootKernelIfNeeded({ rigRepo, sessionRegistry, eventBus, bootstrapOrchestrator: setup.bootstrapOrchestrator,
+  const tracker = await bootKernelIfNeeded({ rigRepo, sessionRegistry, eventBus, bootstrapOrchestrator: setup.bootstrapOrchestrator, detachedAtStart,
     specsDir: "/tmp", cwdOverride: "/tmp", degradedTimeoutMs: 0, probeRuntimes: async () => ({ claudeCode: "ok", codex: "ok" }), log: () => {},
     restoreLostKernel: rigId => automatic = restoreExistingRigUnattended({ rigRepo, snapshotRepo, snapshotCapture, restoreOrchestrator,
       runtimeAdapters: { "claude-code": adapter } as never, tmuxAdapter: tmux }, rigId, () => true),

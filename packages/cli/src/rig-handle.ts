@@ -24,6 +24,12 @@ export type HandleResolution =
   // name posted this way cannot reach the wrong rig.
   | { kind: "passthrough"; handle: string };
 
+/** A rig list entry as the daemon writes it: a string id and name, and archivedAt a string or null. */
+function isSummaryEntry(entry: unknown): boolean {
+  const rig = (entry ?? {}) as Record<string, unknown>;
+  return typeof rig.id === "string" && typeof rig.name === "string" && (rig.archivedAt === null || typeof rig.archivedAt === "string");
+}
+
 /**
  * Resolve a rig handle (rig name OR id) to a concrete rig id, mirroring the
  * `/api/rigs/summary` path `rig up` uses. Resolution is a PRE-STEP: each
@@ -49,7 +55,9 @@ export async function resolveRigHandle(
   client: DaemonClient,
   handle: string,
   // `archived: true` matches names among ARCHIVED rigs instead (for `rig unarchive`, whose target is archived).
-  opts: { archived?: boolean } = {},
+  // `strict: true` reads a rig list with any malformed entry as unavailable (passthrough), for a caller that must not
+  // count an incomplete list as an answer.
+  opts: { archived?: boolean; strict?: boolean } = {},
 ): Promise<HandleResolution> {
   let summaries: RigSummaryEntry[];
   try {
@@ -59,6 +67,7 @@ export async function resolveRigHandle(
     if (res.status !== 200 || !Array.isArray(res.data)) {
       return { kind: "passthrough", handle };
     }
+    if (opts.strict && !res.data.every(isSummaryEntry)) return { kind: "passthrough", handle };
     summaries = res.data;
   } catch {
     return { kind: "passthrough", handle };

@@ -93,6 +93,8 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
         },
         body: JSON.stringify(body),
       });
+      // Only the status is used; release unread bodies without delaying delivery on cleanup.
+      void res.body?.cancel().catch(() => {});
       if (!res.ok) {
         return { ok: false, error: `webhook POST ${res.status}` };
       }

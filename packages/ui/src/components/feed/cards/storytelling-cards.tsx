@@ -537,7 +537,7 @@ export interface AdapterSliceRow {
  *   - the slice lives under the `backlog` mission
  *
  * Exported so the predicate is a discrete, testable surface — guard
- * BLOCKING qitem-20260518093643 flagged that the original filter
+ * review flagged that the original filter
  * (rawStatus alone) over-matched any-mission candidate slices.
  */
 export function isBacklogCandidateSlice(slice: AdapterSliceRow): boolean {

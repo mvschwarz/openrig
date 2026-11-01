@@ -1,3 +1,7 @@
+import { activityGrantsSchema } from "./migrations/143_activity_grants.js";
+import { environmentBindingsSchema } from "./migrations/144_environment_bindings.js";
+import { nodeAccountHomeSchema } from "./migrations/141_node_account_home.js";
+import { escalationTargetRefsSchema } from "./migrations/126_escalation_target_refs.js";
 import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_readings.js";
 // The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
@@ -6,6 +10,8 @@ import { claudeTokenReadingsSchema } from "./migrations/134_claude_token_reading
 
 import { nodeClaudePermissionsSchema } from "./migrations/139_node_claude_permissions.js";
 import { identityPrincipalSchema } from "./migrations/140_identity_principal.js";
+import { sessionAgentRunnerSchema } from "./migrations/141_session_agent_runner.js";
+import { nodeClaudeMcpSchema } from "./migrations/142_node_claude_mcp.js";
 import { nodeCodexPermissionsSchema } from "./migrations/137_node_codex_permissions.js";
 import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
@@ -265,6 +271,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueDelegatedDecisionSchema,
   contextUsageWatchdogUnitsSchema,
   nodeAdvisorSchema,
+  escalationTargetRefsSchema,
   operationCorrelationSchema,
   terminalPolicySchema,
   streamDispositionsSchema,
@@ -279,4 +286,9 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeClaudePermissionsSchema,
   nodeCodexPermissionsSchema,
   identityPrincipalSchema,
+  sessionAgentRunnerSchema,
+  nodeAccountHomeSchema,
+  nodeClaudeMcpSchema,
+  activityGrantsSchema,
+  environmentBindingsSchema,
 ];

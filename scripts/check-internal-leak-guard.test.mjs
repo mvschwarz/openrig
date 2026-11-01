@@ -43,6 +43,33 @@ test("full mode passes a clean tracked tree and ignores untracked files", () => 
   });
 });
 
+test("without a rules file the term checks are skipped with a note; the file the environment names turns them on", () => {
+  requireGuard();
+  withRepo((repo, rules) => {
+    writeFileSync(rules, JSON.stringify({ ...fixtureRules(), charged_terms: ["private-term"] }));
+    write(join(repo, "README.md"), "a private-term detail\n");
+    git(repo, "add", "README.md");
+    git(repo, "commit", "-m", "tracked term");
+    const env = { ...process.env };
+    delete env.OPENRIG_LEAK_GUARD_RULES;
+    const guard = (extra) => spawnSync(process.execPath, [GUARD, "--repo", repo, "--mode", "full"],
+      { cwd: repo, encoding: "utf8", env: { ...env, ...extra } });
+
+    const skipped = guard({});
+    assert.equal(skipped.status, 0, skipped.stderr);
+    assert.match(skipped.stderr, /No leak-guard rules file .*the term checks are skipped/);
+
+    const named = guard({ OPENRIG_LEAK_GUARD_RULES: rules });
+    assert.notEqual(named.status, 0);
+    assert.match(named.stderr, /README\.md/);
+    assert.match(named.stderr, /private-term/);
+
+    const missing = guard({ OPENRIG_LEAK_GUARD_RULES: join(repo, "absent.json") });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /Rules file not found/);
+  });
+});
+
 test("optional exact-line rules reach the full guard and malformed values are refused", () => {
   withRepo((repo, rulesPath) => {
     const line = "Generic operator-agent@<seat> example";

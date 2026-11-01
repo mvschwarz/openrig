@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
@@ -83,6 +84,45 @@ describe("createDaemon startup composition", () => {
   });
   afterAll(() => {
     delete process.env.OPENRIG_NO_KERNEL;
+  });
+
+  it.each(["configured", "native", "empty", "relative"])("the assembled classic clear uses the daemon's %s Claude baseline", async baseline => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "startup-clear-")));
+    const home = path.join(root, "home"), cwd = path.join(root, "work"), bin = path.join(root, "bin");
+    const configured = baseline === "configured" ? path.join(root, "configured-claude") : baseline === "empty" ? "" : baseline === "relative" ? "./relative-claude" : undefined;
+    for (const dir of [home, cwd, bin]) fs.mkdirSync(dir);
+    const saved = saveEnv("HOME", "PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME");
+    process.env.HOME = home; process.env.PATH = `${bin}:/usr/bin:/bin`; delete process.env.CODEX_HOME;
+    if (configured !== undefined) process.env.CLAUDE_CONFIG_DIR = configured; else delete process.env.CLAUDE_CONFIG_DIR;
+    const homedir = vi.spyOn(os, "homedir").mockReturnValue(home);
+    fs.writeFileSync(path.join(bin, "claude"), `#!${process.execPath}
+console.log(JSON.stringify({home:process.env.CLAUDE_CONFIG_DIR??null}));
+`, { mode: 0o700 });
+    let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    try {
+      daemon = await createDaemon({ tmuxExec: async () => "", cmuxFactory: async () => { throw Error("fixture: no cmux"); } });
+      const { db, deps } = daemon;
+      const rig = deps.rigRepo.createRig("clear-baseline");
+      const node = deps.rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", cwd });
+      db.prepare("UPDATE nodes SET account_home = ? WHERE id = ?").run(path.join(root, "old-account"), node.id);
+      const session = "worker@clear-baseline";
+      const identity: Record<string, string> = { OPENRIG_NODE_ID: node.id, OPENRIG_SESSION_NAME: session };
+      vi.spyOn(deps.tmuxAdapter, "getPaneCommand").mockResolvedValue("sh");
+      vi.spyOn(deps.tmuxAdapter, "getSessionEnv").mockImplementation(async (_session, key) => identity[key]);
+      let observed: { home: string | null } | undefined;
+      vi.spyOn(deps.tmuxAdapter, "sendShellCommand").mockImplementation(async (_session, command) => {
+        observed = JSON.parse(execFileSync("/bin/sh", ["-c", command], { encoding: "utf8", cwd,
+          env: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: path.join(root, "old-account") } }));
+        return { ok: true };
+      });
+      const adapter = deps.runtimeAdapters!["claude-code"] as ClaudeCodeAdapter;
+      const binding = { nodeId: node.id, cwd, tmuxSession: session, tmuxPane: "%1", accountHome: null, accountToken: null };
+      adapter.ensureManagedBootstrap(binding);
+      const result = await adapter.launchHarness(binding as never, { name: "worker" });
+      expect(result.ok).toBe(true);
+      expect(observed?.home).toBe(configured ?? null);
+      expect(fs.existsSync(path.join(configured === undefined ? home : path.resolve(cwd, configured), ".claude.json"))).toBe(true);
+    } finally { daemon?.db.close(); homedir.mockRestore(); restoreEnv(saved); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it("calls cmuxAdapter.connect() during startup", async () => {

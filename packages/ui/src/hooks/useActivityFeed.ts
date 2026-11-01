@@ -96,7 +96,7 @@ export function useActivityFeed(): UseActivityFeedResult {
     // so useAttentionItems refetches and the lens updates within
     // the same browser session.
     //
-    // QA BLOCKING-A qitem-20260518195533: attention API returned the
+    // QA BLOCKING-A: attention API returned the
     // newly-created qitem immediately, but the open Approval lens
     // did not show it until a hard reload — react-query cache
     // wasn't invalidated on queue.created.

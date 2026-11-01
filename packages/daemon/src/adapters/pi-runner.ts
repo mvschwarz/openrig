@@ -573,6 +573,13 @@ export class RunnerCore {
         if (this.runtime === "omp") this.io.stopChild?.();
         return;
       }
+      if (record.id === CATCH_UP_ID && this.runtime === "pi") {
+        // A refused catch-up (a saved cursor this session's history doesn't hold, such as an older runner's UI-event
+        // id) is history sync, not the seat's resume: say so, and take a confirmed cursor from the history's tail.
+        this.io.mirrorLine(`[pi-runner] History catch-up didn't run (${message}). That's history sync, separate from the seat's resume; reading the history cursor again.`);
+        this.io.sendRpc({ type: "get_entries", id: CURSOR_REFRESH_ID });
+        return;
+      }
       this.io.mirrorLine(`[${this.runtime}-runner] ERROR rpc: ${message}`);
       // Only a rejected input means the seat cannot do the requested work.
       // A mistimed /abort (or any control command) leaves the seat idle.
@@ -752,8 +759,10 @@ export class RunnerCore {
     if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
       this.assistantErrorShown = false;
     }
-    // Durable cursor: any event carrying a session-entry id advances it.
-    const entryId = typeof event.entryId === "string" ? event.entryId : (typeof event.id === "string" ? event.id : undefined);
+    // Durable cursor: any event carrying a session-entry id advances it. A Pi event's own `id` isn't one (Pi's
+    // history ids reach the cursor through get_entries), so on Pi only an explicit `entryId` counts.
+    const entryId = typeof event.entryId === "string" ? event.entryId
+      : (this.runtime !== "pi" && typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
       this.lastEntryId = entryId;
       this.writeSidecar({});
@@ -780,7 +789,7 @@ export class RunnerCore {
     // the daemon confirms the token. Pi's get_state identity is final.
     if (event.type === "agent_end" && this.runtime === "omp") this.postSessionIdentity();
     if (event.type === "agent_end") {
-      // QA RED fold (qitem-20260707020922): live events do not reliably carry
+      // QA RED fold: live events do not reliably carry
       // session-entry ids, so the durable cursor starved (lastEntryId stayed
       // null in real runs). Refresh it from the source of truth after every
       // completed turn — get_entries returns append-order entries with stable
@@ -995,7 +1004,7 @@ function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; tok
 }
 
 /** The runner-side sidecar handshake, extracted for hermetic testing (guard
- *  re-verdict, qitem-20260707013815): read the PRIOR record's durable cursor
+ *  re-verdict): read the PRIOR record's durable cursor
  *  FIRST, then stamp the launch-scoped pending record — the write carries the
  *  cursor forward so no reset in the chain can erase it. `catchUpSince` is
  *  only surfaced when resuming: a fresh/fork session has no prior projection

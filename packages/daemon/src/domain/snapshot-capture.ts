@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import {
+  resolveActiveSnapshotSession,
   deriveActiveOccupantsByNode,
   deriveActiveSessionIdByNode,
   deriveRehydrateOccupantsByNode,
@@ -57,6 +58,7 @@ export class SnapshotCapture {
     this.checkpointStore = deps.checkpointStore;
   }
 
+  /** Capture truthful occupancy and, on periodic ticks, eligible whole-session resume sources. */
   captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[]; /** Slice 16: notify after the caller's own
     transaction commits, not from inside it. */ deferNotify?: (event: PersistedEvent) => void }): Snapshot {
     // 1. Get rig with nodes, edges, bindings
@@ -123,6 +125,18 @@ export class SnapshotCapture {
       } catch { /* receipt_only — no checkpoint available */ }
     }
 
+    const environmentBindingsByNode: NonNullable<SnapshotData["environmentBindingsByNode"]> = {};
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='environment_bindings'").get()) {
+      for (const node of rig.nodes) {
+        const binding = this.db.prepare("SELECT binding_id,resource_json,generation,config_json FROM environment_bindings WHERE node_id=?").get(node.id) as { binding_id: string; resource_json: string | null; generation: string | null; config_json: string } | undefined;
+        if (!binding?.resource_json) continue;
+        const checkpoint = this.db.prepare("SELECT receipt_json FROM environment_operations WHERE binding_id=? AND kind='checkpoint' AND state='confirmed' ORDER BY rowid DESC LIMIT 1").get(binding.binding_id) as { receipt_json: string } | undefined;
+        const cp = checkpoint ? JSON.parse(checkpoint.receipt_json) : null, config = JSON.parse(binding.config_json);
+        environmentBindingsByNode[node.id] = { version: 1, bindingId: binding.binding_id, resourceId: JSON.parse(binding.resource_json).id, generation: binding.generation,
+          checkpointId: cp?.checkpointId ?? null, nativeType: cp?.nativeType ?? null, nativeId: cp?.nativeId ?? null,
+          destinationCwd: `${config.guestRoot}/work`, nativeState: `${config.guestRoot}/native` };
+      }
+    }
     // 5. Assemble SnapshotData
     const data: SnapshotData = {
       rig: rig.rig,
@@ -141,11 +155,48 @@ export class SnapshotCapture {
         intendedNodeIds,
       },
       checkpoints,
+      ...(Object.keys(environmentBindingsByNode).length ? { environmentBindingsByNode } : {}),
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
       nodeStartupContext,
       envReceipt,
     };
+
+    // A periodic tick between separate per-agent launches must not erase the
+    // down agents' selected resume sources. Keep occupancy absent, and copy the
+    // entire source into this snapshot so pruning the predecessor is harmless.
+    if (kind === "auto-periodic" && rig.nodes.some(node => activeOccupantsByNode[node.id]?.kind === "absent")) {
+      let previous: Snapshot | null = null;
+      try { previous = this.snapshotRepo.findLatestRestoreUsable(rigId); }
+      catch (error) {
+        // Capture remains crash insurance even when the optional history lookup
+        // fails, as the scheduler's existing lookup-failure contract requires.
+        console.warn(`Periodic snapshot: resume sources unavailable for ${rigId}: ${String(error)}`);
+      }
+      if (previous) {
+        const fresh = readFreshOccupantRelations(this.db, rigId);
+        for (const node of rig.nodes) {
+          if (activeOccupantsByNode[node.id]?.kind !== "absent"
+            || previous.data.nodes.find(prior => prior.id === node.id)?.runtime !== node.runtime) continue;
+          const occupant = resolveActiveSnapshotSession(previous.data, node.id);
+          const source = occupant.kind === "resolved" ? occupant.session
+            : occupant.kind === "none" ? previous.data.periodicResumeSourcesByNode?.[node.id] : undefined;
+          if (!source || source.nodeId !== node.id) continue;
+          // The prior occupant is a candidate, not permission to revive a
+          // retired conversation after a newer (including deliberate fresh) launch.
+          const newest = sessions.filter(row => row.nodeId === node.id)
+            .reduce<typeof source | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+          if (!newest || newest.id !== source.id
+            || (Object.hasOwn(fresh, node.id) && fresh[node.id] !== source.id)) continue;
+          const retained = newest.resumeToken ? newest : source;
+          if (newest.restorePolicy !== "resume_if_possible" || retained.restorePolicy !== "resume_if_possible"
+            || !retained.resumeToken?.trim() || !retained.resumeType || retained.resumeType === "none") continue;
+          (data.periodicResumeSourcesByNode ??= {})[node.id] = structuredClone({
+            ...retained, status: newest.status,
+          });
+        }
+      }
+    }
 
     // 5. Atomic: persist snapshot + event in one transaction
     const txn = this.db.transaction(() => {

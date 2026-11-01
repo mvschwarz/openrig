@@ -52,6 +52,14 @@ describe("rig edge", () => {
   beforeEach(() => { vi.stubEnv("OPENRIG_HOST_SELECTED", "local"); });
   afterEach(() => { vi.unstubAllEnvs(); });
 
+  it("plans a deferred target by its address rather than printing a null node", async () => {
+    const named = { ...edge, kind: "escalates_to", to: { logicalId: "review-advisor@coord", nodeId: null } };
+    const post = vi.fn(async () => ({ status: 200, data: { ok: true, rigId: "rig-1", outcome: "would_add", edge: named } }));
+    const result = await run({ post } as never, ["add", "rig-1", "orch.lead", "review-advisor@coord", "--kind", "escalates_to", "--plan"]);
+    expect(result.out.join("\n")).toContain("review-advisor@coord (resolved when used)");
+    expect(result.out.join("\n")).not.toContain("node null");
+  });
+
   it.each(["add", "remove"].flatMap((operation) =>
     ["ECONNREFUSED", "EPERM"].map((causeCode) => ({ operation, causeCode })),
   ))("returns JSON without an edge request when the daemon is unavailable: $operation / $causeCode", async ({ operation, causeCode }) => {

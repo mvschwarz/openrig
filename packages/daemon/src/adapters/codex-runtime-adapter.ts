@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
+import { tmuxAttachCommand } from "./tmux-server.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
@@ -155,7 +156,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
   /** A seat's own CODEX_HOME from its member or rig `env:`, when it declares one. */
-  private seatHome?: (nodeId: string) => string | undefined;
+  private seatHome?: (nodeId: string, ignoreAccountHome?: boolean) => string | undefined;
   /** One thread-id resolver per Codex home its seats use, the daemon's included. */
   private threadResolvers = new Map<string, CodexThreadIdResolver>();
   private launchPath?: string;
@@ -215,7 +216,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     /** Explicit CODEX_HOME; absent preserves the legacy OS/PID home behavior. */
     codexHome?: string;
     /** A seat's own CODEX_HOME (an absolute path its member or rig `env:` declares). It wins over `codexHome` for that seat. */
-    seatHome?: (nodeId: string) => string | undefined;
+    seatHome?: (nodeId: string, ignoreAccountHome?: boolean) => string | undefined;
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string, cwd?: string, home?: string) => Promise<CodexProfileProbeResult>;
@@ -285,28 +286,28 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** The home a seat's Codex uses: its own from its member or rig `env:`, else the daemon's explicit CODEX_HOME. Undefined
    *  keeps the legacy OS/PID home behavior. */
-  private homeFor(binding: { nodeId?: string } | undefined): string | undefined {
+  private homeFor(binding: { nodeId?: string; accountHome?: string | null } | undefined): string | undefined {
     return this.ownHome(binding) ?? this.codexHome;
   }
 
   /** Only the seat's own CODEX_HOME, undefined when it declares none. Probes and readers get it as an extra argument
    *  only when it's set, so a seat without one calls them exactly as before. */
-  private ownHome(binding: { nodeId?: string } | undefined): string | undefined {
-    return binding?.nodeId ? this.seatHome?.(binding.nodeId) : undefined;
+  private ownHome(binding: { nodeId?: string; accountHome?: string | null } | undefined): string | undefined {
+    return binding?.accountHome ?? (binding?.nodeId ? this.seatHome?.(binding.nodeId, binding.accountHome === null) : undefined);
   }
 
-  private ownHomeCommandOpt(binding: { nodeId?: string }): { codexHome?: string } {
+  private ownHomeCommandOpt(binding: { nodeId?: string; accountHome?: string | null }): { codexHome?: string } {
     const own = this.ownHome(binding);
     return own ? { codexHome: own } : {};
   }
 
-  private ownHomeOpt(binding: { nodeId?: string }): { home?: string } {
+  private ownHomeOpt(binding: { nodeId?: string; accountHome?: string | null }): { home?: string } {
     const own = this.ownHome(binding);
     return own ? { home: own } : {};
   }
 
   /** A thread id read for this seat's process, in the seat's own home when it declares one. */
-  private readThreadIdForSeat(binding: { nodeId?: string }, pid: number, identity?: string): Promise<string | undefined> | string | undefined {
+  private readThreadIdForSeat(binding: { nodeId?: string; accountHome?: string | null }, pid: number, identity?: string): Promise<string | undefined> | string | undefined {
     const own = this.ownHome(binding);
     if (own) return this.readThreadIdByPid(pid, identity, own);
     return identity === undefined ? this.readThreadIdByPid(pid) : this.readThreadIdByPid(pid, identity);
@@ -438,11 +439,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cacheRoot = nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN);
     const cachedDir = nodePath.join(cacheRoot, version);
     const cached = this.fs.exists(cachedDir);
-    // Codex's "continue without trusting" choice writes no state. An existing install/configuration may therefore be a
-    // decline even with no hooks.state entry. Absent grants still stay under native review. A proven owned grant may
-    // renew its content approval; an unrecorded skip of that exact owned upgrade cannot be distinguished from pending approval.
+    // Codex's "continue without trusting" choice writes no state, so an existing install with no hooks.state entry for any
+    // of OpenRig's hooks may be an unrecorded skip, or an older install that never granted them. OpenRig trusts its own
+    // exact shipped hooks there as on a first install (#17). Any recorded choice for one of them, or a layer it can't read,
+    // leaves native review in place. A proven owned grant may renew its content approval.
     const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
       && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
+    const noOwnHookChoice = (read: CodexConfigLayerRead[]) => {
+      try { return read.every(layer => layer.state === "absent" || (layer.state === "read" && !holdsOwnHookChoice(parseToml(layer.content)))); }
+      catch { return false; }
+    };
     const renewContentApproval = (freshGrant = false) => {
       const configPath = this.resolveCodexConfigPath(home);
       const currentLayers = readLayers();
@@ -464,8 +470,44 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       if (content !== before) this.fs.writeFile(configPath, content);
       recordOwnedCodexApproval(configPath, planned.approval);
     };
+    // First install grants declarations; Codex0.164 also requires full-bundle content approval. Existing declaration
+    // choices are never rewritten. No cache files or native baseline files are rewritten here.
+    const grantOwnHooks = (): number => {
+      const grantLayers = readLayers();
+      if (codexCorePluginEnablement(grantLayers).decision !== "allow" || !matchesShippedTree(cachedDir)) return 0;
+      // An existing install is granted only while no layer records a choice for any of these hooks, decided on this read.
+      if (!firstInstall && !noOwnHookChoice(grantLayers)) return 0;
+      let freshGrants = 0;
+      const configPath = this.resolveCodexConfigPath(home);
+      const before = this.fs.readFile(configPath);
+      let content = before;
+      const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
+      try {
+        for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
+          groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
+            const { key, hash } = codexHookTrust.computeCodexHookTrust(event, {
+              ...handler, timeoutSec: handler.timeout, matcher: group.matcher,
+              keySource: `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json`, groupIndex, handlerIndex,
+            });
+            // Any existing choice in any readable layer/profile wins; never overwrite enabled=false or an old hash.
+            const hasChoice = (doc: unknown): boolean => {
+              if (!doc || typeof doc !== "object") return false;
+              const value = doc as { hooks?: { state?: Record<string, unknown> } };
+              return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
+            };
+            if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
+              content = upsertCodexHookTrust(content, key, hash);
+              freshGrants++;
+            }
+          }));
+        }
+      } catch { return 0; } // A config the line writer can't extend (an inline hooks table, say) gets no grant; review stays.
+      if (freshGrants === 0 || this.fs.readFile(configPath) !== before) return 0; // A concurrent native choice wins.
+      this.fs.writeFile(configPath, content);
+      return freshGrants;
+    };
     if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
-      renewContentApproval();
+      renewContentApproval(noOwnHookChoice(layers) && grantOwnHooks() === 6);
       return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
     }
     const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
@@ -481,34 +523,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
     if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
-    // First install grants declarations; Codex0.164 also requires full-bundle content approval. Existing declaration
-    // choices are never rewritten. No cache files or native baseline files are rewritten here.
-    let freshGrants = 0;
-    const grantLayers = readLayers();
-    if (firstInstall && codexCorePluginEnablement(grantLayers).decision === "allow" && matchesShippedTree(cachedDir)) {
-      let content = this.fs.readFile(this.resolveCodexConfigPath(home));
-      const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
-      for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
-        groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
-          const { key, hash } = codexHookTrust.computeCodexHookTrust(event, {
-            ...handler, timeoutSec: handler.timeout, matcher: group.matcher,
-            keySource: `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json`, groupIndex, handlerIndex,
-          });
-          // Any existing choice in any readable layer/profile wins; never overwrite enabled=false or an old hash.
-          const hasChoice = (doc: unknown): boolean => {
-            if (!doc || typeof doc !== "object") return false;
-            const value = doc as { hooks?: { state?: Record<string, unknown> } };
-            return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
-          };
-          if (!hasChoice(parseToml(content)) && !grantLayers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
-            content = upsertCodexHookTrust(content, key, hash);
-            freshGrants++;
-          }
-        }));
-      }
-      this.fs.writeFile(this.resolveCodexConfigPath(home), content);
-    }
-    renewContentApproval(freshGrants === 6);
+    renewContentApproval((firstInstall || noOwnHookChoice(layers)) && grantOwnHooks() === 6);
     return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
@@ -858,8 +873,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
+    if (binding.accountHome !== undefined && !this.seatLaunchEnvironment) {
+      return { ok: false, error: "Isolated account-home launch support is unavailable; no agent started." };
+    }
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Codex harness" };
     }
@@ -933,7 +951,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? this.resumeCore(prepared, opts.resumeToken, binding)
       : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${seatFolderArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
-    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
+    const staged = await this.seatCommand(binding, cmd);
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };
+    const textResult = opts.beforeNativeDispatch
+      ? await this.tmux.sendShellCommand(binding.tmuxSession, staged, () => { if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Codex input"); })
+      : await this.tmux.sendShellCommand(binding.tmuxSession, staged);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -1116,7 +1138,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private async seatCommand(binding: NodeBinding, cmd: string): Promise<string> {
     return this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...this.ownHomeCommandOpt(binding) })
+      ? await this.seatLaunchEnvironment.command(binding.tmuxSession!, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...this.ownHomeCommandOpt(binding) })
       : this.launchCommand(cmd, this.homeFor(binding));
   }
 
@@ -1239,7 +1261,26 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (probe.status === "resumed") return { ready: true };
+    if (probe.code === "hook_trust_gate" && this.ownHooksNeverApproved(this.homeFor(binding))) {
+      return { ready: false, code: probe.code, reason: "Codex is waiting for hook review before the session can become interactive. "
+        + `The hooks include OpenRig's own (${CODEX_CORE_PLUGIN_KEY}): this seat's Codex config enables the plugin but records no `
+        + "approval for its hooks, as after an older install or after continuing without trusting. To approve them, do it once in "
+        + `the seat's pane, through Codex's hook review (${tmuxAttachCommand(binding.tmuxSession)}); a later launch on the same `
+        + "plugin version records that approval, and plugin updates after it renew it on their own." };
+    }
     return { ready: false, reason: probe.detail, code: probe.code };
+  }
+
+  /** The user config enables openrig-core and no readable layer holds a choice for any of its hooks. Plugin setup grants
+   *  OpenRig's own hooks there at daemon start and on a fresh launch (#17); a resumed seat's own home can still show this
+   *  until then. Reported only: nothing is granted here. */
+  private ownHooksNeverApproved(home: string | undefined): boolean {
+    try {
+      const layers = codexReadableConfigLayers(nodePath.dirname(this.resolveCodexConfigPath(home)), this.codexSystemConfigDir)
+        .filter((layer) => this.fs.exists(layer.path)).map((layer) => ({ ...layer, content: this.fs.readFile(layer.path) }));
+      const user = layers.find((layer) => layer.name === "user config")?.content ?? null;
+      return userLayerEnablesCorePlugin(user) && !layers.some((layer) => holdsOwnHookChoice(parseToml(layer.content)));
+    } catch { return false; } // An unreadable layer may hold a choice.
   }
 
   async captureForkIdentity(binding: NodeBinding, parentToken: string): Promise<{ resumeToken: string; resumeType: string } | null> {
@@ -2040,6 +2081,14 @@ export function computeCodexHookTrust(
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
  * ⇒ no-op. Only called for our authored inline or verified owned plugin keys (never blanket trust).
  */
+/** Whether a config document, profiles included, holds any `hooks.state` choice for one of openrig-core's own hooks. */
+function holdsOwnHookChoice(doc: unknown): boolean {
+  const prefix = `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json:`;
+  return !!doc && typeof doc === "object"
+    && (Object.keys((doc as { hooks?: { state?: object } }).hooks?.state ?? {}).some((key) => key.startsWith(prefix))
+      || Object.values(doc).some(holdsOwnHookChoice));
+}
+
 export function upsertCodexHookTrust(content: string, key: string, hash: string, field: "trusted_hash" | "trusted_content_hash" = "trusted_hash"): string {
   const path = ["hooks", "state", key];
   const header = `[hooks.state.${JSON.stringify(key)}]`;

@@ -31,7 +31,10 @@ import type { TmuxAdapter } from "../../daemon/src/adapters/tmux.js";
 
 vi.mock("node:child_process", async (actual) => ({ ...await actual<typeof import("node:child_process")>(), execSync: (cmd: string) => {
   if (!cmd.startsWith("tmux display-message ")) throw new Error(`Unexpected shell command in inert fixture: ${cmd}`);
-  return `${process.env.TEST_PHYSICAL_SESSION}\n@12\n%42\n`;
+  // Render the requested format as real tmux does, which writes a control character as "_".
+  const format = /'([^']*)'\s*$/.exec(cmd)?.[1] ?? /"([^"]*)"\s*$/.exec(cmd)?.[1] ?? "";
+  return `${format.replace(/#\{session_name\}/g, process.env.TEST_PHYSICAL_SESSION ?? "").replace(/#\{window_id\}/g, "@12")
+    .replace(/#\{pane_id\}/g, "%42").replace(/[\u0000-\u001f]/g, "_")}\n`;
 } }));
 
 it.each(["0", "person-terminal"])("real attach -> returned env -> actual From -> reply to original %s pane", async (physical) => {

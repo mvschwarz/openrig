@@ -10,6 +10,7 @@ import { codexCommandResumeToken, observeCodexForkProcess, observeCodexPaneProce
 import { prepareCodexSeatFolder } from "../src/domain/codex-team-workspace.js";
 import { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { resolveCodexGitAddDirs } from "../src/domain/codex-git-add-dirs.js";
+import { shellWords } from "../src/domain/seat-restart-in-place.js";
 
 // Issue #121: in a linked git worktree `<cwd>/.git` is a FILE ("gitdir: ..."), so passing it to Codex as
 // `--add-dir` breaks the Linux sandbox for every command. These tests use real temporary Git repositories
@@ -154,7 +155,7 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     const asPs = (command: string) => command.slice(command.indexOf("codex ")).replace(/'/g, "");
     const pane = { getPanePid: async () => 4100 };
     const row = (command: string) => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex",
-      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command) }];
+      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command), argv: shellWords(command.slice(command.indexOf("codex "))) }];
     const resume = await launchCommand(repo, { resumeToken: "thread-1" });
     expect(codexCommandResumeToken(asPs(resume))).toBe("thread-1");
     expect(await observeCodexPaneProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(resume),
@@ -207,7 +208,8 @@ describe("Codex resume and fork git add-dirs (a restored seat keeps .git writabl
     // The process line joins argv with spaces and no quoting, so a dir before the id would hide it.
     const line = built.core.replace(/'/g, "");
     expect(codexCommandResumeToken(line)).toBe("thread-1");
-    const rows = () => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: line }];
+    const rows = () => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000",
+      command: line, argv: shellWords(built.core) }];
     const pane = { getPanePid: async () => 4100 };
     // The restart's own proof, then the send path's check behind a shell.
     expect(await observeCodexPaneProcess({ target: "r01-qa", tmux: pane, listProcesses: rows, expectedToken: "thread-1", requireResume: true })).not.toBeNull();
@@ -251,7 +253,7 @@ describe("Codex seat folder add-dir (a seat keeps its LEARNED.md and recap writa
     const asPs = (command: string) => command.slice(command.indexOf("codex ")).replace(/'/g, "");
     const pane = { getPanePid: async () => 4100 };
     const row = (command: string) => [{ pid: 4100, ppid: 1, pgid: 4100, tpgid: 4100, executableName: "codex",
-      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command) }];
+      startedAt: "Sat Jan  1 12:00:00 2000", command: asPs(command), argv: shellWords(command.slice(command.indexOf("codex "))) }];
     const resume = await launchCommand(repo, { resumeToken: "thread-1" });
     expect(codexCommandResumeToken(asPs(resume))).toBe("thread-1");
     expect(await observeCodexPaneProcess({ target: "r01-qa", tmux: pane, listProcesses: () => row(resume),

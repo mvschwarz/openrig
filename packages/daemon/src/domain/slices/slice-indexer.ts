@@ -150,7 +150,7 @@ interface SliceLocation {
   slicePath: string;
 }
 
-/** qitem-ccf87c0d — the per-generation batch membership index. Replaces the
+/** the per-generation batch membership index. Replaces the
  *  per-slice queue_items scans (353 tier-1 wildcard+ORDER-BY scans + up to 3
  *  body-LIKE scans per zero-typed slice = ~10s cold at host scale,
  *  synchronously blocking the event loop) with TWO streamed scans per
@@ -158,8 +158,8 @@ interface SliceLocation {
  *  pinned by test: typed-authoritative gating (VM-004), per-slice 500
  *  confirmed cap in ts_created DESC/qitem_id DESC order, term-first fallback
  *  assembly, SQL-LIKE ASCII-only case folding, %/_ wildcards spanning
- *  newline, and the per-term 500 cap. Schema shape is INSPECTED up front
- *  (qitem-18110994): queue_items absent => a structurally empty index that is
+ *  newline, and the per-term 500 cap. Schema shape is INSPECTED up front:
+ *  queue_items absent => a structurally empty index that is
  *  still published with its location metadata; the tags column absent => the
  *  typed scan is skipped and the body-only fallback is used; and any PRAGMA /
  *  typed / fallback EXECUTION failure propagates to the caller rather than
@@ -177,7 +177,7 @@ interface MembershipIndex {
   knownSlices: Set<string>;
 }
 
-// --- SQL-LIKE-equivalent matching (qitem-ccf87c0d) -------------------------
+// --- SQL-LIKE-equivalent matching -------------------------
 // SQLite LIKE semantics, replicated byte-for-byte (test-pinned):
 //   - ASCII-ONLY case folding (A-Z <-> a-z; æ vs Æ do NOT fold),
 //   - `%` matches any run and `_` exactly ONE CHARACTER (code point) — both
@@ -196,7 +196,7 @@ function asciiFold(s: string): string {
   return s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 }
 
-/** qitem-18f3300d — SQLite LIKE stops matching at the first raw U+0000 in
+/** SQLite LIKE stops matching at the first raw U+0000 in
  *  the haystack (guard-reproduced against the parent per-slice SQL; a NUL
  *  is production-reachable via POST /api/queue/create JSON bodies). Apply
  *  BEFORE asciiFold/prefilter/confirm so a term occurring only after a NUL
@@ -219,7 +219,7 @@ function likePatternBodyToRegExpSource(patternBody: string): string {
   return out;
 }
 
-/** qitem-18f3300d pattern-side facet — translate the FULL bound LIKE
+/** pattern-side facet — translate the FULL bound LIKE
  *  pattern for one fallback term, exactly as the parent SQL saw it:
  *  build `%<term>%` and truncate THE PATTERN at the first U+0000 (SQLite
  *  truncates patterns too — a NUL inside the term LOSES the trailing
@@ -281,11 +281,11 @@ export class SliceIndexer {
   private readonly cacheTtlMs: number;
   private listingCache: CachedListing | null = null;
   private detailCache: Map<string, CachedSlice> = new Map();
-  // qitem-ccf87c0d — batch membership index (see MembershipIndex doc).
+  // batch membership index (see MembershipIndex doc).
   private membershipIndex: MembershipIndex | null = null;
   // Slice id <-> directory name map, built once per cache window (same TTL as the listing).
   private idAliases: SliceIdAliases | null = null;
-  // qitem-ccf87c0d corrective — depth of open withMembershipBatch scopes.
+  // Depth of open withMembershipBatch scopes.
   private batchDepth = 0;
   private compositionBasis: string | null = null;
   // VM-005: authored mission-status sidecar cache (same TTL as the listing).
@@ -309,7 +309,7 @@ export class SliceIndexer {
     return this.sliceRoots().some((root) => this.isDirectory(root));
   }
 
-  /** qitem-ccf87c0d corrective — the explicit COMPOSITE-OPERATION scope: a
+  /** The explicit COMPOSITE-OPERATION scope: a
    *  caller performing list()-plus-per-slice-get() as ONE user-visible
    *  operation (the slices route's boundToWorkflow lens, ReviewGatherer.
    *  composeMission) wraps it here so every inner list/get shares ONE
@@ -426,7 +426,7 @@ export class SliceIndexer {
     const locations = this.readSliceLocations();
     // ONE batch membership index serves this whole rebuild (the <=4 LIKE-
     // execution load contract), then drops so later uncached operations
-    // read current queue state (qitem-18f3300d operation scoping) — unless
+    // read current queue state (operation scoping) — unless
     // an enclosing withMembershipBatch scope owns the batch lifetime.
     let entries: SliceListEntry[];
     try {
@@ -451,7 +451,7 @@ export class SliceIndexer {
     if (!location) return null;
 
     // Uncached get(): its own operation-scoped batch, dropped afterward so
-    // the next uncached operation sees current queue state (qitem-18f3300d)
+    // the next uncached operation sees current queue state
     // — unless an enclosing withMembershipBatch scope owns the batch lifetime.
     let record: SliceRecord;
     try {
@@ -785,7 +785,7 @@ export class SliceIndexer {
     // Substring fallback (including the missionId term) is preserved for
     // slices whose qitem corpus pre-dates the typed-tag convention so
     // legacy mission-aware workspaces don't regress.
-    // qitem-ccf87c0d — both tiers now answer from the per-generation batch
+    // both tiers now answer from the per-generation batch
     // membership index (TWO scans per generation instead of O(slices) scans;
     // see ensureMembershipIndex). TWO-TIER DOCTRINE unchanged: the SIGNAL
     // tier answers from canonical typed membership ONLY; this DISPLAY tier
@@ -819,7 +819,7 @@ export class SliceIndexer {
         }
       }
     }
-    // qitem-18110994 (item 2) — the broad catch that used to wrap this block
+    // The broad catch that used to wrap this block
     // is REMOVED. It existed for "queue_items table absent", which the schema
     // probe in ensureMembershipIndex now answers structurally. Left in place
     // it would re-swallow a REFUSED build and cache the refusal as an empty
@@ -856,11 +856,11 @@ export class SliceIndexer {
     return idsArr;
   }
 
-  /** qitem-ccf87c0d — build (or reuse) the per-generation membership index.
+  /** build (or reuse) the per-generation membership index.
    *  TWO queue_items scans per generation, replacing O(slices) per-slice
    *  scans.
    *
-   *  SCHEMA IS INSPECTED UP FRONT (qitem-18110994), never inferred from a
+   *  SCHEMA IS INSPECTED UP FRONT, never inferred from a
    *  swallowed error:
    *   - queue_items absent -> a structurally EMPTY index that is still
    *     PUBLISHED with its location metadata (knownSlices/terms), so get/list
@@ -887,7 +887,7 @@ export class SliceIndexer {
    *     order — the same order the un-ORDERed per-term `LIMIT 500` queries
    *     returned; cap 500 per term.
    *
-   *  `served` (qitem-18110994 item 1) is the EXPLICIT scope of the current
+   *  `served` is the EXPLICIT scope of the current
    *  public operation — the slice names actually being answered, or null for
    *  "all known locations" — threaded through the call chain (get/list ->
    *  buildRecord/toListEntry -> matchQitems -> here), never ambient state. It
@@ -895,7 +895,7 @@ export class SliceIndexer {
    *  and the all-location typedMissions verdict are established FIRST, so the
    *  cross-slice modern/legacy rule stays byte-identical (R5 differential). */
   private ensureMembershipIndex(served: Set<string> | null): MembershipIndex {
-    // qitem-18f3300d — OPERATION-scoped, never TTL-scoped: the index lives
+    // OPERATION-scoped, never TTL-scoped: the index lives
     // only for the duration of one public cold list() or one uncached
     // get() (the public entry points clear it), so separate uncached
     // operations always see current queue state — parent-equivalent
@@ -909,7 +909,7 @@ export class SliceIndexer {
     const fallbackByTerm = new Map<string, string[]>();
     const knownSlices = new Set<string>();
 
-    // qitem-18110994 (items 2+4) — SCHEMA TRUTH UP FRONT. The queue_items
+    // SCHEMA TRUTH UP FRONT. The queue_items
     // shape is INSPECTED, never inferred from a swallowed scan error: a
     // failing scan used to be recorded as "tags column missing", silently
     // degrading membership under a false structural label. PRAGMA answers
@@ -975,7 +975,7 @@ export class SliceIndexer {
         typedMissions.add(location.missionId);
       }
     }
-    // qitem-18110994 (item 1) — frontmatter is read HERE and only here, and
+    // Frontmatter is read HERE and only here, and
     // only for locations that can actually consult fallback terms: those the
     // current operation SERVES and that have no confirmed typed membership.
     // A served slice with typed rows returns from typedBySlice and never
@@ -1015,7 +1015,7 @@ export class SliceIndexer {
         re: new RegExp(likeBoundPatternToRegExpSource(term), LIKE_REGEXP_FLAGS),
       }));
       const prefilter = new RegExp(matchers.map((m) => `(?:${m.re.source})`).join("|"), LIKE_REGEXP_FLAGS);
-      // qitem-18110994 (item 2) — buckets accumulate LOCALLY and are published
+      // Buckets accumulate LOCALLY and are published
       // to the index only after the scan completes. Previously they were
       // pre-seeded on the published map and a broad catch let a partially
       // filled result be cached as authoritative: an interrupted build served

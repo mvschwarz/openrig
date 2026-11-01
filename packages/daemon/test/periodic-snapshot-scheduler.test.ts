@@ -8,7 +8,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../src/domain/checkpoint-store.js";
 import { SnapshotCapture } from "../src/domain/snapshot-capture.js";
-import { PeriodicSnapshotScheduler } from "../src/domain/periodic-snapshot-scheduler.js";
+import { PeriodicSnapshotScheduler, runningNonArchivedRigIds } from "../src/domain/periodic-snapshot-scheduler.js";
 import { RigTeardownOrchestrator } from "../src/domain/rig-teardown.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -459,15 +459,68 @@ describe("PsProjectionService periodic snapshot status", () => {
     expect(entry!.autoPeriodicSnapshotCount).toBe(0);
   });
 
-  it("periodicSnapshotActive=true and interval matches after setPeriodicSnapshotState", async () => {
+  it("periodicSnapshotActive=true and interval matches after setPeriodicSnapshotState, for a rig the scheduler snapshots", async () => {
     const { PsProjectionService } = await import("../src/domain/ps-projection.js");
     const svc = new PsProjectionService({ db });
     svc.setPeriodicSnapshotState(true, 300);
-    const rig = new RigRepository(db).createRig("active-rig");
+    const rigRepo = new RigRepository(db);
+    const sessions = new SessionRegistry(db);
+    const rig = rigRepo.createRig("active-rig");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    sessions.updateStatus(sessions.registerSession(node.id, "worker@active-rig").id, "running");
     const entries = svc.getEntries();
     const entry = entries.find((e) => e.rigId === rig.id);
     expect(entry!.periodicSnapshotActive).toBe(true);
     expect(entry!.periodicSnapshotIntervalSeconds).toBe(300);
+  });
+
+  it("periodicSnapshotActive is false for a rig the scheduler skips: zero seats, stopped, newest session exited, archived", async () => {
+    const { PsProjectionService } = await import("../src/domain/ps-projection.js");
+    const svc = new PsProjectionService({ db });
+    svc.setPeriodicSnapshotState(true, 300);
+    const rigRepo = new RigRepository(db);
+    const sessions = new SessionRegistry(db);
+    const running = (name: string) => {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+      sessions.updateStatus(sessions.registerSession(node.id, `worker@${name}`).id, "running");
+      return { rig, node };
+    };
+    const zeroSeat = rigRepo.createRig("zero-seat");
+    const stopped = rigRepo.createRig("stopped");
+    rigRepo.addNode(stopped.id, "worker", { role: "worker" });
+    const exited = running("exited-later");
+    sessions.updateStatus(sessions.registerSession(exited.node.id, "worker@exited-later").id, "exited");
+    const archived = running("archived");
+    rigRepo.archiveRig(archived.rig.id);
+    const live = running("live");
+
+    const entries = svc.getEntries({ includeArchived: true });
+    const flag = (rigId: string) => entries.find((e) => e.rigId === rigId)?.periodicSnapshotActive;
+    for (const rigId of [zeroSeat.id, stopped.id, exited.rig.id, archived.rig.id]) expect(flag(rigId), rigId).toBe(false);
+    expect(flag(live.rig.id)).toBe(true);
+    // `rig ps` names exactly the rigs a tick would snapshot.
+    expect(entries.filter((e) => e.periodicSnapshotActive).map((e) => e.rigId).sort())
+      .toEqual(runningNonArchivedRigIds(db).sort());
+
+    await new PeriodicSnapshotScheduler({ db, snapshotCapture: new SnapshotCapture({ db, rigRepo, sessionRegistry: sessions,
+      eventBus: new EventBus(db), snapshotRepo: new SnapshotRepository(db), checkpointStore: new CheckpointStore(db) }),
+      snapshotRepo: new SnapshotRepository(db) }).tick();
+    const snapshotRepo = new SnapshotRepository(db);
+    for (const rigId of [zeroSeat.id, stopped.id, exited.rig.id, archived.rig.id, live.rig.id]) {
+      expect(snapshotRepo.listSnapshots(rigId, { kind: "auto-periodic" }).length > 0, rigId).toBe(flag(rigId));
+    }
+  });
+
+  it("periodicSnapshotActive stays false for a running rig while the scheduler is off", async () => {
+    const { PsProjectionService } = await import("../src/domain/ps-projection.js");
+    const svc = new PsProjectionService({ db });
+    const rigRepo = new RigRepository(db);
+    const sessions = new SessionRegistry(db);
+    const rig = rigRepo.createRig("running-unscheduled");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    sessions.updateStatus(sessions.registerSession(node.id, "worker@running-unscheduled").id, "running");
+    expect(svc.getEntries().find((e) => e.rigId === rig.id)!.periodicSnapshotActive).toBe(false);
   });
 
   it("autoPeriodicSnapshotCount reflects actual auto-periodic snapshots", async () => {

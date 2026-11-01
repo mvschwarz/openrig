@@ -64,7 +64,7 @@ function firstLine(text: string): string {
  *   message text but its file references stay in the touched-files
  *   inventory).
  *
- * R2 fix (per M2b R2 dispatch qitem-20260502011841-fb53d7fd): inspect
+ * R2 fix: inspect
  * nested content parts BEFORE discarding non-text. Previously dropped
  * tool_use / tool_result silently, leading to misleading all-zero
  * omittedCounts on real Claude transcripts where nearly every assistant

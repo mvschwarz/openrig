@@ -73,10 +73,26 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   first three; `not_attempted` is set when pre-restore validation fails
   (`:281`).
 - **SnapshotData** (`types.ts:351`) — the serialized snapshot payload. It has
-  **7** optional fields, kept optional so older snapshots still load
+  **8** optional fields, kept optional so older snapshots still load
   (`sed -n '/^export interface SnapshotData/,/^}/p' packages/daemon/src/domain/types.ts | grep -c '?:'`):
-  `activeSessionIdByNode?`, `activeOccupantsByNode?`, `topologyRoster?`,
-  `pods?`, `continuityStates?`, `nodeStartupContext?`, `envReceipt?`.
+  `activeSessionIdByNode?`, `activeOccupantsByNode?`, `periodicResumeSourcesByNode?`,
+  `topologyRoster?`, `pods?`, `continuityStates?`, `nodeStartupContext?`, `envReceipt?`.
+  Periodic snapshots retain a down agent's whole authoritative resume-source
+  session in `periodicResumeSourcesByNode`, without marking it running. A named
+  single-agent launch using automatic periodic selection can resume that exact
+  carried source; an explicit snapshot or whole-rig restore still asks about an
+  absent agent with resumable history. Tokenless and non-resume-policy agents
+  keep their existing fresh path. Only the node's newest session with a token
+  and `resume_if_possible` policy is carried; a current fresh-successor relation
+  must agree. Named launch rechecks the live newest session, resume policy and
+  fresh-successor relation under its lifecycle lease, before changing any seat
+  state; a source retired after capture stops and asks without launching.
+  Idle-shell carry advice uses automatic selection again, not an
+  explicit snapshot that disables carry. The selected source is shared by preflight and post-launch
+  restore; explicit reviewed-history selection keeps its existing checks.
+  Ranking, periodic cadence and `--fresh` are unchanged. Retention is best-effort
+  if the earlier-source lookup fails: capture still records current crash
+  insurance and logs that the resume sources were unavailable.
 - **NodeStartupSnapshot** (`types.ts:344`) — persisted restore replay input:
   classification-free projection entries, resolved startup files, startup
   actions, runtime.
@@ -277,7 +293,7 @@ cited here by number with the code that carries them):
   for one seat. `resume` captures an eligibility-checked `auto-rehydrate`
   snapshot when none exists and goes through `launchSingleNode`.
 - **Seat handover** — `rig seat handover <seat> --source
-  fresh|rebuild|fork:<id>|discovered:<id> --reason <reason> [--dry-run]`
+  fresh|rebuild|fork:<seat>|discovered:<id> --reason <reason> [--dry-run]`
   (the reason is required, dry run included; without it the command exits 2
   before contacting the daemon)
   (`packages/cli/src/commands/seat.ts:364`) calls
@@ -395,7 +411,13 @@ via runtime parsers + redaction (`packages/cli/src/restore-packet/`).
 
 The list includes captured Claude and Codex rows that the current restore policy and native resume adapter can structurally attempt. Codex requires an explicit `codex_id` and token; implicit `codex_last` cannot name a particular history. Claude accepts `claude_id` and `claude_name` with tokens. The server checks exact rig and node membership, the snapshot's intended roster and runtime, and the node's current occupant compatibility. A change to a sibling node does not retarget or invalidate this node's list. A changed or pruned snapshot, removed history row, same-name replacement node, ambiguous current occupant, or incompatible source is refused; validation never substitutes another history.
 
-`tokenState` (`present`, `stale`, or `unverified` for listed rows) describes the saved verification record and its age. Eligibility means a future launch may **attempt** native resume. A stored row can share a native token with another row, and neither listing nor validation proves that a native conversation still exists. Launch prerequisites, native resume results, and applying a chosen history belong to the later startup flow.
+`tokenState` (`present`, `stale`, or `unverified` for listed rows) describes the saved verification record and its age. Eligibility means a future launch may **attempt** native resume. A stored row can share a native token with another row, and neither listing nor validation proves that a native conversation still exists.
+
+### Selected history startup
+
+`GET /api/startup/:rigId/nodes/:nodeId?snapshotId=<listed-id>&historySessionId=<listed-id>` returns a read-only review for one listed choice: the selected row's forecast, current terminal observation, consumed launch setting sources (including a member permission envelope or Claude rules), and an opaque revision. The permission view uses restore's pure policy resolution: a readable custom policy's current launch posture can supersede its persisted cache, and a changed resolved decision requires re-review. It refuses a captured row whose native type/token, provenance, restore policy, or harness no longer agrees with the live registry row. The response contains no native token. `POST /api/startup/:rigId/nodes/:nodeId` accepts exactly `{ "action": "resume", "snapshotId": "…", "historySessionId": "…", "revision": "…" }`. Both routes require startup's terminal bearer token. The selected route accepts no fresh, continue, arbitrary token, or alternate target. Review does not capture a snapshot or prepare a provider. `rig seat history` also uses a strictly read-only daemon status check, so inspection does not remove stale daemon state.
+
+Apply revalidates the same current compatible source, durable node and saved launch settings after prerequisite and presence checks. The existing narrow restore engine carries that exact historical row through legacy and pod-aware native resume, with a second identity check at native dispatch after preparation. Before the new registry row is committed, selected startup also checks that no other attachment or running occupant claimed the node during terminal creation or pane observation; a collision leaves that claimant intact and reports the terminal outcome for inspection. An occupied or uncertain terminal blocks the attempt. No alternate history or fresh conversation is selected. The response projects exact typed references and outcome fields; only diagnostic text is redacted, so even a short native name cannot corrupt an ID. It names the selected source row and the newly registered result row when one exists; only the engine's joined native continuity proof produces success. If a change occurs after shell creation, the result reports a partial or uncertain attempt for inspection. The existing engine handles native prerequisites, compensation and proof. This surface adds no separate per-agent prelaunch probe; native checks remain at execution. Physical tmux cleanup still addresses sessions by name, so it cannot prove ownership against an external same-name replacement outside the selected registry guard.
 
 ## See also
 

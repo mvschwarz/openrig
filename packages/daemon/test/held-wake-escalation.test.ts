@@ -17,6 +17,7 @@ import { activityRoutes } from "../src/routes/activity.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import { runWakeLadderTick, makePromptStateReader, classifyPromptAfterRefusal, queueRecoveryOwnsWake } from "../src/domain/queue-wake-ladder.js";
+import { startWakeLadderScheduler } from "../src/index.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
@@ -277,4 +278,27 @@ it("the reader keeps the oracle's verdicts; only a newer, generation-valid moved
       needsInputEvidence: { observedAt: g.clock.value.toISOString() } }) as never,
     getLatestHook: () => ({ state: "needs_input", evidenceSource: "runtime_hook", reason: "permission_prompt", sampledAt: g.clock.value.toISOString() }) as never });
   expect(clearReader(g.name, refusedAt)).toBe("clear");
+});
+
+it("the production scheduler keeps a current Claude prompt alert when an older Stop arrives later", async () => {
+  const f = fixture();
+  await f.hook("Notification", "permission_prompt", 600_000);
+  const { repo } = await refuseAndClimb(f, "blocked");
+  const alerts = () => repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 })
+    .filter(row => row.tags?.includes("wake-prompt-refusal"));
+  expect(alerts()).toHaveLength(1);
+  await f.hook("Notification", "permission_prompt", 0);
+  await f.hook("Stop", null, 1000);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(f.clock.value);
+  const scheduler = startWakeLadderScheduler({ rigRepo: { db: f.db }, queueRepo: repo, agentActivityStore: f.store })!;
+  try {
+    await scheduler.runTickNow();
+    expect(alerts()).toHaveLength(1);
+    expect(f.paste).not.toHaveBeenCalled();
+    expect(f.enter).not.toHaveBeenCalled();
+  } finally {
+    await scheduler.stop();
+    vi.useRealTimers();
+  }
 });

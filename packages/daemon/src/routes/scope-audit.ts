@@ -9,6 +9,7 @@ import {
   deriveMissionDependencyGraph,
   type MissionDependencyGraph,
   type ScopeAuditResult,
+  SLICE_DIRECTORY_NAME,
 } from "../domain/scope/scope-audit.js";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import { NOTES_FILE_PRECEDENCE, resolveNodeFile, resolveNotesFile } from "../domain/scope/node-file.js";
@@ -159,7 +160,7 @@ export function scopeAuditRoutes(): Hono {
       return c.json({ error: "mission_not_found", mission: missionName }, 404);
     }
 
-    // qitem-43d69e17 — ONE audit request is ONE composite operation: the
+    // ONE audit request is ONE composite operation: the
     // per-slice indexer.get() walk below shares ONE membership batch
     // (pre-scope: each uncached get built its own 2-scan batch — 2N total
     // queue scans, 80 at 40 slices). Handler body is fully synchronous.
@@ -280,7 +281,7 @@ export function scopeAuditRoutes(): Hono {
               : null,
           });
 
-          if (!/^\d{2}-/.test(entry)) {
+          if (!SLICE_DIRECTORY_NAME.test(entry)) {
             sliceResult.findings.push({
               kind: "id_convention_violation",
               severity: "high",

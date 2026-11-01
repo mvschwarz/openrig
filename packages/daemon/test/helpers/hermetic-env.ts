@@ -27,6 +27,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { writeRuntimeStubs } from "../../../../test/stub-runtimes.js";
+import { shellQuote } from "../../src/adapters/shell-quote.js";
 
 /**
  * Inherited environment variables that redirect the CLI/daemon client at a
@@ -318,16 +319,21 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
   // operator's server. Refuse before any filesystem effect, like the others.
   assertNoAmbientTmux(baseEnv);
 
-  const root = mkdtempSync(join(tmpdir(), "openrig-scenario-"));
+  // Leave room for the per-home socket, including macOS's /private prefix,
+  // while keeping every socket within the caller's isolated TMPDIR.
+  const root = mkdtempSync(join(tmpdir(), "o"));
   const home = join(root, "home");
   const openrigHome = join(root, "openrig-home");
   const stateDir = join(root, "state");
   // Keep both compatibility and explicit socket paths below sun_path's cap.
-  const tmuxTmpDir = join(root, "tx");
-  const tmuxSocketPath = join(root, "tmux.sock");
+  const tmuxTmpDir = root;
+  // Match native default resolution as well as the wrapper. The daemon now
+  // passes its selected -S explicitly, which takes precedence over the wrapper.
+  const tmuxServerDir = join(tmuxTmpDir, `tmux-${process.getuid?.() ?? 0}`);
+  const tmuxSocketPath = join(tmuxServerDir, "default");
   const tmuxWrapperDir = join(root, "bin");
   const tmuxWrapperPath = join(tmuxWrapperDir, "tmux");
-  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxWrapperDir]) {
+  for (const dir of [home, openrigHome, stateDir, tmuxTmpDir, tmuxServerDir, tmuxWrapperDir]) {
     mkdirSync(dir, { recursive: true });
   }
   // codex and claude resolve to stubs inside the scaffold, so a scenario daemon never runs the host's
@@ -336,20 +342,14 @@ export function prepareHermeticEnv(opts: PrepareHermeticEnvOptions = {}): Hermet
 
   // Test-only command seam: every child `tmux` call gets one explicit private
   // socket. TMUX_TMPDIR remains for compatibility, but is never the selector.
+  // Exec directly so each terminal operation does not start another Node process.
   const originalPath = baseEnv.PATH ?? process.env.PATH ?? "";
   writeFileSync(
     tmuxWrapperPath,
-    `#!/usr/bin/env node
-const { spawnSync } = require("node:child_process");
-const socketPath = ${JSON.stringify(tmuxSocketPath)};
-const originalPath = ${JSON.stringify(originalPath)};
-const env = { ...process.env, PATH: originalPath };
-const result = spawnSync("tmux", ["-S", socketPath, ...process.argv.slice(2)], { env, stdio: "inherit" });
-if (result.error) {
-  console.error(result.error.message);
-  process.exit(127);
-}
-process.exit(result.status ?? 1);
+    `#!/bin/sh
+PATH=${shellQuote(originalPath)}
+export PATH
+exec tmux -S ${shellQuote(tmuxSocketPath)} "$@"
 `,
     { mode: 0o755 },
   );
@@ -358,6 +358,10 @@ process.exit(result.status ?? 1);
   const env: Record<string, string | undefined> = { ...baseEnv };
   for (const name of DAEMON_TARGET_ENV_VARS) delete env[name];
   for (const name of CREDENTIAL_ENV_VARS) delete env[name];
+  // The fixture owns one explicit socket; an ambient mode must not select an
+  // additional server that ordinary scaffold cleanup would leave running.
+  delete env.OPENRIG_TMUX_SERVER;
+  delete env.RIGGED_TMUX_SERVER;
   // Inherited provider roots belong to the runner; explicit ones are test inputs.
   if (opts.baseEnv === undefined) {
     for (const name of ["CODEX_HOME", "CLAUDE_CONFIG_DIR"]) delete env[name];

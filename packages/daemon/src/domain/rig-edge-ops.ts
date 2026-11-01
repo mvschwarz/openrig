@@ -1,3 +1,4 @@
+import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { Edge, NodeWithBinding } from "./types.js";
 import { VALID_EDGE_KINDS } from "./rigspec-schema.js";
@@ -15,7 +16,7 @@ export interface EdgeInput {
 
 export interface EdgeEnd {
   logicalId: string;
-  nodeId: string;
+  nodeId: string | null;
 }
 
 export interface EdgeReceipt {
@@ -118,14 +119,15 @@ export function addRigEdge(
     }
     const from = rig.nodes.find((node) => node.logicalId === input.from);
     const to = rig.nodes.find((node) => node.logicalId === input.to);
-    if (!from || !to) {
+    const targetRef = input.kind === "escalates_to" && isEscalationTargetRef(input.to) ? input.to : null;
+    if (!from || (!to && !targetRef)) {
       const missing = [...new Set([from ? null : input.from, to ? null : input.to].filter((id): id is string => id !== null))];
       return { ok: false, code: "node_not_found", message: `no seat with logical id ${missing.map((id) => `'${id}'`).join(" or ")} in rig ${input.rigId}` };
     }
-    const edge: EdgeReceipt = { kind: input.kind, from: end(from), to: end(to) };
-    const existing = rig.edges.find((e) => e.sourceId === from.id && e.targetId === to.id && e.kind === input.kind);
+    const edge: EdgeReceipt = { kind: input.kind, from: end(from), to: to ? end(to) : { logicalId: targetRef!, nodeId: null } };
+    const existing = rig.edges.find((e) => e.sourceId === from.id && e.targetId === (to?.id ?? targetRef) && e.kind === input.kind);
     if (existing) return { ok: true, rigId: input.rigId, outcome: "present", edge: { ...edge, id: existing.id } };
-    const candidate = { sourceId: from.id, targetId: to.id, kind: input.kind };
+    const candidate = { sourceId: from.id, targetId: to?.id ?? targetRef!, kind: input.kind };
     if (LAUNCH_DEPENDENCY_KINDS.has(input.kind) && createsLaunchCycle(rig.edges, candidate)) {
       return {
         ok: false, code: "edge_cycle",
@@ -133,9 +135,9 @@ export function addRigEdge(
       };
     }
     if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_add", edge };
-    const before = input.kind === "delegates_to" ? routingView(repo, rig.rig.name, to.id) : undefined;
-    const added = repo.addEdge(input.rigId, from.id, to.id, input.kind);
-    const routing = before && routingChange(before, routingView(repo, rig.rig.name, to.id));
+    const before = input.kind === "delegates_to" ? routingView(repo, rig.rig.name, to!.id) : undefined;
+    const added = repo.addEdge(input.rigId, from.id, to?.id ?? targetRef!, input.kind);
+    const routing = before && routingChange(before, routingView(repo, rig.rig.name, to!.id));
     return {
       ok: true, rigId: input.rigId, outcome: "added", edge: { ...edge, id: added.id },
       rollback: `rig edge remove ${input.rigId} ${added.id}`,
@@ -157,7 +159,7 @@ export function removeRigEdge(
     const edge = rig.edges.find((e) => e.id === input.edgeId);
     if (!edge) return { ok: false, code: "edge_not_found", message: `no edge ${input.edgeId} in rig ${input.rigId}` };
     const node = (id: string) => rig.nodes.find((n) => n.id === id)!;
-    const receipt: EdgeReceipt = { id: edge.id, kind: edge.kind, from: end(node(edge.sourceId)), to: end(node(edge.targetId)) };
+    const receipt: EdgeReceipt = { id: edge.id, kind: edge.kind, from: end(node(edge.sourceId)), to: edge.targetRef ? { logicalId: edge.targetRef, nodeId: null } : end(node(edge.targetId)) };
     if (input.plan) return { ok: true, rigId: input.rigId, outcome: "would_remove", edge: receipt };
     const before = edge.kind === "delegates_to" ? routingView(repo, rig.rig.name, edge.targetId) : undefined;
     repo.removeEdge(input.rigId, edge.id);

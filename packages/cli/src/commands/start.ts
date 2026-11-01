@@ -10,6 +10,7 @@ import {
   getDaemonUrl,
   startDaemon,
   waitForKernelReady,
+  skippedKernelMessage,
   type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { freshSeatCommand, launchFreshSeat } from "../fresh-seat-command.js";
@@ -190,6 +191,13 @@ Examples:
 When the daemon is restoring a kernel a reboot left down, rig start goes on to
 your other rigs. Exit 0 then does not mean the kernel is ready (check rig
 status); a restore that returned without a ready kernel exits 1.
+
+--last restores a rig unless every seat it launched was stopped on purpose. A
+rig taken down with rig down before OpenRig 0.6.12, or whose seats exited or
+were lost without rig down, counts as last running: run rig down <rig> once
+(its id when names are shared) and --last keeps it down. --last never selects
+the kernel; under --no-kernel its automatic restore is skipped too, so bring it
+back with rig up kernel --existing.
 `);
   const getDepsF = (): StartDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -286,11 +294,8 @@ status); a restore that returned without a ready kernel exits 1.
         if (!opts.json) console.log("Continuing with your other rigs.");
       } else if (!kernelResult.ok) {
         if (kernelResult.kernelState === "skipped") {
-          // The daemon also skips its boot when a kernel rig already exists (kernel-boot.ts).
-          // That rig need not be running, after a reboot it is not, and this command does not restore it.
-          if (!opts.json) console.log(kernelResult.detail === "kernel rig already managed"
-            ? "Kernel auto-boot skipped (kernel rig already managed). If its seats are not running, for example after a reboot, bring it back with: rig up kernel --existing"
-            : "Kernel auto-boot skipped (--no-kernel or test mode), including the operator that helps you start a team. To start it later, run rig, set up or select kernel, then start its operator seat.");
+          // This command does not restore a kernel the daemon skipped; say why, and the way back.
+          if (!opts.json) console.log(skippedKernelMessage(kernelResult.detail));
         } else {
           const terminalFailure = ["auth_blocked", "spec_missing", "bootstrap_failed", "degraded"].includes(kernelResult.kernelState ?? "");
           console.error(`${terminalFailure ? "Kernel failed to start" : "Kernel did not report ready before the deadline"}: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);

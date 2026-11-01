@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 
 const GENERATOR = resolve("packages/daemon/scripts/gen-control-plane-json.mjs");
 const MIRROR = resolve("scripts/mirror-skills.mjs");
-const NAMES = ["product-public-skills", "internal-tokens", "skill-edge-layout"];
+const NAMES = ["product-public-skills", "skill-edge-layout"];
 
 test("regeneration preserves product policy bytes in place and when exporting", () => {
   withFixture(({ root, policyBytes }) => {
@@ -35,12 +35,14 @@ test("legacy YAML inputs refuse with product pointers before changing policy fil
     for (const name of NAMES) {
       assert.deepEqual(readFileSync(join(root, "scripts", `${name}.generated.json`)), policyBytes[name]);
     }
-    for (const [index, flag] of ["membership", "denylist", "layout"].entries()) {
+    // The leak guard's term lists left the repository: a denylist override points at their local file instead.
+    for (const [flag, named] of [["membership", "product-public-skills.generated.json"], ["denylist", "OPENRIG_LEAK_GUARD_RULES"],
+      ["layout", "skill-edge-layout.generated.json"]]) {
       const single = run(GENERATOR, root, [
         "--repo-root", root, "--output", join(root, "scripts"), `--${flag}`, legacy[flag],
       ]);
       assert.notEqual(single.status, 0);
-      assert.ok(single.stderr.includes(`${NAMES[index]}.generated.json`), single.stderr);
+      assert.ok(single.stderr.includes(named), single.stderr);
       for (const name of NAMES) {
         assert.deepEqual(readFileSync(join(root, "scripts", `${name}.generated.json`)), policyBytes[name]);
       }
@@ -105,7 +107,7 @@ function withFixture(check) {
   };
   const layout = { version: 0, edges, skills: { alpha: { edges: ["plugin"], category: null } } };
   const policyBytes = {};
-  for (const [i, data] of [membership, rules, layout].entries()) {
+  for (const [i, data] of [membership, layout].entries()) {
     // Deliberately nonstandard formatting must survive a refresh byte for byte.
     policyBytes[NAMES[i]] = Buffer.from(JSON.stringify(data, null, 4) + "\n\n");
     write(join(root, "scripts", `${NAMES[i]}.generated.json`), policyBytes[NAMES[i]]);

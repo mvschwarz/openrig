@@ -1,4 +1,7 @@
+import { isEscalationTargetRef } from "./escalation-target-ref.js";
 import { validateClaudePermissionRules } from "./claude-permission-rules.js";
+import { specClaudeTokenRef } from "./claude-seat-token.js";
+import { validateClaudeMcp } from "./claude-mcp.js";
 import { validateCodexMemberPermissions } from "./codex-member-permissions.js";
 import type {
   LegacyRigSpec,
@@ -63,7 +66,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "codex_permissions", "cwd", "restore_policy",
+  "model", "effort", "advisor", "role", "permission_policy", "claude_permissions", "claude_token", "claude_mcp", "codex_permissions", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs",
 ]);
@@ -483,6 +486,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   const prefix = `${podPrefix}.members[${index}]`;
   if (!isMapping(member)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
+  for (const field of ["model", "label"]) {
+    if (member[field] !== undefined && typeof member[field] !== "string") {
+      errors.push(`${prefix}.${field}: must be a string`);
+    }
+  }
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
   // through the manifest's one canonical site; this leg only classifies the answer.
@@ -522,9 +530,19 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   if (!member["runtime"] || typeof member["runtime"] !== "string") {
     errors.push(`${prefix}.runtime: required non-empty string`);
   }
+  if (member["claude_mcp"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_mcp: only valid when runtime is "claude-code"`);
+    try { validateClaudeMcp(member["claude_mcp"], `${prefix}.claude_mcp`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
   if (member["claude_permissions"] !== undefined) {
     if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_permissions: only valid when runtime is "claude-code"`);
     try { validateClaudePermissionRules(member["claude_permissions"], `${prefix}.claude_permissions`); }
+    catch (error) { errors.push((error as Error).message); }
+  }
+  if (member["claude_token"] !== undefined) {
+    if (member["runtime"] !== "claude-code") errors.push(`${prefix}.claude_token: only valid when runtime is "claude-code"`);
+    try { specClaudeTokenRef(member["claude_token"], `${prefix}.claude_token`); }
     catch (error) { errors.push((error as Error).message); }
   }
   if (member["codex_permissions"] !== undefined) {
@@ -846,6 +864,8 @@ function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podP
   }
   if (!to || typeof to !== "string") {
     errors.push(`${prefix}.to: required string`);
+  } else if (kind === "escalates_to" && isEscalationTargetRef(to)) {
+    // Another rig need not exist at import time.
   } else if (to.includes(".")) {
     errors.push(`${prefix}.to: pod-local edge must use unqualified member id, not fully-qualified (got "${to}")`);
   } else if (!memberIds.has(to)) {
@@ -876,6 +896,8 @@ function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQ
   }
   if (!to || typeof to !== "string") {
     errors.push(`${prefix}.to: required string`);
+  } else if (kind === "escalates_to" && isEscalationTargetRef(to)) {
+    // Resolve the declared same-daemon address only when escalating.
   } else if (!to.includes(".")) {
     errors.push(`${prefix}.to: cross-pod edge must use fully-qualified pod.member id (got "${to}")`);
   } else if (!allQualifiedIds.has(to)) {
@@ -1264,6 +1286,8 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     ...(m["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(m["claude_permissions"]) }),
+    ...(m["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(m["claude_token"], "claude_token") }),
+    ...(m["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(m["claude_mcp"]) }),
     ...(m["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(m["codex_permissions"]) }),
     env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
@@ -1381,9 +1405,19 @@ export class LegacyRigSpecSchema {
           errors.push(`node ${node["id"]}: unknown runtime '${node["runtime"]}'`);
         }
 
+        if (node["claude_mcp"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_mcp: only valid when runtime is "claude-code"`);
+          try { validateClaudeMcp(node["claude_mcp"], `nodes.${nodeWhere}.claude_mcp`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
         if (node["claude_permissions"] !== undefined) {
           if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_permissions: only valid when runtime is "claude-code"`);
           try { validateClaudePermissionRules(node["claude_permissions"], `nodes.${nodeWhere}.claude_permissions`); }
+          catch (error) { errors.push((error as Error).message); }
+        }
+        if (node["claude_token"] !== undefined) {
+          if (node["runtime"] !== "claude-code") errors.push(`nodes.${nodeWhere}.claude_token: only valid when runtime is "claude-code"`);
+          try { specClaudeTokenRef(node["claude_token"], `nodes.${nodeWhere}.claude_token`); }
           catch (error) { errors.push((error as Error).message); }
         }
         if (node["codex_permissions"] !== undefined) {
@@ -1429,7 +1463,7 @@ export class LegacyRigSpecSchema {
 
         if (from === to) errors.push(`self-edge not allowed: ${from} -> ${to}`);
         if (from && !nodeIds.has(from)) errors.push(`edge references nonexistent node: '${from}'`);
-        if (to && !nodeIds.has(to)) errors.push(`edge references nonexistent node: '${to}'`);
+        if (to && !nodeIds.has(to) && !(kind === "escalates_to" && isEscalationTargetRef(to))) errors.push(`edge references nonexistent node: '${to}'`);
         // The same five kinds as a pod-aware spec, so an edge that `rig edge add` put on a flat rig exports and imports again.
         if (kind && !VALID_EDGE_KINDS.has(kind)) errors.push(`unknown edge kind: '${kind}'`);
       }
@@ -1456,6 +1490,8 @@ export class LegacyRigSpecSchema {
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),
+      ...(n["claude_token"] === undefined ? {} : { claudeTokenRef: specClaudeTokenRef(n["claude_token"], "claude_token") }),
+      ...(n["claude_mcp"] === undefined ? {} : { claudeMcp: validateClaudeMcp(n["claude_mcp"]) }),
       ...(n["codex_permissions"] === undefined ? {} : { codexPermissions: validateCodexMemberPermissions(n["codex_permissions"]) }),
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,

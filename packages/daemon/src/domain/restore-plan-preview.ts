@@ -289,6 +289,7 @@ export function buildRestorePlanPreview(
   freshLogicalIds?: string[],
   nowMs: number = Date.now(),
   recorded: Record<string, string | null> = {},
+  selectedHistory?: { nodeId: string; historySessionId: string },
 ): RestorePlanPreview {
   // OPR.0.5.7.1 — the relation the resolution consumes: the snapshot's own
   // when previewing a snapshot; for the live no-snapshot case, the SAME
@@ -303,7 +304,12 @@ export function buildRestorePlanPreview(
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
     const savedNodeId = snapshot?.data.nodes?.find(saved => saved.logicalId === node.logicalId)?.id ?? node.id;
-    const resolution = resolveActiveSnapshotSession<PreviewSessionRow>(occupancy, savedNodeId);
+    const resolution = selectedHistory?.nodeId === node.id
+      ? (() => {
+          const selected = sessionRows.find(row => row.nodeId === node.id && row.id === selectedHistory.historySessionId);
+          return selected ? { kind: "resolved" as const, session: selected } : { kind: "none" as const };
+        })()
+      : resolveActiveSnapshotSession<PreviewSessionRow>(occupancy, savedNodeId);
     const runtimeError = resolution.kind !== "ambiguous"
       ? restoreRuntimeCompatibilityError(node.runtime, snapshot?.data.nodeStartupContext?.[savedNodeId]?.runtime)
       : null;
@@ -313,7 +319,7 @@ export function buildRestorePlanPreview(
       currentRuntime: node.runtime,
       recordedSessions: sessionRows.filter((row) => row.nodeId === savedNodeId),
     };
-    const stoppedCurrent = sessionRows.some(row => row.nodeId === savedNodeId && row.stoppedCurrent);
+    const stoppedCurrent = selectedHistory?.nodeId !== node.id && sessionRows.some(row => row.nodeId === savedNodeId && row.stoppedCurrent);
     // Restore checks the live binding before anything else (restoreNodeWithCompensation), and so does its forecast.
     const attached = node.binding?.attachmentType === "external_cli";
     const { intendedAction, reason } = attached
@@ -322,7 +328,7 @@ export function buildRestorePlanPreview(
       ? { intendedAction: "awaiting-decision" as const, reason: runtimeError }
       : intendedActionFor(resolution.kind === "resolved" ? resolution.session : null,
         resolution.kind === "ambiguous" ? resolution : null, freshRequested, seat,
-        { logicalId: node.logicalId, rigName: rig.rig.name, row: absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
+        { logicalId: node.logicalId, rigName: rig.rig.name, row: snapshot?.data.periodicResumeSourcesByNode?.[savedNodeId] ?? absentSeatResumeHistory(sessionRows, savedNodeId), stoppedCurrent });
     // OPR.0.4.3.20 FR-6 — per-seat token state (read-only), derived from the
     // RESOLVED occupant only — never from a historical row.
     const occupant = resolution.kind === "resolved" ? resolution.session : null;

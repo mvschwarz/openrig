@@ -162,7 +162,7 @@ export function main(argv = process.argv.slice(2)) {
     range = [`${from}..${to}`];
     label = `${from.slice(0, 8)}..${to.length > 12 ? to.slice(0, 8) : to}`;
   }
-  const diff = git(repo, ["-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
+  const diff = git(repo, ["-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--diff-filter=ACMR", ...range]);
   const report = renderReport(findPortabilityIssues(addedLines(diff)), label, {
     locationsOnly: options.locationsOnly,
   });

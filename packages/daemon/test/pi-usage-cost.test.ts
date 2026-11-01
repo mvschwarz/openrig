@@ -10,6 +10,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { extractPiUsageFacts, parsePiSessionHeader, type PiSessionBoundary } from "../src/domain/pi-usage-facts.js";
 import { PiUsageEntriesStore, validPiUsageFact } from "../src/domain/pi-usage-entries-store.js";
 import { computeCostView, PI_COST_COVERAGE } from "../src/domain/usage-series.js";
+import { UsageSamplesStore } from "../src/domain/usage-samples-store.js";
 import { activityRoutes } from "../src/routes/activity.js";
 import { RunnerCore, parseRunnerArgs, readPiSessionEntryIds, type RunnerIo } from "../src/adapters/pi-runner.js";
 import { appendFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -355,6 +356,23 @@ describe("computeCostView, Pi seats", () => {
     store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "new", facts: facts(OWN, [assistant("z1", 30, 0.5)]) }, at(40));
     expect(computeCostView(d, { nowIso: at(60) }).seats[0]).toMatchObject({ costUsd: 0.5, window: { piSessionId: "new" } });
     expect((d.prepare("SELECT COUNT(*) AS n FROM pi_usage_entries").get() as { n: number }).n).toBe(8);
+  });
+
+  it("a seat name that ran Pi and now runs Claude shows its Claude estimate; one that moved to Pi shows Pi", () => {
+    const d = db();
+    const claudeSample = (seatSession: string, sampledAt: string, cost: number) => new UsageSamplesStore(d).appendContextSample({ nodeId: "n",
+      seatSession, source: "claude_statusline_json", sampledAt, totalInputTokens: 100, totalOutputTokens: 10, usedPercentage: 5,
+      nativeSessionId: "claude-1", clientCostEstimateUsd: cost }, sampledAt);
+    const store = new PiUsageEntriesStore(d);
+    // Pi first (entries at 16:00:02-10), then Claude under the same name.
+    store.record({ seatSession: SESSION, nodeId: null, generation: null, piSessionId: "0197a2f0", facts: facts(OWN) }, at(20));
+    claudeSample(SESSION, at(50), 0.9);
+    // Claude first, then Pi under the same name.
+    claudeSample("moved@rig", new Date(Date.UTC(2026, 9, 13, 15, 0, 0)).toISOString(), 0.4);
+    store.record({ seatSession: "moved@rig", nodeId: null, generation: null, piSessionId: "s-moved", facts: facts(OWN) }, at(20));
+    const seats = Object.fromEntries(computeCostView(d, { nowIso: at(60) }).seats.map((s) => [s.seatSession, s as Record<string, any>]));
+    expect(seats[SESSION]).toMatchObject({ runtime: "claude-code", status: "reported", costUsd: 0.9 });
+    expect(seats["moved@rig"]).toMatchObject({ runtime: "pi", status: "reported", window: { piSessionId: "s-moved" } });
   });
 
   it("without the table, no Pi rows appear and nothing fails", () => {

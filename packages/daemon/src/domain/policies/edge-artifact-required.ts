@@ -75,9 +75,12 @@ export const edgeArtifactRequiredPolicy: Policy = {
     const source = context.source;
     const target = context.target;
     const sourcePools = expandPoolSides(source);
+    // A target counts as existing in any state, with any header: one still being written, or with invalid YAML, still
+    // satisfies the edge when its body names the source.
     const targetPools = expandPoolSides(target).map((p) => ({
       ...p,
       include_statuses: [] as string[],
+      include_malformed_frontmatter: true,
     }));
     const keyField = source?.key_field ?? "entry";
 

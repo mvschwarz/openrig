@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp-server.js";
+import { createMcpServer, MEMBER_WORKFLOW, MEMBER_WORKFLOW_VERSION, type McpAccess } from "../src/mcp-server.js";
 import { DaemonClient, DaemonConnectionError, type DaemonResponse } from "../src/client.js";
 
 function mockClient(overrides?: {
@@ -44,10 +44,10 @@ describe("MCP Server", () => {
     if (cleanup) await cleanup();
   });
 
-  // T1: MCP server lists all 36 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
+  // T1: MCP server lists all 37 tools: the original 18, the five queue tools, the telemetry events read, restore status, whoami,
   // the team, slice, mission and two context reads, the artifact read, the decision room and delegated decision, and the
   // worker's handoff and unclaim
-  it("lists all 36 tools", async () => {
+  it("lists all 37 tools", async () => {
     await setup();
     const result = await mcpClient.listTools();
     const names = result.tools.map((t) => t.name).sort();
@@ -64,6 +64,7 @@ describe("MCP Server", () => {
       "rig_context_pack",
       "rig_discover",
       "rig_down",
+      "rig_environment_export",
       "rig_human_decision_room",
       "rig_mission",
       "rig_ps",
@@ -240,7 +241,7 @@ describe("MCP Server", () => {
     const reads = ["rig_agent_validate", "rig_bundle_inspect", "rig_capture", "rig_chatroom_watch", "rig_ps", "rig_queue_list", "rig_queue_show",
       "rig_restore_status", "rig_rig_nodes", "rig_rig_validate", "rig_snapshot_list", "rig_status", "rig_telemetry_events", "rig_whoami",
       "rig_team", "rig_slices", "rig_mission", "rig_context_pack", "rig_context_get", "rig_artifact_read", "rig_human_decision_room"];
-    const additive = ["rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
+    const additive = ["rig_environment_export", "rig_add", "rig_chatroom_send", "rig_queue_create", "rig_snapshot_create"];
     // Discover refreshes and retires discovered facts; claim ends a blocked row's wait. Both change existing state.
     // A delegated decision closes the person's ask; a handoff closes the item passed on; an unclaim ends a claim.
     const destructive = ["rig_bind", "rig_discover", "rig_down", "rig_queue_claim", "rig_queue_decide", "rig_queue_handoff", "rig_queue_unclaim",
@@ -362,7 +363,7 @@ describe("MCP Server", () => {
   it("rig_queue_show names where a handed-on item went, and says when it can't tell", async () => {
     const lists: string[] = [];
     const getFn = vi.fn(async (path: string) => {
-      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-20261023-abc@mm2-host" } };
+      if (path === "/api/queue/qitem-remote") return { status: 200, data: { qitemId: "qitem-remote", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qitem-remote-successor@mm2-host" } };
       if (path === "/api/queue/qitem-done") return { status: 200, data: { qitemId: "qitem-done", state: "done", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path === "/api/queue/qitem-old") return { status: 200, data: { qitemId: "qitem-old", state: "handed-off", closureReason: "handed_off_to", closureTarget: "qa@team" } };
       if (path.endsWith("/transitions")) return { status: 200, data: [] };
@@ -381,7 +382,7 @@ describe("MCP Server", () => {
     const successor = async (qitemId: string) => ((await mcpClient.callTool({ name: "rig_queue_show", arguments: { qitemId } })).structuredContent as { successor: unknown }).successor;
 
     // A cross-host handoff is named from its closure target, not fetched.
-    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-20261023-abc", host: "mm2-host" });
+    expect(await successor("qitem-remote")).toEqual({ qitemId: "qitem-remote-successor", host: "mm2-host" });
     expect(lists).toEqual([]);
     // A handoff-and-complete closes the source done, and it still has a successor: the newest, with the others named.
     expect(await successor("qitem-done")).toEqual({ qitemId: "qitem-next", destinationSession: "qa@team", state: "pending", otherSuccessors: ["qitem-earlier"] });
@@ -441,11 +442,20 @@ describe("MCP Server", () => {
         { logicalId: "dev.impl", canonicalSessionName: "dev-impl@my-rig", hostSelfId, agentActivity: { state: "idle" }, activityState: null },
         { logicalId: "dev.qa", canonicalSessionName: null, hostSelfId, activityState: null },
       ] };
+      if (p.startsWith("/api/queue/list?") && new URLSearchParams(p.split("?")[1]).get("destinationSession") === "grok@my-rig") return { status: 200, data: [
+        { qitemId: "q-old", destinationSession: "grok@my-rig", lastNudgeAttempt: "2026-10-26T10:00:00.000Z", lastNudgeWireResult: "failed:webhook (GROK_WAKE_URL) answered 500" },
+        { qitemId: "q-new", destinationSession: "grok@my-rig", lastNudgeAttempt: "2026-10-26T11:00:00.000Z", lastNudgeWireResult: "wake-accepted:webhook (GROK_WAKE_URL) answered 202" },
+        { qitemId: "q-unrung", destinationSession: "grok@my-rig", lastNudgeAttempt: null, lastNudgeWireResult: null },
+        // A daemon that ignored the filter: another seat's ring doesn't count.
+        { qitemId: "q-other", destinationSession: "lead@my-rig", lastNudgeAttempt: "2026-10-26T12:00:00.000Z", lastNudgeWireResult: "verified" },
+      ] };
       return { status: 404, data: {} };
     });
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const presence = path.join(folder, "presence.json");
+    fs.writeFileSync(presence, JSON.stringify({ version: 1, seats: { "grok@my-rig": { grant: "grok", lastCallAt: "2026-10-26T11:05:00.000Z" } } }));
     const connectTo = async (rostersFolder: string) => {
-      const server = createMcpServer(mockClient({ get: getFn }), { rostersFolder: () => rostersFolder });
+      const server = createMcpServer(mockClient({ get: getFn }), { rostersFolder: () => rostersFolder, presenceFile: () => presence });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "test-client", version: "1.0.0" });
       await server.connect(serverTransport);
@@ -459,7 +469,9 @@ describe("MCP Server", () => {
     try {
       const found = await here.team();
       expect(found.hostedMembers).toEqual([{ session: "grok@my-rig", roster: "research", capabilities: ["web research"], useWhen: "Current sources",
-        caveat: "Text only", pane: null, activity: "unknown" }]);
+        caveat: "Text only", pane: null, activity: "unknown",
+        presence: { lastCallAt: "2026-10-26T11:05:00.000Z", lastWakeScope: "the latest ring among its 50 most recent rows",
+          lastWake: { at: "2026-10-26T11:00:00.000Z", result: "wake-accepted:webhook (GROK_WAKE_URL) answered 202", qitemId: "q-new" } } }]);
       // A scoped caller gets a generic note; the file names and errors go to this server's log.
       expect(found.hostedMembersNote).toBe("Some rosters couldn't be read, so hosted members may be missing.");
       expect(log.mock.calls.flat().join(" ")).toContain("b.json");
@@ -508,6 +520,16 @@ describe("MCP Server", () => {
     await cleanup();
   });
 
+  it("cuts long context text before an emoji instead of through it", async () => {
+    const text = `${"x".repeat(47_999)}🚀${"y".repeat(10)}`;
+    await setup({ get: vi.fn(async (path: string) => path.startsWith("/api/context-packs/library/resolve-address")
+      ? { status: 200, data: { address: "world/a.md", packRef: "world", filePath: "a.md", text } }
+      : { status: 404, data: {} }) });
+    const got = (await mcpClient.callTool({ name: "rig_context_get", arguments: { address: "world/a.md" } })).structuredContent as { text: string };
+    expect(got).toMatchObject({ text: "x".repeat(47_999), truncated: true, totalChars: 48_011 });
+    await cleanup();
+  });
+
   it("gives the client short instructions on the seat, durable delegation and reserved questions", async () => {
     await setup();
     const instructions = mcpClient.getInstructions() ?? "";
@@ -517,6 +539,48 @@ describe("MCP Server", () => {
     expect(instructions).toContain("reserved for a person");
     expect(instructions).toContain("beside their answers and never as one");
     await cleanup();
+  });
+
+  it("carries the member workflow as one versioned text, quoted word for word in the hosted-members doc", async () => {
+    await setup();
+    const instructions = mcpClient.getInstructions() ?? "";
+    expect(MEMBER_WORKFLOW).toContain(`(${MEMBER_WORKFLOW_VERSION})`);
+    expect(instructions).toContain(MEMBER_WORKFLOW);
+    // The inbox, the claim before work, and keeping an item blocked while a person is asked.
+    for (const part of ["rig_queue_list with owned set", "rig_queue_claim", "blockedOn that person", "blockedOn that new qitemId"]) expect(MEMBER_WORKFLOW).toContain(part);
+    // v2: the closure reason a finished item takes, and scope described from the grant, not the tool list.
+    expect(MEMBER_WORKFLOW_VERSION).toBe("member-workflow/v2");
+    for (const part of ["closure reason no-follow-on", "a listed tool isn't access", "names the shared roots you may read"]) expect(MEMBER_WORKFLOW).toContain(part);
+    const doc = fs.readFileSync(new URL("../../../docs/reference/hosted-members.md", import.meta.url), "utf8");
+    expect(doc).toContain(`> ${MEMBER_WORKFLOW}`);
+    expect(doc).not.toContain("member-workflow/v1");
+    await cleanup();
+  });
+
+  it("names the closure reasons rig_queue_update takes, finished work first", async () => {
+    await setup();
+    const { tools } = await mcpClient.listTools();
+    const update = tools.find((tool) => tool.name === "rig_queue_update");
+    const reason = (update?.inputSchema as { properties?: Record<string, { description?: string }> } | undefined)?.properties?.closureReason?.description ?? "";
+    expect(reason).toContain("no-follow-on for finished work");
+    for (const value of ["handed_off_to", "denied", "canceled", "escalation", "superseded"]) expect(reason).toContain(value);
+    expect(reason).not.toContain("completed");
+    await cleanup();
+  });
+
+  it("doesn't give an external caller's connection the member workflow or its authority, only the shared lines", async () => {
+    const server = createMcpServer(mockClient(), { seat: "cus-1-caller@team",
+      access: { principal: "cus-1", owner: false, rigs: ["team"], roots: [], workspace: false, external: { objects: { queue: ["create", "show", "list"] } } } });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const external = new Client({ name: "external-client", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await external.connect(clientTransport);
+    const instructions = external.getInstructions() ?? "";
+    expect(instructions).toContain("reserved for a person");
+    expect(instructions).not.toContain(MEMBER_WORKFLOW_VERSION);
+    expect(instructions).not.toContain("basically authorized");
+    await external.close();
+    await server.close();
   });
 
   it("rig_down calls POST /api/down with correct params", async () => {
@@ -626,7 +690,7 @@ describe("MCP Server", () => {
 
     // Verify server is responsive
     const result = await mcpClient.listTools();
-    expect(result.tools.length).toBe(36);
+    expect(result.tools.length).toBe(37);
 
     // Clean disconnect
     await cleanup();
@@ -640,7 +704,7 @@ describe("MCP Server", () => {
     await client2.connect(ct2);
 
     const result2 = await client2.listTools();
-    expect(result2.tools.length).toBe(36);
+    expect(result2.tools.length).toBe(37);
 
     await client2.close();
     await server2.close();
@@ -988,6 +1052,54 @@ describe("MCP Server", () => {
       expect(body.qitemId).toMatch(/^qitem-\d{14}-[0-9a-f]{16}$/);
       expect(body).not.toHaveProperty("sourceSession");
       await cleanup();
+    });
+
+    it("rig_queue_create drops OpenRig's provenance tags only from an external caller's create and revision; other callers' pass as sent", async () => {
+      const sent = ["mission:m", "project:p", "custom", "workflow", "founder-slack", "inbound", "shared-channel", "participant:acme", "slack-body:0123456789abcdef", "slack-attachments:39", "gate"];
+      const tagsSent = async (access?: McpAccess, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination: "lead@team", body: "Do X", tags: sent, ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        expect(result.isError).toBeUndefined();
+        return (postFn.mock.calls[0] as unknown as [string, Record<string, unknown>])[1].tags;
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
+      expect(await tagsSent()).toEqual(sent);
+      expect(await tagsSent(work)).toEqual(sent);
+      expect(await tagsSent(external)).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+      expect(await tagsSent(external, "qitem-0")).toEqual(["mission:m", "project:p", "custom", "workflow"]);
+    });
+
+    it("rig_queue_create: an external caller hands tasks only to its team, never to a caller-shaped seat (itself included); a self-hosted grant is unchanged", async () => {
+      const created = async (access: McpAccess, destination: string, revises?: string) => {
+        const postFn = vi.fn(async () => ({ status: 201, data: { qitemId: "qitem-1" } }));
+        const getFn = vi.fn(async () => ({ status: 200, data: { qitemId: "qitem-0", sourceSession: "cus-a1-caller@team", destinationSession: "lead@team" } }));
+        const server = createMcpServer(mockClient({ post: postFn, get: getFn }), { seat: "cus-a1-caller@team", access });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        const client = new Client({ name: "test-client", version: "1.0.0" });
+        await server.connect(serverTransport);
+        await client.connect(clientTransport);
+        const result = await client.callTool({ name: "rig_queue_create", arguments: { destination, body: "Do X", ...(revises ? { revises } : {}) } });
+        await client.close();
+        await server.close();
+        return { posted: postFn.mock.calls.length, refused: (result.structuredContent as { code?: string } | undefined)?.code === "out_of_scope" };
+      };
+      const work: McpAccess = { principal: "grok", owner: false, rigs: ["team"], roots: [], workspace: false };
+      const external: McpAccess = { ...work, principal: "cus_A1", external: { objects: { queue: ["create", "show", "list"] } } };
+      for (const destination of ["cus-a1-caller@team", "cus-b2-caller@team"]) {
+        expect(await created(external, destination)).toEqual({ posted: 0, refused: true });
+        expect(await created(external, destination, "qitem-0")).toEqual({ posted: 0, refused: true });
+        expect(await created(work, destination)).toEqual({ posted: 1, refused: false });
+      }
+      expect(await created(external, "lead@team")).toEqual({ posted: 1, refused: false });
     });
 
     it("rig_queue_create sends humanAlert only when alert is set, so an MCP-only agent can still raise a sign-in", async () => {

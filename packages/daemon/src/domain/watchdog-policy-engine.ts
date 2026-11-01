@@ -55,6 +55,8 @@ export interface DeliveryRequest {
 
 export interface DeliveryOutcome {
   status: "ok" | "failed" | "retained";
+  /** Typed admission refusal, kept independently of human-readable error text. */
+  code?: "retained_quota_full" | "terminal_seat";
   outboxIds?: string[];
   /** The existing transport's actual input boundary; failure never means no input by itself. */
   inputPhase?: "not_reached" | "attempted" | "written";
@@ -752,7 +754,9 @@ export class WatchdogPolicyEngine {
     const notes = digest
       ? { ...(outcome.notes ?? {}), digestDeliveryId: digest.deliveryId, digestSize: digest.size }
       : outcome.notes;
-    const deliveryNotes = delivery.inputPhase === undefined ? notes : { ...(notes ?? {}), deliveryInputPhase: delivery.inputPhase };
+    const deliveryNotes = delivery.inputPhase === undefined && delivery.code === undefined ? notes
+      : { ...(notes ?? {}), ...(delivery.inputPhase === undefined ? {} : { deliveryInputPhase: delivery.inputPhase }),
+        ...(delivery.code === undefined ? {} : { deliveryCode: delivery.code }) };
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,

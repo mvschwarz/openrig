@@ -89,6 +89,21 @@ describe("SeatAttentionReconciler", () => {
     expect(result.evidence?.state).toBe("idle");
   });
 
+  it.each([
+    { newer: "UserPromptSubmit", older: "StopFailure", ok: true },
+    { newer: "StopFailure", older: "Stop", ok: false },
+  ])("attention clearing uses the newer Claude $newer when $older arrives later", async ({ newer, older, ok }) => {
+    const seat = "worker@r-hook-order";
+    seedAttentionSeat("r-hook-order", seat);
+    const now = Date.now();
+    for (const [index, hookEvent] of [newer, older].entries()) {
+      expect(activityStore.recordHookEvent({ runtime: "claude-code", sessionName: seat, hookEvent,
+        subtype: hookEvent === "StopFailure" ? "rate_limit" : null,
+        occurredAt: new Date(now - (index + 1) * 1000).toISOString() }).ok).toBe(true);
+    }
+    expect(await reconciler.clearAttention(seat)).toMatchObject({ ok, code: ok ? "cleared" : "not_demonstrably_responsive" });
+  });
+
   // needs_input does NOT clear
   it("does NOT clear on needs_input activity", async () => {
     const { rigId, nodeId } = seedAttentionSeat("r3", "worker@r3");
@@ -190,6 +205,16 @@ describe("SeatAttentionReconciler", () => {
     it("a ready seat whose latest hook shows work is still not in attention", async () => {
       const seat = readySeat("r-hook-3", "UserPromptSubmit", 5_000);
       expect(await reconciler.clearAttention(seat, { reason: "nothing to clear" })).toMatchObject({ ok: false, code: "not_in_attention" });
+    });
+
+    it.each([
+      { newer: "UserPromptSubmit", older: "PermissionPromptConfirmed", code: "not_in_attention" },
+      { newer: "PermissionPromptConfirmed", older: "Stop", code: "not_demonstrably_responsive" },
+    ])("the hook-only attention class keeps $newer over a delayed older $older", async ({ newer, older, code }) => {
+      const seat = readySeat("r-hook-only-order", newer, 1000);
+      expect(activityStore.recordHookEvent({ sessionName: seat, runtime: "claude-code", hookEvent: older,
+        occurredAt: new Date(Date.now() - 2000).toISOString() }).ok).toBe(true);
+      expect(await reconciler.clearAttention(seat)).toMatchObject({ ok: false, code });
     });
 
     it("also settles the activity service's pending prompt, so the wake ladder and the inventory agree with the clear", async () => {

@@ -135,7 +135,8 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
       { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /fixture/launch", startedAt },
       { pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: foreign ? "codex" : "claude",
-        command: foreign ? "codex resume other" : `/opt/claude --session-id ${original}`, startedAt },
+        command: foreign ? "codex resume other" : `/opt/claude --session-id ${original}`,
+        ...(foreign ? { argv: ["codex", "resume", "other"] } : {}), startedAt },
     ];
     if (mode === "shim") rows.push({ ...rows[2]!, pid: 103, ppid: 102,
       command: `/child/claude --session-id ${original} --settings /fixture/settings.json` });

@@ -4,6 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { getNodeInventory, getNodeInventoryForAllRigs, getNodeDetail, getNodeInventoryWithContext, getNodeDetailWithContext } from "../src/domain/node-inventory.js";
 import { setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
@@ -166,6 +167,27 @@ describe("Node Inventory Projection", () => {
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
     expect(entry?.resumeCommand).toBe("claude --permission-mode acceptEdits --resume 'abc-123-def'");
+  });
+
+  it.each([
+    ["none", "saved-history"], [null, "saved-history"],
+    ["none", undefined], [null, undefined],
+  ] as const)("served Claude recovery commands retain MCP choice %s with token %s", (selection, resumeToken) => {
+    seedPodAwareRig(db);
+    db.prepare("UPDATE nodes SET claude_mcp = ? WHERE id = 'node-1'").run(selection);
+    seedSession(db, "node-1", "dev-impl@test-rig", { resumeToken });
+    const entry = getNodeInventory(db, "rig-1").find(node => node.nodeId === "node-1")!;
+    const detail = getNodeDetail(db, "rig-1", "dev.impl")!;
+    const commands = [entry.resumeCommand, ...(detail.recoveryGuidance?.commands ?? [])]
+      .filter((command): command is string => command?.startsWith("claude ") === true);
+    expect(commands).toHaveLength(resumeToken ? 3 : 1);
+    for (const command of commands) {
+      const argv = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).trim().split("\n");
+      expect(argv).toContain("--resume");
+      expect(argv.filter(arg => arg === "--strict-mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
+      expect(argv.filter(arg => arg === "--mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
+      if (selection === "none") expect(argv[argv.indexOf("--mcp-config") + 1]).toBe('{"mcpServers":{}}');
+    }
   });
 
   // Test 6: resumeCommand is null when no resume token

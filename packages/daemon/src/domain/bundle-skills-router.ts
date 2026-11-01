@@ -107,8 +107,8 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
         ? declared.slice("skills/".length)
         : declared;
     const targetAbs = nodePath.resolve(input.targetSkillsDir, declaredTrimmed);
-    // Defense-in-depth path-containment on TARGET (B1 repair on
-    // qitem-20260518215234-f84fff45). The leading "skills/" strip can promote
+    // Defense-in-depth path-containment on TARGET (B1 repair).
+    // The leading "skills/" strip can promote
     // a relative segment that looks safe under bundleRoot (e.g.
     // "skills/../outside/SKILL.md" passes source-containment because the bundle
     // tree may contain "outside/SKILL.md", but stripping yields

@@ -7,6 +7,7 @@ import { eventsNodeTypeIndexSchema } from "../src/db/migrations/047_events_node_
 import { inventoryEventIndexesSchema } from "../src/db/migrations/084_inventory_event_indexes.js";
 import { sessionStopIntentSchema } from "../src/db/migrations/103_session_stop_intent.js";
 import { getNodeInventory, getNodeInventoryForRigs } from "../src/domain/node-inventory.js";
+import { buildOrientedMap, deriveOriented } from "../src/domain/startup-proof.js";
 
 // Current readers need the stop-intent column; only the index under test differs.
 const THROUGH = [...ALL_MIGRATIONS.filter(m => m.name <= inventoryEventIndexesSchema.name), sessionStopIntentSchema];
@@ -43,21 +44,22 @@ function projection(db: Database.Database) {
 }
 function plansFromActualReads(db: Database.Database) {
   const original = db.prepare;
-  const calls: Array<{ sql: string; args: unknown[] }> = [];
+  const calls: Array<{ sql: string; args: unknown[]; rowCount: number }> = [];
   db.prepare = function(sql: string) {
     const statement = original.call(this, sql);
     if (sql.includes("restore.outcome_reconciled") || sql.includes("node.startup_challenged")) {
       const all = statement.all;
       statement.all = function(...args: unknown[]) {
-        calls.push({ sql, args });
-        return Reflect.apply(all, this, args);
+        const rows = Reflect.apply(all, this, args);
+        calls.push({ sql, args, rowCount: rows.length });
+        return rows;
       };
     }
     return statement;
   } as typeof db.prepare;
   try { projection(db); } finally { db.prepare = original; }
-  return calls.map(({ sql, args }) => ({
-    sql, args,
+  return calls.map(({ sql, args, rowCount }) => ({
+    sql, args, rowCount,
     detail: JSON.stringify(db.prepare("EXPLAIN QUERY PLAN " + sql).all(...args)),
   }));
 }
@@ -76,6 +78,34 @@ function expectIndexed(db: Database.Database) {
 }
 
 describe("084 inventory event read indexes", () => {
+  it("reads only a rig's node proof history, preserving cross-rig history and fresh verdicts", () => {
+    const db = database(); migrate(db, THROUGH); seed(db);
+    // Node identity, not an event's rig attribution, determines orientation.
+    db.prepare("UPDATE events SET rig_id = 'b' WHERE node_id = 'a'").run();
+    const history = rows(db);
+    expect(buildOrientedMap(db, "a")).toEqual(new Map([["a", "rejected"]]));
+    expect(buildOrientedMap(db, "b")).toEqual(new Map([["b", "n-a"]]));
+    expect(buildOrientedMap(db, "missing")).toEqual(new Map());
+    db.prepare("INSERT INTO rigs(id,name) VALUES('empty','empty')").run();
+    expect(buildOrientedMap(db, "empty")).toEqual(new Map());
+    const proofReads = plansFromActualReads(db).filter(p => p.sql.includes("node.startup_challenged"));
+    expect(proofReads.map(p => p.rowCount)).toEqual([5, 4]); // Fleet then selected rig; b is never materialized twice.
+    expect(proofReads[1].detail).toContain("SEARCH events USING INDEX idx_events_startup_node_seq (node_id=?)");
+    expect(getNodeInventory(db, "a")[0]?.oriented).toBe("rejected");
+    expect(rows(db)).toEqual(history);
+
+    emit(db, "b", "a", "node.startup_proof_verified", { challengeId: "new" });
+    emit(db, "b", "a", "node.startup_proof_rejected", { challengeId: "old" });
+    db.prepare("INSERT INTO events(rig_id,node_id,type,payload) VALUES('b','a','node.startup_proof_rejected','{')").run();
+    expect(buildOrientedMap(db, "a").get("a")).toBe("verified");
+    expect(getNodeInventory(db, "a")[0]?.oriented).toBe(deriveOriented(db, "a"));
+    emit(db, "b", "a", "node.startup_proof_skipped", { reason: "not_selected" });
+    expect(buildOrientedMap(db, "a").get("a")).toBe("n-a");
+    emit(db, "b", "a", "node.startup_challenged", { challengeId: "latest" });
+    expect(buildOrientedMap(db, "a").get("a")).toBe("missing");
+    expect(buildOrientedMap(db, "a").get("a")).toBe(buildOrientedMap(db).get("a"));
+  });
+
   it("preserves rig and fleet inventory when the optional node/type index is absent", () => {
     const db = database();
     migrate(db, THROUGH.filter(m => m.name !== eventsNodeTypeIndexSchema.name));

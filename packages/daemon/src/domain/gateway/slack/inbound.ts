@@ -21,6 +21,12 @@ import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type RecordHu
 import { BotLimiter, DEFAULT_MAX_PER_HOUR, DEFAULT_COOLDOWN_MINUTES, type BotLookup, type NamedBot } from "./bot-inbox.js";
 import { envelopeChannel, type EnvelopeForwarder } from "./forwarding.js";
 
+/** On a row whose body OpenRig gave an attachments block (local copies, failed transfers): the block's exact length, so
+ *  a person-facing post can leave out that block, and only it (queue-access.ts). */
+export const SLACK_ATTACHMENTS_TAG_PREFIX = "slack-attachments:";
+/** How OpenRig's attachments block begins: copies stored, or only failed transfers. */
+export const SLACK_ATTACHMENTS_HEADINGS = ["Attachments (workspace-local copies):\n", "FILE TRANSFER FAILED: "] as const;
+
 export interface SlackEvent {
   type?: string;
   subtype?: string;
@@ -64,7 +70,7 @@ export interface SlackBlockActions {
   actions?: Array<{ block_id?: string; action_id?: string; value?: string; action_ts?: string }>;
 }
 
-export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string }) => RecordHumanAnswerResult;
+export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string; clickedTs?: string }) => RecordHumanAnswerResult;
 
 /** What a person reads in the thread when OpenRig refuses a click or can't record it. Plain words: what happened, and
  *  who may answer or what to do instead. The same clicks are refused as before; they just aren't silent. */
@@ -72,6 +78,7 @@ export const CLICK_REPLIES = {
   unregistered: "This click wasn't recorded: only the person this decision was sent to can answer it, and your Slack account isn't registered with this OpenRig.",
   unmapped: "This click wasn't recorded: OpenRig can't find the decision this message belongs to. Reply in this thread in words instead.",
   closed: "This decision is no longer waiting for answers, so this click wasn't recorded.",
+  parked: "This click wasn't recorded: this decision is parked right now, so it isn't taking this answer.",
   onRecord: "Your answer is recorded, and this decision is no longer waiting for answers.",
   someoneElse: "This click wasn't recorded: this decision was sent to someone else, and only they can answer it.",
   stale: "This click wasn't recorded: the button no longer matches this decision's questions. Reply in this thread in words instead.",
@@ -87,6 +94,7 @@ export function decidedForThemReply(d: { decidedBy: string; modeName: string; ch
 
 /** The reply for a click recordHumanAnswer didn't record, by its reason. */
 export function clickNotRecordedReply(reason: string): string {
+  if (reason === "state-blocked") return CLICK_REPLIES.parked;
   if (reason.startsWith("state-")) return CLICK_REPLIES.closed;
   if (reason === "not-the-asked-human") return CLICK_REPLIES.someoneElse;
   if (reason === "unknown-option" || reason === "no-questions") return CLICK_REPLIES.stale;
@@ -182,6 +190,8 @@ export interface InboundDeps {
   queue: InboundQueuePort;
   seen: SeenStore;
   deadLetter: DeadLetterStore<SlackEvent>;
+  /** What a person's emoji reaction does: "route" (absent) makes a row for the seat that asked; "off" ignores it (#2233). */
+  reactions?: "route" | "off";
   destination: string; // first-class config; default operator-agent@kernel
   /** A6 v3 registration gate. Resolves ev.user -> a registered human (or refuses). Injected so
    *  this core stays pure/testable; the subsystem wires it via the daemon human-registry resolver. */
@@ -194,7 +204,8 @@ export interface InboundDeps {
    *  `--reply-to` reply and later updates land under it. Absent: nothing is minted. */
   mintThread?: (m: { threadTs: string; channel: string; human: string; seat: string; conversationId: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
   /** #193 — record a clicked answer on the decision the clicked message belongs to. */
   recordHumanAnswer?: RecordHumanAnswer;
   /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
@@ -237,13 +248,14 @@ export class InboundRouter {
   }
 
   /** The row's summary names the person who actually wrote (their registered address); its tags stay as they were. */
-  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string } {
+  private summaryOf(ev: SlackEvent, sender: string, transfer?: InboundFileResult | null, correlationQitemId?: string, envelope?: string): { summary: string; body: string; attachmentsChars?: number } {
     const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
     // nothing; the media file is OUR copy). Failures are per-file and named:
     // the message always survives a failed transfer.
     const sections: string[] = [text];
+    let attachments: string | undefined;
     if (ev.recoveredAfterGap) {
       const posted = new Date(Number(ev.ts) * 1000).toISOString();
       const unapplied = ev.recoveredThreadReply && correlationQitemId
@@ -261,7 +273,8 @@ export class InboundRouter {
       for (const f of transfer.failed) {
         lines.push(`FILE TRANSFER FAILED: ${f.name} — ${f.error}`);
       }
-      sections.push(lines.join("\n"));
+      attachments = lines.join("\n");
+      sections.push(attachments);
     }
     // A shared channel's message carries who wrote and the channel's readable policy, for the agent answering it.
     if (envelope) sections.push(envelope);
@@ -270,6 +283,7 @@ export class InboundRouter {
     return {
       summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}${sender} via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
+      ...(attachments ? { attachmentsChars: attachments.length } : {}),
     };
   }
 
@@ -343,23 +357,53 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
-      const askPending = correlated?.state === "pending";
+      // Keep guidance in the attribution footer, not the person's answer (which is extracted above it).
+      // Apply it on replay too, so the durable answer's event footer remains identical.
+      const guidance = "Read the person's words; closing the decision does not mean approval.";
+      const body = !asChannel && correlated?.humanIntent === "decision" && correlated.humanQuestions?.length
+        ? `${incomingBody}\n${guidance}`
+        : incomingBody;
+      // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
+      const parkOpen = correlated?.state === "blocked" && route.correlationQitemId !== undefined
+        && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true;
+      // That answer belongs to the current question, so an earlier park's answer or a plain earlier message never stands in.
+      // Once it resumed the decision, its row still recognizes a redelivery of the same event.
+      const resumedPark = correlated?.state === "in-progress";
+      const askOpen = correlated?.state === "pending" || parkOpen;
       const closed = correlated?.state === "done" || correlated?.state === "handed-off";
-      const committedAnswer = (askPending || closed) && !ev.recoveredThreadReply && !asChannel && route.correlationQitemId
-        ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId, who.source) : null;
+      const answerable = !ev.recoveredThreadReply && !asChannel && route.correlationQitemId !== undefined;
       // An absorbed event has its own identity even when the first answer came from a button or Steering.
-      const absorbedEventKey = committedAnswer ? `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, committedAnswer.qitemId])}` : null;
+      const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
+      // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
+      // one it was absorbed into.
+      const footerAt = incomingBody.lastIndexOf("\n\n---\n");
+      const matchesEventFooter = (savedBody: string) => {
+        if (footerAt < 0) return false;
+        const footer = incomingBody.slice(footerAt);
+        return savedBody.endsWith(footer) || savedBody.endsWith(`${footer}\n${guidance}`);
+      };
+      const ownClosedAnswer = () => {
+        const answers = this.deps.queue.listHumanAnswers?.(route.correlationQitemId!, who.source) ?? [];
+        const seen = this.deps.seen.load();
+        return answers.find((answer) => matchesEventFooter(answer.body))
+          ?? answers.find((answer) => seen.has(consumedKey(answer.qitemId))) ?? null;
+      };
+      const committedAnswer = !answerable ? null
+        : parkOpen || resumedPark ? this.deps.queue.getEpisodeAnswer?.(route.correlationQitemId!, who.source) ?? null
+        : closed ? ownClosedAnswer() ?? this.deps.queue.getHumanAnswer?.(route.correlationQitemId!, who.source) ?? null
+        : askOpen ? this.deps.queue.getHumanAnswer?.(route.correlationQitemId!, who.source) ?? null : null;
+      const absorbedEventKey = committedAnswer ? consumedKey(committedAnswer.qitemId) : null;
       // The footer covers the original typed answer; the marker covers a later event absorbed before close.
-      const replayedAnswer = closed && committedAnswer && (
-        committedAnswer.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ||
+      const replayedAnswer = (closed || resumedPark) && committedAnswer && (
+        matchesEventFooter(committedAnswer.body) ||
         (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
       ) ? committedAnswer : null;
       // A different event after close remains conversation; only the pending ask coalesces other retries.
-      const earlierAnswer = askPending ? committedAnswer : replayedAnswer;
+      const earlierAnswer = askOpen ? committedAnswer : replayedAnswer;
       let qitemId: string;
       try {
         qitemId = replayedAnswer ? replayedAnswer.qitemId : await this.deps.queue.createQitem({
@@ -367,11 +411,12 @@ export class InboundRouter {
           source: who.source, // the REGISTERED human's canonical ref (human-class), never a raw platform id
           destination: route.destination,
           priority: "routine",
-          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? [])],
+          tags: [...(route.tags ?? ["founder-slack", "inbound"]), ...(mintsRoot ? [SLACK_THREAD_ROOT_TAG] : []), ...(who.sharedChannel?.tags ?? []),
+            ...(attachmentsChars ? [`${SLACK_ATTACHMENTS_TAG_PREFIX}${attachmentsChars}`] : [])],
           summary,
           body,
           ...(route.correlationQitemId ? { inReplyTo: route.correlationQitemId } : {}),
-          ...(askPending && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true } : {}),
+          ...(askOpen && !ev.recoveredThreadReply && !asChannel ? { humanAnswer: true, typedReply: true } : {}),
         });
       } catch (e) {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
@@ -390,6 +435,7 @@ export class InboundRouter {
             actorSession: who.source,
             decision: earlierAnswer ? humanAnswerText(earlierAnswer.body) : String(ev.text ?? "").trim() || "[file reply]",
             messageTs: ev.ts,
+            typedReply: true,
           });
         } catch (e) {
           this.deps.log?.(`human reply continuation failed qitem=${route.correlationQitemId} ts=${ts}: ${(e as Error).message}`);
@@ -517,7 +563,7 @@ export class InboundRouter {
     const existing = this.deps.queue.getHumanAnswer?.(qitemId, who.source);
     if (existing) {
       try {
-        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body) });
+        const resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: humanAnswerText(existing.body), messageTs: action?.action_ts });
         if (resolution === "not-applicable") {
           if (live) await acknowledge(CLICK_REPLIES.notClosed);
           return { status: "refused", reason: "resolve-not-applicable" };
@@ -530,7 +576,7 @@ export class InboundRouter {
         return { status: "handler-failed", reason: "answer-continuation-failed" };
       }
     }
-    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
+    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
@@ -562,7 +608,8 @@ export class InboundRouter {
         summary: `${who.source} via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
         body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
       });
-      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; ") });
+      // The click's own time, so a decision parked on this person resumes as a typed reply after its question would.
+      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; "), messageTs: action?.action_ts });
     } catch (e) {
       this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`);
       if (live) await acknowledge("Your answers are recorded, but handing them back failed. OpenRig will retry.");
@@ -599,6 +646,9 @@ export class InboundRouter {
   }
 
   private async attemptReaction(ev: SlackEvent): Promise<{ status: InboundDisposition; reason?: string }> {
+    // With reactions off, a person's emoji stays in Slack and never becomes a row (#2233). That holds on the retry too, so a
+    // reaction retained from before reactions were turned off is dropped as ignored.
+    if (this.deps.reactions === "off") return { status: "ignored", reason: "reactions-off" };
     const eventId = `reaction:${ev.item?.channel ?? "-"}:${ev.item?.ts ?? "-"}:${ev.user ?? "-"}:${ev.reaction ?? "-"}:${ev.event_ts ?? "-"}`;
     if (this.deps.seen.load().has(eventId)) return { status: "ignored", reason: "dup" };
     if (this.inflight.has(eventId)) return { status: "ignored", reason: "inflight" };

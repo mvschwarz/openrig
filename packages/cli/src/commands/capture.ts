@@ -265,8 +265,10 @@ Supported notes:
 
       const client = deps.clientFactory(getDaemonUrl(status));
       const lines = parseInt(opts.lines ?? "20", 10);
+      // The capture default is 20: a missing or non-positive count reads as 20, never 0 or negative.
+      const requestedLines = Number.isNaN(lines) || lines < 1 ? 20 : lines;
 
-      const body: Record<string, unknown> = { lines: isNaN(lines) ? 20 : lines };
+      const body: Record<string, unknown> = { lines: requestedLines };
       if (opts.rig) body.rig = opts.rig;
       if (opts.pod) body.pod = opts.pod;
       if (session) body.session = session;
@@ -334,7 +336,13 @@ async function runCrossHostCapture(
   if (opts.rig) argv.push("--rig", opts.rig);
   if (opts.pod) argv.push("--pod", opts.pod);
   // Only an explicit --lines is forwarded: the remote's own default stays the default.
-  if (opts.linesGiven || opts.historyPlusPane) argv.push("--lines", opts.lines ?? "20");
+  // A value that parses as a positive count goes over as given (the remote decides);
+  // only a missing, zero, negative or non-numeric count sends the documented default.
+  if (opts.linesGiven || opts.historyPlusPane) {
+    const given = opts.lines ?? "20";
+    const parsed = parseInt(given, 10);
+    argv.push("--lines", Number.isNaN(parsed) || parsed < 1 ? "20" : given);
+  }
   if (opts.historyPlusPane) argv.push("--history-plus-pane");
   if (opts.readable) argv.push("--readable");
   if (opts.size !== undefined) argv.push("--size", opts.size);
@@ -375,7 +383,8 @@ async function runHttpHostCapture(
   hint?: string,
 ): Promise<void> {
   const lines = parseInt(opts.lines ?? "20", 10);
-  const body: Record<string, unknown> = { lines: isNaN(lines) ? 20 : lines };
+  const requestedLines = Number.isNaN(lines) || lines < 1 ? 20 : lines;
+  const body: Record<string, unknown> = { lines: requestedLines };
   if (opts.rig) body.rig = opts.rig;
   if (opts.pod) body.pod = opts.pod;
   if (session) body.session = session;

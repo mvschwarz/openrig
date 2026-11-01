@@ -1,4 +1,4 @@
-import { physicalSessionName } from "./session-registry.js";
+import { physicalSessionName, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { isClaudeRateLimitHook } from "./provider/claude-interruption.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
@@ -8,6 +8,7 @@ export const AGENT_ACTIVITY_FRESHNESS_MS = 5 * 60 * 1000;
 
 export interface HookActivityInput {
   turnId?: string | null;
+  hookAgentId?: string | null;
 
   runtime: string | null;
   sessionName?: string | null;
@@ -52,6 +53,8 @@ interface SessionLookupRow {
   node_id: string;
   session_name: string;
   runtime: string | null;
+  /** 1 when this session's community app was launched as a runner; 0 or NULL otherwise. */
+  community_runner?: number | null;
 }
 
 interface EventPayloadRow {
@@ -113,6 +116,7 @@ export class AgentActivityStore {
       // tap filter on it); semantics that depend on the runtime use the seat's.
       runtime: input.runtime ?? session.runtime,
       seatRuntime: session.runtime,
+      communityRunner: session.community_runner === 1,
       hookEvent: input.hookEvent,
       subtype: input.subtype ?? null,
       sampledAt,
@@ -120,6 +124,7 @@ export class AgentActivityStore {
       generation,
     });
     activity.turnId = input.turnId ?? null;
+    if (input.hookAgentId !== undefined) activity.hookAgentId = input.hookAgentId;
     if (input.sourceSequence) activity.sourceSequence = input.sourceSequence;
     if (input.livenessSeconds) activity.livenessSeconds = input.livenessSeconds;
 
@@ -173,7 +178,7 @@ export class AgentActivityStore {
     //      the seat has not earned; marking null-tenure fresh is bare-attribution one field over). The
     //      STORE delivers the row carrying generationProvenance='unresolved' at the ACTIVITY layer. The
     //      tap's discard-condition change that turns this label into a still-flowing consumer row is a
-    //      FOLLOW-ON (qitem-20260808183747-f7f04662, verify-demotion) — NOT this fold; in the INTERIM
+    //      FOLLOW-ON (verify-demotion) — NOT this fold; in the INTERIM
     //      the unchanged tap still discards it (a bounded regression whose exposure is the mint-race
     //      transient; mm2 is unaffected — its daemon carries no occupant_tenures table until 0.5.1).
     //      Ignorance and evidence get DIFFERENT verdicts; the two paths must not collapse.
@@ -279,7 +284,7 @@ export class AgentActivityStore {
    *  State UNKNOWN + a distinct reason + stale:true so no consumer reads it as verified-live (fresh is
    *  a positive liveness claim). The STORE delivers the row carrying generationProvenance:"unresolved"
    *  at the ACTIVITY layer; turning that label into a still-flowing CONSUMER row is the tap FOLLOW-ON
-   *  (verify-demotion, qitem-20260808183747-f7f04662) — the unchanged tap still discards it in the
+   *  (verify-demotion) — the unchanged tap still discards it in the
    *  INTERIM (a bounded regression, mint-race-transient exposure; mm2 has no occupant_tenures table
    *  until 0.5.1). Kept DISTINCT from generationMismatch: ignorance and evidence get different verdicts,
    *  and the paths must not collapse — at the store now, and at the tap when the follow-on lands. */
@@ -332,7 +337,7 @@ export class AgentActivityStore {
   private _resolveSession(input: { sessionName?: string | null; nodeId?: string | null }): SessionLookupRow | null {
     if (input.nodeId) {
       const row = this.db.prepare(`
-        SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime
+        SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime, ${sessionCommunityRunnerSelect(this.db)} AS community_runner
         FROM nodes n
         LEFT JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -345,7 +350,7 @@ export class AgentActivityStore {
     if (!input.sessionName) return null;
     const sessionName = physicalSessionName(this.db, input.sessionName);
     const row = this.db.prepare(`
-      SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime
+      SELECT n.rig_id, n.id AS node_id, s.session_name, n.runtime, ${sessionCommunityRunnerSelect(this.db)} AS community_runner
       FROM sessions s
       JOIN nodes n ON n.id = s.node_id
       WHERE s.session_name = ?
@@ -359,7 +364,7 @@ export class AgentActivityStore {
 /** The activity a runtime hook event means, before freshness or generation checks. The one mapping behind
  *  ingest, the send gate and the wake ladder. `seatRuntime` is the managed seat's runtime: runtime_error is
  *  an OMP runner signal, and a hook claiming OMP on another runtime's seat must not escalate it. */
-export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
+export function hookEventState(rawEvent: string | null | undefined, rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false): AgentActivity["state"] {
   if (rawEvent === "UserPromptSubmit" || rawEvent === "PreToolUse" || rawEvent === "active") return "running";
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
@@ -368,7 +373,7 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
   // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.
-  if (rawEvent === "Stop" && isRunnerExit(rawSubtype, seatRuntime)) return "unknown";
+  if (rawEvent === "Stop" && isRunnerExit(rawSubtype, seatRuntime, communityRunner)) return "unknown";
   if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
   return "unknown";
 }
@@ -383,9 +388,12 @@ export function hookPrecedes(a: { eventAt?: string | null; sourceSequence?: numb
   return !!a.sourceSequence && !!b.sourceSequence && a.sourceSequence < b.sourceSequence;
 }
 
-/** The runner's Stop for its child's process exit (`pi_exited`, `omp_exited`), on that runtime's seat. */
-export function isRunnerExit(rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
-  return (seatRuntime === "pi" || seatRuntime === "omp") && rawSubtype === `${seatRuntime}_exited`;
+/** The runner's Stop for its child's process exit (`pi_exited`, `omp_exited`), on that runtime's seat. A community app's
+ *  `<runtime>_exited` means the same only on a session recorded as launched for a runner; any other seat keeps its
+ *  existing reading. */
+export function isRunnerExit(rawSubtype: string | null | undefined, seatRuntime: string | null, communityRunner = false): boolean {
+  return (seatRuntime === "pi" || seatRuntime === "omp" || (communityRunner && !!seatRuntime))
+    && rawSubtype === `${seatRuntime}_exited`;
 }
 
 /** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation. */
@@ -398,7 +406,8 @@ export function hookMeansNeedsInput(rawEvent: string | null | undefined, rawSubt
 function latestHookState(activity: AgentActivity | null | undefined, seatRuntime: string | null): AgentActivity["state"] {
   if (activity?.evidenceSource !== "runtime_hook") return "unknown";
   if (activity.stale !== true) return activity.state;
-  return activity.reason === "stale_runtime_hook" ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime) : "unknown";
+  return activity.reason === "stale_runtime_hook"
+    ? hookEventState(activity.rawEvent, activity.rawSubtype, seatRuntime, activity.communityRunner === true) : "unknown";
 }
 
 /** The store's latest hook still says the seat waits on a person. Nothing newer was recorded, so nothing
@@ -427,6 +436,8 @@ function normalizeHookActivity(input: {
   runtime: string | null;
   /** The managed seat's runtime, never a hook's claim. */
   seatRuntime: string | null;
+  /** The session was recorded as launched for a community runner (its own launch fact, never a hook's claim). */
+  communityRunner?: boolean;
   hookEvent: string;
   subtype: string | null;
   sampledAt: string;
@@ -437,7 +448,7 @@ function normalizeHookActivity(input: {
   const rawSubtype = input.subtype;
   const reason = normalizeReason(rawSubtype ?? rawEvent);
   const runtime = input.runtime;
-  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime);
+  const state = hookEventState(rawEvent, rawSubtype, input.seatRuntime, input.communityRunner === true);
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = input.seatRuntime === "codex" ? "permission_request_pending" : "permission_request";
@@ -469,6 +480,7 @@ function normalizeHookActivity(input: {
     fallback: false,
     stale: false,
     generation: input.generation ?? null,
+    ...(input.communityRunner ? { communityRunner: true } : {}),
   };
 }
 

@@ -24,7 +24,7 @@
 // No additional state, no SQL migration, no write mutations on plugin
 // folders. Read-only docs-browser surface per slice 28 founder direction
 // 'finishing it is 0.3.1 work, not 0.3.2'. Routing decision
-// qitem-20260513042155-f31c11c3 (orch OPT-A authorization)."
+// (orch OPT-A authorization)."
 //
 // Endpoint shape:
 //   GET /api/plugins                              → PluginEntry[]   (?runtime=, ?source= filters)

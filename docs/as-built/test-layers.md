@@ -88,6 +88,11 @@ are not yet runnable checks.
   credentials, and outbound network blocked except to localhost (see below). A test that reads
   your real home directory, a running daemon, the network or a credential can pass on your
   machine and fail in CI.
+- **Mixed fixture clocks.** `compaction-command-submission.test.ts` uses one clock for the
+  enforcer, the transport's injected `now` and sleeps, and its `Date.now` idle deadline. Previously,
+  real-time transport waits could exhaust the fixture's 20 ms budget during a scheduler pause
+  even though the modeled seat was idle. Restore the `Date.now` spy after each test; keep real
+  deadline behavior covered by the transport tests. This changes the fixture, not production timeouts.
 - **Docs location.** `check-docs-guard` fails if a tracked file under `docs/` sits outside
   `docs/as-built/`, `docs/reference/` or `docs/releases/`. `docs/DESIGN.md` is the one allowed
   exception.
@@ -105,7 +110,7 @@ credentials are supplied.
 | `repo-checks` | ubuntu | `npm run test:repo` |
 | `package-tests` | macOS, matrix `daemon`, `cli`, `tui`, `ui` (fail-fast off) | Installs tmux, runs `npm ci` and `npm run build`. Then runs `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR` and a `sandbox-exec` profile that blocks outbound network except localhost and the job's own socket directory. `scripts/ci-macos-process-probe.mjs` runs first. |
 | `linux-seat-environment` | ubuntu | Builds all packages, then runs `seat-env-parent-session.integration.test.ts` with real CLI, daemon, tmux and stub seats. A network namespace has loopback only; tests run as the unprivileged runner user under `env -i` with scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR`. Runs on pull requests and manual dispatch, like `package-tests`. |
-| `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (eight container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
+| `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (fifteen container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
 
 The Linux seat-environment job covers a gap in the macOS matrix: the integration test
 reads `/proc/<pid>/environ`, so macOS skips it. It checks both a new tmux server and an
@@ -153,7 +158,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 | Piece | Where |
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
-| Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
+| Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `mutate`, `policy` are rejected at load time (`UNBOUND_STEP_VERB`) because the runner has no shipped binding for them; `emit` parses but only `refocus` is bound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
 | Scenario library | `packages/test-system/scenarios/`: 20 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
@@ -162,6 +167,28 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 | Image | `docker/testbed/Dockerfile`, built by `scripts/build-testbed-image.sh`; `docker/testbed/Dockerfile.scenarios` is layered on top by `scripts/run-pr-scenarios.sh` |
 
 ### Host mode: while you're writing a scenario
+
+The tmux server selection regression also uses these scaffold and lifecycle helpers
+in `packages/daemon/test/tmux-server-isolation-daemon.test.ts`. It runs a real stub
+seat through config changes, daemon restarts, capture, self-attachment and cleanup,
+while native socket observations verify that a personal namesake survives. The
+test also removes the effective-server record and verifies that `destroy --all`
+leaves the daemon, database and both servers' sessions intact before restoring
+the record and checking normal cleanup. The
+YAML grammar has no config-write or socket-inventory surface, so these assertions
+live in the Vitest integration test. It does not exercise a real provider model,
+SSH connection or graphical terminal window.
+
+`packages/daemon/test/tmux-server-two-instances.test.ts` adds two real daemons
+sharing a scratch OS home and inherited personal tmux server, with separate
+OpenRig homes, databases and ports. Both enable isolation and control mode. It
+checks same-named seats through inventory, capture and verified writes, observes
+the marked control session on each selected socket, then stops one instance and
+checks that the other instance's pane identity, control session and delivery still
+work. The personal namesake remains untouched. This test requires a tmux version
+that supports control mode and the built CLI and daemon. Like CI's package suites,
+it should run with scratch homes and outbound network restricted to localhost;
+scripted seats prove terminal routing and rendered delivery, not model receipt.
 
 ```sh
 npm run build    # the runner drives packages/cli/dist/bin-wrapper.js
@@ -185,10 +212,12 @@ node --import tsx packages/daemon/scripts/run-scenarios.mjs packages/daemon/test
 
 In CI the `installed-scenario` job runs `scripts/run-pr-scenarios.sh` with no arguments:
 both baton cases (`fixture` = `scenario-02-baton.yaml`, `library` = `queue-baton-survives-restart.yaml`),
-each run three times as healthy, then lost-baton, then healthy. Then the two stub-script
-cases (`transcript` = `transcript-reads-addressed-seat.yaml`, `capture` =
-`capture-returns-addressed-seat.yaml`) run once each, healthy only. That is eight fresh
-containers.
+each run three times as healthy, then lost-baton, then healthy (six containers); the
+`refocus-parked` effect case runs healthy, seeded, then healthy (three containers); and the
+six passing-only cases (`transcript` = `transcript-reads-addressed-seat.yaml`, `capture` =
+`capture-returns-addressed-seat.yaml`, `daemon-restart`, `refocus-active`,
+`refocus-parked-off`, `prompt-state`) run once each, healthy only (six containers). That is
+fifteen fresh containers.
 
 To run a case before you push, point `DOCKER_HOST` at a Docker engine you control over SSH:
 
@@ -198,10 +227,13 @@ DOCKER_HOST=ssh://<your-host> bash scripts/run-pr-scenarios.sh \
   --remote --case library --mode healthy --out dist/scenario-check
 ```
 
-- Options: `--case fixture|library|transcript|capture` (default: all four), `--mode
-  healthy|lost-baton` (default: healthy, lost-baton, healthy) and `--out <dir>` (default
-  `dist/pr-scenarios`). `--mode` applies to `fixture` and `library`; `transcript` and `capture`
-  always run once, healthy. `--mode lost-baton` leaves them out of a full run, and
+- Options: `--case fixture|library|transcript|capture|daemon-restart|refocus-parked|
+  refocus-active|refocus-parked-off|prompt-state` (default: all nine), `--mode
+  healthy|lost-baton|seeded` (default: healthy, lost-baton, healthy) and `--out <dir>` (default
+  `dist/pr-scenarios`). `--mode` applies to the baton cases (`fixture` and `library`) and to
+  the `refocus-parked` effect case; the six passing-only cases (`transcript`, `capture`,
+  `daemon-restart`, `refocus-active`, `refocus-parked-off`, `prompt-state`) always run once
+  each, healthy. `--mode lost-baton` leaves them out of a full run, and
   `--case transcript|capture --mode lost-baton` is refused with exit 2. Use a fresh `--out`
   directory for each run you want to keep.
 - `--remote` accepts only `ssh://` values for `DOCKER_HOST`, and it refuses if
@@ -268,7 +300,7 @@ means:
 | Queue pickup and wake | No stub worker reacts to a nudge by claiming an item, working on it and handing it back. | The baton scenarios prove the claim *survives a restart*. They don't prove delivery, pickup or wake. |
 | Reboot / tmux reset | `daemon: {op: restart}` restarts only the scenario daemon, and the tmux server keeps running. No step resets tmux. | Recycled pane IDs and stale bindings after a real reboot (the class behind #141) are not covered by a daemon restart. |
 | Multi-rig and same-name identities | The `up` step always uses the scenario's top-level `topology` and ignores a per-step override. No step archives or removes a rig. | Cross-rig scope, same-name generations and archive/remove routing (the class behind #174) need runner work before they can be tested. |
-| Step-time restore, compaction, mutation, policy | `restore`, `emit`, `mutate` and `policy` parse, but the runner throws `UnboundActionError` when it reaches them. Behaviours run only from a per-seat launch script (`env.stub_scripts`). A seat `restart` step maps to `rig launch`, which is not native resume or fork. | Step-time compaction and restore, and native resume and fork, are not covered. |
+| Step-time restore, compaction, mutation, policy | `restore`, `mutate` and `policy` steps are refused at load time (`UNBOUND_STEP_VERB`); `emit` parses but a non-`refocus` behavior throws `UnboundActionError` when the runner reaches it. Behaviours run only from a per-seat launch script (`env.stub_scripts`). A seat `restart` step maps to `rig launch`, which is not native resume or fork. | Step-time compaction and restore, and native resume and fork, are not covered. |
 | Skill projection | The stub projects skills into `<cwd>/.openrig/stub/skills/`. Claude Code projects a team seat's skills into the seat's generated plugin in OpenRig's state, and into `<cwd>/.claude/skills/` only for a seat without one. | A stub green says nothing about provider-specific projection (the class behind #159). |
 | Model and provider | No model, no tokens. Stub scripts refuse `usage_limit` because it only exists on real runtimes. | Model behaviour, provider usage limits and real context usage need live evals or a real runtime. |
 | Platform | CI's scenario job runs in a Linux container. | macOS process behaviour is covered by the macOS `package-tests` jobs, not by scenarios. |
@@ -309,9 +341,9 @@ of them. The other nine scenarios are authored but not yet runnable as meaningfu
 | `send-verify-means-rendered` | The `send` step drops `verify`, and the stub has no input loop | Build the input-consuming stub and assert a response derived from the nonce |
 | `home-divergence-preseed-visible` | The pipeline ignores `env.pre_existing_tmux`, and the default script never prints the expected `trust reached` | Recreate the real HOME split and whatever consumes it |
 | `stream-emit-durable-replay-live` | Step-time `emit` is unbound | Assert the actual stream contract |
-| `policy-posture-survives-structural-edit` | `policy` and `mutate` are unbound | Rewrite around current per-seat permission selection and an observed launch |
-| `locked-restore-never-permissive` | `policy` and `restore` are unbound | Keep the invariant (the selection survives a restore) and use current modes |
-| `one-view-state-after-mutation-storm` | The validator rejects its bare-list `equals` (`EQUALS_NOT_DECLARATIVE`), and `mutate` is unbound | Declare the comparable fields and real mutations |
+| `policy-posture-survives-structural-edit` | The validator refuses its `policy` and `mutate` steps at load time (`UNBOUND_STEP_VERB` — no shipped runner binding) | Rewrite around current per-seat permission selection and an observed launch |
+| `locked-restore-never-permissive` | The validator refuses its `policy` and `restore` steps at load time (`UNBOUND_STEP_VERB` — no shipped runner binding) | Keep the invariant (the selection survives a restore) and use current modes |
+| `one-view-state-after-mutation-storm` | The validator rejects its bare-list `equals` (`EQUALS_NOT_DECLARATIVE`) and refuses its `mutate` steps at load time (`UNBOUND_STEP_VERB`) | Declare the comparable fields and real mutations |
 | `kill-daemon-mid-handoff` | A pane `send` doesn't create the queue item the next assertion expects, and later assertions use a shape the queue reader doesn't return | Rebuild the setup before treating a red result as meaningful |
 
 In most of these files, `seed_regression` steps that come *after* the assertions are

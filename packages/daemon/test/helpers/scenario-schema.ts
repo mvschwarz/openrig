@@ -63,6 +63,18 @@ export const EXPECT_MATCH_MODES = ["match", "contains", "equals"] as const;
 /** The daemon-lifecycle verb ops (A1). */
 export const DAEMON_OPS = ["sigterm", "restart"] as const;
 
+/**
+ * Action verbs the format NAMES (they are in ACTION_VERBS) but the runner has no
+ * shipped binding for at v1: `runAction` throws `UnboundActionError` when it
+ * reaches them (scenario-real-deps.ts default case). Letting them pass validation
+ * only to die mid-run — after `up`/`send` already had side effects — is the exact
+ * runtime surprise this validator's teaching contract rejects elsewhere: they are
+ * refused HERE, at load, with a named error and the shipped seam
+ * (`env.stub_scripts` per-seat launch scripts) spelled out. The runtime
+ * `UnboundActionError` floor stays for scripts that bypass this validator.
+ */
+export const UNBOUND_ACTION_VERBS = ["restore", "mutate", "policy"] as const;
+
 export type ActionVerb = (typeof ACTION_VERBS)[number];
 export type ExpectSurface = (typeof EXPECT_SURFACES)[number];
 export type EmitBehavior = (typeof EMIT_BEHAVIORS)[number];
@@ -94,6 +106,7 @@ export type ValidationErrorCode =
   | "EMIT_NOT_OBJECT"
   | "UNKNOWN_EMIT_BEHAVIOR"
   | "USAGE_LIMIT_IN_STUB_TOPOLOGY"
+  | "UNBOUND_STEP_VERB"
   | "UNKNOWN_DAEMON_OP";
 
 export interface ValidationError {
@@ -286,8 +299,22 @@ function validateStep(
   if (verb === "expect") validateExpect(value, `${base}.expect`, push);
   else if (verb === "emit") validateEmit(value, `${base}.emit`, topologyKind, push);
   else if (verb === "daemon") validateDaemon(value, `${base}.daemon`, push);
-  // Other action verbs (up/down/send/restart/restore/mutate/policy/seed_regression)
-  // carry free-form payloads the runner interprets; no schema gate at v1.
+  else if ((UNBOUND_ACTION_VERBS as readonly string[]).includes(verb)) {
+    // Known to the format, unbound in the runner: refuse at load with a teaching
+    // error rather than let the run throw UnboundActionError mid-scenario, after
+    // earlier steps have already had side effects.
+    push(
+      "UNBOUND_STEP_VERB",
+      `${base}.${verb}: "${verb}" is a named step verb but has no shipped runner binding at v1 — the run would ` +
+        `throw UnboundActionError mid-scenario after earlier steps already had side effects. Express this ` +
+        `behaviour through a per-seat launch script (\`env.stub_scripts\`) instead. Bound verbs: ` +
+        `${["up", "down", "send", "restart", "seed_regression", "daemon", "emit"].join(", ")} ` +
+        `(assert with \`expect\`).`,
+      `${base}.${verb}`,
+    );
+  }
+  // Other bound action verbs (up/down/send/restart/seed_regression) carry
+  // free-form payloads the runner interprets; no schema gate at v1.
 }
 
 function validateExpect(

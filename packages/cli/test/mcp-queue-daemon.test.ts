@@ -231,6 +231,11 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     fs.writeFileSync(path.join(shared, "long.md"), `${"a".repeat(48_000)}TAIL`);
     expect((await desk("rig_artifact_read", { root: "proof", path: "long.md" })).structured).toMatchObject({ truncated: true, nextOffset: 48_000, totalChars: 48_004 });
     expect((await desk("rig_artifact_read", { root: "proof", path: "long.md", offset: 48_000 })).structured).toMatchObject({ text: "TAIL", truncated: false });
+    // A page that would end inside an emoji ends before it, and the next page starts with the whole emoji.
+    fs.writeFileSync(path.join(shared, "emoji.md"), `${"a".repeat(47_999)}🚀TAIL`);
+    expect((await desk("rig_artifact_read", { root: "proof", path: "emoji.md" })).structured)
+      .toMatchObject({ text: "a".repeat(47_999), truncated: true, nextOffset: 47_999, totalChars: 48_005 });
+    expect((await desk("rig_artifact_read", { root: "proof", path: "emoji.md", offset: 47_999 })).structured).toMatchObject({ text: "🚀TAIL", truncated: false });
     expect((await desk("rig_artifact_read", { root: "proof", path: "../outside.md" })).structured).toMatchObject({ ok: false, code: "path_escape", status: 400 });
 
     const outside = path.join(home, "notes.md");

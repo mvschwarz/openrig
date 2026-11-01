@@ -244,6 +244,15 @@ interactive"), and the post-launch files aren't sent. A Codex fork that the rig 
 `session_source.mode: fork`, or an agent image's fork) is the exception: its timeout ends as `attention_required`,
 with its startup context kept for `rig seat continue` (see below). A seat handover's fork has its own readiness check.
 
+**Fresh Claude handovers.** `rig handover --source fresh` keeps the previous agent's scrollback. Before sending the
+handover context, OpenRig waits for the latest prompt inside Claude's complete input frame, and confirms that the
+process in the pane belongs to the new launch. A shell's `❯` prompt or echoed launch command is not enough, even
+with an old Claude header or input frame above it and Claude already running. A header alone or a partially drawn
+input frame also keeps the check pending. If the current screen or process cannot be read, or the process identity is unconfirmed, the handover keeps
+waiting within the readiness window and fails if that window expires. Old screen text or the `claude` process label
+alone cannot complete this check. A healthy agent can therefore remain unconfirmed while those observations are
+unavailable; inspect its pane before deciding how to recover.
+
 **Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
 was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
 same prompt still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still

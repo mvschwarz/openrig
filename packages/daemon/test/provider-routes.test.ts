@@ -4,6 +4,7 @@ import { providerRoutes } from "../src/routes/provider.js";
 import type { ClaudeSeatRelaunch, ProviderService } from "../src/domain/provider/provider-service.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
+import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import type { FourBlockReadModel } from "../src/domain/provider/provider-types.js";
 
@@ -46,6 +47,19 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
+  it("forwards API-key file references on both endpoints and refuses conflicting selectors", async () => {
+    const precheck = vi.fn<ProviderService["precheck"]>(async () => ({ safe: true as const }));
+    const switchAccount = vi.fn<ProviderService["switchAccount"]>(async () => ({ outcome: "succeeded" as const }));
+    const app = appWith({ ...stubService, precheck, switchAccount });
+    await app.request("/api/provider/precheck?seat=dev-a@rig&toAccount=api&apiKeyFile=%2Fsynthetic%2Fkey");
+    expect(precheck.mock.calls[0]?.[0]).toMatchObject({ apiKeyFile: "/synthetic/key" });
+    const request = (body: object) => app.request("/api/provider/switch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect((await request({ seat: "dev-a@rig", toAccount: "api", apiKeyFile: "/synthetic/key" })).status).toBe(200);
+    expect(switchAccount.mock.calls[0]?.[0]).toMatchObject({ apiKeyFile: "/synthetic/key" });
+    expect((await request({ seat: "dev-a@rig", toAccount: "api", apiKeyFile: "/synthetic/key", tokenFile: null })).status).toBe(400);
+    expect(switchAccount).toHaveBeenCalledTimes(1);
+  });
+
   it("move reports are queue items now, not the removed event-log record: no setting gates them, and there's no /moves/:id", async () => {
     const app = appWith(stubService);
     // This app wires no queue, so the report routes say so rather than answering a disabled-feature 409.
@@ -171,6 +185,13 @@ describe("provider routes", () => {
       app.route("/api/provider", providerRoutes());
       await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
       expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ nodeId: node.id, logicalId: "dev.a", running: true, pane: "%101" });
+      // Restores can mix ISO and SQLite timestamp spellings; ULIDs retain creation order.
+      registry.updateStatus(session.id, "superseded");
+      const current = registry.registerSession(node.id, "dev-a@fixture-rig");
+      registry.updateStatus(current.id, "running");
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-10-28T00:00:01Z", session.id);
+      db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-10-28 00:00:02", current.id);
+      expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ running: true });
       expect(await lent.exclusive(node.id, async () => "held")).toBe("held");
       expect(leased).toEqual([[node.id]]);
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toEqual({ ok: true, status: "resumed", warnings: ["dev-a@fixture-rig: a launch warning"] });
@@ -179,10 +200,55 @@ describe("provider routes", () => {
       // Restore's stops before it touches the seat leave it unchanged; anything else after the launch began is unknown.
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", error: "decide first" }] };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "awaiting-decision" });
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "awaiting-decision", launchStarted: true, error: "resume failed after cutover" }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "awaiting-decision" });
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", error: "the pane couldn't be respawned" }] };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "failed" });
+      // A launch that failed before its takeover stopped anything left the seat as this attempt found it, so the switch
+      // puts its token reference back.
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", nothingStopped: true, error: "Pane %7 isn't in tmux session, so nothing was stopped." }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
+    } finally { db.close(); }
+  });
+
+  it("a stopped Claude seat's next launch is read from the snapshot `rig launch` selects, and no snapshot is taken", async () => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code" });
+      registry.updateStatus(registry.registerSession(node.id, "dev-a@fixture-rig").id, "exited");
+      const capture = { captureSnapshot: vi.fn() };
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, snapshotRepo: new SnapshotRepository(db), snapshotCapture: capture,
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      expect(lent.seat("dev-a@fixture-rig")).toMatchObject({ running: false });
+      expect(lent.nextLaunch(rig.id, node.id)).toMatchObject({ snapshotId: null, resumes: false, why: expect.stringContaining("has no usable snapshot") });
+      const saved = (resumeToken: string | null) => JSON.stringify({
+        rig: { id: rig.id, name: "fixture-rig", createdAt: "2026-10-29", updatedAt: "2026-10-29" },
+        nodes: [{ id: node.id, logicalId: "dev.a", runtime: "claude-code" }], edges: [], checkpoints: {},
+        sessions: [{ id: "saved", nodeId: node.id, sessionName: "dev-a@fixture-rig", status: "running", createdAt: "2026-10-29T10:00:00.000Z",
+          lastSeenAt: null, resumeType: resumeToken ? "claude_id" : "none", resumeToken, restorePolicy: "resume_if_possible", origin: "launched",
+          startupStatus: "ready", startupCompletedAt: "2026-10-29T10:00:00.000Z" }],
+        activeSessionIdByNode: { [node.id]: "saved" }, activeOccupantsByNode: { [node.id]: { kind: "resolved", sessionId: "saved" } },
+      });
+      const insert = db.prepare("INSERT INTO snapshots(id, rig_id, kind, data, created_at) VALUES (?, ?, 'auto-pre-down', ?, ?)");
+      insert.run("snap-a", rig.id, saved("conv-9"), "2026-10-29 10:00:00");
+      expect(lent.nextLaunch(rig.id, node.id)).toEqual({ snapshotId: "snap-a", resumes: true, automatic: false, conversation: "conv-9" });
+      // A later snapshot that saved the seat without its conversation is what the launch would use, so it doesn't resume.
+      insert.run("snap-b", rig.id, saved(null), "2026-10-29 10:05:00");
+      expect(lent.nextLaunch(rig.id, node.id)).toMatchObject({ snapshotId: "snap-b", resumes: false, why: "has no resume token for this seat" });
+      expect(capture.captureSnapshot).not.toHaveBeenCalled();
     } finally { db.close(); }
   });
 

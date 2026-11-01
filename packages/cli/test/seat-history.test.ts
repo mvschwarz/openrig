@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Command } from "commander";
 import { seatCommand } from "../src/commands/seat.js";
 import type { DaemonClient } from "../src/client.js";
-import { STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { STATE_FILE, getDaemonStatus, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
+import { DAEMON_SHUTDOWN_RECEIPT } from "@openrig/daemon/daemon-shutdown";
+import { dirname, join } from "node:path";
 
 const rigId = "01M5FH6C2XEGA4B56J40RF9Q2G";
 const nodeId = "01M5FH6ZV4C0S3JW1AGM5YNRQ4";
@@ -22,9 +24,9 @@ function lifecycleDeps(): LifecycleDeps {
 
 describe("rig seat history", () => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); process.exitCode = 0; });
-  async function run(args: string[], client: { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> }) {
+  async function run(args: string[], client: { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn> }, lifecycle = lifecycleDeps()) {
     vi.stubEnv("OPENRIG_TERMINAL_BEARER_TOKEN", "test-terminal-token");
-    const deps: StatusDeps = { lifecycleDeps: lifecycleDeps(), clientFactory: () => client as unknown as DaemonClient };
+    const deps: StatusDeps = { lifecycleDeps: lifecycle, clientFactory: () => client as unknown as DaemonClient };
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...parts: unknown[]) => { lines.push(parts.join(" ")); });
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -57,5 +59,23 @@ describe("rig seat history", () => {
     await run(["--snapshot-id", snapshotId], client);
     expect(client.get).not.toHaveBeenCalled(); expect(client.post).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
+  });
+
+  it("inspection preserves a stale daemon state even with a clean shutdown receipt", async () => {
+    const lifecycle = lifecycleDeps();
+    const receipt = join(dirname(STATE_FILE), DAEMON_SHUTDOWN_RECEIPT);
+    lifecycle.isProcessAlive = vi.fn(() => false);
+    lifecycle.exists = vi.fn(path => path === STATE_FILE || path === receipt);
+    lifecycle.readFile = vi.fn(path => path === STATE_FILE
+      ? JSON.stringify({ pid: 123, port: 7433, db: "fixture.sqlite", startedAt: "2026-10-20T00:00:00Z" })
+      : path === receipt ? JSON.stringify({ schema: "openrig.daemon-shutdown/v1", pid: 123,
+        startedAt: "2026-10-20T00:00:00Z", completedAt: "2026-10-20T00:00:01Z",
+        phase: "complete", outcome: "clean", failures: [] }) : null);
+    const client = { get: vi.fn(), post: vi.fn() };
+    await run([], client, lifecycle);
+    expect(lifecycle.removeFile).not.toHaveBeenCalled();
+    expect(client.get).not.toHaveBeenCalled();
+    expect((await getDaemonStatus(lifecycle)).state).toBe("stale");
+    expect(lifecycle.removeFile).toHaveBeenCalledWith(STATE_FILE);
   });
 });

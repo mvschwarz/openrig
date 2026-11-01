@@ -22,6 +22,7 @@ import { observeClaudePaneRuntime, type NativeProcessLister } from "./native-pro
 import { validateResumeToken } from "./resume-token-validation.js";
 import { readProcessTable } from "./process-table.js";
 import type { HomeRuntime } from "./seat-runtime-home.js";
+import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 
 export interface ResumeRefreshSession {
   /** The seat, when known, so its own runtime home is read. */
@@ -42,7 +43,7 @@ interface ResumeMetadataRefresherDeps {
   listProcesses?: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   readCodexThreadIdByPid?: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
   /** `configDir` is the seat's own Claude config dir, passed only when it declares one. */
-  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  probeClaudeResume?: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string, claudeMcp?: ClaudeMcp) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
@@ -70,7 +71,7 @@ export class ResumeMetadataRefresher {
   private tmuxAdapter: TmuxAdapter;
   private listProcesses: () => Array<{ pid: number; ppid: number; command: string }> | Promise<Array<{ pid: number; ppid: number; command: string }>>;
   private readCodexThreadIdByPid: (pid: number, identity?: string, report?: CodexCaptureReporter, home?: string) => Promise<string | undefined> | string | undefined;
-  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string) => Promise<"resumable" | "not_resumable" | "inconclusive">;
+  private probeClaudeResume: (sessionName: string, resumeToken: string, cwd?: string | null, configDir?: string, claudeMcp?: ClaudeMcp) => Promise<"resumable" | "not_resumable" | "inconclusive">;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
@@ -106,7 +107,7 @@ export class ResumeMetadataRefresher {
     // through the named ungated escape hatch — never a silent fallback (r1 owed item 3).
     this.readCodexThreadIdByPid = deps.readCodexThreadIdByPid
       ?? ((pid, identity, report, home) => identity === undefined ? resolverFor(home).resolveUngatedLegacy(pid, report) : resolverFor(home).resolve(pid, identity, report));
-    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd, configDir) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd, configDir));
+    this.probeClaudeResume = deps.probeClaudeResume ?? ((sessionName, resumeToken, cwd, configDir, claudeMcp) => this.defaultProbeClaudeResume(sessionName, resumeToken, cwd, configDir, claudeMcp));
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
@@ -238,7 +239,19 @@ export class ResumeMetadataRefresher {
         }
         // A seat with its own Claude config dir keeps its conversations there, so the probe looks there.
         const seatHome = session.nodeId ? this.seatHome?.(session.nodeId, "claude-code") : undefined;
-        const probe = await (seatHome
+        let claudeMcp: ClaudeMcp | undefined;
+        try {
+          claudeMcp = session.nodeId ? readSeatClaudeMcp(this.sessionRegistry.db, session.nodeId) : undefined;
+        } catch {
+          // A probe must not restore normal MCP loading when the saved choice is unreadable.
+          // Keep the token and let shutdown proceed, just as an inconclusive probe does.
+          this.sessionRegistry.markResumeProbeResult(session.sessionId, "inconclusive");
+          this.log(`[resume-metadata] skipped Claude probe for ${session.sessionName}: saved claude_mcp could not be read`);
+          continue;
+        }
+        const probe = await (claudeMcp
+          ? this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null, seatHome, claudeMcp)
+          : seatHome
           ? this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null, seatHome)
           : this.probeClaudeResume(session.sessionName, session.resumeToken, session.cwd ?? null));
         // OPR.0.4.3.20 FR-6 §2.1b — record the probe result WITHOUT clearing:
@@ -378,8 +391,9 @@ export class ResumeMetadataRefresher {
     resumeToken: string,
     cwd?: string | null,
     configDir?: string,
+    claudeMcp?: ClaudeMcp,
   ): Promise<"resumable" | "not_resumable" | "inconclusive"> {
-    const resume = buildNativeResumeCommand("claude-code", resumeToken, sessionName);
+    const resume = buildNativeResumeCommand("claude-code", resumeToken, sessionName, undefined, undefined, claudeMcp);
     if (!resume) {
       return "not_resumable";
     }

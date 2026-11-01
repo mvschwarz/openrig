@@ -20,6 +20,19 @@ it("reads v1 extensions without importing authored live facts", () => {
   expect(value.members).toEqual([member]);
   expect(() => parseRoster({ ...authored, version: 2 })).toThrow("version 1");
 });
+it("shows a hosted member's last call only for a roster row on this host; another host's same-named seat is unknown", () => {
+  const home = mkdtempSync(join(tmpdir(), "roster-presence-"));
+  folders.push(home);
+  vi.stubEnv("OPENRIG_HOME", home);
+  writeFileSync(join(home, "mcp-http-presence.json"), JSON.stringify({ version: 1, seats: { "bot@team": { grant: "bot", lastCallAt: "2026-10-26T18:00:00.000Z" } } }));
+  const local = { ...member, seat: "bot@team", host: "host-a", hosted: true };
+  const here = { ...inventory([]), localHostId: "host-a" };
+  expect(enrichRosterMember(local, here).live).toMatchObject({ lastCallAt: "2026-10-26T18:00:00.000Z" });
+  expect(enrichRosterMember({ ...local, host: "host-b" }, here).live).toMatchObject({ lastCallAt: null });
+  expect(enrichRosterMember(local, { ...here, localHostId: null }).live).toMatchObject({ lastCallAt: null });
+  vi.unstubAllEnvs();
+});
+
 it("keeps an authored hosted flag, refuses one that isn't a boolean, and says a hosted member has no pane", () => {
   const hosted = { ...member, seat: "grok@studio", hosted: true };
   expect(parseRoster({ ...authored, members: [hosted, { ...member, hosted: false }] }).members).toEqual([hosted, member]);

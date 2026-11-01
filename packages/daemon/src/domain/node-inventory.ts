@@ -1,3 +1,4 @@
+import { sessionCommunityRunnerSelect } from "./session-registry.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -5,7 +6,7 @@ import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
-import { identityVerdictConfirmsSessionMissing, identityVerdictDownranksRunning } from "./types.js";
+import { identityVerdictConfirmsSessionMissing, identityVerdictConfirmsExecutorStopped, identityVerdictDownranksRunning } from "./types.js";
 import { resolveSeatEffort } from "./seat-effort.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -26,10 +27,12 @@ import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
-import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 
 // -- Row types for SQL results --
 
@@ -46,6 +49,7 @@ interface InventoryRow {
   effort: string | null;
   effort_choice: string | null;
   codex_config_profile: string | null;
+  claude_mcp: ClaudeMcp | null;
   agent_ref: string | null;
   profile: string | null;
   cwd: string | null;
@@ -64,6 +68,7 @@ interface InventoryRow {
   session_created_at: string | null;
   session_status: string | null;
   session_community_harness?: string | null;
+  session_community_runner?: number | null;
   intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -107,8 +112,8 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut);
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
+  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
@@ -122,21 +127,22 @@ function computeRecoveryGuidance(input: {
   codexConfigProfile?: string | null;
   /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
   codexDaemonOptOut?: boolean;
+  claudeMcp?: ClaudeMcp;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut, claudeMcp } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
     const notes: string[] = [];
 
     if (resumeToken) {
-      const cmd = buildNativeResumeCommand(runtime, resumeToken, sessionName);
+      const cmd = buildNativeResumeCommand(runtime, resumeToken, sessionName, undefined, undefined, claudeMcp);
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
-    commands.push("claude --resume");
+    commands.push(["claude --resume", ...claudeMcpArgs(claudeMcp).map(shellQuote)].join(" "));
 
     if (sessionName) {
       notes.push(`Look for session name: ${sessionName}`);
@@ -269,7 +275,7 @@ function deriveOccupantLifecycle(
   row: InventoryRow,
   identityVerdict: SeatIdentityVerdict | null,
 ): NodeInventoryEntry["occupantLifecycle"] {
-  if (row.occupant_lifecycle === "active" && identityVerdictConfirmsSessionMissing(identityVerdict)) {
+  if (row.occupant_lifecycle === "active" && identityVerdictConfirmsExecutorStopped(identityVerdict)) {
     return "unknown";
   }
   if (row.occupant_lifecycle) {
@@ -551,10 +557,8 @@ function applicableVerdict(
   return verdict;
 }
 
-/** Is this node's current session confirmed missing? The inventory's own rule (an identity
- *  verdict for the current session and binding that confirms session_missing), for readers
- *  outside the inventory projection. No verdict, a stale one or an unreadable store: false. */
-export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+/** Read only identity evidence applicable to this session, binding and occupant. Unknown stays null. */
+function currentIdentityVerdict(db: Database.Database, nodeId: string): SeatIdentityVerdict | null {
   try {
     const row = db.prepare(`
       SELECT n.handover_at, s.id AS session_id, s.session_name, s.created_at AS session_created_at, b.tmux_pane AS binding_tmux_pane
@@ -563,10 +567,24 @@ export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: strin
         LEFT JOIN bindings b ON b.node_id = n.id
        WHERE n.id = ?
     `).get(nodeId) as Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at"> | undefined;
-    return !!row && identityVerdictConfirmsSessionMissing(applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row));
+    return row ? applicableVerdict(new SeatIdentityStore(db).getForNode(nodeId), row) : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function nodeSessionConfirmedMissing(db: Database.Database, nodeId: string): boolean {
+  return identityVerdictConfirmsSessionMissing(currentIdentityVerdict(db, nodeId));
+}
+
+/** Current positive stopped-executor evidence, without conflating a retained pane with a missing session. */
+export function nodeExecutorStoppedReason(db: Database.Database, nodeId: string): "session_missing" | "pane_exited" | null {
+  const reason = currentIdentityVerdict(db, nodeId)?.reason;
+  return reason === "session_missing" || reason === "pane_exited" ? reason : null;
+}
+
+export function nodeExecutorConfirmedStopped(db: Database.Database, nodeId: string): boolean {
+  return nodeExecutorStoppedReason(db, nodeId) !== null;
 }
 
 // -- Public API --
@@ -588,9 +606,9 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   const identityVerdicts = new SeatIdentityStore(db).getForRig(rigId);
   // FS-1 W1.3 S1/S2 — the per-node restore-outcome + oriented reads built ONCE
   // for the rig (was a query per node inside the rows.map). rig-scoped restore
-  // map = the prior WHERE rig_id=? filter; oriented map is node-scoped/global.
+  // map = the prior WHERE rig_id=? filter; oriented history follows the rig's nodes.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
-  const orienteds = buildOrientedMap(db);
+  const orienteds = buildOrientedMap(db, rigId);
   const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
 
   const rows = queryInventoryRows(db, rigId);
@@ -635,6 +653,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
       ${codexConfigProfileSelect} as codex_config_profile,
+      ${nodeColumnOrNull("claude_mcp")} as claude_mcp,
       n.agent_ref,
       n.profile,
       n.cwd,
@@ -652,6 +671,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.created_at as session_created_at,
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
+      ${sessionCommunityRunnerSelect(db)} as session_community_runner,
       s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
@@ -741,11 +761,14 @@ function buildInventoryEntry(
   const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
   // Keep registry history intact; only an applicable, explicit absence changes
   // the current status. Unavailable tmux and process mismatches are not absence.
-  const sessionStatus = row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict)
-    ? "detached" : row.session_status;
+  const paneExited = row.session_status === "running" && identityVerdict?.reason === "pane_exited";
+  const sessionStatus = paneExited ? "exited"
+    : row.session_status === "running" && identityVerdictConfirmsSessionMissing(identityVerdict) ? "detached" : row.session_status;
+  const startupStatus = paneExited || (sessionStatus === "running" && identityVerdictDownranksRunning(identityVerdict?.verdict))
+    ? "attention_required" : row.startup_status as NodeInventoryEntry["startupStatus"];
   const lifecycleState = deriveNodeLifecycleState({
     sessionStatus,
-    startupStatus: row.startup_status,
+    startupStatus,
     restoreOutcome,
     nodeId: row.node_id,
     usableSnapshot,
@@ -766,18 +789,16 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    // An explicit down records a failed start's rolled-back session without changing its superseded status.
     intentionallyStopped: row.intentionally_stopped === 1
-      && row.session_status === "exited" && row.binding_id === null,
+      && (row.session_status === "exited" || row.session_status === "superseded") && row.binding_id === null,
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
-    startupStatus: sessionStatus === "running"
-      && identityVerdictDownranksRunning(identityVerdict?.verdict)
-      ? "attention_required"
-      : row.startup_status as NodeInventoryEntry["startupStatus"],
+    startupStatus,
     restoreOutcome,
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has
@@ -790,7 +811,11 @@ function buildInventoryEntry(
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id)),
+    ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerArgs().length
+      ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
+    ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()
+      ? { tmuxServerMode: daemonTmuxServerInfo()!.mode } : {}),
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -1083,6 +1108,7 @@ export function getNodeDetail(
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
       codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
+      claudeMcp: entry.runtime === "claude-code" ? readSeatClaudeMcp(db, nodeId) : undefined,
     }),
     binding,
     startupFiles,
@@ -1250,7 +1276,7 @@ export function attachTerminalActivityAndWork(
   const assignedByDest = readAssignedWorkBySession(deps.db);
   const now = deps.now ?? new Date();
   return entries.map((entry) => {
-    const sessionMissing = identityVerdictConfirmsSessionMissing(entry.identityVerdict);
+    const sessionMissing = identityVerdictConfirmsExecutorStopped(entry.identityVerdict);
     let terminalActive: boolean | null | undefined = sessionMissing ? false : undefined;
     // ARCH RULING 3a947fb1 (FR-7 additive): project the RAW lastActivityAt fact
     // alongside terminalActive from the SAME observation — honest-absence ladder
@@ -1267,7 +1293,7 @@ export function attachTerminalActivityAndWork(
     let activityState: NodeInventoryEntry["activityState"] = sessionMissing ? null : undefined;
     // Capability-checked: a partial injected double without the S19 surface keeps the
     // pre-taxonomy shape (undefined) rather than faking a null oracle answer.
-    const arb = seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function"
+    const arb = !sessionMissing && seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function"
       ? seatActivity.getSeatStateBySession(entry.canonicalSessionName) : null;
     if (!sessionMissing && seatActivity && entry.canonicalSessionName && typeof seatActivity.getSeatStateBySession === "function") {
       activityState = arb
@@ -1283,8 +1309,8 @@ export function attachTerminalActivityAndWork(
     }
     const work = countAssignedWorkForEntry(entry, assignedByDest);
     const arbitratedNeedsInput = arbitratedNeedsInputSignal(arb);
-    const hook = entry.canonicalSessionName
-      ? deps.agentActivity?.getLatestForNode({ sessionName: entry.canonicalSessionName, now,
+    const hook = !sessionMissing && entry.agentActivity == null && entry.canonicalSessionName
+      ? deps.agentActivity?.getLatestForNode({ nodeId: entry.nodeId, sessionName: entry.canonicalSessionName, now,
         order: entry.runtime === "claude-code" ? "source" : "arrival" }) ?? null : null;
     return {
       ...entry,
@@ -1303,7 +1329,7 @@ export function attachTerminalActivityAndWork(
 }
 
 /**
- * QA baseline-deep-dogfood BLOCKING-A2 (qitem-20260518063900-85745917):
+ * QA baseline-deep-dogfood BLOCKING-A2:
  * adopted/live-session rigs do NOT surface assigned queue work because
  * the prior lookup matched destination_session ONLY against
  * canonicalSessionName.
@@ -1506,15 +1532,15 @@ export async function attachAgentActivity(
   const sampledAt = deps.now ?? new Date();
   const captureFallback = deps.captureFallback ?? false;
   return Promise.all(entries.map(async (entry) => {
-    // A cached hook, pane sample or motion cannot revive a confirmed absent
-    // session. Preserve the identity observation's provenance without probing.
-    if (identityVerdictConfirmsSessionMissing(entry.identityVerdict)) {
+    // A cached hook, pane sample or motion cannot revive a confirmed absent executor.
+    // Preserve the applicable missing-session or exited-pane observation without probing.
+    if (identityVerdictConfirmsExecutorStopped(entry.identityVerdict)) {
       return {
         ...entry,
         agentActivity: {
           state: "unknown",
-          reason: "session_missing",
-          evidenceSource: "tmux_session",
+          reason: entry.identityVerdict!.reason!,
+          evidenceSource: entry.identityVerdict!.evidenceSource ?? "tmux_session",
           sampledAt: entry.identityVerdict!.observedAt,
           evidence: entry.canonicalSessionName,
         },
@@ -1602,11 +1628,12 @@ export async function attachAgentActivity(
       };
     };
 
-    const hookActivity = deps.activityStore?.getLatestForNode({
+    const hookActivity = entry.canonicalSessionName ? deps.activityStore?.getLatestForNode({
+      nodeId: entry.nodeId,
       sessionName: entry.canonicalSessionName,
       now: sampledAt,
       order: entry.runtime === "claude-code" ? "source" : "arrival",
-    });
+    }) : null;
     // Reuse the existing cached capture. Only a complete supported idle frame, bound to this
     // target and started in a later second than the last write, distinguishes idle redraw from resumed work.
     // window_activity has second precision: same-second ordering is unknown. Poll/completion time is not write time.

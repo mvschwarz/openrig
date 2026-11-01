@@ -23,7 +23,7 @@ async function fixture() {
     CREATE TABLE sessions(id INTEGER, node_id TEXT, session_name TEXT, status TEXT);
     CREATE TABLE bindings(node_id TEXT, attachment_type TEXT);
     CREATE TABLE queue_items(qitem_id TEXT PRIMARY KEY, source_session TEXT, destination_session TEXT,
-      state TEXT, blocked_on TEXT, closure_required_at TEXT, ts_created TEXT);`);
+      state TEXT, blocked_on TEXT, closure_required_at TEXT, ts_created TEXT, tags TEXT);`);
   const adapter = new TmuxAdapter(async () => { throw new Error("unexpected shell path"); }, undefined,
     async argv => tmux(...argv.slice(1)));
   // A reader clock ten seconds ahead makes genuine native window timestamps idle
@@ -40,7 +40,7 @@ async function fixture() {
     await tmux("new-session", "-d", "-s", session, "sleep 60");
   }
   function waiting(session: string) {
-    db.prepare("INSERT OR REPLACE INTO queue_items VALUES ('q1', 'sender@fixture', ?, 'pending', NULL, NULL, ?)")
+    db.prepare("INSERT OR REPLACE INTO queue_items VALUES ('q1', 'sender@fixture', ?, 'pending', NULL, NULL, ?, NULL)")
       .run(session, new Date().toISOString());
     // The startup activity-reader SQL seam resolves the durable node; the real
     // service and queue projection supply all activity/confidence values.

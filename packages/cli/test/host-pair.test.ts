@@ -69,12 +69,20 @@ describe("rig host pair (OPR.0.4.6.MH1 FR-6)", () => {
     return prog.parseAsync(["node", "rig", "host", ...argv]);
   }
 
-  it("approved walk: registry entry with bearer_file + a 0600 token file; code printed", async () => {
+  it.each([false, true])("approved walk: registry entry with bearer_file + a 0600 token file (json=%s)", async (json) => {
     const deps = fakeDeps({ poll: [{ status: 200, body: { status: "approved", token: "issued-bearer" } }] });
-    const { out, exitCode } = await capture(() => run(deps, ["pair", "vps-a:7433", "--id", "vps-a", "--timeout", "10"]));
+    const { out, err, exitCode } = await capture(() => run(deps, ["pair", "vps-a:7433", "--id", "vps-a", "--timeout", "10", ...(json ? ["--json"] : [])]));
     expect(exitCode).toBeUndefined();
-    expect(out.join("\n")).toContain("Pairing code: 424242");
-    expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");
+    expect(err).toEqual([]);
+    if (json) {
+      expect(JSON.parse(out.join("\n"))).toMatchObject({ ok: true, entry: { id: "vps-a", transport: "http" } });
+    } else {
+      expect(out.join("\n")).toContain("Pairing code: 424242");
+      expect(out.join("\n")).toContain("Paired. Host 'vps-a' registered");
+      expect(out.join("\n")).toContain("rig host doctor vps-a");
+      expect(out.join("\n")).toContain("rig config set feed.subscriptions.vps-a.enabled true");
+    }
+    expect(fs.existsSync(path.join(dir, "config.json"))).toBe(false);
 
     const tokenPath = path.join(dir, "secrets", "host-vps-a.token");
     expect(fs.readFileSync(tokenPath, "utf8")).toBe("issued-bearer\n");

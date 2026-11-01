@@ -12,8 +12,8 @@ import type {
   RungHealthEvent,
   RungTrust,
 } from "./activity-taxonomy.js";
-import { COMMUNITY_HARNESS_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
-import { sessionCommunityHarnessSelect } from "./session-registry.js";
+import { COMMUNITY_HARNESS_RUNG_INVENTORY, COMMUNITY_RUNNER_RUNG_INVENTORY, EVIDENCE_RUNG_RANK, runtimeRungInventory } from "./activity-taxonomy.js";
+import { sessionCommunityHarnessSelect, sessionCommunityRunnerSelect } from "./session-registry.js";
 import { hookPrecedes } from "./agent-activity-store.js";
 
 /** Default polling cadence: 1Hz. The default silence window is 3s, so
@@ -188,7 +188,9 @@ export class SeatActivityService {
       let updated = false;
       for (const [id, request] of snapshot) {
         if (seat.permissions.get(id) !== request) continue;
-        request.seen ||= visible === true;
+        // A screen does not identify which Claude actor owns a dialog. With overlapping actors, only a
+        // scoped batch or turn boundary can settle their unseen notifications.
+        request.seen ||= visible === true && (!claude || seat.permissions.size === 1);
         request.confirmed = visible !== false || (claude && !request.seen);
         request.nextCheckMs = this.now().getTime()
           + (visible === false && this.now().getTime() - request.sinceMs >= 10_000 ? 5_000 : DEFAULT_POLL_INTERVAL_MS);
@@ -196,23 +198,60 @@ export class SeatActivityService {
         updated = true;
       }
       if (!updated) return;
-      seat.permissionObservedAt = this.now().toISOString();
-      const count = [...seat.permissions.values()].filter(request => request.confirmed).length;
-      if (claude && count === 0) {
-        for (const source of seat.sources.values()) {
-          if (source.latest.permissionRequest) source.latest = { ...source.latest, needsInput: undefined };
-        }
-      }
-      const sourceId = `${runtime}:permission-prompt`;
-      this.reportEvidence({
-        seatNodeId: seatNodeId!, sessionName, rung: "needs-input-chrome", sourceId,
-        seq: (seat.sources.get(sourceId)?.latest.seq ?? 0) + 1,
-        observedAt: seat.permissionObservedAt,
-        needsInput: { count, reason: count ? (!claude && visible === null ? "permission_request_unverified" : "permission_prompt") : null },
-      });
+      this.reportPermissionObservation(seatNodeId!, seat, "needs-input-chrome", this.now().toISOString(),
+        !claude && visible === null ? "permission_request_unverified" : "permission_prompt");
     } finally {
       seat.permissionPolling = false;
     }
+  }
+
+  /** A native Claude PostToolBatch resolves only this actor's earlier permission notifications. The route checks
+   *  the emitting occupant first. Missing actor attribution and unordered timestamps retain the pane/turn fallback. */
+  completeClaudeToolBatch(sessionName: string, hookAgentId: string | null, observedAt: string): boolean {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired || seat.inventory?.runtime !== "claude-code") return false;
+    const completedAt = Date.parse(observedAt);
+    if (!Number.isFinite(completedAt)) return false;
+    // A notification may arrive after its completion, including when no request was observed yet.
+    seat.claudeToolBatches.set(hookAgentId, Math.max(completedAt, seat.claudeToolBatches.get(hookAgentId) ?? -Infinity));
+    let settled = false;
+    for (const [id, request] of seat.permissions) {
+      if (request.hookAgentId === undefined || request.hookAgentId !== hookAgentId
+          || !(Date.parse(request.observedAt) < completedAt)) continue;
+      seat.permissions.delete(id);
+      settled = true;
+    }
+    if (!settled) return false;
+    seat.permissionRevision++;
+    this.reportPermissionObservation(seatNodeId!, seat, "lifecycle-hooks", observedAt, "permission_prompt");
+    return true;
+  }
+
+  /** Whether this occupant's actor already completed a strictly later batch. Equal timestamps do not establish order. */
+  hasLaterClaudeToolBatch(sessionName: string, hookAgentId: string | null | undefined, observedAt: string): boolean {
+    if (hookAgentId === undefined) return false;
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired || seat.inventory?.runtime !== "claude-code") return false;
+    const completedAt = seat.claudeToolBatches.get(hookAgentId);
+    return completedAt !== undefined && Date.parse(observedAt) < completedAt;
+  }
+
+  private reportPermissionObservation(seatNodeId: string, seat: SeatLadderState, rung: EvidenceRungId,
+    observedAt: string, reason: string): void {
+    const runtime = seat.inventory?.runtime ?? "codex";
+    seat.permissionEvidence = { rung, observedAt };
+    const count = [...seat.permissions.values()].filter(request => request.confirmed).length;
+    if (runtime === "claude-code" && count === 0) {
+      for (const source of seat.sources.values()) {
+        if (source.latest.permissionRequest) source.latest = { ...source.latest, needsInput: undefined };
+      }
+    }
+    const sourceId = `${runtime}:permission-prompt`;
+    this.reportEvidence({ seatNodeId, sessionName: seat.sessionName, rung, sourceId,
+      seq: (seat.sources.get(sourceId)?.latest.seq ?? 0) + 1, observedAt,
+      needsInput: { count, reason: count ? reason : null } });
   }
 
   /**
@@ -237,7 +276,8 @@ export class SeatActivityService {
     seat.retired = true;
     seat.sources.clear();
     seat.permissions.clear();
-    seat.permissionObservedAt = null;
+    seat.claudeToolBatches.clear();
+    seat.permissionEvidence = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -261,14 +301,15 @@ export class SeatActivityService {
     try {
       const rows = db.prepare(`
         SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
-          COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness
+          COALESCE(b.attachment_type, 'tmux') as attachment_type, ${sessionCommunityHarnessSelect(db)} as community_harness,
+          ${sessionCommunityRunnerSelect(db)} as community_runner
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string; community_harness: string | null; community_runner: number | null }>;
       const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
       const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
       for (const pane of this.latestByPaneId.keys()) {
@@ -290,12 +331,13 @@ export class SeatActivityService {
       // touching the launch machinery.
       for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        const inventory = runtimeRungInventory(r.runtime, r.community_harness);
+        const inventory = runtimeRungInventory(r.runtime, r.community_harness, r.community_runner === 1);
         // A replacement occupant can keep the seat's session name; its own recorded app selection (or none) decides.
-        const communityHarnessChanged = !!known && (known.inventory === COMMUNITY_HARNESS_RUNG_INVENTORY) !== (inventory === COMMUNITY_HARNESS_RUNG_INVENTORY);
+        // A plain and a runner launch of the same app read differently, so a change between them re-declares too.
+        const communityHarnessChanged = !!known && communityKind(known.inventory) !== communityKind(inventory);
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
-          this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
+          this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory, r.runtime);
         }
       }
 
@@ -387,16 +429,21 @@ export class SeatActivityService {
     const claude = runtime === "claude-code";
     const wasConfirmed = seat.arbitrated.needsInput.count > 0;
     if (evidence.permissionRequest) {
-      seat.permissionRevision++;
       const request = evidence.permissionRequest;
+      if (claude && this.hasLaterClaudeToolBatch(evidence.sessionName, request.hookAgentId, evidence.observedAt)) return;
+      const previousRequest = seat.permissions.get(request.id);
+      // Relay posts can arrive out of order. Keep the newer actor request so an older batch cannot settle it.
+      if (claude && previousRequest && Date.parse(evidence.observedAt) < Date.parse(previousRequest.observedAt)) return;
+      seat.permissionRevision++;
       if (claude || !seat.permissions.has(request.id)) {
-        seat.permissions.set(request.id, { sinceMs: this.now().getTime(), confirmed: claude, seen: false, nextCheckMs: 0 });
+        seat.permissions.set(request.id, { sinceMs: this.now().getTime(), observedAt: evidence.observedAt,
+          hookAgentId: request.hookAgentId, confirmed: claude, seen: false, nextCheckMs: 0 });
       }
     } else if ((evidence.rung === "lifecycle-hooks" && (evidence.activity === "idle-at-prompt" || evidence.permissionResolved
         || (claude && evidence.needsInput?.count && evidence.needsInput.reason !== "permission_prompt")))
         || (claude && seat.permissions.size === 0 && evidence.needsInput?.count && evidence.needsInput.reason !== "permission_prompt")) {
       seat.permissions.clear();
-      seat.permissionObservedAt = null;
+      seat.permissionEvidence = null;
       seat.sources.delete(`${runtime}:permission-prompt`);
     }
     seat.sources.set(evidence.sourceId, {
@@ -423,7 +470,7 @@ export class SeatActivityService {
     const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
     if (!seat || seat.retired) return;
     seat.permissions.clear();
-    seat.permissionObservedAt = null;
+    seat.permissionEvidence = null;
     seat.sources.delete(`${seat.inventory?.runtime ?? "codex"}:permission-prompt`);
     for (const source of seat.sources.values()) {
       if (source.latest.needsInput?.count) source.latest = { ...source.latest, needsInput: undefined };
@@ -440,7 +487,8 @@ export class SeatActivityService {
     if (!seat) return;
     seat.sources.clear();
     seat.permissions.clear();
-    seat.permissionObservedAt = null;
+    seat.claudeToolBatches.clear();
+    seat.permissionEvidence = null;
     seat.pendingIdle = null;
     seat.contradictionSinceMs = null;
     seat.promotion.clear();
@@ -523,9 +571,10 @@ export class SeatActivityService {
         inventory: null,
         sources: new Map(),
         permissions: new Map(),
+        claudeToolBatches: new Map(),
         permissionRevision: 0,
         permissionPolling: false,
-        permissionObservedAt: null,
+        permissionEvidence: null,
         trust: new Map(),
         promotion: new Map(),
         contradictionSinceMs: null,
@@ -637,13 +686,15 @@ export class SeatActivityService {
   }
 
   /** A runner seat declared with no hook evidence (after a daemon restart) takes its last recorded hook, so an idle seat
-   *  that posts nothing still reads idle. Its seq is 0: any live hook outranks it. */
-  private restoreDurableHook(seat: { seatNodeId: string; sessionName: string }, inventory: AdapterRungInventory): void {
+   *  that posts nothing still reads idle. Its seq is 0: any live hook outranks it. The seat's own runtime reads the
+   *  record, as its live hooks are read: a community runner's inventory names no runtime of its own. */
+  private restoreDurableHook(seat: { seatNodeId: string; sessionName: string }, inventory: AdapterRungInventory,
+    seatRuntime: string | null): void {
     if (!this.restoreHookEvidence || !inventory.rungs.some((r) => r.rung === "lifecycle-hooks" && r.durableBoundaries)) return;
     const ladder = this.ladder.get(seat.seatNodeId);
     if (!ladder || this.latestByRung(ladder, "lifecycle-hooks")) return;
     let evidence: ActivityEvidence | null = null;
-    try { evidence = this.restoreHookEvidence(seat, inventory.runtime); } catch { evidence = null; }
+    try { evidence = this.restoreHookEvidence(seat, seatRuntime ?? inventory.runtime); } catch { evidence = null; }
     if (evidence && evidence.seatNodeId === seat.seatNodeId && evidence.sessionName === seat.sessionName
         && evidence.rung === "lifecycle-hooks") this.reportEvidence({ ...evidence, seq: 0 });
   }
@@ -760,7 +811,7 @@ export class SeatActivityService {
     }
 
     // Codex permission hooks need probe confirmation after grace; Claude hooks latch
-    // attention until a seen prompt disappears. Unavailable capture fails safe.
+    // attention until a seen prompt disappears or the same actor's tool batch completes. Unavailable capture fails safe.
     // Other prompts retain their existing rung arbitration.
     const chrome = this.latestByRung(seat, "needs-input-chrome");
     const hooksEv = this.latestByRung(seat, "lifecycle-hooks");
@@ -775,14 +826,14 @@ export class SeatActivityService {
             : null;
     const confirmedCount = [...seat.permissions.values()].filter(p => p.confirmed).length;
     const permissionTracked = (seat.inventory?.runtime === "codex" || seat.inventory?.runtime === "claude-code")
-      && (seat.permissions.size > 0 || seat.permissionObservedAt !== null);
+      && (seat.permissions.size > 0 || seat.permissionEvidence !== null);
     const needsInput: NeedsInputShape = permissionTracked
       ? { count: confirmedCount, reason: confirmedCount ? chrome?.needsInput?.reason ?? "permission_prompt" : null }
       : decider?.needsInput ?? { count: 0, reason: null };
     if (permissionTracked && Boolean(confirmedCount) !== Boolean(seat.arbitrated.needsInput.count)) {
       this.permissionPromptChanged?.(seat.sessionName, Boolean(confirmedCount), seat.inventory!.runtime);
     }
-    const needsInputEvidence = permissionTracked ? (seat.permissionObservedAt ? { rung: "needs-input-chrome" as const, observedAt: seat.permissionObservedAt } : null) : decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
+    const needsInputEvidence = permissionTracked ? seat.permissionEvidence : decider ? { rung: decider.rung, observedAt: decider.observedAt } : null;
 
     // Which rung answers is part of the answer: default zero → observed zero changes what
     // consumers may conclude, so it advances seq and pushes like a count change.
@@ -847,10 +898,12 @@ interface PromotionRun {
 }
 
 interface SeatLadderState {
-  permissions: Map<string, { sinceMs: number; confirmed: boolean; seen: boolean; nextCheckMs: number }>;
+  permissions: Map<string, { sinceMs: number; observedAt: string; hookAgentId?: string | null;
+    confirmed: boolean; seen: boolean; nextCheckMs: number }>;
+  claudeToolBatches: Map<string | null, number>;
   permissionRevision: number;
   permissionPolling: boolean;
-  permissionObservedAt: string | null;
+  permissionEvidence: ArbitratedSeatState["needsInputEvidence"];
   sessionName: string;
   retired: boolean;
   inventory: AdapterRungInventory | null;
@@ -877,3 +930,8 @@ export const SAMPLING_IDLE_DEBOUNCE_CAP_MS = 2_500;
 export const RUNG_PROMOTION_AGREEMENT_COUNT = 50;
 /** …spread over at least this window of production time. */
 export const RUNG_PROMOTION_MIN_WINDOW_MS = 60 * 60 * 1000;
+
+/** Which community inventory a seat has, if any: the reconcile pass re-declares when this changes for a session. */
+function communityKind(inventory: unknown): "runner" | "plain" | null {
+  return inventory === COMMUNITY_RUNNER_RUNG_INVENTORY ? "runner" : inventory === COMMUNITY_HARNESS_RUNG_INVENTORY ? "plain" : null;
+}

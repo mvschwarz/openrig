@@ -22,6 +22,7 @@ import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SeatEffortRead, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
+import { sanitizeHostDisplayName } from "./topology/host-label.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
 // the daemon's serialized output — see the Phase-2 endpoint-shape survey).
@@ -176,6 +177,7 @@ interface AttentionAggregateRead {
 }
 /** The host registry (`rig host list`): each registered host with a quick reachability probe. */
 interface HostsRead {
+  ownName?: unknown;
   hosts?: Array<{ id?: unknown; status?: unknown }>;
 }
 interface StreamItemRead {
@@ -311,6 +313,12 @@ function groupPods(nodes: NodeInventoryRead[]): PodNode[] {
     pods.set(pod, list);
   }
   return [...pods.entries()].map(([name, agents]) => ({ name, agents }));
+}
+
+// Rigs are listed as `rig ps` lists them: by name, compared as SQLite's `ORDER BY r.name` does (so uppercase before
+// lowercase). The summary arrives in creation order and the sort is stable, so equal names keep that order, as in `rig ps`.
+function byRigName(a: { name: string }, b: { name: string }): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
 function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
@@ -496,13 +504,18 @@ export async function hydrateSnapshot(
   const wantsConnections = viewContext?.section === "connections";
   const wantsSpecs = !viewContext || viewContext.section === "specs" || topologyLeaf?.kind === "agent";
   const wantsTopologyScope = !viewContext || viewContext.section === "topology";
-  const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
+  // A pod's Recent tab shows its rig's window; the pod's other tabs draw none of it.
+  const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig"
+    || (topologyLeaf.kind === "pod" && viewContext?.viewTab === "recent"));
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
   // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
   const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
+  // A seat's page also lists that seat's RECENTLY FINISHED items; the drilled table tab shows none.
+  const recentlyFinishedReads = broadReads || (focusedTopology && topologyLeaf?.kind === "agent");
   // render.ts draws healthSummaryLine on the instance Table and on the rig/pod Table and Overview; those focused pages must load health too.
-  const rendersHealthSummary = (topologyLeaf?.kind === "host" && viewContext?.viewTab === "table")
+  const rendersHealthSummary = topologyLeaf?.kind === "agent"
+    || (topologyLeaf?.kind === "host" && viewContext?.viewTab === "table")
     || ((topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod") && (viewContext?.viewTab === "table" || viewContext?.viewTab === "overview"));
   const healthRequested = broadReads || viewContext?.viewTab === "health" || rendersHealthSummary;
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
@@ -529,7 +542,7 @@ export async function hydrateSnapshot(
     !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
     !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
+    !recentlyFinishedReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
     broadReads && sliceDetailName
@@ -654,11 +667,13 @@ export async function hydrateSnapshot(
     }
   }
   const aggHosts = agg?.hosts ?? [];
+  const ownName = typeof hostsRead?.ownName === "string" ? sanitizeHostDisplayName(hostsRead.ownName) : undefined;
   const localHost: HostNode = {
     id: "local",
     name: instanceHealth?.selfHostId?.trim() || "local",
+    displayName: ownName && ownName !== "localhost" ? ownName : undefined,
     reachable: true,
-    rigs,
+    rigs: rigs.sort(byRigName),
   };
   // A remote host is any registered host, or one the attention aggregate answered for. Its reachability is the aggregate's
   // answer where there is one, else the registry's probe. Only a drilled-into remote host's rigs are read, through this
@@ -676,7 +691,7 @@ export async function hydrateSnapshot(
     name: id,
     reachable: aggStatus.has(id) ? aggStatus.get(id) === "ok" : registered.some((h) => h.id === id && h.reachable),
     rigs: id === drilledRemote
-      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id }))
+      ? (remoteRigs ?? []).map((rig) => ({ id: rig.id, name: rig.name, lifecycleState: rig.lifecycleState, hasLiveAgents: rig.hasLiveAgents ?? null, pods: [], remoteHost: id })).sort(byRigName)
       : [],
   }));
 

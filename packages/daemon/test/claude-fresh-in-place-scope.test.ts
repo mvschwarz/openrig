@@ -7,7 +7,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
 
 const token = "22222222-2222-4222-8222-222222222222";
-const history = "Claude Code v2.1.303\n❯ predecessor finished turn\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+const history = "Claude Code v2.1.303\n─────────\n❯ predecessor finished turn\n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
 const binding: NodeBinding = { id: "binding", nodeId: "node", tmuxSession: "seat", tmuxPane: "%9",
   tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture", launchGeneration: 7 };
 function fixture() {
@@ -27,6 +27,14 @@ function fixture() {
 const launch = (adapter: ClaudeCodeAdapter, opts: Partial<Parameters<RuntimeAdapter["launchHarness"]>[1]> = {}) =>
   adapter.launchHarness(binding, { name: "seat", freshInPlace: true, ...opts });
 
+function ownProcess(pid = 101): NativeProcessRow[] {
+  const startedAt = "Mon Oct 19 21:30:00 2026";
+  return [
+    { pid: 100, ppid: 1, pgid: 100, tpgid: pid, executableName: "bash", command: "-bash", startedAt },
+    { pid, ppid: 100, pgid: pid, tpgid: pid, executableName: "claude", command: `claude --session-id ${token}`, startedAt },
+  ];
+}
+
 // Claude Code 2.1.309's Resume session picker, from dev50-qa's native capture of a bare `claude --resume` (100×80).
 const resumePicker = (JSON.parse(readFileSync(new URL("./fixtures/claude-resume-picker-2.1.309.json", import.meta.url), "utf8")) as
   Record<string, string>).first100x80!;
@@ -41,7 +49,7 @@ describe("Claude's Resume session picker is not ready", () => {
   });
 });
 
-describe("fresh in-place readiness scope and fallback", () => {
+describe("fresh in-place readiness requires current launch evidence", () => {
   it.each(["adopted", "ordinary-fresh", "resume", "fork"])("preserves %s readiness without reading the current frame", async mode => {
     const f = fixture();
     if (mode === "ordinary-fresh") await f.adapter.launchHarness(binding, { name: "seat" });
@@ -59,17 +67,98 @@ describe("fresh in-place readiness scope and fallback", () => {
     expect(f.capturePaneScreen).not.toHaveBeenCalled();
   });
 
-  it.each([null, "", "  "])("retains old admission when the current frame is unavailable (%s)", async screen => {
+  it.each([null, "", "  "])("waits for a current frame even when its own process is running (%s)", async screen => {
     const f = fixture();
+    f.listProcesses.mockReturnValue(ownProcess());
     f.capturePaneScreen.mockResolvedValue(screen);
     await launch(f.adapter);
-    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
     expect(f.capturePaneScreen).toHaveBeenCalledWith("%9");
+    f.capturePaneScreen.mockResolvedValue(history);
+    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
   });
-  it("retains old admission on a failed screen observation", async () => {
+  it("does not admit the old frame when the current screen read fails", async () => {
     const f = fixture();
     f.capturePaneScreen.mockRejectedValue(new Error("capture unavailable"));
     await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+  });
+
+  it.each(["❯ ", `❯ claude --permission-mode acceptEdits --session-id ${token} --name seat`])(
+    "waits for Claude to draw its input when the launch process is stable but the shell still shows %s", async screen => {
+      const f = fixture();
+      f.getPaneCommand.mockResolvedValue("claude");
+      f.capturePaneScreen.mockResolvedValue(screen);
+      f.listProcesses.mockReturnValue(ownProcess());
+      await launch(f.adapter);
+      expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+      expect(f.listProcesses).toHaveBeenCalled();
+      f.capturePaneScreen.mockResolvedValue("───────── seat ─\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+    },
+  );
+
+  it.each([
+    ["retained header", "Claude Code v2.1.303"],
+    ["retained input frame", "─────────\n❯ predecessor finished turn\n─────────"],
+    ["retained header and frame", history],
+  ].flatMap(([name, retained]) => [
+    { name: `${name}, direct launch`, screen: `${retained}\n❯ claude --permission-mode acceptEdits --session-id ${token} --name seat` },
+    { name: `${name}, script launch`, screen: `${retained}\n❯ /bin/sh fixture-launch.txt` },
+  ]))("does not combine $name with a shell prompt", async ({ screen }) => {
+    const f = fixture();
+    f.getPaneCommand.mockResolvedValue("claude");
+    f.capturePaneScreen.mockResolvedValue(screen);
+    f.listProcesses.mockReturnValue(ownProcess());
+    await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+    f.capturePaneScreen.mockResolvedValue(`${screen}\n───────── seat ─\n❯ \n─────────`);
+    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+  });
+
+  it("waits for the full input frame after Claude draws a header and prompt", async () => {
+    const f = fixture();
+    f.getPaneCommand.mockResolvedValue("claude");
+    f.listProcesses.mockReturnValue(ownProcess());
+    await launch(f.adapter);
+    f.capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ ");
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+    f.capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n─────────\n❯ ");
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+    f.capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n─────────\n❯ Try \"explain this codebase\"\n─────────");
+    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+  });
+
+  it.each([history,
+    "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle)",
+    "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)",
+    "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+  ])("accepts a current prompt once its own stable process is confirmed: %s", async screen => {
+    const f = fixture();
+    f.getPaneCommand.mockResolvedValue("sh");
+    f.capturePaneScreen.mockResolvedValue(screen);
+    f.listProcesses.mockReturnValue(ownProcess());
+    await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+  });
+
+  it("does not admit a ready-looking current frame while the process changes between observations", async () => {
+    const f = fixture();
+    f.capturePaneScreen.mockResolvedValue(history);
+    let pid = 100;
+    f.listProcesses.mockImplementation(() => ownProcess(++pid));
+    await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+  });
+
+  it("waits for an interactive frame after the new Claude process starts", async () => {
+    const f = fixture();
+    f.getPaneCommand.mockResolvedValue("claude");
+    f.capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\nStarting...");
+    f.listProcesses.mockReturnValue(ownProcess());
+    await launch(f.adapter);
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
+    f.capturePaneScreen.mockResolvedValue(history);
     expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
   });
 
@@ -97,10 +186,12 @@ describe("fresh in-place readiness scope and fallback", () => {
     expect(f.capturePaneScreen).not.toHaveBeenCalled();
   });
 
-  it.each(["claude", "claude --unrecognized-option opaque --session-id apparent-token"])("keeps unknown identity unknown: %s", async command => {
-    for (const screen of [null, history,
-      "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle)",
-      "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)"]) {
+  it.each(["claude", "claude --unrecognized-option opaque --session-id apparent-token"].flatMap(command => [
+    { frame: "unavailable", screen: null },
+    { frame: "header", screen: history },
+    { frame: "auto", screen: "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ auto mode on (shift+tab to cycle)" },
+    { frame: "accept-edits", screen: "Restored conversation\n─────────\n❯ \n─────────\n  ⏵⏵ accept edits on (shift+tab to cycle)" },
+  ].map(frame => ({ command, ...frame }))))("keeps unknown identity unknown: $command ($frame)", async ({ command, screen }) => {
       const f = fixture();
       f.getPaneCommand.mockResolvedValue("sh");
       f.capturePaneScreen.mockResolvedValue(screen);
@@ -110,8 +201,7 @@ describe("fresh in-place readiness scope and fallback", () => {
         { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "claude", command, startedAt },
       ]);
       await launch(f.adapter);
-      expect(await f.adapter.checkReady(binding), JSON.stringify({ command, screen })).toEqual({ ready: true });
-    }
+      expect(await f.adapter.checkReady(binding), JSON.stringify({ command, screen })).toMatchObject({ ready: false, code: "awaiting_runtime" });
   });
 
   it.each(["missing-pane-pid", "missing-pane-row", "background-claude"])("does not claim absence from incomplete pane evidence: %s", async mode => {
@@ -127,7 +217,7 @@ describe("fresh in-place readiness scope and fallback", () => {
     ]);
     if (mode === "missing-pane-pid") f.getPanePid.mockResolvedValue(null);
     await launch(f.adapter);
-    expect(await f.adapter.checkReady(binding)).toEqual({ ready: true });
+    expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "awaiting_runtime" });
   });
 
   it("does not use unavailable-screen fallback for a positively different launch identity", async () => {
@@ -148,7 +238,8 @@ describe("fresh in-place readiness scope and fallback", () => {
     const startedAt = "Mon Oct 19 21:30:00 2026";
     f.listProcesses.mockReturnValue([
       { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
-      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "codex", command: "codex resume other-token", startedAt },
+      { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "codex", command: "codex resume other-token",
+        argv: ["codex", "resume", "other-token"], startedAt },
     ]);
     await launch(f.adapter);
     expect(await f.adapter.checkReady(binding)).toMatchObject({ ready: false, code: "claude_launch_identity_conflict" });

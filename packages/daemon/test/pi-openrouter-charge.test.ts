@@ -455,6 +455,49 @@ describe("K4: the request's OpenRouter charge beside its Pi estimate", () => {
     expect(p.timers).toEqual([]);
   });
 
+  it("a lookup retry that comes due while a re-post is in flight is looked up once the re-post ends", async () => {
+    let up = false;
+    const p = pipeline({ postChargesOk: () => up, replies: (id, n) => id === "gen-x-2" && n === 1 ? { status: 404, body: null } : generation(id, 0.5) });
+    // a1 is charged but its post fails (a re-post is scheduled first); a2 isn't there yet (its retry is scheduled after).
+    await p.refresh([turn("a1", 2, { cost: 0.01, responseId: "gen-x-1" }), turn("a2", 3, { cost: 0.02, responseId: "gen-x-2" })]);
+    expect(p.timers).toHaveLength(2);
+    up = true;
+    await p.runTimers(); // the re-post starts, then a2's retry fires while it's still posting; no new usage fact follows
+    await p.runTimers();
+    expect(p.lookups).toEqual(["gen-x-1", "gen-x-2", "gen-x-2"]);
+    expect(p.rows()).toEqual([
+      expect.objectContaining({ entry_id: "a1", status: "charged" }),
+      expect.objectContaining({ entry_id: "a2", status: "charged" }),
+    ]);
+  });
+
+  it.each(["retryable error", "success"] as const)("handles a due post retry when an in-flight lookup ends with %s", async (result) => {
+    const timers: Array<() => void> = [];
+    const posts: string[][] = [];
+    let finishLookup!: (reply: GenerationReply) => void;
+    const lookup = new OpenRouterChargeLookup({
+      fetchGeneration: (id) => id === "gen-1" ? Promise.resolve(generation(id, 0.5))
+        : new Promise((resolve) => { finishLookup = resolve; }),
+      postCharges: async (_session, charges) => {
+        posts.push(charges.map((charge) => charge.entryId));
+        return false;
+      },
+      schedule: (fn) => { timers.push(fn); },
+    });
+    const fact = (entryId: string, responseId: string) => ({ origin: "own", entryId, kind: "assistant", provider: "openrouter",
+      api: "openai-completions", responseId }) as Parameters<typeof lookup.enqueue>[1][number]["fact"];
+    const provenance = { ok: true, credentialSource: "fixture" } as const;
+    lookup.enqueue("session", [{ fact: fact("a1", "gen-1"), provenance }], new Set());
+    await settleAll();
+    expect(posts).toEqual([["a1"]]);
+    lookup.enqueue("session", [{ fact: fact("a2", "gen-2"), provenance }], new Set());
+    lookup.enqueue("session", [{ fact: fact("a3", "gen-3"), provenance }], new Set()); // stays in flight after a2
+    timers.shift()!(); // the post retry becomes due while the second lookup is in flight
+    finishLookup(result === "success" ? generation("gen-2", 0.5) : { status: 404, body: null });
+    await settleAll();
+    expect(posts).toEqual([["a1"], result === "success" ? ["a1", "a2"] : ["a1"]]);
+  });
+
   it("a reply field that reflects the key is never stored or shown", async () => {
     const key = "sk-or-fixture-secret";
     const fake = (async () => new Response(JSON.stringify(generation("gen-x-1", 0.5, { model: `echo ${key}`, workspace_id: key }).body), { status: 200 })) as unknown as typeof fetch;

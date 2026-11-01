@@ -52,12 +52,17 @@ export interface HerdrTransport {
 
 export type HerdrTransportFactory = () => HerdrTransport;
 
-/** Resolve the herdr control socket path: env override → per-session → default. */
-export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env): string {
-  if (env["HERDR_SOCKET_PATH"]) return env["HERDR_SOCKET_PATH"] as string;
-  const base = path.join(homedir(), ".config", "herdr");
-  const session = env["HERDR_SESSION"];
-  return session ? path.join(base, "sessions", session, "herdr.sock") : path.join(base, "herdr.sock");
+/** A per-request session keeps the daemon's config home. An explicit socket
+ * belongs to its configured session, never to an unrelated requested session. */
+export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env, selectedSession?: string): string {
+  if (env["HERDR_SOCKET_PATH"] && (selectedSession === undefined || selectedSession === env["HERDR_SESSION"])) {
+    return env["HERDR_SOCKET_PATH"];
+  }
+  const configHome = env["XDG_CONFIG_HOME"] !== undefined
+    ? path.resolve(env["XDG_CONFIG_HOME"]) : path.join(env["HOME"] || homedir(), ".config");
+  const base = path.join(configHome, "herdr");
+  const session = selectedSession ?? env["HERDR_SESSION"];
+  return session && session !== "default" ? path.join(base, "sessions", session, "herdr.sock") : path.join(base, "herdr.sock");
 }
 
 /** Extract a version token (e.g. from a ping result's `version`, or `herdr --version`). */

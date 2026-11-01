@@ -21,7 +21,7 @@ describe("DaemonClient's principal header goes only to this host's own daemon", 
   });
 
   /** The headers of the first daemon request, with the endpoint answering /healthz as `endpointId`. */
-  async function headersSent(opts: { direct?: boolean; endpointId?: string; remote?: boolean; principal?: { source: "file" | "cloud"; id: string } }): Promise<Record<string, string>> {
+  async function headersSent(opts: { direct?: boolean; endpointId?: string; remote?: boolean; principal?: { source: "file" | "grant-service"; id: string } }): Promise<Record<string, string>> {
     vi.stubEnv("OPENRIG_URL", opts.direct ? BASE : "");
     const sent: Array<Record<string, string>> = [];
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {

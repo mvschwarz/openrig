@@ -132,7 +132,7 @@ async function extractInstallTimeMetadata(bundlePath: string): Promise<{
     const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
     const bundleManifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
 
-    // B1 safety repair (slice-05 Checkpoint 4.2 / qitem-20260518204906): validate
+    // B1 safety repair (slice-05 Checkpoint 4.2): validate
     // the parsed manifest BEFORE trusting any of its fields. The validators
     // reject unsafe rig_spec values (isRelativeSafePath: no absolute, no ../,
     // no backslash, no empty segments). Schema-version-aware: v2 uses pod-aware

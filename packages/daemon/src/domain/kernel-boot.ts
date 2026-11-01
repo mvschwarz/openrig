@@ -66,6 +66,9 @@ export interface KernelBootDeps {
    *  kernel a reboot or crash left down (see `classifyManagedKernel`); resolves to the errors that
    *  kept it from restoring, if any. Without it, an existing kernel is skipped as before. */
   restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>;
+  /** The sessions this start's reconcile marked detached. Only a kernel it found down is restored; one already detached
+   *  before this start stays down. */
+  detachedAtStart?: ReadonlySet<string>;
 }
 
 /** Entry point. Idempotent: safe to call on every daemon startup.
@@ -104,7 +107,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
   // (e.g., from a prior boot or operator-migrated substrate kernel),
   // the builtin path stays out of the way.
   if (kernelAlreadyManaged(deps.rigRepo)) {
-    const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry);
+    const managed = classifyManagedKernel(deps.rigRepo, deps.sessionRegistry, deps.detachedAtStart);
     if (managed.kind === "lost" && deps.restoreLostKernel) {
       // Startup reconcile found none of its seats running and marked them detached: a reboot or
       // crash took it down, not `rig down` (which marks them exited). Bring it back as it was.
@@ -113,7 +116,10 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
       return tracker;
     }
     log("info", `kernel-boot: kernel rig already managed (${managed.kind}); skipping builtin boot`);
-    tracker.setSkipped("kernel rig already managed");
+    // A stale kernel stays down on purpose; say why and how to bring it back (`rig start` prints it).
+    tracker.setSkipped(managed.kind === "stale"
+      ? "kernel rig already managed; it was already down before this daemon start, so it was not restored. Bring it back with: rig up kernel --existing"
+      : "kernel rig already managed");
     if (managed.kind === "live") tracker.observeManagedKernel();
     return tracker;
   }
@@ -174,16 +180,20 @@ export function expectedKernelSeats(specPath: string): string[] | null {
 
 export type ManagedKernel =
   | { kind: "live" | "lost"; rigId: string; seats: string[] }
-  | { kind: "stopped" | "unknown" };
+  | { kind: "stopped" | "stale" | "unknown" };
 
 /** What startup reconcile left of the existing kernel rig, from each seat's newest session:
  *  - live: some seat is still running;
  *  - lost: every seat is detached, which reconcile does to a seat whose tmux session is gone, and
- *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared);
+ *    still bound to that session (an unclaimed seat is detached too, but its binding is cleared),
+ *    and this start's reconcile detached at least one of them (`detachedAtStart`);
+ *  - stale: the same, but no seat was detached by this start: the kernel was already down before it;
  *  - stopped: some seat was stopped on purpose (`rig down kernel` or a seat stop marks it exited);
  *  - unknown: anything else, including more than one current kernel rig or a seat with no session.
- *  Only `lost` is restored, so a deliberate stop survives daemon restarts. */
-export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry): ManagedKernel {
+ *  Only `lost` is restored, so a deliberate stop survives daemon restarts and a long-gone kernel
+ *  doesn't come back with its old conversations. */
+export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: SessionRegistry,
+  detachedAtStart: ReadonlySet<string> = new Set()): ManagedKernel {
   try {
     const rigs = rigRepo.findUnarchivedRigsByName("kernel");
     if (rigs.length !== 1) return { kind: "unknown" };
@@ -207,7 +217,9 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
       const session = latest.get(node.id);
       return !!session && sessionRegistry.getBindingForNode(node.id)?.tmuxSession === session.sessionName;
     });
-    if (statuses.every((status) => status === "detached") && stillBound) return { kind: "lost", rigId, seats };
+    if (statuses.every((status) => status === "detached") && stillBound) {
+      return nodes.some((node) => detachedAtStart.has(latest.get(node.id)!.id)) ? { kind: "lost", rigId, seats } : { kind: "stale" };
+    }
     if (statuses.some((status) => status === "exited")) return { kind: "stopped" };
     return { kind: "unknown" };
   } catch {

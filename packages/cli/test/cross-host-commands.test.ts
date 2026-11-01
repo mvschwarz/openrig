@@ -285,6 +285,32 @@ describe("capture --host (cross-host short-circuit)", () => {
     expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "5x"]);
   });
 
+  it("forwards a fractional --lines as given: a positive parseInt means the remote decides", async () => {
+    const captureCalls: { argv?: readonly string[] } = {};
+    const cmd = captureCommand(deps({
+      run: async (_h, argv) => {
+        captureCalls.argv = argv;
+        return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+      },
+    }));
+    await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", "--lines=3.5"], { from: "user" });
+    expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "3.5"]);
+  });
+
+  it("forwards a non-positive or non-numeric --lines as the documented default of 20", async () => {
+    for (const value of ["0", "-1", "abc"]) {
+      const captureCalls: { argv?: readonly string[] } = {};
+      const cmd = captureCommand(deps({
+        run: async (_h, argv) => {
+          captureCalls.argv = argv;
+          return { ok: true, failedStep: "none", stdout: "", stderr: "", remoteExitCode: 0 };
+        },
+      }));
+      await cmd.parseAsync(["--host", "vm-a", "dev-impl@my-rig", `--lines=${value}`], { from: "user" });
+      expect(captureCalls.argv).toEqual(["rig", "capture", "dev-impl@my-rig", "--lines", "20"]);
+    }
+  });
+
   it("forwards --history-plus-pane with the --lines it applies to", async () => {
     const captureCalls: { argv?: readonly string[] } = {};
     const cmd = captureCommand(deps({

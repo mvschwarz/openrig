@@ -481,6 +481,26 @@ describe("transport routes", () => {
     expect((await res.json()).reason).toBe("target_needs_input");
   });
 
+  it("POST /send to a Claude seat whose recorded pane is gone returns 409 and names the repair, not a 500", async () => {
+    const { node1 } = seedRig();
+    sessionRegistry.updateBinding(node1.id, { tmuxSession: "dev-impl@my-rig", tmuxPane: "%1" });
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    // The seat was resumed by hand in its session, so the session's only pane is a new one.
+    const tmux = { ...mockTmux({ sendText }), listPanes: async () => [{ id: "%7" }] } as unknown as TmuxAdapter;
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux });
+    const app = createApp({ sessionTransport: transport });
+    const res = await app.request("/api/transport/send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: "dev-impl@my-rig", text: "status?" }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, sent: false, reason: "target_runtime_conflict" });
+    expect(body.error).toContain("The session does not have the expected bound pane. No text was sent.");
+    expect(body.error).toContain("rig reconcile-session dev-impl@my-rig");
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
   // OPR.0.4.1.10 — the route rejects contradictory / unauditable override requests before transport.
   it("POST /send rejects --dangerously-interact + --wait-for-idle with 400", async () => {
     seedRig();

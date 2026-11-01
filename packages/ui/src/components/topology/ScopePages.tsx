@@ -32,7 +32,9 @@ import { RigStatusControl } from "../RigStatusControl.js";
 import { useRigSummary } from "../../hooks/useRigSummary.js";
 import { useHosts, useSelectHost, useHostSelection } from "../../hooks/useHosts.js";
 import { LOCAL_HOST_ID } from "../../lib/host-param.js";
-import { useSpecLibrary, useLibraryReview, type LibraryRigReview } from "../../hooks/useSpecLibrary.js";
+import { useRigSpecExport } from "../../hooks/useRigSpecExport.js";
+import { useRigSpecReview } from "../../hooks/useSpecReview.js";
+import { WorkflowCodePreview } from "../WorkflowScaffold.js";
 import { LiveNodeDetails } from "../LiveNodeDetails.js";
 import { useTopologyOverlay } from "./topology-overlay-context.js";
 // V1 attempt-3 Phase 5 P5-9: graph view-mode degrades to table on
@@ -345,70 +347,47 @@ export function RigScopePage() {
   );
 }
 
-/** V1 polish slice Phase 5.1 P5.1-6 — Rig overview tab.
- *
- *  Mounts the existing canonical RigSpecDisplay component (from
- *  /specs/rig/$id) sourced via useSpecLibrary("rig") + useLibraryReview.
- *  Matches the rig name against the library entries (per
- *  LibraryReview.tsx pattern) and renders the spec detail.
- */
-function RigOverviewTab({ rigId, rigName }: { rigId: string; rigName: string | null }) {
-  const { data: entries = [], isLoading: entriesLoading } = useSpecLibrary("rig");
-  // Match by rig name when available; some rigs may have one library
-  // entry per name (operator-authored rig spec).
-  const matches = rigName ? entries.filter((e) => e.name === rigName) : [];
-  const entryId = matches.length === 1 ? matches[0]!.id : null;
-  const { data: review, isLoading: reviewLoading } = useLibraryReview(entryId);
+/** The running-rig view reads the selected instance, not a reusable library template. */
+export function RigOverviewTab({ rigId }: { rigId: string; rigName: string | null }) {
+  const exported = useRigSpecExport(rigId);
+  const preview = useRigSpecReview(exported.hostSelection === "local" ? exported.data ?? null : null);
 
-  if (entriesLoading || reviewLoading) {
-    return (
-      <div className="p-6">
-        <div className="font-mono text-[10px] text-on-surface-variant">Loading rig spec…</div>
-      </div>
-    );
+  if (exported.hostSelection === "loading" || (exported.hostSelection === "local" && exported.isLoading)) {
+    return <div className="p-6 font-mono text-[10px] text-on-surface-variant">Loading current rig spec…</div>;
   }
-  if (matches.length === 0) {
+  if (exported.hostSelection !== "local" || exported.isError || exported.data === undefined) {
     return (
       <div className="p-6">
         <EmptyState
-          label="NO RIG SPEC"
-          description={`No rig spec entry found for "${rigName ?? rigId}". Author one via /specs.`}
+          label="CURRENT RIG SPEC UNAVAILABLE"
+          description={exported.hostSelection === "remote"
+            ? "The current spec is not available on a selected remote host. No local configuration or library template was substituted."
+            : exported.hostSelection === "unavailable"
+              ? "The selected host could not be determined. No local configuration or library template was substituted."
+              : `The selected rig's configuration could not be read${exported.error ? ` (${exported.error.message})` : ""}. No library template was substituted.`}
           variant="card"
-          testId="topology-rig-overview-no-spec"
+          testId="topology-rig-overview-unavailable"
         />
       </div>
     );
   }
-  if (matches.length > 1) {
-    return (
-      <div className="p-6">
-        <EmptyState
-          label="AMBIGUOUS RIG SPEC"
-          description={`${matches.length} rig spec entries match "${rigName ?? rigId}". Disambiguate at /specs.`}
-          variant="card"
-        />
-      </div>
-    );
-  }
-  if (!review || review.kind !== "rig") {
-    return (
-      <div className="p-6">
-        <EmptyState
-          label="RIG SPEC UNAVAILABLE"
-          description="Rig spec failed to load."
-          variant="card"
-        />
-      </div>
-    );
-  }
-  const rigReview = review as LibraryRigReview;
   return (
     <div className="px-6 pb-6" data-testid="topology-rig-overview">
-      <RigSpecDisplay
-        review={rigReview}
-        yaml={rigReview.raw}
-        testIdPrefix="topology-rig-overview-"
-      />
+      <p className="mb-3 font-mono text-[10px] text-on-surface-variant">
+        Current rig configuration — exported from this instance, not the Specs library template.
+      </p>
+      {preview.data ? (
+        <RigSpecDisplay review={preview.data} yaml={exported.data} testIdPrefix="topology-rig-overview-" />
+      ) : (
+        <>
+          <p className="mb-3 font-mono text-[10px] text-on-surface-variant">
+            {preview.isError ? "Topology preview unavailable. The current export is shown below." : "Preparing topology preview…"}
+          </p>
+          <WorkflowCodePreview title="Current configuration" testId="topology-rig-overview-yaml">
+            {exported.data}
+          </WorkflowCodePreview>
+        </>
+      )}
     </div>
   );
 }

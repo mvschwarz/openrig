@@ -158,6 +158,14 @@ describe("Send CLI", () => {
           const parsed = JSON.parse(body);
           lastSendBody = parsed;
           sendBodies.push(parsed);
+          if (parsed.session === "slow-session") {
+            // A completed send can answer after the ordinary client's five-second deadline.
+            setTimeout(() => {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, sessionName: parsed.session }));
+            }, 6_000);
+            return;
+          }
           if (parsed.session === "lost-response-session") {
             // The message was accepted, but no response headers reach the caller.
             res.destroy();
@@ -433,6 +441,25 @@ describe("Send CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it.each([false, true])("waits for a slow successful send without repeating it (json=%s)", { timeout: 15_000 }, async (json) => {
+    const { stdout, stderr, exitCode } = await captureChannels(async () => {
+      await makeCmd().parseAsync(["node", "rig", "send", "slow-session", "hello", ...(json ? ["--json"] : [])]);
+    });
+    expect(sendBodies).toHaveLength(1);
+    expect(exitCode).toBeUndefined();
+    expect(stderr).toEqual([]);
+    if (json) expect(JSON.parse(stdout[0])).toMatchObject({ ok: true, sessionName: "slow-session" });
+    else expect(stdout).toContain("Sent to slow-session");
+  });
+
+  it("gives a local fan-out the send response budget", async () => {
+    const post = vi.fn().mockResolvedValue({ status: 200, data: { total: 1, sent: 1, failed: 0, results: [] } });
+    await captureLogs(() => makeCmd(runningDeps(port, () => ({ post } as unknown as DaemonClient)))
+      .parseAsync(["node", "rig", "send", "--to", "a@r", "hello"]).then(() => {}));
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][2]).toMatchObject({ timeoutMs: 60_000 });
+  });
+
   it.each([false, true])("losing the response after acceptance is unconfirmed (json=%s), with no resend", async (json) => {
     const { stdout, stderr, exitCode } = await captureChannels(async () => {
       await makeCmd().parseAsync(["node", "rig", "send", "lost-response-session", "hello", ...(json ? ["--json"] : [])]);
@@ -443,6 +470,8 @@ describe("Send CLI", () => {
     const output = json ? JSON.parse(stdout[0]).error : { consequence: stderr[1], action: stderr[2] };
     expect(output.consequence).toContain("Delivery UNCONFIRMED");
     expect(output.action).toContain("duplicate");
+    expect(output.action).toContain("off-screen");
+    expect(output.action).toContain("does not prove non-delivery");
     expect([...stdout, ...stderr].join("\n")).not.toMatch(/was not sent|Sent to/);
     if (json) { expect(stdout).toHaveLength(1); expect(stderr).toEqual([]); }
     else expect(stdout).toEqual([]);
@@ -578,7 +607,7 @@ describe("Send CLI", () => {
         text: expect.stringContaining("hello"),
         waitForIdleMs: 30000,
       }),
-      { timeoutMs: 35000 },
+      { timeoutMs: 90000 },
     );
     const sentText = postFn.mock.calls[0]?.[1] as { text: string } | undefined;
     expect(sentText?.text).toContain("To: dev-impl@my-rig");
@@ -625,13 +654,13 @@ describe("Send CLI", () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello", "--wait-for-idle", "600"]);
     });
-    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([[600000, { timeoutMs: 605000 }]]);
+    expect(postFn.mock.calls.map((call) => [(call[1] as { waitForIdleMs: number }).waitForIdleMs, call[2]])).toEqual([[600000, { timeoutMs: 660000 }]]);
     expect(logs.join("\n")).toContain("when the 600000ms wait ended (8 checks). No text was sent.");
     expect(logs.join("\n")).not.toMatch(/did not respond|consecutive/i);
     expect(exitCode).toBe(1);
   });
 
-  it("send without wait-for-idle uses default client timeout path", async () => {
+  it("send without wait-for-idle uses the 60 s response budget", async () => {
     const postFn = vi.fn(async () => ({
       status: 200,
       data: { ok: true, sessionName: "dev-impl@my-rig" },
@@ -640,7 +669,7 @@ describe("Send CLI", () => {
     await captureLogs(async () => {
       await makeCmd(deps).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
     });
-    expect(postFn.mock.calls[0]?.[2]).toBeUndefined();
+    expect(postFn.mock.calls[0]?.[2]).toEqual({ timeoutMs: 60_000 });
   });
 
   // Slice-03 Atom 6b — --context delivery flag.
@@ -1285,6 +1314,19 @@ describe("Send CLI", () => {
 
     it("R1 RED: single-seat + OPENRIG_URL custom port + probe-stopped -> actual POST lands, exact env target passed to clientFactory", async () => {
       vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}`);
+      vi.stubEnv("RIGGED_URL", "");
+      lastSendBody = null;
+      const rc = recordingRealClient();
+      const { logs } = await captureLogs(async () => {
+        await makeCmd(probeFailNoStateDeps(rc.factory)).parseAsync(["node", "rig", "send", "dev-impl@my-rig", "hello"]);
+      });
+      expect(logs.join("\n")).toContain("Sent to dev-impl@my-rig");
+      expect(rc.seen()).toBe(`http://127.0.0.1:${port}`);
+      expect(String(lastSendBody?.text)).toContain("To: dev-impl@my-rig");
+    });
+
+    it("single-seat send with a trailing-slash OPENRIG_URL reaches <url>/api/..., not <url>//api/...", async () => {
+      vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${port}/`);
       vi.stubEnv("RIGGED_URL", "");
       lastSendBody = null;
       const rc = recordingRealClient();

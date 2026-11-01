@@ -16,7 +16,7 @@ const REMOTE_RIGS = [{ id: "r-vps-kernel", name: "kernel", lifecycleState: "runn
 const LOCAL_CHANGE: RecentTransitionSnap = { transitionId: 41, qitemId: "qitem-local", ts: "2026-10-25T19:00:00.000Z",
   actorSession: "local-seat@kernel", change: "created", rig: "kernel", targetKind: "qitem", target: "qitem-local" };
 
-interface Fake { calls: string[]; hosts?: unknown[]; hostsStatus?: number; remoteStatus?: number; aggregateHosts?: unknown[] }
+interface Fake { calls: string[]; ownName?: unknown; hosts?: unknown[]; hostsStatus?: number; remoteStatus?: number; aggregateHosts?: unknown[] }
 
 function daemon(fake: Fake): DaemonClient {
   return new DaemonClient({ baseUrl: "http://fixture", fetchImpl: (async (input) => {
@@ -24,7 +24,7 @@ function daemon(fake: Fake): DaemonClient {
     if (u.pathname === "/healthz") return Response.json({ selfHostId: "mac" });
     if (u.pathname === "/api/hosts") return fake.hostsStatus
       ? Response.json({ error: "invalid_registry" }, { status: fake.hostsStatus })
-      : Response.json({ ownName: "mac", selected: "local", hosts: fake.hosts ?? [VPS] });
+      : Response.json({ ownName: Object.hasOwn(fake, "ownName") ? fake.ownName : "localhost", selected: "local", hosts: fake.hosts ?? [VPS] });
     if (u.pathname === "/api/rigs/summary") {
       const host = u.searchParams.get("host");
       if (!host) return Response.json(LOCAL_RIGS);
@@ -52,13 +52,93 @@ async function page(fake: Fake, ...steps: Step[]) {
   const view = createViewState({ instanceId: "remote-hosts", getSnapshot: () => snap });
   const client = daemon(fake);
   const rigName = () => view.get().drill.find((part) => part.kind === "rig")?.name ?? null;
-  snap = await hydrateSnapshot(client, undefined, null, null, rigName(), view.get());
+  const refresh = async () => snap = await hydrateSnapshot(client, undefined, null, null, rigName(), view.get());
+  await refresh();
   for (const step of steps) {
     view.dispatch(typeof step === "string" ? parseCommand(step) : step);
-    snap = await hydrateSnapshot(client, undefined, null, null, rigName(), view.get());
+    await refresh();
   }
-  return { snap, view, text: renderScreen(view.get(), snap, { cols: 160, rows: 50, colorMode: "none" }).lines.join("\n") };
+  return { snap, view, refresh, text: renderScreen(view.get(), snap, { cols: 160, rows: 50, colorMode: "none" }).lines.join("\n") };
 }
+
+describe("the local host's configured display name (#2049)", () => {
+  it.each([undefined, null, 7, "  ", "mac", "localhost", " localhost "])("keeps one stable identity when the served name is %s", async (ownName) => {
+    const { snap, view, text } = await page({ calls: [], ownName }, "host mac");
+    expect(text).toContain("⊕ mac");
+    expect(text).toContain("instance mac");
+    expect(text).not.toContain("mac (mac)");
+    expect(snap.hosts[0]?.name).toBe("mac");
+    expect(view.get().drill).toEqual([{ kind: "host", name: "mac" }]);
+  });
+
+  it("shows its name on the tree and host pages while commands keep its identity", async () => {
+    for (const tab of ["table", "overview", "graph", "health", "recent"]) {
+      const fake: Fake = { calls: [], ownName: "Mac mini 2" };
+      const { snap, view, text } = await page(fake, "host mac", `tab ${tab}`);
+      expect(text).toContain("⊕ mac · Mac mini 2");
+      expect(text).toContain("instance Mac mini 2 (mac)");
+      expect(view.get().drill).toEqual([{ kind: "host", name: "mac" }]);
+      expect(snap.hosts.map((host) => [host.id, host.name])).toEqual([["local", "mac"], ["vps", "vps"]]);
+      expect(fake.calls.some((call) => call.includes("host="))).toBe(false);
+    }
+  });
+
+  it("keeps selection and local reads when a rename matches a registered remote host", async () => {
+    const fake: Fake = { calls: [], ownName: "Desk Mac" };
+    const { snap, view, refresh } = await page(fake, "host mac", "tab recent");
+    const screen = (current: FleetSnapshot) => renderScreen(view.get(), current, { cols: 160, rows: 50, colorMode: "none" });
+    const before = screen(snap);
+    expect(before.lines.join("\n")).toContain("⊕ mac · Desk Mac");
+    const keys = before.explorerRows.map((row) => row.key);
+    fake.ownName = "vps";
+    fake.calls.length = 0;
+    const renamed = screen(await refresh());
+    expect(renamed.lines.join("\n")).toContain("⊕ mac · vps");
+    expect(renamed.lines.join("\n")).toContain("qitem-local");
+    expect(renamed.explorerRows.map((row) => row.key)).toEqual(keys);
+    expect(view.get().drill).toEqual([{ kind: "host", name: "mac" }]);
+    expect(fake.calls.some((call) => call.startsWith("/api/queue/recent-transitions?scope=instance"))).toBe(true);
+    expect(fake.calls.some((call) => call.includes("host=vps"))).toBe(false);
+    view.dispatch(parseCommand("host vps"));
+    const remote = screen(await refresh());
+    expect(fake.calls).toContain("/api/rigs/summary?host=vps");
+    expect(remote.lines.join("\n")).not.toContain("qitem-local");
+  });
+
+  it.each([80, 160].flatMap(cols => [true, false].map(reachable => ({ cols, reachable }))))(
+    "keeps the local identity and reachability visible at $cols columns (reachable=$reachable)", async ({ cols, reachable }) => {
+      const otherHost = { ...VPS, id: "fleet-machine-with-a-very-long-identifier" };
+      const { snap, view } = await page({ calls: [], ownName: otherHost.id, hosts: [otherHost] });
+      snap.hosts[0]!.reachable = reachable;
+      const screen = renderScreen(view.get(), snap, { cols, rows: 50, colorMode: "none" });
+      const local = screen.explorerRows.find(row => row.key === "host:mac")!;
+      const visible = screen.lines[local.y - 1]!.slice(0, screen.explorerWidth);
+      expect(visible).toContain("⊕ mac");
+      if (!reachable) expect(visible).toContain("(unreachable)");
+      view.dispatch(local.action!);
+      expect(view.get().drill).toEqual([{ kind: "host", name: "mac" }]);
+    },
+  );
+
+  it.each([
+    { label: "ANSI styling and erase", ownName: "\u001b[31mDesk\u001b[0m\u001b[2J", shown: "Desk (mac)" },
+    { label: "OSC window title", ownName: "\u001b]0;Changed title\u0007Desk", shown: "Desk (mac)" },
+    { label: "OSC string terminator", ownName: "\u001b]0;Changed title\u001b\\Desk", shown: "Desk (mac)" },
+    { label: "C1 OSC", ownName: "\u009d0;Changed title\u009cDesk", shown: "Desk (mac)" },
+    { label: "C0 and C1 controls", ownName: "De\u0000s\u007fk\u0085", shown: "Desk (mac)" },
+    { label: "bidirectional formatting controls", ownName: "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069Desk", shown: "Desk (mac)" },
+    { label: "styled default name", ownName: "\u001b[31mlocalhost\u001b[0m", shown: "mac" },
+    { label: "default name with OSC, bidi and C0 controls", ownName: "\u001b]0;Changed title\u0007\u202elocal\u0000host", shown: "mac" },
+    { label: "only controls", ownName: "\u001b[2J\u0007", shown: "mac" },
+    { label: "ordinary Unicode", ownName: "研发 机房 🖥", shown: "研发 机房 🖥 (mac)" },
+    { label: "Arabic and Hebrew text", ownName: "مكتب שרת", shown: "مكتب שרת (mac)" },
+  ])("renders $label as plain display text", async ({ ownName, shown }) => {
+    const { text, view } = await page({ calls: [], ownName }, "host mac");
+    expect(text).toContain(`instance ${shown}`);
+    expect(text).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f-\x9f\p{Bidi_Control}]/u);
+    expect(view.get().drill).toEqual([{ kind: "host", name: "mac" }]);
+  });
+});
 
 describe("a registered remote host in the topology tree (#2049)", () => {
   it("is listed on the Table tab with no feed subscription and no attention-aggregate read", async () => {

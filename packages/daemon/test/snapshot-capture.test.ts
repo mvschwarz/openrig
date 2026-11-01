@@ -60,6 +60,89 @@ describe("SnapshotCapture", () => {
     return { rig, n1, n2 };
   }
 
+  it("#1822 carries an absent agent's whole authoritative source across periodic snapshots without reviving it", () => {
+    const { rig, n1, n2 } = seedRig();
+    const lead = sessionRegistry.registerSession(n1.id, "r01-lead");
+    const worker = sessionRegistry.registerSession(n2.id, "r01-worker");
+    sessionRegistry.updateStatus(lead.id, "running");
+    sessionRegistry.updateStatus(worker.id, "running");
+    sessionRegistry.updateResumeToken(worker.id, "community:demo", "worker-conversation", "hook");
+    sessionRegistry.recordCommunityHarnessSelection(worker.id, "demo");
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run("2026-10-26 00:00:00", worker.id);
+    const before = capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(worker.id, "exited");
+    // Force a second boundary without sleeping; compare the full current row.
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run("2026-10-26 00:00:01", worker.id);
+    const periodic = capture.captureSnapshot(rig.id, "auto-periodic");
+    const carried = periodic.data.periodicResumeSourcesByNode?.[n2.id];
+    expect(carried).toEqual(sessionRegistry.getSessionsForRig(rig.id).find(row => row.id === worker.id));
+    expect(carried?.status).toBe("exited");
+    expect(carried?.communityHarness).toBe("demo");
+    expect(periodic.data.activeOccupantsByNode?.[n2.id]).toEqual({ kind: "absent" });
+    expect(periodic.data.periodicResumeSourcesByNode?.[n1.id]).toBeUndefined();
+    // The predecessor need not survive pruning, nor the live ledger retain the token.
+    db.prepare("DELETE FROM snapshots WHERE id = ?").run(before.id);
+    db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(worker.id);
+    const next = capture.captureSnapshot(rig.id, "auto-periodic");
+    expect(next.data.periodicResumeSourcesByNode?.[n2.id]).toEqual(carried);
+    expect(next.data.activeOccupantsByNode?.[n2.id]).toEqual({ kind: "absent" });
+    expect(capture.captureSnapshot(rig.id, "manual").data.periodicResumeSourcesByNode).toBeUndefined();
+  });
+
+  it.each(["no token", "relaunch_fresh", "checkpoint_only", "no resume type"])("#1822 does not carry non-resumable history: %s", (mode) => {
+    const { rig, n2 } = seedRig();
+    const row = sessionRegistry.registerSession(n2.id, "r01-worker");
+    sessionRegistry.updateStatus(row.id, "running");
+    sessionRegistry.updateResumeToken(row.id, mode === "no resume type" ? "none" : "codex_id", "old-token");
+    if (mode === "no token") db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(row.id);
+    if (mode === "relaunch_fresh" || mode === "checkpoint_only") db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?").run(mode, row.id);
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(row.id, "exited");
+    expect(capture.captureSnapshot(rig.id, "auto-periodic").data.periodicResumeSourcesByNode).toBeUndefined();
+  });
+
+  it.each(["newer session", "fresh successor", "dangling fresh effect"])("#1822 does not carry a retired predecessor: %s", (mode) => {
+    const { rig, n2 } = seedRig();
+    const old = sessionRegistry.registerSession(n2.id, "r01-old");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateResumeToken(old.id, "codex_id", "retired-token");
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(old.id, "exited");
+    let successorId = "missing-session";
+    if (mode !== "dangling fresh effect") {
+      const successor = sessionRegistry.registerSession(n2.id, "r01-new", mode === "fresh successor" ? "fresh" : undefined);
+      successorId = successor.id;
+      sessionRegistry.updateStatus(successor.id, "running");
+      sessionRegistry.updateResumeToken(successor.id, "codex_id", "new-conversation");
+      sessionRegistry.updateStatus(successor.id, "exited");
+    }
+    if (mode !== "newer session") {
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, n2.id,
+        JSON.stringify({ nodeId: n2.id, sessionId: successorId, newGeneration: sessionRegistry.currentOccupantTenure(n2.id)!.generationUuid }));
+    }
+    const periodic = capture.captureSnapshot(rig.id, "auto-periodic");
+    expect(periodic.data.periodicResumeSourcesByNode).toBeUndefined();
+    expect(periodic.data.activeOccupantsByNode?.[n2.id]).toEqual({ kind: "absent" });
+  });
+
+  it("#1822 does not select arbitrary history for an ambiguous predecessor or a changed runtime", () => {
+    const { rig, n2 } = seedRig();
+    const first = sessionRegistry.registerSession(n2.id, "r01-first");
+    const second = sessionRegistry.registerSession(n2.id, "r01-second");
+    for (const row of [first, second]) {
+      sessionRegistry.updateStatus(row.id, "running");
+      sessionRegistry.updateResumeToken(row.id, "codex_id", row.id, "hook");
+    }
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    for (const row of [first, second]) sessionRegistry.updateStatus(row.id, "exited");
+    expect(capture.captureSnapshot(rig.id, "auto-periodic").data.periodicResumeSourcesByNode?.[n2.id]).toBeUndefined();
+    sessionRegistry.updateStatus(first.id, "running");
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(first.id, "exited");
+    db.prepare("UPDATE nodes SET runtime = 'claude-code' WHERE id = ?").run(n2.id);
+    expect(capture.captureSnapshot(rig.id, "auto-periodic").data.periodicResumeSourcesByNode?.[n2.id]).toBeUndefined();
+  });
+
   it("does not collapse a dangling current effect into a never-occupied seat", () => {
     expect(deriveRehydrateOccupantsByNode([], ["n1"], { n1: "missing-session" }).n1).toEqual({ kind: "ambiguous", candidateIds: [] });
   });

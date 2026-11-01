@@ -125,8 +125,9 @@ describe("managed Claude full down/up", () => {
 });
 
 // A pod-aware resume rolls a seat back as unresumable only on the runtime's own report that the
-// conversation doesn't exist. A Claude that returns to its shell for another reason stays failed,
-// with its pane and binding kept so its output can still be read.
+// conversation doesn't exist, and waits for a decision with the one step that starts it fresh. A Claude
+// that returns to its shell for another reason stays failed, with its pane and binding kept so its
+// output can still be read.
 describe("pod-aware Claude resume failure outcomes", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
@@ -212,9 +213,13 @@ describe("pod-aware Claude resume failure outcomes", () => {
       expect(latest).toMatchObject({ status: "running", startup_status: "failed" });
       expect(binding).toMatchObject({ tmuxSession: name, tmuxPane: "%new" });
     } else if (mode === "missing") {
+      // The launch's own token, for a seat stopped before its first message: it pauses, and nothing starts it fresh.
       expect(outcome.status).toBe("awaiting-decision");
       expect(outcome.error).toContain("Original session unresumable");
       expect(outcome.error).toContain("no conversation found for the requested session");
+      expect(outcome.error).toContain(`If you know this seat was never used, nothing is lost by starting only this seat fresh, in one step: rig seat launch '${node.logicalId}@restore-test' --fresh --reason "<why>".`);
+      expect(up.result.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("started fresh")]));
+      expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
       expect(up.result.rigResult).toBe("partially_restored");
       expect(tmux.killSession).toHaveBeenCalledExactlyOnceWith(name);
       expect(live).toBe(false);

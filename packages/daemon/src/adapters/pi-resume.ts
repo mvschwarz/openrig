@@ -138,7 +138,7 @@ export class PiResumeAdapter {
   // Poll the runner's launch-scoped sidecar ONLY — never stale pane
   // scrollback (a prior instance's READY/ERROR markers survive in the pane,
   // and a prior resume of the SAME file would even match; guard fold,
-  // code-review qitem-20260707011908). Resumed = THIS attempt's sidecar is
+  // code-review). Resumed = THIS attempt's sidecar is
   // ready AND names exactly the requested session file.
   private async verifyResume(tmuxSessionName: string, sessionFile: string, launchId: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 250;

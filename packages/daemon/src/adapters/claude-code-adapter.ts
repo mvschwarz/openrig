@@ -1,5 +1,6 @@
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
+import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -14,7 +15,7 @@ import type {
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
-import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, hasClaudeDrawnInput } from "../domain/native-resume-probe.js";
 import { resumeProbeEvidence } from "../domain/native-resume-probe-evidence.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProcesses, observeClaudeDelivery, observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, verifyClaudePaneProcess, verifyCodexPaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
@@ -48,6 +49,29 @@ export interface ClaudeAdapterFsOps {
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
+
+/** #2277: the shell's own not-found line for the launched Claude, from the last lines of a pane back at its shell: bash's
+ *  `claude: command not found`, sh's `claude: not found`, zsh's `command not found: claude`, or `No such file or directory`
+ *  naming exactly the launch's executable (a managed launch runs its resolved path, which can be a versioned file). */
+function claudeNotFoundLine(paneContent: string, executable: string | undefined): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse().find((line) => {
+    if (/(?:^|[\s:])claude: (?:command )?not found$/.test(line) || /command not found: claude$/.test(line)) return true;
+    const missing = missingFileOperand(line);
+    return missing !== undefined && (executable ? missing === executable : missing.endsWith("/claude"));
+  }) ?? null;
+}
+
+/** The path a missing-file line names, whole: `<prog>: <path>: No such file or directory` (bash, sh, env, which may quote
+ *  it) or zsh's `zsh: no such file or directory: <path>`. */
+function missingFileOperand(line: string): string | undefined {
+  const operand = /^\S+: (?:line \d+: )?(.+): No such file or directory$/.exec(line)?.[1] ?? /^\S+: no such file or directory: (.+)$/.exec(line)?.[1];
+  return operand?.replace(/^['‘]|['’]$/g, "");
+}
+
+function claudeNotFoundReason(line: string): string {
+  return `the pane shows that claude wasn't found (${line}). If that line is from this launch, Claude Code may have been updating or `
+    + "being reinstalled at that moment; relaunch this seat once claude is back.";
+}
 
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
@@ -256,9 +280,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; freshInPlace?: boolean },
+    opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; freshInPlace?: boolean; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
+    if (binding.accountHome !== undefined && (!this.claudeManagedLaunch || !this.seatLaunchEnvironment)) {
+      return { ok: false, error: "Isolated account-home launch support is unavailable; no agent started." };
+    }
+    const accountHome = binding.accountHome !== undefined ? binding.accountHome : this.claudeManagedLaunch?.accountHome?.(binding.nodeId);
+    if (accountHome) {
+      try { this.claudeManagedLaunch!.assertAccountHome(binding.nodeId, accountHome, binding.accountHome ? binding.accountToken ?? null : undefined); }
+      catch (error) { return { ok: false, error: (error as Error).message }; }
+    }
+    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}` : "claude";
     this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
@@ -277,27 +310,45 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
+          ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
+          ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
           ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
             pane: binding.runtimeSwitchFrom.pane, generation: binding.runtimeSwitchFrom.generation } } : {}) }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
     // A seat's own subscription token: the managed launch carries it; the classic launch gets its step in the staged
-    // subshell. A launch that can't apply it still starts, and says so.
-    const seatToken = managed ? null : this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId) ?? null;
+    // subshell. Subscription-token fallback is reported; an unusable API key refuses the launch.
+    let seatToken: ReturnType<ClaudeManagedLaunch["seatTokenLaunch"]> = null;
+    if (!managed) {
+      try {
+        seatToken = this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId,
+          binding.accountHome !== undefined ? { accountHome: binding.accountHome, ref: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null, required: !!binding.accountHome } : {}) ?? null;
+      } catch (error) { return { ok: false, error: (error as Error).message }; }
+    }
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    if (seatToken) tokenWarnings.push(...(await this.claudeManagedLaunch?.tokenPrecedenceWarnings?.(binding.nodeId, seatToken.ref) ?? []));
     const session = binding.tmuxSession;
+    const assertSelected = opts.beforeNativeDispatch ? () => {
+      if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Claude input");
+    } : undefined;
+    const beforeManagedInput = opts.beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
     const sendClassic = async (cmd: string) => {
       if (!this.seatLaunchEnvironment) {
+        if (seatToken?.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
         if (seatToken) tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
-        return this.tmux.sendText(session, cmd);
+        if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
+        return assertSelected ? this.tmux.sendText(session, cmd, assertSelected) : this.tmux.sendText(session, cmd);
       }
       const staged = await this.seatLaunchEnvironment.command(session, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration,
-        runtime: this.runtime, ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
+        runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
+        if (seatToken.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This pane cannot apply the selected API key; no Claude process started." };
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
-      return this.tmux.sendShellCommand(session, staged, undefined, { sourceInPane: true });
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
+      return assertSelected ? this.tmux.sendShellCommand(session, staged, assertSelected, { sourceInPane: true })
+        : this.tmux.sendShellCommand(session, staged, undefined, { sourceInPane: true });
     };
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
@@ -322,6 +373,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
     const advisor = binding.advisor?.trim();
     const advisorArg = advisor ? ` --advisor ${shellQuote(advisor)}` : "";
+    const mcpArgs = claudeMcpArgs(binding.claudeMcp);
+    const mcpArg = mcpArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.7.0.9: the seat's own additions, after the model, effort and Advisor and before the identity options.
     const additionArgs = seatLaunchAdditionArgs(binding.launchAdditions);
     const additionArg = additionArgs.map((arg, index) => ` ${index % 2 === 0 ? arg : shellQuote(arg)}`).join(""); // flag, value pairs
@@ -344,12 +397,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const forkSessionId = this.sessionIdFactory();
       const launchArgs = permissionArgs(forkSessionId);
       const permissionMode = permissionArg(launchArgs);
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
+        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await sendClassic(cmd);
       if (!textResult.ok) {
@@ -367,19 +420,21 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     const permissionMode = permissionArg(launchArgs);
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
       opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
+      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
-    const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
+    const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)
       : await sendClassic(cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
     // Send Enter to execute
-    const enterResult = managed || this.seatLaunchEnvironment ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+    const enterResult = managed || this.seatLaunchEnvironment ? { ok: true as const }
+      : await (assertSelected ? this.tmux.sendKeys(binding.tmuxSession, ["Enter"], assertSelected) : this.tmux.sendKeys(binding.tmuxSession, ["Enter"]));
     if (!enterResult.ok) {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
@@ -415,7 +470,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
     const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options);
-    const probe = await this.assessFreshInPlaceProbe(binding, paneCommand, historyProbe);
+    const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
 
     // A script-launched Claude reads as `sh` until the script hands over the foreground, so the label alone
     // is not a return to a shell. Say so only for a proven idle shell (the rule Codex's checkReady uses).
@@ -427,6 +482,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         code: "awaiting_runtime",
       };
     }
+    // A proven idle shell showing not-found for the launched Claude says why. It stays a wait: the line may be an earlier
+    // launch's, still on screen while this launch's command is dispatched but not yet run.
+    const notFound = probe.code === "returned_to_shell"
+      ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
+    if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
 
     if (probe.status === "resumed") return "provedWithoutLaunch" in probe ? { ready: true, provedWithoutLaunch: true } : { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -438,17 +498,16 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
+  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"]; accountHome?: string | null }): void {
     this.provisionManagedBootstrap(binding);
   }
 
   // -- Private helpers --
 
-  /** A fresh in-place launch keeps the retiree's scrollback. Qualify a history-based ready result
-   * with the current frame, only for the exact launch that requested it. Unavailable observations
-   * retain the old admission (including its ambiguity); visible gates and conflicting identity do not. */
+  /** A fresh in-place launch keeps the retiree's scrollback. Its readiness requires a current
+   * prompt and stable process proof for that exact launch. Missing observations stay inconclusive. */
   private async assessFreshInPlaceProbe(
-    binding: NodeBinding, paneCommand: string | null,
+    binding: NodeBinding,
     historyProbe: ReturnType<typeof assessNativeResumeProbe>,
   ) {
     const launch = this.autoLaunches.get(binding.nodeId);
@@ -459,8 +518,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     let screen: string | null = null;
     try { screen = await this.tmux.capturePaneScreen(binding.tmuxPane); } catch { /* unavailable */ }
-    // Missing process evidence is unknown, not a conflicting recipient. Reuse the launch observer's
-    // positive conflict distinction without requiring process proof for ordinary ready frames.
+    // Missing process evidence is unknown, not a conflicting recipient. Keep that distinction
+    // while requiring positive launch evidence before admitting the current prompt below.
     let occupant: "own" | "another" | "unknown" | "absent" = "unknown";
     try { occupant = await this.paneOccupant(binding, false, { positiveConflictOnly: true }); } catch { /* unavailable */ }
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
@@ -470,31 +529,48 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       status: "inconclusive" as const, code: "claude_launch_identity_conflict",
       detail: "A different runtime identity occupies the fresh launch's pane.",
     };
-    if (!screen?.trim()) return historyProbe;
-    const current = await this.assessManagedProbe(binding, paneCommand, screen);
+    if (!screen?.trim()) return {
+      status: "inconclusive" as const, code: "awaiting_runtime",
+      detail: "The fresh launch's current Claude prompt could not be observed.",
+    };
+    // A process label alone cannot establish an interactive prompt. This probe uses the current
+    // frame and the same exact, stable launch proof as managed headerless readiness.
+    const current = await this.assessManagedProbe(binding, null, screen, { requireCurrentLaunch: true });
     if (this.autoLaunches.get(binding.nodeId) !== launch) return {
       status: "inconclusive" as const, code: "awaiting_runtime", detail: "The fresh launch changed during readiness observation.",
     };
-    // A shell prompt can also start with ❯. Keep the headerless fallback only when process
-    // evidence cannot rule Claude out; a readable shell/script-only pane uses the current result.
-    const withIdentity = assessNativeResumeProbe({ runtime: "claude-code", paneCommand, paneContent: screen,
-      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
-    return withIdentity.status === "resumed" && occupant !== "absent" ? historyProbe : current;
+    return current;
   }
 
-  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string, options?: ReadinessOptions) {
+  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string, options?: ReadinessOptions & { requireCurrentLaunch?: boolean }) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
-    const probe = assessNativeResumeProbe(input);
+    let probe = assessNativeResumeProbe(input);
     // Headerless managed launches (including bypass mode) use the same readiness
     // precedence as resume. This candidate result is returned only after the
     // exact launch identity below is proved; screen text alone is insufficient.
     const verifiedProbe = assessNativeResumeProbe({ ...input,
       claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
-    if (probe.status === "resumed" || verifiedProbe.status !== "resumed") return probe;
+    if ((!options?.requireCurrentLaunch && probe.status === "resumed") || verifiedProbe.status !== "resumed") return probe;
+    if (options?.requireCurrentLaunch) {
+      // The shell may use the same ❯ glyph while its new Claude process is still
+      // starting. Preserve gate results above, and require Claude's drawn input
+      // before pinning that process as the ready launch.
+      if (!hasClaudeDrawnInput(paneContent)) return {
+        status: "inconclusive" as const, code: "awaiting_runtime",
+        detail: "Waiting for the fresh Claude launch to draw its current input frame.",
+      };
+      probe = {
+        status: "inconclusive", code: "awaiting_runtime",
+        detail: "Waiting to confirm the new Claude process in this pane.",
+      };
+    }
     const launch = this.autoLaunches.get(binding.nodeId);
     // No launch record (this daemon did not launch the seat): the caller's real binding and the seat's recorded
     // conversation are the proof's inputs. A record for another launch keeps today's result below.
-    if (!launch) return await this.proveWithoutLaunch(binding, options) ? { ...verifiedProbe, provedWithoutLaunch: true } : probe;
+    if (!launch) {
+      if (options?.requireCurrentLaunch) return probe;
+      return await this.proveWithoutLaunch(binding, options) ? { ...verifiedProbe, provedWithoutLaunch: true } : probe;
+    }
     if (!binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
       || launch.binding.tmuxSession !== binding.tmuxSession
@@ -724,10 +800,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     if (await this.paneReturnedToShell(binding, finalCommand)) {
+      const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
       return {
         ok: false,
         probe: probeEvidence,
-        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
     }
@@ -951,10 +1028,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content, orientation);
   }
 
-  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
+  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"]; accountHome?: string | null }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    const accountHome = binding.accountHome !== undefined ? binding.accountHome
+      : binding.nodeId ? this.claudeManagedLaunch?.accountHome(binding.nodeId) : undefined;
     // Match launchHarness: an explicit permission mode exports the selected home to the child, so
     // only that home is provisioned.
     const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
@@ -964,17 +1043,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const failures: string[] = [];
     if (managed) {
       // The seat's own home when it declares one (member or rig `env:`), else the daemon's.
-      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId).statePath);
+      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId, accountHome).statePath);
     } else {
-      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
-      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      if (!accountHome && home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // Without an isolated account home, a classic seat inherits the tmux server's
       // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
       // When the seat's own `env:` or the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
       // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
       // selected home untouched: a child that inherits the daemon's selection read neither.
       try {
         const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
-        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId) : undefined;
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId, accountHome) : undefined;
         if (selected && !statePaths.includes(selected)) statePaths.push(selected);
       } catch (err) {
         failures.push((err as Error).message);

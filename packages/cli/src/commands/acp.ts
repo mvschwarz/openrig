@@ -94,7 +94,7 @@ Ctrl-C (or rig acp cancel <runId>) asks the agent to cancel the turn; a second C
 Ending the run closes the agent's stdin and reports whether any process carrying the run's marker remains.
 
 Example:
-  rig acp run qitem-20261023-abc --cwd ~/work/app -- openclaw acp --url ws://127.0.0.1:18789 --token-file ~/.openclaw/gateway.token
+  rig acp run <qitem-id> --cwd ~/work/app -- openclaw acp --url ws://127.0.0.1:18789 --token-file ~/.openclaw/gateway.token
 
 Guide: rig context get reference/acp-agents.md`)
     .action(async (qitemId: string, agent: string[], opts: { cwd: string; permissionsTo?: string; loadSession?: string; pollSeconds: string }) => {

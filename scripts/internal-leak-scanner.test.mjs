@@ -113,16 +113,14 @@ test("exact-line allowances preserve modified lines, adjacent findings and inter
   assert.equal(scan(line, "skills/internal/SKILL.md")[0].kind, "path");
 });
 
-test("generated rules allow the shipped compaction template and still detect concrete paths", async () => {
+test("an allowed exact line lets the shipped compaction template through, and concrete paths are still found", async () => {
   const { scanInternalLeaks } = await loadScanner();
-  const rules = JSON.parse(readFileSync(new URL("./internal-tokens.generated.json", import.meta.url), "utf8"));
+  const rules = allowedLineRules(COMPACTION_TEMPLATE);
   const bytes = readFileSync(new URL(
     "../packages/daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md",
     import.meta.url,
   ));
   assert.ok(bytes.toString("utf8").split("\n").includes(COMPACTION_TEMPLATE));
-  assert.ok(rules.allowed_context_lines.includes(COMPACTION_TEMPLATE));
-  assert.ok(rules.path_prefixes.includes(".openrig/compaction/"));
   for (const path of [
     "daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md",
     "daemon/context-packs/skills/claude-compaction-restore/SKILL.md",
@@ -135,14 +133,12 @@ test("generated rules allow the shipped compaction template and still detect con
   }
 });
 
-test("generated rules allow the startup guide's preparation-root sentence and nothing derived from it", async () => {
+test("an allowed exact line lets the startup guide's preparation-root sentence through, and nothing derived from it", async () => {
   const { scanInternalLeaks } = await loadScanner();
-  const rules = JSON.parse(readFileSync(new URL("./internal-tokens.generated.json", import.meta.url), "utf8"));
+  const rules = allowedLineRules(STARTUP_GUIDE_LINE);
   const bytes = readFileSync(new URL("../docs/reference/agent-startup-guide.md", import.meta.url));
   const text = bytes.toString("utf8");
   assert.ok(text.split("\n").includes(STARTUP_GUIDE_LINE));
-  assert.ok(rules.allowed_context_lines.includes(STARTUP_GUIDE_LINE));
-  assert.ok(rules.path_prefixes.includes(".openrig/compaction/"));
   for (const path of ["docs/reference/agent-startup-guide.md", "daemon/docs/reference/agent-startup-guide.md"]) {
     assert.deepEqual(scanInternalLeaks({ path, bytes, rules }), []);
     for (const modified of [
@@ -181,6 +177,15 @@ async function loadScanner() {
   assert.equal(typeof scanner.scanInternalLeaks, "function");
   assert.equal(typeof scanner.buildInternalLeakMessage, "function");
   return scanner;
+}
+
+/** The term lists live outside the repository, so a test writes the one rule it needs: the compaction prefix, with one
+ *  exact line allowed. */
+function allowedLineRules(line) {
+  return {
+    path_prefixes: [".openrig/compaction/"], seat_and_rig_patterns: [], host_patterns: [], charged_terms: [],
+    internal_path_globs: [], allowed_context_substrings: [], allowed_context_lines: [line],
+  };
 }
 
 function fixtureRules() {

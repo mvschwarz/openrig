@@ -102,7 +102,7 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
 - **r3 — Claude `sessions/<pid>.json` self-report** (busy/shell/idle/waiting, since
   v2.1.139): standing, above hooks for working/idle. Undocumented internal — unreadable
   means fall down the ladder, never error.
-- **r2 — lifecycle hooks** (Claude SessionStart/UserPromptSubmit/Stop/Notification;
+- **r2 — lifecycle hooks** (Claude SessionStart/UserPromptSubmit/PostToolBatch/Stop/StopFailure/Notification;
   Codex SessionStart/UserPromptSubmit/Stop/PermissionRequest): standing for Claude; Codex's
   hook rung starts at trial and is promoted after 50 agreeing observations over at least an
   hour. Exactly-once turn boundaries; SubagentStop filtered (it
@@ -138,6 +138,26 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
   idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
   runner) keeps the hold-until-the-next-boundary behaviour.
+
+Claude permission notifications raise needs-input immediately. A visible permission can clear
+after it has been observed and then disappears. A notification whose dialog was never observed
+can also clear when Claude reports `PostToolBatch`: every tool in that actor's batch has resolved,
+so its earlier permission requests are no longer pending. The relay carries the native actor
+identity; a subagent or in-process teammate finishing its batch cannot clear the main session's
+request, and overlapping actors remain separate. An individual `PostToolUse` is insufficient
+because another tool in the batch may still be waiting for permission.
+
+Batch completion must come from the current occupant and have a later source timestamp than
+the matching notification. Missing actor attribution from an older relay, equal or older
+timestamps, and another actor's completion retain attention. An unrecognized or missing screen
+does not expire attention by age. `Stop` and `UserPromptSubmit` remain the turn-boundary fallback.
+The oracle remembers each actor's latest completed batch for the current occupant, so a strictly
+earlier notification arriving late cannot restore the mark, even if the completion arrived first.
+A notification with an equal or later timestamp remains eligible; swapping or retiring the
+occupant discards its remembered completions.
+Completing a batch changes the needs-input signal without inferring that the seat is idle or
+overwriting a later elicitation. The hook contract is documented in
+[Claude's hooks reference](https://code.claude.com/docs/en/hooks#posttoolbatch).
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
 trust, unless its inventory declares it positive-only. A positive-only source can report

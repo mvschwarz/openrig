@@ -85,7 +85,8 @@ export function planOwnedCodexContentApproval(input: {
 }): { hashes: Record<string, string>; approval: OwnedApproval } | undefined {
   try {
     if (codexPluginContentHash(input.shipped, true) !== codexPluginContentHash(input.installed, true)) return;
-    const contentHash = codexPluginContentHash(input.installed);
+    // The trees just matched byte for byte, so approve the shipped bytes rather than a second read of the cache.
+    const contentHash = codexPluginContentHash(input.shipped);
     const declarations: Record<string, string> = {};
     const manifest = JSON.parse(fs.readFileSync(path.join(input.shipped, "hooks/codex.json"), "utf8"));
     for (const [event, groups] of Object.entries(manifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {

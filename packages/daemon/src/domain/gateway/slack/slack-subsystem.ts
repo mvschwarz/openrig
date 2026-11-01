@@ -41,7 +41,7 @@ import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./soc
 import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
-import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
+import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
@@ -79,7 +79,8 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
+  /** `typedReply`: a typed thread reply, whose words a decision parked on its person stores as its answer; a click's return never does. */
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string; messageTs?: string; typedReply?: boolean }) => Promise<"resolved" | "resolved-uncertain" | "already-resolved" | "not-applicable">;
 }
 
 interface HumanReplyActionPort {
@@ -109,14 +110,14 @@ export function makeHumanReplyResolver(
       return "resolved-uncertain";
     }
     let uncertain = false;
+    let parkedOnAsked = false;
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
-      const episode = queueRepo.transitionLog.listForQitem(input.qitemId)
-        .filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
+      parkedOnAsked = source.destinationSession === input.actorSession;
+      const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
-      const key = `${input.qitemId}:${episode.transitionId}`;
-      const receipt = queueRepo.transitionLog.getOwnerNotificationReceipt(input.qitemId, key);
+      const { key, receipt } = episode;
       // A final receipt attests delivery even when reconciliation lost its timestamp.
       // Without one, ONLY a unique exact current-episode primary proves anything.
       const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;
@@ -128,7 +129,10 @@ export function makeHumanReplyResolver(
     }
 
     try {
-      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision });
+      // A question parked on the person it asked takes their typed reply as its answer, stored in the resume's own
+      // transaction. A click's return stores nothing here, and a reply whose order is uncertain stays words in context.
+      await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision,
+        ...(input.typedReply && parkedOnAsked && !uncertain ? { answerText: input.decision } : {}) });
       return uncertain ? "resolved-uncertain" : "resolved";
     } catch (error) {
       if ((error as { code?: string }).code !== "qitem_not_leg1_parked") throw error;
@@ -611,6 +615,20 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        // #2234: Slack posted a reply to this root as a new top-level message, so the root is gone. Its mapping is closed,
+        // so later posts don't reuse it. A closed root still routes a reply to its seat.
+        onThreadMissing: (p, threadTs, channel) => {
+          threadMap.close(threadTs, channel);
+          log(`thread ${threadTs} in ${channel} is gone: Slack posted the reply as a new message, so its mapping is closed`);
+          // A --reply-to update's receipt says where it actually went; the recorded choice stays, for retries.
+          if (threadReplyTo(p)) {
+            try {
+              opts.queueRepo.update({ qitemId: p.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToThreadMissing(threadTs) });
+            } catch (e) {
+              log(`reply-to placement for ${p.qitemId} not recorded: ${(e as Error).message}`);
+            }
+          }
+        },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
           // v3 digest branch: transport truth first — every member receipt is
@@ -1021,6 +1039,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       seen: inboundSeen,
       deadLetter: dead,
       destination: cfg.inboundDestination,
+      reactions: cfg.reactions === "off" ? "off" : "route",
       resolveSender: makeInboundSenderResolver(registry, opts.home),
       // S10 — deterministic thread routing: mapped thread → exactly the mapped seat; unmapped
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.

@@ -67,6 +67,9 @@ describe("cross-host target resolution — alias -> id -> transport", () => {
     expect(r.target).toBe("pm@some-rig@host-84c37990");
     expect(r.sugarHost).toBeUndefined();
     expect(r.hint).toContain("no registered host 'host-84c37990'");
+    // The step that binds a peer's self-id, not only the list of hosts.
+    expect(r.hint).toContain("run `rig host doctor <alias>` for that machine's entry if it uses http (it learns the id)");
+    expect(r.hint).toContain("set `hostId: host-84c37990` on that entry in hosts.yaml (any transport)");
   });
 
   // Two spellings of ONE host. An operator who pastes back the reply hint we printed them AND

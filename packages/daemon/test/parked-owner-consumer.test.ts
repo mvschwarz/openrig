@@ -15,6 +15,7 @@ import {
   REFUSED_PREFIX,
   FAILED_PREFIX,
   openPromptRefusals,
+  currentParkedOwnerNoInputFailure,
   NUDGE_FAIL_PREFIX,
   PARKED_OWNER_POLICY_NAME,
   type ParkedOwnerConsumerDeps,
@@ -199,6 +200,16 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     expect(result.message).toContain("rig view show held");
     expect(result.message).not.toContain("S01");
     expect(result.message).not.toContain("OPR.0.5.5.1");
+  });
+
+  it("a no-longer-parked episode closure does not claim that its agent resumed", async () => {
+    const store = new RowStore();
+    await makeParkedOwnerConsumerPolicy(makeDeps([parkedSeat()],store)).evaluate(makeJob());
+    await makeParkedOwnerConsumerPolicy(makeDeps([parkedSeat({parked:false})],store)).evaluate(makeJob());
+    const closed = store.appended.filter(x => x.note.startsWith(CLOSE_PREFIX));
+    expect(closed.length).toBeGreaterThan(0);
+    expect(closed.every(x => x.note.includes("no longer observed parked"))).toBe(true);
+    expect(closed.some(x => x.note.includes("seat resumed"))).toBe(false);
   });
 
   it("B1 hard check: an obligation set closed between derive and the delivery boundary skips with the exact reason and ZERO reserve", async () => {
@@ -724,5 +735,113 @@ describe("#1933: the first reminder waits a grace after the seat starts waiting"
     } as ParkedOwnerConsumerDeps).evaluate(makeJob());
     expect((await run(new Date(NOW - 60_000).toISOString())).action).toBe("skip");
     expect((await run(new Date(NOW - GRACE_MS - 1_000).toISOString())).action).toBe("send");
+  });
+});
+
+
+describe("parked reminders after a positive no-input quota rejection", () => {
+  const quotaState = "guard-revision-a:100:8192";
+  const failedQuota = (result: Awaited<ReturnType<ReturnType<typeof makeParkedOwnerConsumerPolicy>["evaluate"]>>, phase: string | undefined = "not_reached") => {
+    const entry = sentHistory({ episodeKey: String(result.notes?.["episodeKey"]), primaryRow: String(result.notes?.["primaryRow"]), deliveryStatus: "failed", deliveryReason: "Held-message quota is full; no input was written." });
+    entry.evaluationNotes = { ...entry.evaluationNotes, deliveryCode: "retained_quota_full", ...(phase ? { deliveryInputPhase: phase } : {}) };
+    return entry;
+  };
+  const policy = (store: RowStore, history: WatchdogHistoryEntry[], state = quotaState, terminal = false) =>
+    makeParkedOwnerConsumerPolicy({ ...makeDeps([parkedSeat()], store, history), retentionState: () => state, isTerminalSeat: () => terminal } as ParkedOwnerConsumerDeps);
+
+  it("bounds unchanged attempts AND row bookkeeping across restart and history pruning", async () => {
+    const store = new RowStore();
+    const first = await policy(store, []).evaluate(makeJob());
+    expect(first.action).toBe("send");
+    const history = [failedQuota(first)];
+    const next = await policy(store, history).evaluate(makeJob());
+    expect(next).toMatchObject({ action: "skip", notes: { skippedSeats: [{ seat: SEAT, why: "retention-quota-unchanged" }] } });
+    const writes = store.appended.length;
+    const nudges = store.nudges.length;
+    expect(store.nudges[0]?.result).toContain("retained_quota_full");
+    expect(store.nudges[0]?.result).toContain("not_reached");
+    for (let i = 0; i < 100; i++) {
+      expect((await policy(store, i < 50 ? history : []).evaluate(makeJob())).action).toBe("skip");
+    }
+    expect(store.appended).toHaveLength(writes);
+    expect(store.nudges).toHaveLength(nudges);
+    expect(nudges).toBe(1);
+  });
+
+  it.each(["quota-released", "guard-revision-b:off"])("rechecks admission when %s changes", async state => {
+    const store = new RowStore();
+    const first = await policy(store, []).evaluate(makeJob());
+    const history = [failedQuota(first)];
+    expect((await policy(store, history).evaluate(makeJob())).action).toBe("skip");
+    const retry = await policy(store, history, state).evaluate(makeJob());
+    expect(retry.action).toBe("send");
+    const delivered = sentHistory({ episodeKey: String(retry.notes?.["episodeKey"]), primaryRow: String(retry.notes?.["primaryRow"]) });
+    expect((await policy(store, [delivered, ...history], state).evaluate(makeJob())).action).toBe("skip");
+  });
+
+  it.each([undefined, "attempted", "written"])("does not turn phase %s into positive no-input admission", async phase => {
+    const store = new RowStore();
+    const first = await policy(store, []).evaluate(makeJob());
+    const entry = failedQuota(first, phase);
+    if (phase === undefined) delete entry.evaluationNotes!["deliveryInputPhase"];
+    expect((await policy(store, [entry]).evaluate(makeJob())).action).toBe("send");
+  });
+
+  it("leaves an ordinary transient failure retryable", async () => {
+    const store = new RowStore();
+    const first = await policy(store, []).evaluate(makeJob());
+    const entry = failedQuota(first);
+    delete entry.evaluationNotes!["deliveryCode"];
+    expect((await policy(store, [entry]).evaluate(makeJob())).action).toBe("send");
+  });
+
+  it("records terminal-only custody once without reserving recurring input attempts", async () => {
+    const store = new RowStore();
+    const first = await policy(store, [], quotaState, true).evaluate(makeJob());
+    expect(first).toMatchObject({ action: "skip", notes: { skippedSeats: [{ seat: SEAT, why: "terminal-seat" }] } });
+    expect(store.nudges).toHaveLength(1);
+    expect(store.nudges[0]?.result).toContain("failed:terminal-seat:");
+    expect(store.nudges[0]?.result).toContain("route it to an agent seat");
+    const writes = store.appended.length;
+    for (let i = 0; i < 100; i++) expect((await policy(store, [], quotaState, true).evaluate(makeJob())).action).toBe("skip");
+    expect(store.appended).toHaveLength(writes);
+    expect(store.nudges).toHaveLength(1);
+    expect((await policy(store, [], quotaState, false).evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+
+describe("parked-owner machine marker position", () => {
+  it.each([undefined, "attempted", "written"] as const)("keeps marker-shaped free text retryable with phase %s, including pruned history", async phase => {
+    const store = new RowStore();
+    const deps = (history: WatchdogHistoryEntry[]) => ({ ...makeDeps([parkedSeat()], store, history), retentionState: () => "unchanged" });
+    const first = await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob());
+    const entry = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: String(first.notes?.["primaryRow"]), deliveryStatus: "failed", deliveryReason: "untyped detail; code retained_quota_full; input not_reached; terminal detail; code terminal_seat; input not_reached;" });
+    entry.evaluationNotes = { ...entry.evaluationNotes, ...(phase ? { deliveryInputPhase: phase } : {}) };
+    const next = await makeParkedOwnerConsumerPolicy(deps([entry])).evaluate(makeJob());
+    expect(next.action).toBe("send");
+    expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
+  });
+});
+
+
+describe("leading untyped parked-owner marker text", () => {
+  it.each(["retained_quota_full", "terminal_seat"].flatMap(code => [undefined, "attempted", "written"].map(phase => ({ code, phase }))))("keeps $code text with phase $phase untyped after pruning", async ({ code, phase }) => {
+    const store = new RowStore();
+    const deps = (history: WatchdogHistoryEntry[]) => ({ ...makeDeps([parkedSeat()], store, history), retentionState: () => "unchanged" });
+    const first = await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob());
+    const primary = String(first.notes?.["primaryRow"]);
+    const entry = sentHistory({ episodeKey: String(first.notes?.["episodeKey"]), primaryRow: primary, deliveryStatus: "failed", deliveryReason: `code ${code}; input not_reached; detail` });
+    entry.evaluationNotes = { ...entry.evaluationNotes, ...(phase ? { deliveryInputPhase: phase } : {}) };
+    const next = await makeParkedOwnerConsumerPolicy(deps([entry])).evaluate(makeJob());
+    const transitions = store.transitions.get(primary)!;
+    const failed = transitions.findIndex(t => t.transitionNote?.startsWith(FAILED_PREFIX));
+    expect(failed).toBeGreaterThanOrEqual(0);
+    // Restore the durable failure before a subsequent reserve; history can disappear at that boundary.
+    const persisted = transitions.slice(0, failed + 1);
+    expect(currentParkedOwnerNoInputFailure(persisted)).toBeNull();
+    expect(next.action).toBe("send");
+    store.transitions.set(primary, persisted);
+    expect((await makeParkedOwnerConsumerPolicy(deps([])).evaluate(makeJob())).action).toBe("send");
   });
 });

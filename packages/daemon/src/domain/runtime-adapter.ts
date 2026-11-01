@@ -8,13 +8,20 @@ import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 // The startup orchestrator (AS-T07) constructs NodeBinding from Binding + node.cwd.
 
 export interface NodeBinding extends Binding {
+  environmentRestore?: NonNullable<import("./types.js").SnapshotData["environmentBindingsByNode"]>[string];
   cwd: string;
+  /** In-place Claude continuation only: executable observed before the old process exits. */
+  claudeExecutable?: string;
   model?: string;
   effort?: string;
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** A staged account-home selection; null explicitly returns to configured defaults before commit. */
+  accountHome?: string | null;
+  accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex seat's own permission envelope, read live; emitted instead of the posture decision. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** Rebuild only: a process/conversation-bound native predecessor policy. */
@@ -124,7 +131,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 
 // `launchedProcess` (Claude resume launches): the first process the launch's own readiness check
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
-export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed } & (
+export type HarnessLaunchResult = { firstInput?: import("./community-harness-first-input.js").FirstInputPassed;
+  /** A community launcher that opts in was handed the seat's declared model as OPENRIG_MODEL: "confirmed" when the launch
+   *  command's send succeeded, "uncertain" when typing began and the send then failed. Never proof of the model that runs. */
+  modelInput?: { model: string; dispatch: "confirmed" | "uncertain" } } & (
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
     /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
     resumeProvenance?: "launcher" | "passed";
@@ -213,6 +223,10 @@ export interface ForkSource {
  * to the startup orchestrator after checkReady().
  */
 export interface RuntimeAdapter {
+  /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
+  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate">;
+  preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void>;
+  prepareEnvironmentStartup?(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
@@ -246,6 +260,8 @@ export interface RuntimeAdapter {
       firstInputText?: string;
       /** The saved token's type, when known (a community harness resumes only its own `community:<name>` ids). */
       resumeType?: string;
+      /** Explicit selected-history startup rechecks identity at the adapter's actual input boundary. */
+      beforeNativeDispatch?: () => boolean;
       /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
       freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;

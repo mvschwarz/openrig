@@ -75,6 +75,41 @@ describe("parseAddress — the one grammar form: name#H2-slug/H3-slug", () => {
 });
 
 describe("parseMarkdownSections — code-fence-protected header tree", () => {
+  it.each(["\n", "\r\n"])("ignores commented headings and fences while retaining section bytes (%j)", (newline) => {
+    const text = [
+      "## Current", "before", "   <!-- archived notes", "## Current", "### Hidden",
+      "```", "--> trailing text", "after", "### Child", "child body", "## Next", "next body",
+    ].join(newline);
+    expect(parseMarkdownSections(text).map((s) => s.headerPath)).toEqual([
+      ["current"], ["current", "child"], ["next"],
+    ]);
+    const current = resolveAddress(text, ["current"]);
+    expect(current.text).toBe(text.slice(0, text.indexOf("## Next") - 1));
+    expect(current.ownText).toBe(text.slice(0, text.indexOf("### Child") - 1));
+    expect(resolveAddress(text, ["current", "child"]).headerLine).toBe(8);
+    expect(() => resolveAddress(text, ["current", "hidden"])).toThrow(AddressResolutionError);
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
+  it("resumes scanning after a single-line comment and keeps an unclosed comment through EOF", () => {
+    const text = ["## Current", "<!-- one line -->", "### Child", "<!--", "## Hidden", "~~~"].join("\n");
+    expect(parseMarkdownSections(text).map((s) => s.headerPath)).toEqual([["current"], ["current", "child"]]);
+    expect(resolveAddress(text, ["current", "child"]).text).toContain("## Hidden");
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
+  it.each(["```", "~~~"])("treats comment openers inside %s fences as code", (marker) => {
+    const text = ["## Current", marker, "<!--", marker, "## Next", "body"].join("\n");
+    expect(parseMarkdownSections(text).map((s) => s.headerPath)).toEqual([["current"], ["next"]]);
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
+  it("does not open an HTML comment block from inline code or four-space indentation", () => {
+    const text = ["## Current", "    <!-- indented code", "`<!--` inline code", "## Next", "body"].join("\n");
+    expect(parseMarkdownSections(text).map((s) => s.headerPath)).toEqual([["current"], ["next"]]);
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
   it("finds exactly the real H2/H3 headers, never fenced ones", () => {
     const sections = parseMarkdownSections(CORPUS);
     expect(sections.map((s) => s.headerPath.join("/"))).toEqual([

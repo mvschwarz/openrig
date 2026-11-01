@@ -77,6 +77,8 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
         headers,
         body: payload.body,
       });
+      // Only the status is used; release unread bodies without delaying delivery on cleanup.
+      void res.body?.cancel().catch(() => {});
       if (!res.ok) {
         return { ok: false, error: `ntfy POST ${res.status}` };
       }

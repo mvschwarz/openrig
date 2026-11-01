@@ -69,6 +69,33 @@ test("the content scan executes the named full-mode guard with the artifact boun
   }
 });
 
+test("the substance gate needs the leak guard's term lists: --rules or the file the environment names", () => {
+  withFixture(({ repo, rules, review, receipt }) => {
+    const publicFile = join(repo, "public/guide.md");
+    write(publicFile, "# Public guide\nGeneric user-facing guidance.\n");
+    commitAll(repo, "public surface");
+    const cutSha = gitHead(repo);
+    writeFileSync(review, JSON.stringify({
+      surfaces: [{ path: "public/guide.md", sha256: sha256(publicFile), verdict: "ship",
+        reason: "Generic product guidance with no instance dependency.", candidateDispositions: [] }],
+    }));
+    const env = { ...process.env };
+    delete env.OPENRIG_LEAK_GUARD_RULES;
+    const gate = (extra) => spawnSync(process.execPath, [GATE, "--repo", repo, "--package-root", repo,
+      "--surface-manifest", join(repo, "substance-surfaces.json"), "--review", review, "--receipt", receipt,
+      "--judge", "dev-qa@fixture", "--cut-sha", cutSha], { encoding: "utf8", env: { ...env, ...extra } });
+
+    const refused = gate({});
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /--rules <file> or OPENRIG_LEAK_GUARD_RULES is required/);
+    assert.equal(existsSync(receipt), false);
+
+    const named = gate({ OPENRIG_LEAK_GUARD_RULES: rules });
+    assert.equal(named.status, 0, named.stderr);
+    assert.equal(JSON.parse(readFileSync(receipt, "utf8")).gate, "substance gate");
+  });
+});
+
 test("the named substance gate writes a cut-bound, per-surface receipt and records the full scan", () => {
   withFixture(({ repo, rules, review, receipt }) => {
     const publicFile = join(repo, "public/guide.md");
@@ -393,10 +420,9 @@ function writeGateHarness(root, source, invocationPath) {
   mkdirSync(root, { recursive: true });
   const gate = join(root, "check-substance-gate.mjs");
   writeFileSync(gate, source);
-  writeFileSync(
-    join(root, "internal-leak-scanner.mjs"),
-    readFileSync(resolve("scripts/internal-leak-scanner.mjs")),
-  );
+  for (const module of ["internal-leak-scanner.mjs", "leak-guard-rules.mjs"]) {
+    writeFileSync(join(root, module), readFileSync(resolve("scripts", module)));
+  }
   writeFileSync(join(root, "check-internal-leak-guard.mjs"), [
     "import { readFileSync, writeFileSync } from \"node:fs\";",
     `const invocationPath = ${JSON.stringify(invocationPath)};`,

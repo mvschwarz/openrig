@@ -15,6 +15,8 @@ export interface ProviderPrecheckInput {
   toAccount: string;
   /** A Claude seat's own subscription token file (absolute); null moves it back to its config dir's stored login. */
   tokenFile?: string | null;
+  /** Claude API key read from this file at launch; never credential bytes. */
+  apiKeyFile?: string;
 }
 
 export interface ProviderSwitchInput {
@@ -23,6 +25,8 @@ export interface ProviderSwitchInput {
   forceUnsafe: boolean;
   /** As on the precheck. */
   tokenFile?: string | null;
+  /** Claude API key read from this file at launch; never credential bytes. */
+  apiKeyFile?: string;
 }
 
 /**
@@ -54,9 +58,16 @@ export interface ClaudeSeatRelaunch {
   setTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): void;
   /** A snapshot taken now, and whether restoring this seat from it resumes its conversation. */
   snapshot(rigId: string, nodeId: string): { snapshotId: string; resumes: true; conversation: string | null } | { snapshotId: string; resumes: false; why: string };
+  /** For a stopped seat: the snapshot a plain `rig launch <rig> <seat>` selects, read without taking a new one, and whether
+   *  that launch resumes its conversation, as restore decides it (including its automatic periodic carry). `automatic`:
+   *  it resumes only through that carry, so naming the snapshot (`--snapshot-id`) would turn the carry off. */
+  nextLaunch(rigId: string, nodeId: string): { snapshotId: string; resumes: true; automatic: boolean; conversation: string | null } | { snapshotId: string | null; resumes: false; why: string };
   /** Runs `fn` holding the seat's lifecycle lease (the one its stop, launch and restore take), so no other one runs on the
    *  seat in between. A wait for it ends with the seat as it is then. */
   exclusive<T>(nodeId: string, fn: () => Promise<T>): Promise<T>;
+  /** The running Claude's `--effort` (null: launched without one) beside the effort its relaunch would launch with, and
+   *  whether that one is the seat's own explicit choice (`rig seat set-effort`). null when the running process can't be read. */
+  effortChange?(nodeId: string, pane: string): Promise<{ running: string | null; relaunch: string | null; relaunchIsSeatChoice: boolean } | null>;
   /** Relaunch only this seat from that snapshot in its own pane: its process ends in place, the pane and its scrollback stay,
    *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. */
   relaunchInPane(rigId: string, logicalId: string, snapshotId: string): Promise<{ ok: true; status: "resumed"; warnings: string[] }
@@ -64,7 +75,7 @@ export interface ClaudeSeatRelaunch {
 }
 
 /** What would outrank a Claude seat's own token at its next launch (`ClaudeManagedLaunch.credentialPrecedence`). */
-export type ClaudeCredentialPrecedence = (nodeId: string, opts?: { storedLogin?: boolean }) => Promise<CredentialPrecedence>;
+export type ClaudeCredentialPrecedence = (nodeId: string, opts?: { storedLogin?: boolean; apiKey?: boolean }) => Promise<CredentialPrecedence>;
 
 /** What a seat switch did: for a Codex seat, in the Codex home it runs on; for a Claude seat, to its token reference. */
 export interface SeatSwitchReport {
@@ -75,6 +86,7 @@ export interface SeatSwitchReport {
   account: string;
   /** Claude: the token file the launch reads (a path; never its contents). */
   tokenFile?: string;
+  credentialKind?: "api-key";
   /** Claude: the conversation the relaunch resumes. */
   conversation?: string | null;
   /** Whether the seat's login source is now `account`. */

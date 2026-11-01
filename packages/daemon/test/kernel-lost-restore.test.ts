@@ -79,14 +79,17 @@ function host(claimed = false) {
   const reboot = () => live.clear();
   /** What `rig down kernel` does. */
   const down = () => new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
-  /** What daemon start does: reconcile every rig, then boot the kernel. */
+  /** What daemon start does: reconcile every rig, then boot the kernel with the sessions that reconcile detached. */
   const reconcile = async (readProcesses?: () => Promise<ProcessTableRow[]>) => {
     const reconciler = new Reconciler({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, ...(readProcesses ? { readProcesses } : {}) });
-    for (const r of rigRepo.listRigs()) await reconciler.reconcile(r.id);
+    const detached = new Set<string>();
+    for (const r of rigRepo.listRigs()) for (const id of (await reconciler.reconcile(r.id)).detachedSessionIds) detached.add(id);
+    return detached;
   };
   const daemonStart = async (restoreLostKernel?: (rigId: string) => Promise<{ errors: string[] }>, readProcesses?: () => Promise<ProcessTableRow[]>) => {
-    await reconcile(readProcesses);
+    const detachedAtStart = await reconcile(readProcesses);
     return bootKernelIfNeeded({
+      detachedAtStart,
       rigRepo, sessionRegistry, eventBus,
       bootstrapOrchestrator: bootstrap as unknown as BootstrapOrchestrator,
       specsDir, cwdOverride: specsDir,
@@ -115,6 +118,42 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("doesn't bring back a kernel that was already down before this start, or its old conversations", async () => {
+    const h = host();
+    h.reboot();
+    // An earlier start (here a --no-kernel one) found it down and left it: detached and still bound.
+    process.env.OPENRIG_NO_KERNEL = "1";
+    await h.daemonStart();
+    delete process.env.OPENRIG_NO_KERNEL;
+    expect(h.statuses()).toEqual(["detached", "detached"]);
+    for (const { node, name } of h.nodes) expect(h.sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe(name);
+    // A later start with the restore wired: its reconcile detaches nothing, so the kernel stays down.
+    const restore = vi.fn(async () => ({ errors: [] }));
+    const tracker = await h.daemonStart(restore);
+    expect(restore).not.toHaveBeenCalled();
+    // The person is told why it stayed down and how to bring it back.
+    expect(tracker.getStatus()).toMatchObject({
+      kernelState: "skipped",
+      detail: "kernel rig already managed; it was already down before this daemon start, so it was not restored. Bring it back with: rig up kernel --existing",
+    });
+    expect(classifyManagedKernel(h.rigRepo, h.sessionRegistry, await h.reconcile())).toEqual({ kind: "stale" });
+    expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+    expect(h.statuses()).toEqual(["detached", "detached"]);
+  });
+
+  it("restores a kernel this start found down, even with a seat an earlier start had already found down", async () => {
+    const h = host();
+    h.live.delete(h.nodes[1]!.name);
+    process.env.OPENRIG_NO_KERNEL = "1";
+    await h.daemonStart();
+    delete process.env.OPENRIG_NO_KERNEL;
+    expect([...h.statuses()].sort()).toEqual(["detached", "running"]);
+    h.reboot();
+    const restore = vi.fn(async () => ({ errors: [] }));
+    await h.daemonStart(restore);
+    expect(restore).toHaveBeenCalledWith(h.rig.id);
   });
 
   it("doesn't restore a kernel whose seats still run on a tmux server this daemon can't see", async () => {
@@ -291,12 +330,14 @@ describe("classifyManagedKernel", () => {
     const h = host();
     await h.down();
     // A later occupant of each seat, lost to a reboot, outranks the stopped one before it.
+    const lost = new Set<string>();
     for (const { node, name } of h.nodes) {
       const next = h.sessionRegistry.registerSession(node.id, name);
       h.sessionRegistry.updateStatus(next.id, "detached");
       h.sessionRegistry.updateBinding(node.id, { tmuxSession: name });
+      lost.add(next.id);
     }
-    const managed = classifyManagedKernel(h.rigRepo, h.sessionRegistry);
+    const managed = classifyManagedKernel(h.rigRepo, h.sessionRegistry, lost);
     expect(managed.kind).toBe("lost");
     expect("seats" in managed ? [...managed.seats].sort() : []).toEqual([...SEATS].sort());
   });

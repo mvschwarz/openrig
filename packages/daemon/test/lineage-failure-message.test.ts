@@ -14,7 +14,8 @@ const RUNNING = "cda8d870-0478-45df-9aa5-ce029845711c";
 const shell: NativeProcessRow = { pid: 100, ppid: 1, pgid: 100, tpgid: 100, command: "/bin/sh /tmp/launch.sh", executableName: "sh", startedAt };
 const claude = (token: string | null, pid = 101): NativeProcessRow => ({ pid, ppid: 100, pgid: 100, tpgid: 100, executableName: "2.1.1", startedAt,
   command: `/home/u/.local/share/claude/versions/2.1.1${token ? ` --session-id ${token}` : ""}` });
-const codex = (args: string): NativeProcessRow => ({ pid: 101, ppid: 100, pgid: 100, tpgid: 100, executableName: "codex", startedAt, command: `codex ${args}` });
+const codex = (...args: string[]): NativeProcessRow => ({ pid: 101, ppid: 100, pgid: 100, tpgid: 100, executableName: "codex", startedAt,
+  command: ["codex", ...args].join(" "), argv: ["codex", ...args] });
 const sleeper: NativeProcessRow = { pid: 101, ppid: 100, pgid: 100, tpgid: 100, executableName: "sleep", startedAt, command: "sleep 300" };
 
 const databases: Database.Database[] = [];
@@ -70,14 +71,14 @@ describe("a failed lineage check names the check, not the pane label", () => {
     expect(await detail("claude-code", [shell, sleeper], { token: null, strict: false })).toContain("does not hold exactly one process the check recognises as Claude");
   });
   it("Codex resumed on another conversation: says it does not match the record, and does not print what it read", async () => {
-    const text = await detail("codex", [shell, codex(`resume ${RUNNING}`)]);
+    const text = await detail("codex", [shell, codex("resume", RUNNING)]);
     expect(text).toContain("read a conversation from the running Codex's launch that does not match the seat's record");
     expect(text).toContain(`the seat records ${STORED.slice(0, 8)}`);
     expect(text).not.toContain(RUNNING.slice(0, 8));
     expect(text).not.toContain("does not positively identify");
   });
   it("Codex started fresh instead of resuming", async () => {
-    expect(await detail("codex", [shell, codex("-C /project")])).toContain("could not read a resume from the running Codex");
+    expect(await detail("codex", [shell, codex("-C", "/project")])).toContain("could not read a resume from the running Codex");
   });
   it("no Codex process in the foreground", async () => {
     expect(await detail("codex", [shell, sleeper])).toContain("does not hold a single process the check recognises as Codex");
@@ -122,16 +123,16 @@ describe("the explanation names only a cause the check tested", () => {
     return () => { reads++; return reads === 2 ? rows.map((row) => row.pid === pid ? { ...row, startedAt: "Fri Oct  2 20:00:09 2026" } : row) : rows; };
   };
   it("non-strict Codex that fails only on instability is not called 'not a resume'", async () => {
-    const text = await detail("codex", unsteady([shell, codex("-C /project")], 101), { strict: false });
+    const text = await detail("codex", unsteady([shell, codex("-C", "/project")], 101), { strict: false });
     expect(text).toContain("may have changed during the check");
     expect(text).not.toContain("could not read a resume from the running Codex");
     expect(text).not.toContain("names no conversation");
   });
   it("strict Codex started fresh still says so (the check required a resume)", async () => {
-    expect(await detail("codex", [shell, codex("-C /project")])).toContain("could not read a resume from the running Codex");
+    expect(await detail("codex", [shell, codex("-C", "/project")])).toContain("could not read a resume from the running Codex");
   });
   it("strict Codex with no recorded conversation says there is nothing to match", async () => {
-    const text = await detail("codex", [shell, codex(`resume ${RUNNING}`)], { token: null });
+    const text = await detail("codex", [shell, codex("resume", RUNNING)], { token: null });
     expect(text).toContain("records no conversation");
     expect(text).not.toContain("needs the two to agree");
   });
@@ -170,14 +171,14 @@ describe("the explanation mirrors the check's own rejection (round 2)", () => {
   };
   it("non-strict Codex resume that names no conversation (--last) is not called unsteady", async () => {
     for (const token of [STORED, null]) {
-      const text = await detail("codex", [shell, codex("resume --last")], { strict: false, token });
+      const text = await detail("codex", [shell, codex("resume", "--last")], { strict: false, token });
       expect(text).toContain("read no conversation after the running Codex's resume");
       expect(text).not.toContain("may have changed during the check");
     }
   });
   it("a Codex launcher chain whose outer link names another conversation is that conversation, not unsteady", async () => {
-    const launcher: NativeProcessRow = { ...codex(`resume ${RUNNING}`), pid: 101 };
-    const inner: NativeProcessRow = { ...codex("-C /p"), pid: 102, ppid: 101 };
+    const launcher: NativeProcessRow = { ...codex("resume", RUNNING), pid: 101 };
+    const inner: NativeProcessRow = { ...codex("-C", "/p"), pid: 102, ppid: 101 };
     // Non-strict: any link naming another conversation rejects. Strict: the deepest link must name the conversation itself, and it names none.
     const loose = await detail("codex", [shell, launcher, inner], { strict: false });
     expect(loose).toContain("read a conversation from the running Codex's launch that does not match the seat's record");
@@ -205,7 +206,7 @@ describe("the explanation mirrors the check's own rejection (round 2)", () => {
     expect(text).not.toContain("may have changed during the check");
   });
   it("Codex with a steady matching resume that fails only a second read is unsteady", async () => {
-    const text = await detail("codex", unsteady([shell, codex(`resume ${STORED}`)], 101), { strict: true });
+    const text = await detail("codex", unsteady([shell, codex("resume", STORED)], 101), { strict: true });
     expect(text).toContain("may have changed during the check");
   });
 });
@@ -285,14 +286,14 @@ describe("'names no conversation' is scoped to what the reader could read (verif
   });
   it("Codex: a mismatching conversation after options is worded as what the check read", async () => {
     // The model value is skipped; the actual resumed conversation disagrees with the stored one.
-    const text = await detail("codex", [shell, codex(`resume -m gpt-5 ${RUNNING}`)]);
+    const text = await detail("codex", [shell, codex("resume", "-m", "gpt-5", RUNNING)]);
     expect(text).toContain("read a conversation from the running Codex's launch that does not match the seat's record");
     expect(text).not.toContain("gpt-5");
     expect(text).not.toContain("resumed conversation");
   });
   it("Codex: 'resume names no conversation' stays, since the reader returns null only when no positional follows resume", async () => {
-    for (const args of ["resume", "resume --last", "resume --all"]) {
-      expect(await detail("codex", [shell, codex(args)], { strict: false })).toContain("read no conversation after the running Codex's resume");
+    for (const args of [["resume"], ["resume", "--last"], ["resume", "--all"]]) {
+      expect(await detail("codex", [shell, codex(...args)], { strict: false })).toContain("read no conversation after the running Codex's resume");
     }
   });
 });
@@ -314,36 +315,36 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 describe("values the check cannot vouch for are not printed (maintainer review)", () => {
   it("a model option is not shown when the resumed conversation mismatches", async () => {
-    const text = await wordingOnly("codex", [shell, codex(`resume -m gpt-5 ${RUNNING}`)]);
+    const text = await wordingOnly("codex", [shell, codex("resume", "-m", "gpt-5", RUNNING)]);
     expect(text).toContain("does not match the seat's record");
     expect(text).not.toContain("gpt-5");
   });
   it("a value shaped like a conversation id that is not the conversation is not shown, whole or clipped", async () => {
     const looksLikeId = "0f8fad5b-d9cb-469f-a165-70867728950e";
-    const text = await wordingOnly("codex", [shell, codex(`resume -m ${looksLikeId} ${RUNNING}`)]);
+    const text = await wordingOnly("codex", [shell, codex("resume", "-m", looksLikeId, RUNNING)]);
     expect(text).toContain("does not match the seat's record");
     expect(text).not.toContain(looksLikeId);
     expect(text).not.toContain(looksLikeId.slice(0, 8));
   });
   it("a short model option is not shown either", async () => {
-    const text = await wordingOnly("codex", [shell, codex(`resume -m x ${RUNNING}`)]);
+    const text = await wordingOnly("codex", [shell, codex("resume", "-m", "x", RUNNING)]);
     expect(text).toContain("does not match the seat's record");
     expect(text).not.toContain(" x ");
     expect(text).not.toMatch(/conversation x\b/);
   });
   it("control characters in the model option are not printed", async () => {
-    const text = await wordingOnly("codex", [shell, codex(`resume -m a\u001b[2Jb ${RUNNING}`)]);
+    const text = await wordingOnly("codex", [shell, codex("resume", "-m", "a\u001b[2Jb", RUNNING)]);
     expect(text).not.toMatch(CONTROL);
     expect(text).not.toContain("[2J");
   });
   it("control characters in the seat's record are replaced; a short record is shown whole", async () => {
-    const text = await wordingOnly("codex", [shell, codex(`resume ${RUNNING}`)], { token: "ab\u001b[2Jc\nforged line" });
+    const text = await wordingOnly("codex", [shell, codex("resume", RUNNING)], { token: "ab\u001b[2Jc\nforged line" });
     expect(text).not.toMatch(CONTROL);
     expect(text).toContain("the seat records ab?[2Jc?…");
-    expect(await wordingOnly("codex", [shell, codex(`resume ${RUNNING}`)], { token: "tok" })).toContain("the seat records tok");
+    expect(await wordingOnly("codex", [shell, codex("resume", RUNNING)], { token: "tok" })).toContain("the seat records tok");
   });
   it("control characters in the pane's foreground command are replaced, with and without a process check", async () => {
-    expect(await wordingOnly("codex", [shell, codex(`resume ${RUNNING}`)], { command: "sh\u001b]0;x\u0007" })).not.toMatch(CONTROL);
+    expect(await wordingOnly("codex", [shell, codex("resume", RUNNING)], { command: "sh\u001b]0;x\u0007" })).not.toMatch(CONTROL);
     const label = await detail("claude-code", [], { token: null, strict: false, command: "no\u0007de" });
     expect(label).not.toMatch(CONTROL);
     expect(label).toContain("foreground command 'no?de'");
@@ -356,8 +357,8 @@ describe("values the check cannot vouch for are not printed (maintainer review)"
     expect(text).not.toContain("running Claude");
   });
   it("conflicting conversations are what the reader reported, not a fact about the launcher chain", async () => {
-    const launcher: NativeProcessRow = { ...codex(`resume ${RUNNING}`), pid: 101 };
-    const inner: NativeProcessRow = { ...codex("resume 9b2f0c3e-1111-4222-8333-444455556666"), pid: 102, ppid: 101 };
+    const launcher: NativeProcessRow = { ...codex("resume", RUNNING), pid: 101 };
+    const inner: NativeProcessRow = { ...codex("resume", "9b2f0c3e-1111-4222-8333-444455556666"), pid: 102, ppid: 101 };
     const text = await wordingOnly("codex", [shell, launcher, inner]);
     expect(text).toContain("The check read different conversations from the Codex launcher chain");
     expect(text).not.toContain("names different conversations");

@@ -308,7 +308,7 @@ export function workflowRoutes(): Hono {
     }
   });
 
-  // OPR.0.4.6.WF1 FR-2 COMPLETION FIXBACK (qitem-20260706211220-279039f5):
+  // OPR.0.4.6.WF1 FR-2 COMPLETION FIXBACK:
   // list/show/trace carry the derived deadline verdict — the ratified
   // FR-2 queryability clause ("queryable via list/show/trace … with
   // the evidence (step, owner, deadline, age)"). Additive field,

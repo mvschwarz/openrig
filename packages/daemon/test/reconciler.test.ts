@@ -119,6 +119,23 @@ describe("Reconciler", () => {
     expect(notifications[0]!.type).toBe("session.detached");
   });
 
+  it("a session counts as detached once its transaction commits, even if notifying afterwards throws", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
+    ]);
+    // The bus catches a subscriber's own error; this stands for a database error in its post-commit drain.
+    vi.spyOn(eventBus, "notifySubscribers").mockImplementation(() => { throw new Error("post-commit notify failed"); });
+
+    const reconciler = createReconciler(mockTmuxAdapter({ "r01-dev1-impl": false }));
+    const result = await reconciler.reconcile(rig.id);
+
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    expect(session.status).toBe("detached");
+    expect(result.detached).toBe(1);
+    expect(result.detachedSessionIds).toEqual([session.id]);
+    expect(result.errors).toEqual([{ sessionId: session.id, error: "post-commit notify failed" }]);
+  });
+
   it("no sessions in DB: no changes, no events", async () => {
     const rig = rigRepo.createRig("r01");
     const reconciler = createReconciler(mockTmuxAdapter({}));

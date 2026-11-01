@@ -144,7 +144,7 @@ test("keeps added header-shaped text as source content inside a hunk", () => {
 });
 
 
-test("native Git reports UTF-8 and spaced names independently of quotePath configuration", async () => {
+test("native Git reports UTF-8 and spaced names independently of quotePath and diff-prefix configuration", async () => {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -156,7 +156,8 @@ test("native Git reports UTF-8 and spaced names independently of quotePath confi
     execFileSync("git", ["init", "--quiet", repo]);
     for (const name of names) writeFileSync(join(repo, name), "see /Users/alice/project\n");
     execFileSync("git", ["-C", repo, "add", "--", ...names]);
-    for (const quotePath of ["true", "false"]) {
+    for (const [quotePath, mnemonicPrefix] of [["true", "true"], ["false", "true"], ["true", "false"], ["false", "false"]]) {
+      execFileSync("git", ["-C", repo, "config", "diff.mnemonicPrefix", mnemonicPrefix]);
       execFileSync("git", ["-C", repo, "config", "core.quotePath", quotePath]);
       const report = execFileSync(process.execPath, [fileURLToPath(new URL("./portability-report.mjs", import.meta.url)), "--repo", repo, "--staged", "--locations-only"], { encoding: "utf8" });
       for (const name of names) assert.ok(report.includes(`\`${name}:1\``), report);

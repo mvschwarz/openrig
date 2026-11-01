@@ -86,7 +86,9 @@ describe("A3 Claude shell sampling", () => {
     const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": command } });
     const rows = () => [
       { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "sh", command: "sh", startedAt: "start" },
-      { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: runtime === "codex" ? "codex" : "claude", command: runtime === "codex" ? "codex resume saved-token" : "claude --resume saved-token", startedAt: "start" },
+      { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: runtime === "codex" ? "codex" : "claude",
+        command: runtime === "codex" ? "codex resume saved-token" : "claude --resume saved-token",
+        ...(runtime === "codex" ? { argv: ["codex", "resume", "saved-token"] } : {}), startedAt: "start" },
     ];
     const listProcesses = vi.fn(async () => rows());
     const rec = new SeatIdentityReconciler({ db, tmux, listProcesses, now: NOW });
@@ -201,6 +203,14 @@ describe("A3 Claude shell sampling", () => {
     expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(1);
   });
 
+  it.each([null, [], ["codex", "resume", "saved-token", "bad\0argument"]])(
+    "does not mark a Codex identity verified from an opaque argv: %j", async argv => {
+      const f = fixture("codex", "codex");
+      f.listProcesses.mockImplementation(async () => f.rows().map(row => row.executableName === "codex" ? { ...row, argv } : row));
+      await f.rec.reconcileAll();
+      expect(f.verdict()?.verdict).toBe("mismatch");
+    });
+
   it("fences a stop during the early command observation before process sampling or publication", async () => {
     const f = fixture();
     let release!: () => void;
@@ -253,7 +263,8 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     const tmux = makeTmux({ sessions: ["c1@rig", "c2@rig"], panePid: { "%1": 10, "%2": 20 }, paneCommand: { "%1": "bash", "%2": "node" } });
     const rows = [1, 2].flatMap(n => [
       { pid: n * 10, ppid: 1, pgid: n * 10, tpgid: n * 10 + 1, executableName: "bash", command: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
-      { pid: n * 10 + 1, ppid: n * 10, pgid: n * 10 + 1, tpgid: n * 10 + 1, executableName: "codex", command: `codex resume thread-${n}`, startedAt: "Sat Jan  1 12:00:00 2000" },
+      { pid: n * 10 + 1, ppid: n * 10, pgid: n * 10 + 1, tpgid: n * 10 + 1, executableName: "codex",
+        command: `codex resume thread-${n}`, argv: ["codex", "resume", `thread-${n}`], startedAt: "Sat Jan  1 12:00:00 2000" },
     ]);
     const listProcesses = vi.fn(async () => rows);
     const rec = new SeatIdentityReconciler({ db, tmux, listProcesses, now: NOW });
@@ -281,7 +292,8 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "c1", sessionName: "c1@rig", pane: "%1", runtime: "codex" });
     const tmux = makeTmux({ sessions: ["c1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "codex" } });
-    const listProcesses = vi.fn(async () => [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex -m configured-model", startedAt: "Sat Jan  1 12:00:00 2000" }]);
+    const listProcesses = vi.fn(async () => [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex",
+      command: "codex -m configured-model", argv: ["codex", "-m", "configured-model"], startedAt: "Sat Jan  1 12:00:00 2000" }]);
     const rec = new SeatIdentityReconciler({ db, tmux, listProcesses, now: NOW });
     await rec.reconcileAll();
     expect(new SeatIdentityStore(db).getForNode("c1")?.verdict).toBe("verified");
@@ -531,7 +543,8 @@ describe("SeatIdentityReconciler — bounded polling", () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "c1", sessionName: "c1@rig", pane: "%1", runtime: "codex" });
     const tmux = makeTmux({ sessions: ["c1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "codex" } });
-    const rows = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex", startedAt: "Sat Jan  1 12:00:00 2000" }];
+    const rows = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex", argv: ["codex"],
+      startedAt: "Sat Jan  1 12:00:00 2000" }];
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const listProcesses = vi.fn(async () => rows).mockImplementationOnce(async () => { await gate; return rows; });

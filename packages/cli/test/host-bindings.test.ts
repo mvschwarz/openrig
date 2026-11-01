@@ -232,6 +232,80 @@ describe("doctorLegs — Source-1 learning from the healthz body already in hand
     } as never);
     expect(rows.find((r) => r.step === "host-identity-binding")).toBeUndefined();
   });
+
+  it("first contact where replies do resolve here keeps the claim and adds no route row", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const rows = await doctorLegs(anonHost, {
+      ...baseDeps,
+      httpGet: async () => ({ status: 200, body: JSON.stringify({ selfHostId: "host-84c37990" }) }),
+      learnHostBinding: (_alias: string, id: string) => ({ outcome: "bound", binding: { hostId: id, firstObservedAt: "x", lastObservedAt: "x" } }),
+      replyRoute: () => anonHost,
+    } as never);
+    expect(rows.find((r) => r.step === "host-identity-binding")!.detail).toContain("now resolve to 'mm2-host'");
+    expect(rows.find((r) => r.step === "reply-route")).toBeUndefined();
+  });
+
+  // An earlier hosts.yaml entry that learned the same identity keeps the replies, even after its
+  // address stops answering. Real learner and real resolver over one sidecar file.
+  it("an earlier entry with the same identity: doctor names it on the working entry and fails it when dead", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const p = tmpPath();
+    const stale = { id: "old-box-b", transport: "http", url: "http://10.0.0.9:7433" } as const;
+    const working = { id: "box-b", transport: "http", url: "http://10.0.0.5:7433" } as const;
+    const registry: HostRegistry = { hosts: [stale, working] };
+    recordHostObservation({ alias: stale.id, observedHostId: "host-0b0b0b0b", observedUrl: stale.url, path: p });
+    const deps = {
+      ...baseDeps,
+      learnHostBinding: (alias: string, id: string, url: string) => recordHostObservation({ alias, observedHostId: id, observedUrl: url, path: p }),
+      replyRoute: (id: string) => {
+        const r = resolveHost(registry, id, loadHostBindings(p).bindings);
+        return r.ok ? r.host : null;
+      },
+      learnedHostId: (alias: string) => loadHostBindings(p).bindings[alias]?.hostId ?? null,
+    };
+
+    const live = await doctorLegs(working, { ...deps, httpGet: async () => ({ status: 200, body: JSON.stringify({ selfHostId: "host-0b0b0b0b" }) }) } as never);
+    const identity = live.find((r) => r.step === "host-identity-binding")!;
+    expect(identity.status).toBe("pass");
+    expect(identity.detail).not.toContain("now resolve to");
+    const route = live.find((r) => r.step === "reply-route")!;
+    expect(route.status).toBe("unknown");
+    expect(route.detail).toContain("go to 'old-box-b', not 'box-b'");
+    expect(route.fix).toContain("rig host doctor old-box-b");
+    // The entry doctor names is the one rig send's own resolver picks.
+    const sent = resolveCrossHostTarget("pm@some-rig@host-0b0b0b0b", undefined, () => ({ ok: true as const, registry }), undefined, () => loadHostBindings(p));
+    expect(sent).toMatchObject({ ok: true, sugarHost: "old-box-b" });
+
+    const dead = await doctorLegs(stale, { ...deps, httpGet: async () => { throw new Error("read ECONNRESET"); } } as never);
+    expect(dead.find((r) => r.step === "transport-reachability")!.status).toBe("fail");
+    const deadRoute = dead.find((r) => r.step === "reply-route")!;
+    expect(deadRoute.status).toBe("fail");
+    expect(deadRoute.detail).toContain("@host-0b0b0b0b resolve to 'old-box-b'");
+    expect(deadRoute.fix).toContain("delete 'old-box-b'");
+  });
+
+  it("an unreachable entry that replies don't resolve to adds no route row", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const rows = await doctorLegs(anonHost, {
+      ...baseDeps,
+      httpGet: async () => { throw new Error("connect ECONNREFUSED"); },
+      learnedHostId: () => "host-84c37990",
+      replyRoute: () => ({ id: "other-host", transport: "http", url: "http://y:7433" }),
+    } as never);
+    expect(rows.map((r) => r.step)).toEqual(["transport-reachability"]);
+  });
+
+  it("an unreachable ssh entry whose declared hostId replies resolve to gets the route row too", async () => {
+    const { doctorLegs } = await import("../src/commands/host.js");
+    const sshHost = { id: "vps-1", transport: "ssh", target: "vps-1.tailnet", user: "openrig", hostId: "host-84c37990" } as const;
+    const rows = await doctorLegs(sshHost, {
+      ...baseDeps,
+      run: async () => ({ ok: false, failedStep: "ssh-unreachable", sshStderr: "connect refused" }),
+      httpGet: async () => ({ status: 200, body: "" }),
+      replyRoute: (id: string) => (id === "host-84c37990" ? sshHost : null),
+    } as never);
+    expect(rows.find((r) => r.step === "reply-route")).toMatchObject({ status: "fail" });
+  });
 });
 
 describe("F2 — concurrency guard: conflict records survive concurrent writers", () => {

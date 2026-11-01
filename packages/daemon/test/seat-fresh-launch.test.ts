@@ -128,7 +128,8 @@ describe("SeatLifecycleService.launchFresh", () => {
     invalidations = [];
     activitySwaps = [];
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
-      executableName: "codex", command: "/opt/native/codex -m model", startedAt: "Sat Jan  1 12:00:00 2000" }];
+      executableName: "codex", command: "/opt/native/codex -m model", argv: ["/opt/native/codex", "-m", "model"],
+      startedAt: "Sat Jan  1 12:00:00 2000" }];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
     service = new SeatLifecycleService({
       db,

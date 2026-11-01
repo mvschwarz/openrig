@@ -36,11 +36,15 @@ export interface Node {
   effort?: string | null;
   /** Session-scoped Claude Advisor model; never written to shared Claude settings. */
   advisor?: string | null;
+  /** Claude MCP loading for this seat; null/absent preserves the provider default. */
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
+  /** Explicit native account-home selection; a path only, not credential data. */
+  accountHome?: string | null;
   codexConfigProfile?: string | null;
   /** A Claude seat's own subscription credential, as a reference (operator label and token-file path); null = none. */
-  claudeTokenRef?: { label: string; tokenFile: string } | null;
+  claudeTokenRef?: { label: string; tokenFile: string; kind?: "api-key" } | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
   permissionPolicy?: string | null;
@@ -72,7 +76,9 @@ export interface Edge {
   id: string;
   rigId: string;
   sourceId: string;
+  /** Node ID, or the declared address when targetRef is present. */
   targetId: string;
+  targetRef?: string;
   kind: string;
   createdAt: string;
 }
@@ -116,6 +122,7 @@ export interface Session {
 // -- Event types --
 
 export type RigEvent =
+  | { type: "scope.sources_changed"; scope: string }
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
   | { type: "rig.created"; rigId: string }
@@ -248,6 +255,7 @@ export type RigEvent =
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
+  | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
@@ -383,6 +391,7 @@ export interface NodeStartupSnapshot {
 }
 
 export interface SnapshotData {
+  environmentBindingsByNode?: Record<string, { version: 1; bindingId: string; resourceId: string; generation: string | null; checkpointId: string | null; nativeType: string | null; nativeId: string | null; destinationCwd: string; nativeState: string }>;
   rig: Rig;
   nodes: NodeWithBinding[];
   edges: Edge[];
@@ -399,6 +408,10 @@ export interface SnapshotData {
    *  this never overloads null: zero candidates is absent, one live candidate
    *  is resolved, and multiple candidates retain their exact ids. */
   activeOccupantsByNode?: Record<string, SnapshotOccupantState>;
+  /** Resume sources retained by a periodic capture for absent agents. These are
+   * history, not running occupants; only an automatic, explicitly named launch
+   * may select one without an additional history decision. */
+  periodicResumeSourcesByNode?: Record<string, Session>;
   /** The immutable intended membership for this snapshot's restore attempt.
    *  Historical node records remain in `nodes` but are not in this roster. */
   topologyRoster?: SnapshotTopologyRoster;
@@ -489,8 +502,15 @@ export interface RestoreValidationBlocker {
 }
 
 export interface RestoreNodeResult {
+  /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
+  launchStarted?: true;
+  /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
+  nothingStopped?: true;
   nodeId: string;
   logicalId: string;
+  /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
+  sourceSessionId?: string;
+  resultSessionId?: string;
   // L3: `attention_required` is set when the post-launch probe detects a
   // Claude resume-selection prompt. `operator_recovered` is the terminal
   // outcome after `restore.outcome_reconciled`; never produced directly by
@@ -514,6 +534,13 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** Restore gaps that are not guidance: a resumed seat whose saved startup
+   *  context lacked a selection the current specification still makes and
+   *  whose re-apply was skipped, failed, or threw (e.g. the Claude
+   *  activity-hook marker that could not be re-applied). Like guidanceGaps,
+   *  this only discloses the gap; the rig rolls up partially_restored. A
+   *  healed re-apply or an undeterminable selection is a warning, not a gap. */
+  restoreGaps?: string[];
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
@@ -551,6 +578,8 @@ export type ContinuityOutcome = "resumed" | "rebuilt" | "forked" | "fresh" | "fa
 export type HandoverResult = "complete" | "unchanged" | "partial" | "failed" | null;
 export type AgentActivityState = "running" | "needs_input" | "idle" | "unknown";
 export type AgentActivityEvidenceSource =
+  /** Explicit pane liveness (including tmux pane_dead), not inferred input or activity. */
+  | "pane_process"
   | "runtime_hook"
   | "pane_heuristic"
   /** ACTIVITY D1+D2 — tmux `#{window_activity}` motion (SeatActivityService). A fact about BYTES on
@@ -565,6 +594,10 @@ export type AgentActivityEvidenceSource =
 
 export interface AgentActivity {
   turnId?: string | null;
+  /** Native Claude hook actor: null is the main session; absent means an older or unrecognized relay. */
+  hookAgentId?: string | null;
+  /** Recorded on a hook for a session launched for a community runner (its launch fact, not the hook's claim). */
+  communityRunner?: boolean;
 
   state: AgentActivityState;
   reason: string;
@@ -636,6 +669,7 @@ export interface SeatIdentityVerdict {
     | "pane_pid_gone"
     | "binding_pane_missing"
     | "session_missing"
+    | "pane_exited"
     | "tmux_unavailable"
     | null;
   evidence: {
@@ -655,6 +689,12 @@ export interface SeatIdentityVerdict {
  * Callers must first gate the verdict to the current session and binding. */
 export function identityVerdictConfirmsSessionMissing(verdict: SeatIdentityVerdict | null | undefined): boolean {
   return verdict?.reason === "session_missing";
+}
+
+/** Positive executor absence only. Unknown identity or an unreadable pane never proves an exit.
+ * Callers must first gate the verdict to the current session, binding and occupant. */
+export function identityVerdictConfirmsExecutorStopped(verdict: SeatIdentityVerdict | null | undefined): boolean {
+  return identityVerdictConfirmsSessionMissing(verdict) || verdict?.reason === "pane_exited";
 }
 
 /**
@@ -720,6 +760,10 @@ export interface NodeInventoryEntry {
   previousOccupant: string | null;
   handoverAt: string | null;
   tmuxAttachCommand: string | null;
+  /** Structured server identity for clients that attach without a shell. */
+  tmuxServerArgs?: string[];
+  /** Effective mode; inherited non-default sockets also have server arguments. */
+  tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;
@@ -1071,6 +1115,9 @@ export interface LegacyRigSpecNode {
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
+  claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   cwd?: string;
   surfaceHint?: string;
@@ -1192,6 +1239,9 @@ export interface RigSpecPodMember {
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
+  /** A Claude seat's own subscription token file, by reference (spec `claude_token`); read as Claude starts. */
+  claudeTokenRef?: import("./claude-seat-token.js").ClaudeSeatTokenRef;
+  claudeMcp?: import("./claude-mcp.js").ClaudeMcp;
   /** A Codex member's own permission envelope; the seat's live record afterwards. */
   codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions;
   /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
@@ -1472,14 +1522,20 @@ export interface ExpansionPodFragment {
   label: string;
   summary?: string;
   members: Array<{
+    /** Canonical RigSpec member fields pass through unchanged; the schema validates them. */
+    [field: string]: unknown;
     id: string;
     runtime: string;
     agentRef?: string;
     profile?: string;
     cwd?: string;
     model?: string;
+    /** As written: the canonical RigSpec schema trims a text effort and ignores any other value with an advisory. */
+    effort?: unknown;
     codexConfigProfile?: string;
     claudePermissions?: unknown;
+    claudeToken?: unknown;
+    claudeMcp?: unknown;
     codexPermissions?: unknown;
     /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF — threaded through the
      *  expansion ingress exactly like role (never silently dropped). Typed UNKNOWN

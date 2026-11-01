@@ -204,8 +204,10 @@ export class AgentImageLibraryService {
     const sentinelPath = join(entry.sourcePath, PINNED_SENTINEL);
     try {
       unlinkSync(sentinelPath);
-    } catch {
-      // Already absent — no-op.
+    } catch (err) {
+      // An already absent sentinel is a no-op; other failures must leave
+      // the in-memory protection intact and reach the caller.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
     entry.pinned = false;
   }

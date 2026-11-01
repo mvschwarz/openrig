@@ -6,23 +6,9 @@ This isn't a schedule or a promise: we release often, and an item ships when a g
 To see what's being worked on, by release and theme, open the [OpenRig roadmap board](https://github.com/users/mvschwarz/projects/1).
 Issues labelled `good first issue` are also listed on the [contribute page](https://github.com/mvschwarz/openrig/contribute).
 
-## Released in 0.7.2
+## Released in 0.7.6
 
-[0.7.2 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.2).
-See its release notes for what shipped, upgrade instructions, contributor credits and the remaining testing gaps.
-
-Hermes and Cursor through the shared plug-in point were not included. The Codex counterpart to per-member Claude
-permission rules was not included either; that work has since merged on main in
-[#2048](https://github.com/mvschwarz/openrig/pull/2048). These follow-ups have no release promise here.
-
-## Active: 0.7.3 — people and agent teams through one gateway
-
-- **Participant foundation:** people and vetted shared channels, an explicit default, organization and groups, and readable policy.
-- **Attributed shared-channel conversations:** reach a support seat with who spoke, the configured role and policy, and the thread;
-  send answers back to that thread.
-- **Actions and perspective for the primary user:** see whose work needs attention and preserve who actually spoke or acted.
-
-These are the active themes, not claims that the changes have shipped or a release-date promise.
+[0.7.6 is published](https://github.com/mvschwarz/openrig/releases/tag/v0.7.6): follow a slice's work in one terminal workspace, plus steadier daemon start and delivery. See its release notes for what shipped, known issues, upgrade instructions and contributor credits.
 
 ## How to help
 

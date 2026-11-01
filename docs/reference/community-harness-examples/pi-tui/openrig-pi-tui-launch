@@ -1,0 +1,100 @@
+#!/bin/sh
+# A reference launcher for Pi's own terminal UI (interactive `pi`) as an OpenRig community harness. Copy it, own it, and
+# change it: OpenRig doesn't ship or run it. It's written for Pi 1.4.0 from its source and not yet checked with a real Pi.
+# It follows docs/reference/community-harness-presets.md (`names_conversation`, `first_input`):
+#   - a new launch (OPENRIG_CONVERSATION set): Pi creates the session whose id is that name, in the seat's own session
+#     folder, and takes the first input as its first prompt;
+#   - a resume (OPENRIG_RESUME_REF set): the launcher opens the one session file whose id is that name, and starts nothing
+#     when there isn't exactly one. Pi's --session-id creates a new session for an id it doesn't find, and --session with
+#     an id can open another session whose id starts the same way, so neither is used to resume.
+set -eu
+
+pi="${OPENRIG_PI:-pi}"
+state="${OPENRIG_HOME:-$HOME/.openrig}/state/pi-tui/${OPENRIG_NODE_ID:-${OPENRIG_SESSION_NAME:-default}}"
+sessions="$state/sessions"
+
+# Each seat gets its own Pi agent folder (settings, logins, skills) unless PI_CODING_AGENT_DIR is already set, so seats
+# don't share settings and a person's ~/.pi/agent isn't touched. Give the seat its provider key in its environment, or its
+# login and settings in this folder, before its first start.
+PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-$state/agent}"
+# Pi expands a leading ~ in this folder; do the same, so the skills land where Pi looks.
+case "$PI_CODING_AGENT_DIR" in
+  "~") PI_CODING_AGENT_DIR="$HOME" ;;
+  "~/"*) PI_CODING_AGENT_DIR="$HOME/${PI_CODING_AGENT_DIR#"~/"}" ;;
+esac
+export PI_CODING_AGENT_DIR
+mkdir -p "$PI_CODING_AGENT_DIR/skills" "$sessions"
+
+# Copy the installed OpenRig's coordination skills in at each launch, so an upgrade reaches the seat. Pi lists the skills
+# in <agent folder>/skills/ by itself; the seat's first input should still name queue-handoff (see the recipe).
+skills_from="${OPENRIG_PI_SKILLS_FROM:-${OPENRIG_HOME:-$HOME/.openrig}/plugins/openrig-core/skills}"
+set -f
+for skill in ${OPENRIG_PI_SKILLS:-queue-handoff}; do
+  case "$skill" in
+    *[!a-z0-9-]*|-*) echo "openrig-pi-tui-launch: skipping '$skill': not a skill name" >&2; continue ;;
+  esac
+  if [ -d "$skills_from/$skill" ]; then
+    rm -rf "$PI_CODING_AGENT_DIR/skills/$skill"
+    cp -Rp "$skills_from/$skill" "$PI_CODING_AGENT_DIR/skills/"
+  else
+    echo "openrig-pi-tui-launch: no $skill skill in $skills_from; starting without it" >&2
+  fi
+done
+set +f
+
+# Pi's session ids: letters, digits, '.', '_' and '-', starting and ending with a letter or digit.
+valid_id() {
+  case "$1" in
+    "" | *[!A-Za-z0-9._-]* | [!A-Za-z0-9]* | *[!A-Za-z0-9]) return 1 ;;
+  esac
+}
+
+# The first input goes over as Pi's first prompt, byte for byte, after `--`. OpenRig's starts with its identity-context
+# line; Pi would read one starting with @ as a file even after `--`, and may run one starting with / as a command.
+set --
+if [ -n "${OPENRIG_FIRST_INPUT:-}" ]; then
+  first_input=$(cat "$OPENRIG_FIRST_INPUT" && printf '.')
+  first_input="${first_input%.}"
+  if [ -n "$first_input" ]; then set -- -- "$first_input"; fi
+fi
+
+if [ -n "${OPENRIG_RESUME_REF:-}" ]; then
+  id="$OPENRIG_RESUME_REF"
+  if ! valid_id "$id"; then
+    echo "openrig-pi-tui-launch: '$id' isn't a Pi session id; starting nothing" >&2
+    exit 2
+  fi
+  # Pi names a session file <time>_<id>.jsonl, but the file's first line, its header, is what says which session it is:
+  # its top-level type and id, read as JSON as Pi reads it. Pi writes the file only once the conversation has a message, so
+  # a session that never got one can't be reopened. Pi runs on Node, so node reads the header.
+  node="${OPENRIG_PI_NODE:-node}"
+  if ! command -v "$node" >/dev/null 2>&1; then
+    echo "openrig-pi-tui-launch: $node isn't on PATH to read Pi's session headers; starting nothing" >&2
+    exit 1
+  fi
+  found="" count=0
+  for file in "$sessions"/*_"$id".jsonl; do
+    [ -s "$file" ] || continue
+    if head -n 1 "$file" | "$node" -e '
+      let text = ""; process.stdin.on("data", c => { text += c; }).on("end", () => {
+        try { const h = JSON.parse(text); process.exit(h && h.type === "session" && h.id === process.argv[1] ? 0 : 1); }
+        catch { process.exit(1); }
+      });' "$id"; then
+      found="$file" count=$((count + 1))
+    fi
+  done
+  if [ "$count" -ne 1 ]; then
+    echo "openrig-pi-tui-launch: expected one Pi session $id in $sessions, found $count; starting nothing" >&2
+    exit 1
+  fi
+  exec "$pi" --session-dir "$sessions" --session "$found" "$@"
+fi
+if [ -n "${OPENRIG_CONVERSATION:-}" ]; then
+  if ! valid_id "$OPENRIG_CONVERSATION"; then
+    echo "openrig-pi-tui-launch: '$OPENRIG_CONVERSATION' isn't a Pi session id; starting nothing" >&2
+    exit 2
+  fi
+  exec "$pi" --session-dir "$sessions" --session-id "$OPENRIG_CONVERSATION" "$@"
+fi
+echo "openrig-pi-tui-launch: OpenRig passed no conversation name; is names_conversation set in the preset?" >&2
+exit 2

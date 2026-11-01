@@ -165,6 +165,12 @@ commit. Evidence capture (`proof add`), policy acceptance, higher outcome
 judgment and publication are distinct. This optional component does not select
 Part B or add a mandatory review gate.
 
+A judgment binds the slice's path, the item's text and the policy. Moving or
+renaming a slice (`rig scope slice move`, or by hand) reopens its judged items:
+`rig proof show` reports each as `unknown`, and each needs a new judgment on its
+current revision. `rig scope audit` checks structure only and never reads proof
+readiness, so a passing audit doesn't mean the proof still stands.
+
 The project readiness that `rig proof show --project` reports counts only
 missions whose `mission.yaml` carries `metadata.status: active` or
 `metadata.status: release-candidate`. `rig scope mission create` writes

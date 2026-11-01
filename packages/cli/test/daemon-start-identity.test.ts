@@ -4,7 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startDaemon, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
+import { startDaemon, getDaemonStatus, STATE_FILE, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import { acquireDaemonStartLock } from "../src/daemon-start-lock.js";
 
 afterEach(() => vi.useRealTimers());
@@ -67,6 +67,8 @@ describe("child-bound startup", () => {
       ? { ok: true, json: async () => ({ ...f.body, pid: 888 }) } : fetch(url);
     await expect(startDaemon(opts, f.deps)).rejects.toThrow(/identity mismatch.*127.0.0.2/);
     expect(f.files.has(STATE_FILE)).toBe(false);
+    expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+    expect(f.lock.release).toHaveBeenCalledWith(false);
   });
   it("publishes the verified child, naming the unverified listener, when only a secondary listener stays uncertain", async () => {
     vi.useFakeTimers();
@@ -114,7 +116,7 @@ describe("child-bound startup", () => {
       expect((outcome as Error).message).toMatch(/identity mismatch.*observed 888/);
       expect(f.files.has(STATE_FILE)).toBe(false);
     });
-    it("gives up on a never-answering endpoint within one readiness deadline", async () => {
+    it("returns pending within one readiness deadline without stopping its still-starting child", async () => {
       vi.useFakeTimers();
       const f = fixture(); const fetch = f.deps.fetch;
       f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
@@ -122,7 +124,11 @@ describe("child-bound startup", () => {
       expect((outcome as Error).message).toMatch(/Last probe: .*timed out|Last probe: .*healthz/);
       expect(elapsed).toBeLessThanOrEqual(20_000);
       expect(f.files.has(STATE_FILE)).toBe(false);
-      expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+      expect(f.deps.kill).not.toHaveBeenCalled();
+      expect(f.lock.release).toHaveBeenCalledWith(true);
+      expect((outcome as Error).message).toMatch(/pending.*12345/);
+      expect((outcome as Error).message).toContain("Launch endpoint: http://127.0.0.1:19873/healthz");
+      expect((outcome as Error).message).toContain("daemon.log");
     });
     // Synchronous work crossing the deadline is modelled by a clock jump inside one fetch, before
     // any timer runs. Post-spawn fetches: 0 primary read, 1 primary listener check, 2 secondary check.
@@ -190,6 +196,8 @@ describe("child-bound startup", () => {
     };
     await expect(startDaemon(opts, f.deps)).rejects.toThrow(/exited/);
     expect(f.files.has(STATE_FILE)).toBe(false);
+    expect(f.deps.kill).not.toHaveBeenCalled();
+    expect(f.lock.release).toHaveBeenCalledWith(false);
   });
   it("handles an asynchronous native spawn error without a PID", async () => {
     const f = fixture();
@@ -279,4 +287,53 @@ describe("local startup reservation", () => {
       expect(fs.existsSync(file)).toBe(true); third.release();
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
   });
+});
+
+
+it.each(["missing", "stale"] as const)("keeps a slow child discoverable with %s old state and excludes a duplicate launch", async (oldState) => {
+  vi.useFakeTimers();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-pending-start-"));
+  const f = fixture(), fetch = f.deps.fetch;
+  const previousState = oldState === "stale"
+    ? JSON.stringify({ pid: 999, host: "127.0.0.2", port: 19874, db: "old.sqlite", startedAt: "old" })
+    : undefined;
+  if (previousState) f.files.set(STATE_FILE, previousState);
+  f.deps.isProcessAlive = pid => pid === f.child.pid && f.child.exitCode === null;
+  let ready = false;
+  f.deps.acquireStartLock = () => acquireDaemonStartLock(home);
+  f.deps.fetch = async url => {
+    const response = await fetch(url);
+    if (!ready) throw Object.assign(new Error("still initializing"), { code: "ECONNREFUSED" });
+    return response;
+  };
+  vi.stubEnv("OPENRIG_URL", `http://127.0.0.1:${opts.port}`);
+  vi.stubEnv("RIGGED_URL", "");
+  try {
+    const began = Date.now(), result = startDaemon(opts, f.deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const outcome = await result;
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/pending.*12345/);
+    const message = (outcome as Error).message;
+    expect(message).toContain("Launch endpoint: http://127.0.0.1:19873/healthz");
+    expect(message).not.toContain("127.0.0.2:19874");
+    expect(message).toContain("this check does not publish readiness, adopt the child or release the reservation");
+    expect(message).toContain("stop child PID 12345 and wait for exit");
+    expect(message).toContain(path.join(path.dirname(STATE_FILE), "daemon-start.lock"));
+    expect(message).toContain("only after both recorded launcher and child PIDs are absent, archive it and run 'rig daemon start'");
+    expect(message).toContain("'rig daemon stop' cannot target this unpublished child");
+    expect(Date.now() - began).toBeLessThanOrEqual(20_000);
+    expect(f.deps.kill).not.toHaveBeenCalled();
+    expect(f.child.exitCode).toBeNull();
+    expect(f.files.get(STATE_FILE)).toBe(previousState);
+    expect(fs.readFileSync(path.join(home, "daemon-start.lock"), "utf8")).toContain('"childPid":12345');
+    ready = true;
+    await expect(getDaemonStatus(f.deps)).resolves.toMatchObject({ state: "running", healthy: true, port: opts.port });
+    expect(f.files.get(STATE_FILE)).toBe(previousState); // A status probe never retroactively publishes start readiness.
+    await expect(startDaemon(opts, f.deps)).rejects.toThrow(/already reserved/);
+    expect(f.deps.spawn).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

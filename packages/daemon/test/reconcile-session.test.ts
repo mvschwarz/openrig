@@ -213,7 +213,8 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
     }
     it.each(["claude-code", "codex"] as const)("reports no runtime drift when a %s process holds the pane's foreground under an sh launcher", async (runtime) => {
       const exe = runtime === "claude-code" ? "claude" : "codex";
-      expect(await drift(runtime, [launchScript, { pid: 901, ppid: 900, command: exe, pgid: 901, tpgid: 901, executableName: exe, startedAt: started }])).toEqual([]);
+      expect(await drift(runtime, [launchScript, { pid: 901, ppid: 900, command: exe,
+        ...(runtime === "codex" ? { argv: ["codex"] } : {}), pgid: 901, tpgid: 901, executableName: exe, startedAt: started }])).toEqual([]);
     });
     it.each(["claude-code", "codex"] as const)("keeps the unverified note for a %s node whose pane is only an idle shell", async (runtime) => {
       expect(await drift(runtime, [idleSh])).toEqual([`runtime unverified: pane command "sh" does not confirm runtime "${runtime}"`]);

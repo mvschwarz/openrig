@@ -1,0 +1,15 @@
+# Install as $OPENRIG_HOME/community-harnesses/pi-tui.yaml, with openrig-pi-tui-launch on the seat's PATH.
+# "pi" itself is the built-in managed Pi runtime, so this preset for Pi's own terminal UI takes another name.
+format: 1
+name: pi-tui
+command: openrig-pi-tui-launch    # no model or provider here: they go in the seat's Pi settings or environment
+maintainer: Your name or team
+limits:
+  - checked once with Pi 1.4.0 and OpenRig 0.7.4 (one run, one model); other Pi versions aren't checked
+  - resume not declared until reopening a named session, and a missing one, have been checked with a real Pi
+  - with the default typing guard, a wake submits a person's half-typed draft in Pi's editor together with the wake; run the seat unattended, not where a person also types
+  - a send while a Pi dialog OpenRig doesn't recognize is open, such as /settings, types into the dialog
+  - how Pi takes a wake that arrives while it's busy isn't shown
+  - only the listed openrig-core skills are copied into the seat's Pi agent folder; no guidance or startup files are placed
+names_conversation: true
+first_input: true

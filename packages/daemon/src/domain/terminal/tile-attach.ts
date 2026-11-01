@@ -5,7 +5,7 @@ export function tileAttachArgv(
   tmux: string, server: readonly string[], session: string, readOnly: boolean,
   retrySeconds = 30,
 ): string[] {
-  const ro = readOnly ? "-r " : "";
+  const ro = readOnly ? "-r " : "-f ignore-size ";
   // No apostrophes or control characters in the script: Herdr also stores this
   // argv as its restart command. All external values stay positional arguments.
   const script = [

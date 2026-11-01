@@ -17,9 +17,10 @@ import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { readSeatClaudeMcp } from "./claude-mcp.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { settleOwnStartupPaste, startupSubmissionEvidence, STARTUP_SUBMIT_CAPTURE_LINES, STARTUP_SUBMIT_RETRIES, STARTUP_UNCONFIRMED_REASON, waitForClaudeInputBox, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -33,10 +34,10 @@ import { recordConversationPromptForNode, recordForkConversationPromptForNode, s
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
-const UNCONFIRMED_STAGED = "the prompt still looked staged in the input box";
-const UNCONFIRMED_UNOBSERVABLE = "the input box could not be observed";
-const UNCONFIRMED_UNCLEAR = "the input box did not clearly show the prompt as submitted";
-const UNCONFIRMED_RETRY_REFUSED = "the guarded Enter retry did not go through";
+const UNCONFIRMED_STAGED = STARTUP_UNCONFIRMED_REASON.staged;
+const UNCONFIRMED_UNOBSERVABLE = STARTUP_UNCONFIRMED_REASON.unobservable;
+const UNCONFIRMED_UNCLEAR = STARTUP_UNCONFIRMED_REASON.unclear;
+const UNCONFIRMED_RETRY_REFUSED = STARTUP_UNCONFIRMED_REASON.retryRefused;
 
 /**
  * The proof line is held back on purpose when the startup prompt isn't confirmed submitted. Say that
@@ -159,6 +160,8 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
 }
 
 export interface StartupInput {
+  /** Explicit history startup checks its exact source after awaited preparation. */
+  beforeNativeLaunch?: () => boolean;
   /** Internal attempt state: a launch input may already have reached the harness, so it cannot be replayed. */
   firstInputPassed?: boolean;
   rigId: string;
@@ -339,8 +342,21 @@ export class StartupOrchestrator {
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.startNodeWithWarnings(input, warnings));
     }
+    // A contained runtime reconciles saved execution before the ordinary startup prelude writes state or files.
+    if (input.adapter.environment) {
+      input = { ...input, binding: { ...input.binding, launchGeneration: input.binding.launchGeneration ?? this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid } };
+      try {
+        if (!input.adapter.preflightEnvironmentStartup) throw new Error("Selected environment lacks startup reconciliation");
+        await input.adapter.preflightEnvironmentStartup(input.binding, { resumeToken: input.resumeToken, resumeType: input.resumeType, forkSource: input.forkSource });
+      } catch (error) {
+        return { ok: false, startupStatus: "attention_required", errors: [(error as Error).message] };
+      }
+    }
     try {
       input = { ...input, binding: new NativePermissionStore(this.db).apply(input.binding, input.adapter.runtime) };
+      if (input.adapter.runtime === "claude-code") {
+        input = { ...input, binding: { ...input.binding, claudeMcp: readSeatClaudeMcp(this.db, input.nodeId) } };
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Permission selection: ${(error as Error).message}`], undefined, false, undefined, false, "permission_selection", true);
     }
@@ -392,6 +408,7 @@ export class StartupOrchestrator {
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
+    if (input.adapter.environment) input = { ...input, binding: { ...input.binding, launchGeneration: input.binding.launchGeneration ?? launchGeneration } };
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -435,7 +452,8 @@ export class StartupOrchestrator {
     // so the operator's trust-precedence ordering is preserved when the post-launch
     // delivery loop walks the array. Rebuild artifacts are tagged
     // appliesOn: ["fresh_start"] by the resolver, which matches the rebuild context.
-    const sourceFiles = input.rebuildArtifacts && input.rebuildArtifacts.length > 0
+    const restoreEnvironmentContext = !!input.adapter.environment && !!input.binding.environmentRestore && !!input.preserveStartupContext;
+    const sourceFiles = restoreEnvironmentContext ? [] : input.rebuildArtifacts && input.rebuildArtifacts.length > 0
       ? [...input.rebuildArtifacts, ...input.resolvedStartupFiles]
       : input.resolvedStartupFiles;
     // OPR.0.7.0.13 (router, R1.1): the one-line bootstrap is delivered on its own (below), only with a yes, and never
@@ -445,6 +463,13 @@ export class StartupOrchestrator {
       && isSeatSkillsBootstrapLine(f));
     const applicableFiles = sourceFiles.filter((f) => f.appliesOn.includes(context) && !input.replaySkip?.files.has(f.absolutePath)
       && !isSeatSkillsBootstrapLine(f));
+    if (input.adapter.environment) {
+      try {
+        if (!input.adapter.prepareEnvironmentStartup) throw new Error("Selected environment does not support required startup projection");
+        const prepared = await input.adapter.prepareEnvironmentStartup(restoreEnvironmentContext ? input.resolvedStartupFiles : applicableFiles, input.binding);
+        if (prepared.failed.length) return this.fail(input, "failed", prepared.failed.map(file => `Required environment startup input ${file.path}: ${file.error}`), undefined, false, undefined, false, "pre_launch_files", true);
+      } catch (error) { return this.fail(input, "failed", [`Environment startup preparation: ${(error as Error).message}`], undefined, false, undefined, false, "pre_launch_files", true); }
+    }
     const preLaunchFiles: ResolvedStartupFile[] = [];
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
@@ -550,9 +575,12 @@ export class StartupOrchestrator {
 
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
-    // later reads (identity, activity, labels, restore), not launch success or identity proof.
+    // later reads (identity, activity, labels, restore), not launch success or identity proof. Whether this launch's
+    // preset declares a runner is recorded with it, so activity follows the occupant as launched, not a later edit:
+    // only a harness launch samples it, and a continuation that launches nothing keeps what was recorded.
     if (input.adapter instanceof CommunityHarnessRuntimeAdapter) {
-      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime); }
+      try { this.sessionRegistry.recordCommunityHarnessSelection(input.sessionId, input.adapter.runtime,
+        input.skipHarnessLaunch ? undefined : input.adapter.runner()); }
       catch (err) { errors.push(`Couldn't record the community harness selection: ${(err as Error).message}`); return this.fail(input, "failed", errors); }
     }
 
@@ -576,11 +604,15 @@ export class StartupOrchestrator {
             launchPrompt = this.composeInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles,
               launchChallenge?.promptBlock ?? null, input.includeDurableObligations);
           }
+          if (input.beforeNativeLaunch && !input.beforeNativeLaunch()) {
+            return this.fail(input, "attention_required", ["The selected seat, settings or history changed after preparation; native resume was not dispatched."], undefined, false, undefined, false, "harness_launch", true);
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             ...(launchPrompt ? { firstInputText: launchPrompt.prompt } : {}),
             resumeToken: launchResumeToken,
             ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
+            ...(input.beforeNativeLaunch ? { beforeNativeDispatch: input.beforeNativeLaunch } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
           if (launchResult.firstInput) {
@@ -588,6 +620,13 @@ export class StartupOrchestrator {
             this.eventBus.emit({ type: "node.startup_first_input_passed", rigId: input.rigId, nodeId: input.nodeId,
               sessionId: input.sessionId, ...launchResult.firstInput });
             warnings.push("First startup input passed at launch; submission is not confirmed.");
+          }
+          if (launchResult.modelInput?.dispatch === "confirmed") {
+            this.eventBus.emit({ type: "node.startup_model_passed", rigId: input.rigId, nodeId: input.nodeId,
+              sessionId: input.sessionId, model: launchResult.modelInput.model, resume: !!launchResumeToken });
+            warnings.push(`Model "${launchResult.modelInput.model}" passed to the launcher at launch; which model runs is not confirmed.`);
+          } else if (launchResult.modelInput) {
+            warnings.push(`Model "${launchResult.modelInput.model}": the launch command's send is uncertain, so it isn't recorded as passed.`);
           }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
@@ -803,7 +842,7 @@ export class StartupOrchestrator {
       challengeOnlyPrompt = challenge.promptBlock;
     }
 
-    // OPR.0.4.7.17 restore-order-correction (qitem-e99624f7). On a resumed
+    // OPR.0.4.7.17 restore-order-correction. On a resumed
     // restore the work-triggering guidance/role.md is delivered as a post-launch
     // send_text file (step 7 below) and starts the seat's first turn at once. An
     // after_ready send_text "BEFORE you do anything else, load skills" preload

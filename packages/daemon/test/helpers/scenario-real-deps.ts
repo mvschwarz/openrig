@@ -142,11 +142,11 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
         return r;
       }
       case "send": {
-        const p = (payload && typeof payload === "object" ? payload : {}) as { to?: string; text?: string };
+        const p = (payload && typeof payload === "object" ? payload : {}) as { to?: string; text?: string; verify?: boolean };
         const to = p.to ?? seat;
         const text = p.text ?? "";
         if (!to) return fail("send: no recipient (payload.to or a seat is required)");
-        return runRig(["send", to, text, "--json"], daemon.readEnv, rigBin);
+        return runRig(["send", to, text, "--json", ...(p.verify === true ? ["--verify"] : [])], daemon.readEnv, rigBin);
       }
       case "restart": {
         // Seat relaunch/resume — rig launch <rigId> <seat>. Distinct from the

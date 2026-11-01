@@ -104,7 +104,7 @@ export function demoSnapshot(): FleetSnapshot {
         build_info: { commit: "51209941a" },
       },
       q1_lanes: [{
-        qitem_id: "qitem-20260806-drv0aa11",
+        qitem_id: "qitem-demo-06-drv0aa11",
         slice: "OPR.0.5.2.9",
         seat: "dev50-driver@openrig-build",
         worktree_path: "/demo/openrig",
@@ -114,7 +114,7 @@ export function demoSnapshot(): FleetSnapshot {
         join_basis: "typed demo work node",
         activity: { activity: "working", needs_input: { count: 0, reason: null }, decided_by: "activity oracle", changed_at: "2026-08-06T11:58:30.000Z" },
         pickup: { state: "working" },
-        source: { qitem_id: "qitem-20260806-drv0aa11" },
+        source: { qitem_id: "qitem-demo-06-drv0aa11" },
       }],
       q2_sequencing: [
         { slice_id: "OPR.0.5.2.5", dir: "crash-cart", depends_on: [], blocked_on_rows: [], next_up: false, next_up_basis: "declared done", next_up_rank: null, source: { spec_path: "/demo/crash-cart/SPEC.md", arrangement_path: "/demo/crash-cart/slice.yaml", wave_map_row: "foundation" } },
@@ -155,7 +155,7 @@ export function demoSnapshot(): FleetSnapshot {
     // resolves this live via GET /:qitemId). The render excludes the human-blocked
     // one (b2, a SESSION in blockedOn) — it is already surfaced under NEEDS YOU.
     blocked: [
-      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-20260805-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-demo-05-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
       { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", blockerSession: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.9"], summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
     ],
     // PULSE ◌ PARKED WITH BATON + ● NOW source — shaped like the shipped
@@ -164,11 +164,11 @@ export function demoSnapshot(): FleetSnapshot {
     // owned by ACTIVE seats → they surface under NOW (running seats with work),
     // NOT parked.
     inProgress: [
-      { qitemId: "qitem-20260806-8f3a1b2c", state: "in-progress", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.6"], summary: "slice 51-06 D2 atom", body: "", claimedAt: "2026-08-06T10:50:00.000Z", tsUpdated: "2026-08-06T11:13:00.000Z" },
-      { qitemId: "qitem-20260806-drv0aa11", state: "in-progress", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "pulse-view incr build", body: "", claimedAt: "2026-08-06T11:40:00.000Z", tsUpdated: "2026-08-06T11:58:00.000Z" },
-      { qitemId: "qitem-20260806-pln0b220", state: "in-progress", destinationSession: "dev50-planner@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "IMPL-PLAN incr-4 drill-in", body: "", claimedAt: "2026-08-06T11:30:00.000Z", tsUpdated: "2026-08-06T11:57:00.000Z" },
-      { qitemId: "qitem-20260806-r10c331", state: "in-progress", destinationSession: "review50-r1@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "review incr-3 lanes", body: "", claimedAt: "2026-08-06T11:45:00.000Z", tsUpdated: "2026-08-06T11:59:00.000Z" },
-      { qitemId: "qitem-20260806-led0d442", state: "in-progress", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.20"], summary: "fold receipt 0.5.2", body: "", claimedAt: "2026-08-06T11:50:00.000Z", tsUpdated: "2026-08-06T11:59:30.000Z" },
+      { qitemId: "qitem-demo-06-8f3a1b2c", state: "in-progress", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.6"], summary: "slice 51-06 D2 atom", body: "", claimedAt: "2026-08-06T10:50:00.000Z", tsUpdated: "2026-08-06T11:13:00.000Z" },
+      { qitemId: "qitem-demo-06-drv0aa11", state: "in-progress", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "pulse-view incr build", body: "", claimedAt: "2026-08-06T11:40:00.000Z", tsUpdated: "2026-08-06T11:58:00.000Z" },
+      { qitemId: "qitem-demo-06-pln0b220", state: "in-progress", destinationSession: "dev50-planner@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "IMPL-PLAN incr-4 drill-in", body: "", claimedAt: "2026-08-06T11:30:00.000Z", tsUpdated: "2026-08-06T11:57:00.000Z" },
+      { qitemId: "qitem-demo-06-r10c331", state: "in-progress", destinationSession: "review50-r1@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "review incr-3 lanes", body: "", claimedAt: "2026-08-06T11:45:00.000Z", tsUpdated: "2026-08-06T11:59:00.000Z" },
+      { qitemId: "qitem-demo-06-led0d442", state: "in-progress", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.20"], summary: "fold receipt 0.5.2", body: "", claimedAt: "2026-08-06T11:50:00.000Z", tsUpdated: "2026-08-06T11:59:30.000Z" },
     ],
     // Per-seat ps/activity — the NOW + PARKED join's right side (terminalActive
     // idle boolean + raw lastActivityAt). driver/planner/r1/lead ACTIVE → NOW;
@@ -187,20 +187,20 @@ export function demoSnapshot(): FleetSnapshot {
     // exercise the display-cap overflow: the view renders the first four + a "…"
     // marker, with the header count the TRUE total (6).
     pending: [
-      { qitemId: "qitem-20260806-up000001", state: "pending", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "RM ceremony 0.5.2", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:55:00.000Z" },
-      { qitemId: "qitem-20260806-up000002", state: "pending", destinationSession: "dev50-qa@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "51-02 scenario runner", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:50:00.000Z" },
-      { qitemId: "qitem-20260806-up000003", state: "pending", destinationSession: "dev50-qa@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "51-03 seed scenarios", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:45:00.000Z" },
-      { qitemId: "qitem-20260806-up000004", state: "pending", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "incr-4 drill-in + selection parity", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:40:00.000Z" },
-      { qitemId: "qitem-20260806-up000005", state: "pending", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "incr-5 live refresh-seam", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:35:00.000Z" },
-      { qitemId: "qitem-20260806-up000006", state: "pending", destinationSession: "dev50-planner@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "docs sweep sdlc-conventions", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:30:00.000Z" },
+      { qitemId: "qitem-demo-06-up000001", state: "pending", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "RM ceremony 0.5.2", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:55:00.000Z" },
+      { qitemId: "qitem-demo-06-up000002", state: "pending", destinationSession: "dev50-qa@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "51-02 scenario runner", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:50:00.000Z" },
+      { qitemId: "qitem-demo-06-up000003", state: "pending", destinationSession: "dev50-qa@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "51-03 seed scenarios", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:45:00.000Z" },
+      { qitemId: "qitem-demo-06-up000004", state: "pending", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "incr-4 drill-in + selection parity", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:40:00.000Z" },
+      { qitemId: "qitem-demo-06-up000005", state: "pending", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "incr-5 live refresh-seam", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:35:00.000Z" },
+      { qitemId: "qitem-demo-06-up000006", state: "pending", destinationSession: "dev50-planner@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "docs sweep sdlc-conventions", body: "", claimedAt: null, tsUpdated: "2026-08-06T11:30:00.000Z" },
     ],
     // PULSE ✓ JUST FINISHED source — shaped like the shipped state=done,handed-off
     // read (bounded recent window). Served in ts_created order; the view re-sorts
     // by tsUpdated DESC (finish time) → newest-finished first.
     recentlyFinished: [
-      { qitemId: "qitem-20260806-fin00001", state: "done", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "slice-03 close-out", body: "", claimedAt: "2026-08-06T11:20:00.000Z", tsUpdated: "2026-08-06T11:44:00.000Z" },
-      { qitemId: "qitem-20260806-fin00002", state: "handed-off", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: "review50-r1@openrig-build", tier: null, tags: null, summary: "field fold receipt", body: "", claimedAt: "2026-08-06T10:40:00.000Z", tsUpdated: "2026-08-06T11:20:00.000Z" },
-      { qitemId: "qitem-20260806-fin00003", state: "done", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "terminal CLEAR 51209941", body: "", claimedAt: "2026-08-06T10:20:00.000Z", tsUpdated: "2026-08-06T10:58:00.000Z" },
+      { qitemId: "qitem-demo-06-fin00001", state: "done", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "slice-03 close-out", body: "", claimedAt: "2026-08-06T11:20:00.000Z", tsUpdated: "2026-08-06T11:44:00.000Z" },
+      { qitemId: "qitem-demo-06-fin00002", state: "handed-off", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: "review50-r1@openrig-build", tier: null, tags: null, summary: "field fold receipt", body: "", claimedAt: "2026-08-06T10:40:00.000Z", tsUpdated: "2026-08-06T11:20:00.000Z" },
+      { qitemId: "qitem-demo-06-fin00003", state: "done", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "terminal CLEAR 51209941", body: "", claimedAt: "2026-08-06T10:20:00.000Z", tsUpdated: "2026-08-06T10:58:00.000Z" },
     ],
     // When this demo snapshot "hydrated" — 2s before the 12:00 demo clock so the
     // PULSE footer renders "updated 2s ago" deterministically.

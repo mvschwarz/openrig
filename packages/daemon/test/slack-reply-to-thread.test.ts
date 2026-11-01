@@ -18,6 +18,7 @@ import { QueueRepository, hasLiveHumanGate } from "../src/domain/queue-repositor
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { buildSlackGatewayWire, makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { WsLike } from "../src/domain/gateway/slack/socket-inbound.js";
+import { CLICK_REPLIES } from "../src/domain/gateway/slack/inbound.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { resolveSlackHandle } from "../src/domain/gateway/human-registry.js";
 import { ThreadSeatMap, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
@@ -182,7 +183,9 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
-    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string, channel?: string) => Promise<void>> {
+    // `respond` adds to Slack's answer for a post, such as the posted `message` for a reply that Slack put elsewhere.
+    async function connectInbound(respond?: (body: Record<string, unknown>, ts: string) => Record<string, unknown>):
+      Promise<(threadTs: string | undefined, ts: string, channel?: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -195,7 +198,10 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         inboundMaxConnects: 1,
         fetchImpl: async (url, init) => {
           if (url.endsWith("apps.connections.open")) return reply({ ok: true, url: "wss://fake-slack/ws" });
-          posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` });
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          posts.push(body);
+          const ts = `${posts.length}.1`;
+          return reply({ ok: true, ts, ...respond?.(body, ts) });
         },
       });
       stops.push(() => wire.stop()); wire.startServices?.();
@@ -281,6 +287,27 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
     });
 
+    it("#2234: an update Slack posted top-level because its thread's root was gone verifies unthreaded, and the seat's answer to a reply threads under it", async () => {
+      // Slack answers a post into the deleted root 1.1 as a new top-level message.
+      const humanReply = await connectInbound((body, ts) => body.thread_ts === "1.1" ? { message: { ts, text: "posted" } } : {});
+      const decision = await repo.create({ ...request, humanAlert: true });
+      await deliver(decision.qitemId);
+      resolveDecision(decision.qitemId);
+      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: decision.qitemId });
+      await deliver(update.qitemId);
+      const promoted = `${posts.length}.1`;
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(update.qitemId)?.replyToFallback).toBe("thread-missing (thread 1.1)");
+
+      // The person replies under the update Slack promoted, and the seat answers that reply.
+      await humanReply(promoted, "920.1");
+      await vi.waitFor(() => expect(inboundRow("920.1")).toMatchObject({ destinationSession: "author@rig" }));
+      const answer = await repo.create({ ...request, humanIntent: "update", body: "On it.", replyTo: inboundRow("920.1")!.qitemId });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe(promoted);
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+    });
+
     it("interaction provenance: a completed button answer keeps its ask's thread for the seat's follow-up", async () => {
       await connectInbound();
       const decision = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: [
@@ -307,7 +334,201 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(new ThreadSeatMap(db).resolveByThread("1.1")?.conversationId).toBe(decision.qitemId);
     });
 
-    async function reactToAsk(decisionId: string, eventTs: string): Promise<string> {
+    describe("an ask parked on the person it asked (P4)", () => {
+      const questions = [
+        { id: "q1", question: "Ship the fix?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+        { id: "q2", question: "Tell the users?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      ];
+      const click = (questionId: string, optionId: string, actionTs: string) => inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: `interaction-${questionId}-${actionTs}`, type: "interactive", payload: {
+          type: "block_actions", user: { id: registry.entities[0]!.connectorBindings[0]!.handle }, channel: { id: "C-TEST" },
+          container: { type: "message", message_ts: "1.1", channel_id: "C-TEST" }, message: { ts: "1.1" },
+          actions: [{ type: "button", block_id: `or-q:${questionId}`, action_id: `or-opt:${optionId}`, value: optionId, action_ts: actionTs }],
+        },
+      }) });
+      const answerRowId = (qitemId: string) => `qitem-human-answer-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`;
+      const resolvedCount = (qitemId: string) => repo.transitionLog.listForQitem(qitemId)
+        .filter((t) => t.ownerNotificationKind === "human-decision-resolved").length;
+      // The ask posts as root 1.1; its agent then parks it on the person it asked, and that question posts too.
+      async function parkedAsk(blockedOn: string = human) {
+        await connectInbound();
+        const ask = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: questions });
+        await deliver(ask.qitemId);
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn, summary: "Still need your call",
+          evidenceRef: "/private/proof.md", transitionNote: "parked on its person" });
+        await postPendingNotice(ask.qitemId);
+        return ask;
+      }
+
+      it("records each click, then resumes the ask once and hands the answers back once, even when Slack redelivers", async () => {
+        const ask = await parkedAsk();
+        click("q1", "yes", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes" }));
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        click("q2", "no", "991.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: "yes", q2: "no" });
+        expect(repo.getById(answerRowId(ask.qitemId))).toMatchObject({ destinationSession: "author@rig" });
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        click("q2", "no", "991.1");
+        await new Promise((r) => setTimeout(r, 50));
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        expect(repo.getById(ask.qitemId)?.state).toBe("in-progress");
+      });
+
+      it("refuses a click from before its current question posted, and says the decision is parked", async () => {
+        const ask = await parkedAsk();
+        const before = posts.length;
+        click("q1", "yes", "1.5");
+        await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+        expect(posts.at(-1)?.text).toBe(CLICK_REPLIES.parked);
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+      });
+
+      it("still refuses a click on an ask parked on something other than its person", async () => {
+        const other = await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig", body: "Ship the fix.", nudge: false });
+        await connectInbound();
+        const ask = await repo.create({ ...request, humanAlert: true, humanIntent: "decision", humanQuestions: questions });
+        await deliver(ask.qitemId);
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: other.qitemId, transitionNote: "waits on the work" });
+        const before = posts.length;
+        click("q1", "yes", "990.1");
+        await vi.waitFor(() => expect(posts.length).toBeGreaterThan(before));
+        expect(posts.at(-1)?.text).toBe(CLICK_REPLIES.parked);
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+      });
+
+      // A typed reply in the ask's thread, from the person it asked.
+      const typed = (text: string, ts: string) => inboundSocket.onmessage?.({ data: JSON.stringify({
+        envelope_id: `e-${ts}`, type: "events_api", payload: { event: {
+          type: "message", user: registry.entities[0]!.connectorBindings[0]!.handle, text, ts, thread_ts: "1.1", channel: "C-TEST" } },
+      }) });
+      const answerRows = (qitemId: string) => db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? AND destination_session = 'author@rig'").all(qitemId);
+      // The rows the asking seat receives as an answer (tagged human-answer), with their words.
+      const humanAnswerRows = (qitemId: string) => db.prepare(`SELECT qitem_id, body FROM queue_items WHERE reply_to = ?
+        AND destination_session = 'author@rig' AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = 'human-answer')`)
+        .all(qitemId) as Array<{ qitem_id: string; body: string }>;
+      const typedAnswer = (text: string, unansweredCount: number) => ({ kind: "typed-reply", text, placement: "first-unanswered", unansweredCount });
+
+      it("records a typed reply as the answer, resumes the ask once and hands it back once as the answer, even when Slack redelivers", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1) });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(1);
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+
+        typed("large", "990.1"); // Slack redelivers the same event
+        typed("small", "992.1"); // a later reply once the question is answered stays a message
+        await vi.waitFor(() => expect(answerRows(ask.qitemId)).toHaveLength(2));
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1) });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(1);
+      });
+
+      it("keeps a typed reply from before its current question posted as a message: the ask stays parked, with no answer", async () => {
+        const ask = await parkedAsk();
+        typed("large", "1.5");
+        await vi.waitFor(() => expect(answerRows(ask.qitemId)).toHaveLength(1));
+        expect(repo.getById(ask.qitemId)?.state).toBe("blocked");
+        expect(Object.keys(repo.getById(ask.qitemId)?.humanAnswers ?? {})).toEqual([]);
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(0);
+      });
+
+      it("takes the current reply, not an earlier message, as the answer to the current question", async () => {
+        const ask = await parkedAsk();
+        typed("small", "1.5"); // before the current question: a message
+        await vi.waitFor(() => expect(answerRows(ask.qitemId)).toHaveLength(1));
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1) });
+        expect(humanAnswerRows(ask.qitemId).map((row) => row.body.includes("large"))).toEqual([true]);
+        expect(resolvedCount(ask.qitemId)).toBe(1);
+      });
+
+      it("answers a re-park with the person's new reply, not their answer to the earlier question", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "And the users?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again for the second question" });
+        await postPendingNotice(ask.qitemId);
+        typed("yes", "995.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1), q2: typedAnswer("yes", 0) });
+        expect(humanAnswerRows(ask.qitemId)).toHaveLength(2);
+        expect(humanAnswerRows(ask.qitemId).filter((row) => row.body.includes("yes"))).toHaveLength(1);
+        expect(resolvedCount(ask.qitemId)).toBe(2);
+        expect(posts.some((post) => String(post.text ?? "").startsWith("Already answered"))).toBe(false);
+      });
+
+      it("stores the answer once when the resume is interrupted after it commits, and a redelivery finishes without a second return", async () => {
+        const act = MissionControlWriteContract.prototype.act;
+        let interrupt = true;
+        const spy = vi.spyOn(MissionControlWriteContract.prototype, "act").mockImplementation(async function (this: MissionControlWriteContract, input) {
+          const result = await act.call(this, input);
+          if (input.verb === "resolve" && interrupt) { interrupt = false; throw new Error("stopped after the resolve committed"); }
+          return result;
+        });
+        try {
+          const ask = await parkedAsk();
+          typed("large", "990.1");
+          await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+          expect(interrupt).toBe(false);
+          typed("large", "990.1"); // the same event again, after the interrupted attempt
+          await new Promise((r) => setTimeout(r, 100));
+          expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1) });
+          expect(resolvedCount(ask.qitemId)).toBe(1);
+          expect(answerRows(ask.qitemId)).toHaveLength(1);
+        } finally { spy.mockRestore(); }
+      });
+
+      // The click path keeps its own rules until its follow-up: only a typed reply stores its words as the answer.
+      it("stores no earlier typed answer under a re-park's question when the person clicks", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "And the users?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again for the second question" });
+        await postPendingNotice(ask.qitemId);
+        click("q2", "yes", "996.1");
+        await vi.waitFor(() => expect(resolvedCount(ask.qitemId)).toBe(2));
+        expect(repo.getById(ask.qitemId)?.humanAnswers?.q2).toBeUndefined();
+      });
+
+      it("returns nothing again when a re-park's interrupted answer is replayed after the ask closes", async () => {
+        const ask = await parkedAsk();
+        typed("large", "990.1");
+        await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+        repo.update({ qitemId: ask.qitemId, actorSession: "author@rig", state: "blocked", blockedOn: human, summary: "And the users?",
+          evidenceRef: "/private/proof.md", transitionNote: "parked again for the second question" });
+        await postPendingNotice(ask.qitemId);
+        const act = MissionControlWriteContract.prototype.act;
+        let interrupt = true;
+        const spy = vi.spyOn(MissionControlWriteContract.prototype, "act").mockImplementation(async function (this: MissionControlWriteContract, input) {
+          const result = await act.call(this, input);
+          if (input.verb === "resolve" && interrupt) { interrupt = false; throw new Error("stopped after the resolve committed"); }
+          return result;
+        });
+        try {
+          typed("yes", "995.1");
+          await vi.waitFor(() => expect(repo.getById(ask.qitemId)?.state).toBe("in-progress"));
+          expect(interrupt).toBe(false);
+          repo.update({ qitemId: ask.qitemId, actorSession: human, state: "done", closureReason: "no-follow-on", transitionNote: "decided" });
+          typed("yes", "995.1"); // the interrupted event again, after the ask closed
+          await new Promise((r) => setTimeout(r, 100));
+          expect(answerRows(ask.qitemId)).toHaveLength(2);
+          expect(humanAnswerRows(ask.qitemId)).toHaveLength(2);
+          expect(resolvedCount(ask.qitemId)).toBe(2);
+          expect(repo.getById(ask.qitemId)?.humanAnswers).toEqual({ q1: typedAnswer("large", 1), q2: typedAnswer("yes", 0) });
+        } finally { spy.mockRestore(); }
+      });
+    });
+
+    /** With `routed` false, the reaction must make no row: a routed one lands well within the wait (#2233). */
+    async function reactToAsk(decisionId: string, eventTs: string, routed = true): Promise<string> {
       const eventId = `reaction:C-TEST:1.1:UFOUNDER:eyes:${eventTs}`;
       const qitemId = `qitem-slack-reaction-${createHash("sha256").update(eventId).digest("hex").slice(0, 20)}`;
       inboundSocket.onmessage?.({ data: JSON.stringify({
@@ -316,10 +537,28 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
           item: { type: "message", channel: "C-TEST", ts: "1.1" },
         } },
       }) });
+      if (!routed) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(repo.getById(qitemId)).toBeNull();
+        return qitemId;
+      }
       await vi.waitFor(() => expect(repo.getById(qitemId)).not.toBeNull());
       expect(repo.getById(qitemId)?.body).toContain(`In reply to: ${decisionId}`);
       return qitemId;
     }
+
+    it("#2233: with reactions off, a person's emoji on an ask makes no row, so it costs the asking seat no turn", async () => {
+      saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: join(home, "fake.env"), minimumLevelThatInterrupts: "NOTICE", reactions: "off" }, home);
+      await connectInbound();
+      const decision = await repo.create({ ...request, humanAlert: true });
+      await deliver(decision.qitemId);
+      await reactToAsk(decision.qitemId, "913.1", false);
+      expect(repo.getById(decision.qitemId)).toMatchObject({ humanAnswers: null });
+    });
+
+    it("#2233: reactions accepts only route or off", () => {
+      expect(() => saveConfig({ ...DEFAULT_CONFIG, reactions: "sometimes" } as never, home)).toThrow(/reactions must be one of route, off/);
+    });
 
     it("interaction provenance: a reaction row keeps its resolved ask's thread for the seat's follow-up", async () => {
       await connectInbound();

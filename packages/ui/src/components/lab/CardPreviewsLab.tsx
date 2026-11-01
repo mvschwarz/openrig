@@ -93,7 +93,7 @@ export function CardPreviewsLab() {
       />
       <ApprovalCard
         source={{
-          qitemId: "qitem-20260511201234-abcdef01",
+          qitemId: "qitem-preview-approval-01",
           title: "Auth bearer tailscale trust — approve merge?",
           oneLiner: "All gates green; merge requires operator sign-off.",
           bodyPreview: "Triple-guard CLEAR. velocity-qa VM walk PASS. Ready for merge to main.",

@@ -418,10 +418,12 @@ describe("SeatHandoverService", () => {
     ["default source", undefined],
     ["fresh source", "fresh"],
     ["rebuild source", "rebuild"],
-    ["fork source", "fork:abc123"],
+    ["fork source", "fork:dev-impl@seat-rig"],
     ["discovered source", "discovered:some-id"],
   ])("keeps dry-run mutation-free across %s (AC-1)", async (_label, source) => {
-    seedSeat();
+    const { sessionId } = seedSeat();
+    // A fork source is resolved in the dry run too, so it names a seat with a native conversation id.
+    if (source?.startsWith("fork:")) db.prepare("UPDATE sessions SET resume_token = ? WHERE id = ?").run("codex-thread-1", sessionId);
     const before = durableRows();
 
     const result = await service.handover({
@@ -891,14 +893,27 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
-  it("B3: still returns a dry-run PLAN for fork/rebuild (planning is not blocked)", async () => {
-    seedSeat({ runtime: "codex" });
+  it("B3: still returns a dry-run PLAN for a fork source the real run can resolve (planning is not blocked)", async () => {
+    const { sessionId } = seedSeat({ runtime: "codex" });
+    db.prepare("UPDATE sessions SET resume_token = ? WHERE id = ?").run("codex-thread-1", sessionId);
     const before = durableRows();
 
-    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:abc", dryRun: true });
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:dev-impl@seat-rig", dryRun: true });
 
     expect(result.ok).toBe(true);
     expect(result.ok && "plan" in result && result.plan.willMutate).toBe(false);
+    expect(durableRows()).toBe(before);
+  });
+
+  it("a dry run refuses a fork source the real run refuses, with the same refusal, and writes nothing", async () => {
+    seedSeat({ runtime: "codex" });
+    const before = durableRows();
+
+    const dryRun = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:0b0165d7", dryRun: true });
+    const run = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fork:0b0165d7" });
+
+    expect(dryRun).toMatchObject({ ok: false, code: "fork_source_not_found" });
+    expect(dryRun).toEqual(run);
     expect(durableRows()).toBe(before);
   });
 
@@ -1360,8 +1375,10 @@ describe("SeatHandoverService", () => {
     });
   });
 
-  it("carries the current rules, primary model and Advisor through handover to the successor", async () => {
+  it.each([undefined, "none"] as const)("carries current rules, model, Advisor and MCP selection (%s) to the successor", async claudeMcp => {
     const { node } = seedSeat({ runtime: "claude-code", model: "claude-sonnet-5-5", advisor: "opus" });
+    rigRepo.setNodeClaudeMcp(node.id, claudeMcp ?? null);
+    capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
     const rules = { allow: [], deny: ["Read(./private/**)"] };
     const writer = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux() });
     expect(await writer.setPermissions({ seatRef: "dev-impl@seat-rig", rules, actor: "operator@seat-rig", reason: "Set successor rules" })).toMatchObject({ ok: true });
@@ -1374,7 +1391,7 @@ describe("SeatHandoverService", () => {
     });
     expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
     expect(launchHarness).toHaveBeenCalledTimes(1);
-    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules });
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nodeId: node.id, model: "claude-sonnet-5-5", advisor: "opus", claudePermissions: rules, claudeMcp });
   });
 
   it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {
@@ -1393,6 +1410,7 @@ describe("SeatHandoverService", () => {
 
   it("OPR.0.7.0.9 (K2): a Claude seat's launch additions reach its fresh handover successor's launch, and the new conversation's start is recorded", async () => {
     const { rig } = seedSeat({ runtime: "claude-code" });
+    capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
     const src = fs.mkdtempSync(path.join(os.tmpdir(), "handover-additions-"));
     try {
       fs.writeFileSync(path.join(src, "prompt.md"), "Short answers.\n");

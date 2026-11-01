@@ -180,8 +180,7 @@ function emitOperatingPosture(value: OperatingPosture | undefined): void {
  * scope rule applies at invocation, NOT only at raw HTTP URL parsing.
  *
  * Reject:
- *   - explicit qualifier with global_host (BLOCKING re-verify finding from
- *     guard qitem-20260518044650): operators who type
+ *   - explicit qualifier with global_host (a review finding): operators who type
  *     `--scope global_host --qualifier <id>` get an error and the daemon
  *     is never contacted. The CLI does NOT silently drop the qualifier.
  *   - missing qualifier for any non-global scope.
@@ -269,7 +268,7 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         return;
       }
 
-      // BLOCKING re-verify-2 (qitem-20260518045300): when --scope is
+      // Review finding: when --scope is
       // explicit, validate scope + qualifier LOCALLY before touching
       // the daemon. Otherwise an invalid operator invocation
       // (e.g. `--scope global_host --qualifier X`) surfaces as
@@ -542,7 +541,7 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         return;
       }
       const scope = scopeArg as Scope;
-      // BLOCKING re-verify (qitem-20260518044650): never silently drop
+      // Review finding: never silently drop
       // an explicit operator-supplied qualifier on global_host on unset.
       // Same hazard class as set; same shared helper.
       const normalized = normalizeScopeQualifier(scope, qualifierArg);

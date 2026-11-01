@@ -72,6 +72,14 @@ describe("rig start kernel wait evidence", () => {
     expect(result.errors).toBe(""); expect(result.exitCode).toBe(0);
     expect(result.received).toContain("/api/rigs/summary");
   });
+  it("says a kernel that was already down before this daemon start stays down, and how to bring it back", async () => {
+    const result = await run("skipped", 200, 200, {}, false,
+      "kernel rig already managed; it was already down before this daemon start, so it was not restored. Bring it back with: rig up kernel --existing");
+    expect(result.logs).toContain("Kernel auto-boot skipped: kernel rig already managed; it was already down before this daemon start");
+    expect(result.logs).toContain("rig up kernel --existing");
+    expect(result.logs).not.toContain("--no-kernel or test mode");
+    expect(result.errors).toBe(""); expect(result.exitCode).toBe(0);
+  });
   it("names an already-managed kernel and how to bring it back, instead of blaming --no-kernel", async () => {
     const result = await run("skipped", 200, 200, {}, false, "kernel rig already managed");
     expect(result.logs).not.toContain("--no-kernel or test mode");

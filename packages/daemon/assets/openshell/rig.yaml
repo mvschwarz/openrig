@@ -1,0 +1,19 @@
+version: "0.2"
+name: openshell-example
+pods:
+  - id: team
+    members:
+      - id: coordinator
+        agent_ref: local:agents/coordinator
+        runtime: claude-code
+        profile: default
+        cwd: .
+      - id: worker
+        agent_ref: local:agents/worker
+        runtime: openshell-claude
+        profile: default
+        cwd: .
+edges:
+  - kind: delegates_to
+    from: team.coordinator
+    to: team.worker

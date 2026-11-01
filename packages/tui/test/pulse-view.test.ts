@@ -48,7 +48,7 @@ describe("PULSE view (5.2 Wave B — increment 1: static skeleton from the appro
     expect(body).toContain("dev50-driver@openrig-build");
     // label==referent: the blocking AGENT is named (resolved blockerSession), NOT the qitem pointer
     expect(body).toContain("blocked on review-r1@openrig-build");
-    expect(body).not.toContain("qitem-20260805-review");
+    expect(body).not.toContain("qitem-demo-05-review");
     expect(body).toContain("terminal verdict for 51209941");
     expect(body).not.toContain("human sign-off pending"); // human-blocked → not here
 
