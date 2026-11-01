@@ -953,18 +953,23 @@ export class TmuxAdapter {
       OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
       ...env,
     };
+    const warnings: string[] = [];
+    let bootstrap: string | undefined;
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, file => { bootstrap = file; });
+    // Stock psmux only accepts identifier-shaped -e names. The private native
+    // bootstrap supports Windows names such as ProgramFiles(x86) and already
+    // carries them into the actual child; don't reject them at the transport.
+    const transportEnv = Object.entries(seatEnv).filter(([key]) =>
+      !(this.isNativeWindows && scopedCommand) || /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
-    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of transportEnv) argv.push("-e", `${k}=${v}`);
     // The pane new-session itself made: an after-new-session hook may select another window.
     argv.push("-P", "-F", "#{pane_id}");
     const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
     if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
-    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
+    for (const [k, v] of transportEnv) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));
-    const warnings: string[] = [];
-    let bootstrap: string | undefined;
-    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, file => { bootstrap = file; });
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {

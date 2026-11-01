@@ -75,10 +75,10 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX).each(
     expect(await adapter.getDefaultShell()).toBeTruthy();
     // Configure the held empty server before its first actual session.
     await invoke(["tmux", "set-option", "-g", "remain-on-exit", "on"]);
-    const command = `[IO.File]::WriteAllText(${powershellQuote(output)},(ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED; pane=$env:TMUX_PANE; registry=$env:PSMUX_DATA_DIR }))`;
+    const command = `[IO.File]::WriteAllText(${powershellQuote(output)},(ConvertTo-Json @{ selected=$env:SELECTED; unrelated=$env:UNRELATED; pane=$env:TMUX_PANE; registry=$env:PSMUX_DATA_DIR; programFilesX86=[Environment]::GetEnvironmentVariable('ProgramFiles(x86)') }))`;
     await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile -EncodedCommand ${Buffer.from(command, "utf16le").toString("base64")}`]);
     adapter.launchEnvironment = () => ({ inheritTmuxEnvironment: false, env: { SystemRoot: process.env.SystemRoot, SELECTED: "synthetic-selected" } });
-    expect(await adapter.createSession("seat", dir, { OPENRIG_NODE_ID: "synthetic-seat" })).toEqual({ ok: true });
+    expect(await adapter.createSession("seat", dir, { OPENRIG_NODE_ID: "synthetic-seat", "ProgramFiles(x86)": "owned x86 & path" })).toEqual({ ok: true });
     const deadline = Date.now() + 7000;
     while (!existsSync(output) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
     const observed = JSON.parse(readFileSync(output, "utf8"));
@@ -86,6 +86,7 @@ it.skipIf(process.platform !== "win32" || !process.env.OPENRIG_TEST_PSMUX).each(
     expect(observed.unrelated).toBeNull();
     expect(observed.pane).toBeTruthy();
     expect(observed.registry).toBe(registry);
+    expect(observed.programFilesX86).toBe("owned x86 & path");
     const pane = (await adapter.listPanes("seat"))[0]!;
     const deadDeadline = Date.now() + 5000;
     while (!await adapter.isPaneDead(pane.id) && Date.now() < deadDeadline) await new Promise(resolve => setTimeout(resolve, 50));
