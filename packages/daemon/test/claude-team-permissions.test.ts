@@ -232,6 +232,26 @@ describe("Claude team command permissions", () => {
     ])("emits no decision on truncated input: %s", raw => {
       expect(askDecision(raw)).toBeUndefined();
     });
+    it.each([
+      // The fallback must apply the same tool check as the parsed path:
+      // a truncated non-Bash payload whose raw text holds a lifecycle
+      // command string stays silent, as does one with no identifiable
+      // tool at all. tool_name precedes tool_input in hook payloads, so
+      // a truncation that leaves a complete command also leaves the
+      // tool name intact; silence here loses no Bash fallback ask.
+      '{"tool_name":"Read","tool_input":{"command":"rig down example"',
+      '{"tool_name":"Grep","tool_input":{"command":"rig down example"',
+      '{"tool_input":{"command":"rig down example"',
+      // A tool name cut off mid-token never recovers, whatever follows it.
+      '{"tool_input":{"command":"rig down example"},"tool_name":"Bas',
+    ])("emits no decision when truncated input is not identifiably Bash: %s", raw => {
+      expect(askDecision(raw)).toBeUndefined();
+    });
+    it("still asks on truncated Bash input once the tool identity is checked", () => {
+      expect(askDecision('{"tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
+      // The recovered name is JSON-decoded, as the recovered command is.
+      expect(askDecision('{"tool_name":"\\u0042ash","tool_input":{"command":"rig down example"')).toBe("ask");
+    });
     it("uses the existing hook output contract for the fallback ask", () => {
       const result = runHook('{"tool_name":"Bash","tool_input":{"command":"rig down example"');
       expect(result.status, result.stderr).toBe(0);

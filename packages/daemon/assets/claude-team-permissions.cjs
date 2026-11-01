@@ -279,6 +279,20 @@ function extractCommandText(raw) {
   }
 }
 
+// Recover the tool name the same way, so the unparseable path applies the
+// same Bash-only check as the parsed path below. A name that cannot be
+// recovered is not Bash: the hook stays silent and Claude's own permission
+// handling applies, as for any other non-Bash input.
+function extractToolName(raw) {
+  const match = /"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(raw);
+  if (!match) return undefined;
+  try {
+    return JSON.parse(`"${match[1]}"`);
+  } catch {
+    return undefined;
+  }
+}
+
 module.exports = { decide };
 if (require.main === module) {
   let raw = "";
@@ -313,7 +327,11 @@ if (require.main === module) {
     // Unparseable input: ask only when the recovered command identifiably
     // requests a lifecycle action. Anything else keeps current behavior
     // (no output), including a hook that never starts or times out, which
-    // no code inside this file can intercept.
+    // no code inside this file can intercept. Only Bash input reaches the
+    // fallback at all, as in the parsed path above: tool_name precedes
+    // tool_input in hook payloads, so a truncation that leaves a complete
+    // command also leaves the tool name intact.
+    if (extractToolName(raw) !== "Bash") return;
     const recovered = extractCommandText(raw);
     if (recovered === undefined) return;
     if (conservativeAsk(recovered, policy) === "ask") emit("ask");
