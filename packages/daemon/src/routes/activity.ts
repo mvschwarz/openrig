@@ -473,6 +473,22 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
         });
       }
     }
+    // #2341: a reserved occupant generation is registered only when its launch or handover commits. Until then, and
+    // after a failed handover, its Claude hooks don't move the seat's resume target, which stays the registered
+    // occupant's conversation. An absent generation, no current tenure or an unreadable ledger keep today's write.
+    if (runtime === "claude-code" && generation && !currentGeneration) {
+      let uncommitted = false;
+      try {
+        uncommitted = !!sessionRegistry.currentOccupantTenure(resolved.nodeId)
+          && !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation);
+      } catch { /* an unreadable ledger is no evidence */ }
+      if (uncommitted) {
+        return c.json({
+          ok: true, sessionId, provenance: "hook", tokenPersisted: false, code: "generation_uncommitted",
+          detail: "This Claude's occupant generation isn't registered for the seat yet (a handover that hasn't committed), so the seat keeps its resume target.",
+        });
+      }
+    }
     const persistHook = (type: string, token: string): boolean => {
       if (runtime !== "claude-code") return sessionRegistry.updateResumeToken(resolved.sessionId, type, token, "hook");
       return sessionRegistry.recordHookSessionIdentity(resolved.sessionId, type, token,
