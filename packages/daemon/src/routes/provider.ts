@@ -121,16 +121,19 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const restore = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
       if (!restore) return { ok: false, effect: "none", code: "restore_unavailable", message: "This daemon has no restore orchestrator." };
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
+      // The effort restore's launch selected, when this relaunch asked it to keep one.
+      const heard: { effort?: { effort: string | null; kept: boolean } } = {};
       const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
-        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
+        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort, onLaunchEffort: (selected: { effort: string | null; kept: boolean }) => { heard.effort = selected; } } : {}) });
+      const effort = heard.effort ? { effort: heard.effort } : {};
       // A refusal of the whole launch (no usable snapshot, no such seat) comes before anything is touched.
       if (!result.ok) return { ok: false, effect: "none", code: result.code ?? "launch_failed", message: result.message ?? "The seat wasn't launched from the snapshot." };
       const node = result.launched?.find((n) => n.logicalId === logicalId);
-      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [] };
+      if (node?.status === "resumed") return { ok: true, status: "resumed", warnings: result.warnings ?? [], ...effort };
       // Restore stops for a decision, or leaves an attached CLI alone, before it touches the seat; a launch that failed
       // before its takeover stopped anything left it as this attempt found it too.
       const untouched = node?.nothingStopped === true || (!node?.launchStarted && (node?.status === "awaiting-decision" || node?.status === "left_attached"));
-      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot." };
+      return { ok: false, effect: untouched ? "none" : "unknown", code: node?.status ?? "not_launched", message: node?.error ?? "The seat wasn't launched from the snapshot.", ...effort };
     },
   };
 }

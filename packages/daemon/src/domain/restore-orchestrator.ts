@@ -619,13 +619,15 @@ export class RestoreOrchestrator {
   /** `keepPane`: the seat is running and is relaunched in its own pane (its process ended in place, the pane and scrollback
    *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. `keepEffort`, with
    *  `keepPane`: launch with that effort (the running process's own, kept by a provider switch) in place of the seat's
-   *  saved one; it isn't saved as the seat's choice. */
+   *  saved one, unless the seat has an explicit choice when the launch reads it; it isn't saved as the seat's choice.
+   *  `onLaunchEffort` hears the effort the launch selected, and whether it was the kept one. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     snapshotId?: string;
     keepPane?: boolean;
     keepEffort?: string;
+    onLaunchEffort?: (selected: { effort: string | null; kept: boolean }) => void;
     selectedHistory?: SelectedRestoreHistory;
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
@@ -638,6 +640,7 @@ export class RestoreOrchestrator {
     snapshotId?: string;
     keepPane?: boolean;
     keepEffort?: string;
+    onLaunchEffort?: (selected: { effort: string | null; kept: boolean }) => void;
     selectedHistory?: SelectedRestoreHistory;
     namedAgent?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
@@ -693,7 +696,8 @@ export class RestoreOrchestrator {
       }
       if (opts.keepPane) {
         launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
-          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry, ...(opts.keepEffort ? { keepEffort: opts.keepEffort } : {}) }, subsetWarnings));
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry,
+            ...(opts.keepEffort ? { keepEffort: opts.keepEffort, ...(opts.onLaunchEffort ? { onLaunchEffort: opts.onLaunchEffort } : {}) } : {}) }, subsetWarnings));
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
@@ -1075,7 +1079,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepEffort?: string; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: { effort: string | null; kept: boolean }) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1594,7 +1598,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: { effort: string | null; kept: boolean }) => void },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1608,8 +1612,6 @@ export class RestoreOrchestrator {
     // precedence seam (latest wins), which also says so when the snapshot held another value.
     let restoreEffort: { effort: string | null } | undefined;
     const effortForRestore = (): string | null => {
-      // A provider switch's relaunch keeps the effort its seat was running with; it isn't saved as the seat's choice.
-      if (opts?.keepEffort) return opts.keepEffort;
       if (!restoreEffort) {
         // The live seat is found by its logical id in this rig: a seat removed and grown back has a new node id,
         // and its latest saved choice still wins over the older snapshot.
@@ -1617,9 +1619,14 @@ export class RestoreOrchestrator {
           ? "SELECT id FROM nodes WHERE id = ? AND rig_id = ? AND logical_id = ?"
           : "SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(...(selected ? [node.id, rigId, node.logicalId] : [rigId, node.logicalId])) as
           { id: string } | undefined;
-        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, liveRow?.id ?? node.id) });
+        const live = readSeatEffort(this.db, liveRow?.id ?? node.id);
+        // A provider switch's relaunch keeps the effort its seat was running with, unless the seat has an explicit choice
+        // by now: read here, at launch, the latest choice wins. A kept effort isn't saved as the seat's choice.
+        const kept = opts?.keepEffort && !live?.choice ? opts.keepEffort : undefined;
+        const decided: { effort: string | null; warning?: string } = kept ? { effort: kept } : effortPrecedence.restoreLaunchEffort({ snapshot: node, live });
         if (decided.warning) warnings?.push(`Restore: ${node.logicalId}: ${decided.warning}`);
         restoreEffort = decided;
+        if (opts?.keepEffort) opts.onLaunchEffort?.({ effort: decided.effort, kept: kept !== undefined });
       }
       return restoreEffort.effort;
     };

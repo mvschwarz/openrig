@@ -150,8 +150,8 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
       message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it's as it was before the switch, with its token reference as it was.` };
   }
   report.loginChanged = true;
-  const effortUsed = effortNote(input.seat, effort);
-  if (effortUsed) report.effort = effortUsed;
+  const effortLine = effortNote(input.seat, effort, keepEffort, relaunched);
+  if (effortLine) report.effort = effortLine;
   if (!relaunched.ok) {
     const recoveryCommand = `rig launch ${rigName} ${logicalId} --snapshot-id ${snapshot.snapshotId}`;
     report.restart = { outcome: relaunched.code, message: relaunched.message, recoveryCommand,
@@ -187,18 +187,43 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     : `Relaunched ${input.seat} in its own pane on its config dir's stored login, resuming its conversation. Work in flight when it stopped didn't carry over.` };
 }
 
-/** Which effort a switch's relaunch used, and why, when that isn't simply the effort already running. Nothing when no
- *  reader is wired. */
-function effortNote(seat: string, effort: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>> | undefined): string | undefined {
+/** Which effort a switch's relaunch used, and why, when that isn't simply the effort already running. When the relaunch
+ *  didn't report resuming, it's worded as asked, not done, with the effort the recovery command (a plain restore) uses
+ *  and how to keep another. Nothing when no reader is wired. */
+function effortNote(seat: string, effort: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>> | undefined,
+  keepEffort: string | undefined, relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>): string | undefined {
   if (effort === undefined) return undefined;
+  if (!relaunched.ok) {
+    if (effort === null) {
+      return "the running effort couldn't be read, and the relaunch didn't report resuming. The recovery command relaunches at the seat's saved effort, "
+        + `or the runtime default when it has none; rig seat set-effort ${seat} <level> chooses one first.`;
+    }
+    const saved = effort.relaunch ?? "(the runtime default, no --effort)";
+    if (keepEffort) {
+      return `the relaunch was asked to keep the running effort ${keepEffort}, but it didn't report resuming. The recovery command relaunches at the `
+        + `seat's saved effort ${saved}; to keep ${keepEffort}, run rig seat set-effort ${seat} ${keepEffort} first.`;
+    }
+    if (effort.running === effort.relaunch) return undefined;
+    if (effort.relaunchIsSeatChoice) {
+      return `the relaunch was to use the seat's chosen effort ${effort.relaunch} (rig seat set-effort), but it didn't report resuming. The recovery command uses that choice too.`;
+    }
+    return `the running process had no --effort flag; the relaunch was to use the seat's saved effort ${saved}, but it didn't report resuming. The recovery command uses that saved effort too.`;
+  }
   if (effort === null) return "the running effort couldn't be read, so the relaunch used the seat's saved effort, or the runtime default when it has none.";
+  if (keepEffort) {
+    const selected = relaunched.effort;
+    if (selected?.kept) {
+      return `kept the running effort ${keepEffort}: the seat has no effort choice of its own, so the relaunch kept what it ran with. `
+        + `Its saved effort, ${effort.relaunch ?? "the runtime default (no --effort)"}, is unchanged; rig seat set-effort ${seat} <level> chooses one.`;
+    }
+    if (selected) {
+      return `the seat's chosen effort ${selected.effort ?? "(the runtime default, no --effort)"}, saved during the switch, in place of the running ${keepEffort} the relaunch was asked to keep.`;
+    }
+    return `the relaunch was asked to keep the running effort ${keepEffort}, but it didn't say which effort it launched; rig seat effort ${seat} shows what launched.`;
+  }
   if (effort.running === effort.relaunch) return undefined;
   if (effort.relaunchIsSeatChoice) {
     return `the seat's chosen effort ${effort.relaunch} (rig seat set-effort), in place of the running ${effort.running ?? "process's runtime default (no --effort flag)"}.`;
-  }
-  if (effort.running) {
-    return `kept the running effort ${effort.running}: the seat has no effort choice of its own, so the relaunch kept what it ran with. `
-      + `Its saved effort, ${effort.relaunch ?? "the runtime default (no --effort)"}, is unchanged; rig seat set-effort ${seat} <level> chooses one.`;
   }
   return `the running process had no --effort flag, so the relaunch used the seat's saved effort ${effort.relaunch}.`;
 }

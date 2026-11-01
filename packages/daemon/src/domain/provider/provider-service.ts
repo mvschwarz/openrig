@@ -70,10 +70,12 @@ export interface ClaudeSeatRelaunch {
   effortChange?(nodeId: string, pane: string): Promise<{ running: string | null; relaunch: string | null; relaunchIsSeatChoice: boolean } | null>;
   /** Relaunch only this seat from that snapshot in its own pane: its process ends in place, the pane and its scrollback stay,
    *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. `effort`:
-   *  launch with it in place of the seat's saved effort (the running process's own, kept by a switch); it isn't saved as
-   *  the seat's choice. */
-  relaunchInPane(rigId: string, logicalId: string, snapshotId: string, opts?: { effort?: string }): Promise<{ ok: true; status: "resumed"; warnings: string[] }
-    | { ok: false; effect: "none" | "unknown"; code: string; message: string }>;
+   *  launch with it in place of the seat's saved effort (the running process's own, kept by a switch), unless the seat
+   *  has an explicit choice when restore's launch reads it; it isn't saved as the seat's choice. The result's `effort` is
+   *  what that launch selected, and whether it was the kept one. */
+  relaunchInPane(rigId: string, logicalId: string, snapshotId: string, opts?: { effort?: string }): Promise<
+    | { ok: true; status: "resumed"; warnings: string[]; effort?: { effort: string | null; kept: boolean } }
+    | { ok: false; effect: "none" | "unknown"; code: string; message: string; effort?: { effort: string | null; kept: boolean } }>;
 }
 
 /** What would outrank a Claude seat's own token at its next launch (`ClaudeManagedLaunch.credentialPrecedence`). */
