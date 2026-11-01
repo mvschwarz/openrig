@@ -81,7 +81,8 @@ function fixture(options: { owner?: string | null; guest?: boolean; realGuest?: 
   app.route("/api/mission-control", missionControlRoutes());
   // The guest listener's own app, as the daemon builds it; a person still answers on the main app.
   const activityApp = options.realGuest
-    ? createGuestActivityApp({ rigRepo: rigs, sessionRegistry: sessions, eventBus: bus, agentActivityStore: store, queueRepo, activityHookToken: INSTALL } as AppDeps)
+    ? createGuestActivityApp({ rigRepo: rigs, sessionRegistry: sessions, eventBus: bus, agentActivityStore: store, queueRepo, activityHookToken: INSTALL,
+      streamStore } as unknown as AppDeps)
     : app;
 
   const generation = () => sessions.currentOccupantTenure(runner.id)!.generationUuid;
@@ -483,6 +484,13 @@ describe("a default permit's record", () => {
     expect(records[0]!.body).toContain("conversation-1, turn 1, request 7");
     expect(f.rowsToSeat()).toBe(0);
     expect(f.nudges).toHaveLength(0);
+  });
+
+  it("records a permit made through the guest listener with a seat grant", async () => {
+    const f = fixture({ realGuest: true, owner: null, people: [] });
+    const grant = f.grants.issue({ nodeId: f.runner.id, generation: f.generation(), issuedBy: "test" });
+    expect(await f.submit({ nodeId: undefined, generation: undefined }, grant.token)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(1);
   });
 
   it("records a resubmitted request once", async () => {
