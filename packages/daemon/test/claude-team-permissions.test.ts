@@ -257,6 +257,13 @@ describe("Claude team command permissions", () => {
       // tool_name: recovery must not require tool_name to be the first key.
       expect(askDecision('{"session_id":"abc","transcript_path":"/t.jsonl","cwd":"/proj","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
     });
+    it("still asks when a field value holds the boundary key text", () => {
+      // A "command" (or "tool_input") string inside an earlier field value
+      // is data, not a structural key: it must not bound the tool-name
+      // scan and hide the real tool_name ahead of tool_input.
+      expect(askDecision('{"agent_type":"command","tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
+      expect(askDecision('{"note":"tool_input","tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
+    });
     it("still asks on truncated Bash input once the tool identity is checked", () => {
       expect(askDecision('{"tool_name":"Bash","tool_input":{"command":"rig down example"')).toBe("ask");
       // The recovered name is JSON-decoded, as the recovered command is.

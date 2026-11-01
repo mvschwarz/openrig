@@ -279,6 +279,27 @@ function extractCommandText(raw) {
   }
 }
 
+// Index of the `"name"` key token in raw JSON-ish text, or -1. Only a
+// string followed by `:` counts as a key, so the same text inside a field
+// value — `"agent_type": "command"` — never matches. An unterminated
+// string (a truncated payload) swallows the rest, so nothing inside it
+// counts either. Key text is JSON-decoded, as the recovered values below.
+function structuralKeyIndex(raw, name) {
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== '"') continue;
+    let j = i + 1;
+    while (j < raw.length && raw[j] !== '"') j += raw[j] === "\\" ? 2 : 1;
+    if (j >= raw.length) return -1;
+    let decoded;
+    try { decoded = JSON.parse(raw.slice(i, j + 1)); } catch { decoded = undefined; }
+    let k = j + 1;
+    while (k < raw.length && /\s/.test(raw[k])) k++;
+    if (raw[k] === ":" && decoded === name) return i;
+    i = j;
+  }
+  return -1;
+}
+
 // Recover the tool name the same way, so the unparseable path applies the
 // same Bash-only check as the parsed path below. A name that cannot be
 // recovered is not Bash: the hook stays silent and Claude's own permission
@@ -288,10 +309,12 @@ function extractCommandText(raw) {
 // data, not the payload's tool identity. tool_name precedes tool_input in
 // hook payloads, so bounding the scan there loses no legitimate recovery;
 // anchoring to the payload's first key instead would, since real payloads
-// carry session_id/cwd/hook_event_name ahead of tool_name.
+// carry session_id/cwd/hook_event_name ahead of tool_name. The bounds are
+// structural keys, so the same text inside a field value (e.g. an
+// agent_type of "command") cannot cut the scan short of the real name.
 function extractToolName(raw) {
-  const inputAt = raw.indexOf('"tool_input"');
-  const commandAt = raw.indexOf('"command"');
+  const inputAt = structuralKeyIndex(raw, "tool_input");
+  const commandAt = structuralKeyIndex(raw, "command");
   const bounds = [inputAt, commandAt].filter((at) => at !== -1);
   const scope = bounds.length === 0 ? raw : raw.slice(0, Math.min(...bounds));
   const match = /"tool_name"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(scope);
