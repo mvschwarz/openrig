@@ -121,14 +121,15 @@ describe("contained Claude restore activity resources", () => {
     return { rig, node, snap, saved };
   }
   function restore(f: ReturnType<typeof seed>, runtimeAdapter: RuntimeAdapter = adapter, beforeResume = () => {}, desired?: (nodeId: string) =>
-    | { status: "known"; selected: boolean } | { status: "unknown"; evidence: string }) {
+    | { status: "known"; selected: boolean } | { status: "unknown"; evidence: string },
+    adapters?: Record<string, RuntimeAdapter>) {
     const claude = { canResume: () => true, resume: vi.fn(async () => { beforeResume(); return { ok: true }; }) } as unknown as ClaudeResumeAdapter;
     const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
     const orch = new RestoreOrchestrator({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events,
       snapshotRepo: snapshots, snapshotCapture: capture, checkpointStore: checkpoints, nodeLauncher, tmuxAdapter: tmux,
       claudeResume: claude, codexResume: { canResume: () => true, resume: async () => ({ ok: true }) } as unknown as CodexResumeAdapter,
       ...(desired ? { getDesiredClaudeActivityHooks: desired } : {}) });
-    return orch.restore(f.snap.id, { adapters: { [runtimeAdapter.runtime]: runtimeAdapter }, fsOps: { exists: fs.existsSync } });
+    return orch.restore(f.snap.id, { adapters: adapters ?? { [runtimeAdapter.runtime]: runtimeAdapter }, fsOps: { exists: fs.existsSync } });
   }
 
   it.each([false, true])("preserves selected hooks, including at native launch (pod=%s)", async pod => {
@@ -315,6 +316,20 @@ describe("contained Claude restore activity resources", () => {
     expect(owned().length).toBeGreaterThan(0);
   });
 
+  it("does not consult the current selection for saved entries when no Claude adapter was supplied", async () => {
+    // Legacy (non-pod) restore proceeds without a runtime adapter, so the
+    // guard is reached; with a saved entry present the current selection
+    // must stay unread and no gap may be recorded for it.
+    const f = seed(false);
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, adapter, () => {}, desired, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(desired).not.toHaveBeenCalled();
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
   it("does not project when the current spec does not select hooks", async () => {
     const f = seed(true, false);
     const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: false }));
@@ -332,9 +347,30 @@ describe("contained Claude restore activity resources", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(owned()).toEqual([]);
-    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined"))).toBe(true);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined") && w.includes("p.seat"))).toBe(true);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
     expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("reports a gap when the current selection is known but no Claude adapter was supplied", async () => {
+    const f = seed(false, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("seat") && w.includes("could not be re-applied"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps?.[0]).toContain("claude_activity_hooks");
+  });
+
+  it("warns without a gap when the selection is unknown and no Claude adapter was supplied", async () => {
+    const f = seed(false, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "unknown", evidence: "no agent file" }), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined") && w.includes("seat"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
   it("treats a throwing selection reader as unknown, never as selected", async () => {

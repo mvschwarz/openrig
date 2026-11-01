@@ -1406,10 +1406,12 @@ export class RestoreOrchestrator {
    *  Unknown selections are warned about, never guessed at. Never blocks
    *  the resume. Only absolute `path:` agent refs resolve here; `local:` and
    *  `builtin:` refs resolve to unknown (warn, no gap) because no
-   *  authoritative launch root is retained at restore time. */
+   *  authoritative launch root is retained at restore time. A known selection
+   *  with no Claude runtime adapter is a gap: the hooks were skipped, not
+   *  re-applied, and the skip must be reported rather than silent. */
   private async restoreCurrentActivityHooks(
     node: PlanEntry["node"],
-    activityAdapter: import("./runtime-adapter.js").RuntimeAdapter,
+    activityAdapter: import("./runtime-adapter.js").RuntimeAdapter | undefined,
     launchResult: { session: import("./types.js").Session; binding: import("./types.js").Binding },
     warnings: string[] | undefined,
     activityHookGaps: string[] | undefined,
@@ -1424,12 +1426,20 @@ export class RestoreOrchestrator {
     }
     if (desired.status === "unknown") {
       const detail = `the current Claude activity-hook selection could not be determined (${desired.evidence}); no hooks were re-applied.`;
-      warnings?.push(`Restore activity hooks: ${detail}`);
+      warnings?.push(`Restore activity hooks: ${node.logicalId}: ${detail}`);
       // Unknown is a warning only: nothing is known to be missing, so it
       // must not downgrade the rig to partially_restored.
       return;
     }
     if (!desired.selected) return;
+    if (!activityAdapter) {
+      // The selection was resolved before requiring the adapter: a known
+      // selection with no adapter to project it is a skipped re-apply.
+      const gap = `claude_activity_hooks: the current selection could not be re-applied: no Claude runtime adapter was available.`;
+      warnings?.push(`Restore activity hooks: ${node.logicalId}: the current selection could not be re-applied: no Claude runtime adapter was available.`);
+      activityHookGaps?.push(gap);
+      return;
+    }
     // Marker-only entry, reconstructed from the current selection: the
     // adapter ignores every path field for this resource type.
     const marker: import("./projection-planner.js").ProjectionEntry = {
@@ -1673,10 +1683,10 @@ export class RestoreOrchestrator {
     // no guidance, skills or startup replay, and the saved context is never
     // rewritten. A seat whose current spec does not select hooks stays silent.
     const activityAdapter = opts?.adapters?.["claude-code"];
-    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code" && activityAdapter) {
+    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code") {
       const entries = startupCtx.projectionEntries.filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
-      if (entries.length > 0) try {
+      if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
           runtime: "claude-code", cwd: node.cwd ?? ".",
           entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
@@ -1689,7 +1699,7 @@ export class RestoreOrchestrator {
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
-      } else {
+      } else if (entries.length === 0) {
         await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
       }
     }
