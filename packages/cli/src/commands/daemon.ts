@@ -356,7 +356,8 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
             console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
             console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
-          } else {
+          } else if (!status.startPending) {
+            // A pending start's probe was refused, not inconclusive; its line above says what is known.
             console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");
             console.log("  Re-check with: rig daemon status  ·  direct: curl the daemon /healthz");
           }

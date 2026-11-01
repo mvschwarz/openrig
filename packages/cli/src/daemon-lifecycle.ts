@@ -140,6 +140,16 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
       ...causeCode,
     };
   }
+  // A refused probe under a live start reservation: a launch is in progress and nothing is listening yet.
+  if (status.startPending) {
+    const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+    return {
+      fact: `Daemon is starting (launch reserved by pid ${status.startPending.pid}${since}); it isn't listening yet.`,
+      consequence: "This command needs a responsive daemon.",
+      action: "Wait, then re-check with 'rig daemon status'.",
+      ...causeCode,
+    };
+  }
   // unverified, or running-but-unhealthy: we do NOT know it is down.
   return {
     fact: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
@@ -1138,7 +1148,7 @@ export async function getDaemonStatus(
       if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err), ...(startPending ? { startPending } : {}) };
       if (refused && !startPending) return { state: "stopped" };
       return refused
-        ? { state: "unverified", port: configured.port, host: configured.host, startPending }
+        ? { state: "unverified", port: configured.port, host: configured.host, startPending, ...probeErrorCodeOf(err) }
         : { state: "unverified", port: configured.port, host: configured.host, ...probeErrorCodeOf(err) };
     }
   }
@@ -1169,7 +1179,7 @@ export async function getDaemonStatus(
       // T2: unless a live start reservation says a launch is in progress.
       if (isRefusedError(err)) {
         const startPending = liveStartReservation(deps);
-        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending } : { state: "stopped" };
+        return startPending ? { state: "unverified", pid: state.pid, port: state.port, host, startPending, ...probeErrorCodeOf(err) } : { state: "stopped" };
       }
       return { state: "unverified", pid: state.pid, port: state.port, host, ...probeErrorCodeOf(err) };
     }
