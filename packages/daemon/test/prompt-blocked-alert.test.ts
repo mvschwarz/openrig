@@ -243,6 +243,48 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     }
   });
 
+  it.each([true, false])("a repaired carrier wakes its newly configured lead before the human rung (choice=%s)", async choice => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (${choice ? "selection_prompt" : "target_needs_input"}). No text was sent.`);
+    const posts: unknown[] = []; let ready = false;
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: "fixture" }));
+    await tick(port, { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    expect(notes(old.qitemId).join("\n")).toContain("orchestrator self-skip");
+    if (choice) repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "wake-ladder@system",
+      transitionNote: "ladder-exhausted: explicit-only floor: a visible row, not posted to a person" });
+    ready = true; const wakes: string[] = [];
+    const opts = { humanRung: "explicit-only" as const, loadHumanRegistry: () => registry, resolveOrchestrator: () => "lead@fixture",
+      attemptWake: async (_id: string, target: string) => { wakes.push(target); return "failed:offline"; } };
+    await tick(port, opts);
+    expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
+    expect(alerts()[0]!.qitemId).toBe(old.qitemId); expect(alerts()[0]!.body).toBe(old.body);
+    expect(alerts()[0]!.destinationSession).toBe("lead@fixture");
+    await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+    if (choice) expect(posts).toEqual([]);
+    else await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(wakes).toEqual(["lead@fixture"]);
+    expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+  });
+
+  it.each([
+    { kind: "posted", boundary: "progress" }, { kind: "terminated", boundary: "progress" },
+    { kind: "posted", boundary: "dispatch" }, { kind: "terminated", boundary: "dispatch" },
+  ])("a fixed-key old $kind does not resolve a later $boundary episode", async ({ kind, boundary }) => {
+    const row = await refusal(); const key = `${row.qitemId}:operator-rung`;
+    expect(repo.transitionLog.latestOwnerNotificationForQitem(row.qitemId)).toBeNull();
+    repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "daemon@kernel",
+      transitionNote: `${kind === "posted" ? "slack-owner-notification-posted" : "delivery-termination:"} notification_key=${key}` });
+    if (boundary === "progress") await repo.update({ qitemId: row.qitemId, actorSession: seat, transitionNote: "continuing the obligation" });
+    else repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "wake-ladder@system",
+      transitionNote: `escalation-rung: operator dispatched-to-engine notification_key=${key}` });
+    const posts: unknown[] = []; const port = engine(posts);
+    expect(port.hasAcceptedEscalation!(repo.getById(row.qitemId)!)).toBe(false);
+    expect(await port.dispatchEscalation(repo.getById(row.qitemId)!, "later episode")).toMatchObject({ dispatched: true, resolved: false });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(port.hasAcceptedEscalation!(repo.getById(row.qitemId)!)).toBe(true);
+  });
+
   it.each([false, true, "posted", "terminated"] as const)("an accepted old human carrier is not rerouted or woken (marker=%s)", async marker => {
     await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
     await tick(engine([], false), { humanRung: "always" });

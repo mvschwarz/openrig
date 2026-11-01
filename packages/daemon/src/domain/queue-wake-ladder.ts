@@ -118,6 +118,7 @@ export const LADDER_SUSPEND_PREFIX = "ladder-suspend:";
 export const LADDER_RESUME_PREFIX = "ladder-resume:";
 
 const LADDER_ACTOR = "wake-ladder@system";
+const UNACCEPTED_CARRIER_REROUTE = "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness";
 
 export interface WakeLadderStatusSnapshot {
   lastTickAt: string | null;
@@ -278,6 +279,14 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
   let resumes = 0;
   for (const r of rows) {
     const note = r.transition_note ?? "";
+    // This unaccepted route changed owners. Its old self-skip/floor did not wake the new fallback.
+    if (note.startsWith("fallback-routed: ") && note.endsWith(`(${UNACCEPTED_CARRIER_REROUTE})`)) {
+      view.orchRung = false;
+      view.orchRungFailed = false;
+      view.exhausted = false;
+      view.exhaustedNote = null;
+      view.lastMarkerTs = null;
+    }
     const isAttempt = note.startsWith(LADDER_ATTEMPT_PREFIX);
     const isRung = note.startsWith(LADDER_RUNG_PREFIX);
     if (isAttempt) view.attempts += 1;
@@ -1610,7 +1619,7 @@ async function ensureEscalationRow(
     if (row && knownPerson(deps, row.destinationSession) && !gatewayOwnsEscalation(deps, row)) {
       deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch)
         ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession) : orch,
-        "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness");
+        UNACCEPTED_CARRIER_REROUTE);
     }
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };

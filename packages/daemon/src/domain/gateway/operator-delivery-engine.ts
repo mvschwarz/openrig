@@ -7,6 +7,7 @@
 
 import type { QueueItem, QueueRepository } from "../queue-repository.js";
 import { DispatchBuffer } from "./dispatch-buffer.js";
+import { lastMeaningfulTransition } from "../queue-waiting.js";
 import type { DispatchResult } from "./dispatcher.js";
 import type { HumanFragment, LoadResult } from "./human-registry.js";
 import { loadHumanRegistry } from "./human-registry.js";
@@ -73,9 +74,22 @@ export function makeOperatorDeliveryEngine(deps: {
     return owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
   };
   const resolvedFor = (row: QueueItem, key: string): string | null => {
-    if (deps.queueRepo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, key)) return "posted";
-    return deps.queueRepo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith("delivery-termination:")
-      && t.transitionNote.split(/\s+/).includes(`notification_key=${key}`)) ? "terminated" : null;
+    const transitions = deps.queueRepo.listTransitions(row.qitemId);
+    // Prompt aggregates keep one episode across claims. Ordinary fixed-key rows can progress into another.
+    const after = transitions.length && key === `${row.qitemId}:operator-rung` && !row.tags?.includes("wake-prompt-refusal")
+      ? lastMeaningfulTransition(deps.queueRepo.db, row.qitemId)?.id ?? 0 : 0;
+    let resolved: string | null = null;
+    for (const t of transitions) {
+      if (t.transitionId <= after) continue;
+      const note = t.transitionNote ?? "";
+      // Match the ladder: a receipt before the latest dispatch cannot resolve that dispatch.
+      if (note.startsWith("escalation-rung: operator dispatched-to-engine")) resolved = null;
+      if (note.split(/\s+/).includes(`notification_key=${key}`)) {
+        if (note.startsWith("slack-owner-notification-posted ")) resolved = "posted";
+        if (note.startsWith("delivery-termination:")) resolved = "terminated";
+      }
+    }
+    return resolved;
   };
   return {
     hasAcceptedEscalation: row => {
