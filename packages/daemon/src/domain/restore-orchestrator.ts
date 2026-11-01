@@ -1683,7 +1683,7 @@ export class RestoreOrchestrator {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
       } else {
-        this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
+        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
       }
     }
 

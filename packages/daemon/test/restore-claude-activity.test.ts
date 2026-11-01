@@ -285,6 +285,26 @@ describe("contained Claude restore activity resources", () => {
     expect(fs.existsSync(path.join(cwd, "CLAUDE.md"))).toBe(false);
   });
 
+  // The recovery projection must be awaited: an adapter whose project()
+  // suspends (real async work) must not have its warnings/gaps silently
+  // dropped because postLaunchRestore continued to the rollup first.
+  it("waits for a suspending recovery projection before reporting restore gaps", async () => {
+    const f = seed(true, false);
+    const original = adapter.project.bind(adapter);
+    vi.spyOn(adapter, "project").mockImplementation(async (planArg: ProjectionPlan, bindingArg: NodeBinding) => {
+      if (planArg.entries.some((e) => e.resourceType === "claude_activity_hooks")) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return original(planArg, bindingArg);
+    });
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps![0]).toContain("claude_activity_hooks");
+  });
+
   it("does not consult the current selection when a saved hooks entry exists", async () => {
     const f = seed(true);
     const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
