@@ -117,11 +117,12 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
       return guard ? guard.lifecycle([nodeId], fn) : fn();
     },
-    relaunchInPane: async (rigId, logicalId, snapshotId) => {
+    relaunchInPane: async (rigId, logicalId, snapshotId, relaunchOpts) => {
       const restore = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
       if (!restore) return { ok: false, effect: "none", code: "restore_unavailable", message: "This daemon has no restore orchestrator." };
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
-      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true });
+      const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
+        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
       // A refusal of the whole launch (no usable snapshot, no such seat) comes before anything is touched.
       if (!result.ok) return { ok: false, effect: "none", code: result.code ?? "launch_failed", message: result.message ?? "The seat wasn't launched from the snapshot." };
       const node = result.launched?.find((n) => n.logicalId === logicalId);

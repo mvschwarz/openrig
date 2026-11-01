@@ -127,15 +127,12 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   if (!seat.pane) {
     return { outcome: "failed_safely", reasons: ["no_bound_pane"], message: `${input.seat} has no bound tmux pane to relaunch it in. Nothing changed.` };
   }
-  // The relaunch runs the seat's saved effort. A process running with another --effort (launched by hand, or from an
-  // older setting) would come back changed with no one choosing it, so stop and show the difference. A relaunch effort
-  // that is the seat's own explicit choice is the change `rig seat set-effort` asked for, and goes ahead.
-  const effort = await relaunch.effortChange?.(nodeId, seat.pane);
-  if (effort?.running && effort.running !== effort.relaunch && !effort.relaunchIsSeatChoice) {
-    return { outcome: "failed_safely", reasons: ["effort_would_change"],
-      message: `${input.seat} runs with effort ${effort.running}, but relaunching it would use ${effort.relaunch ?? "the runtime default (no --effort)"}. `
-        + `Nothing changed. To keep ${effort.running}, run rig seat set-effort ${input.seat} ${effort.running}, then switch again.` };
-  }
+  // A switch is how a person recovers a seat from a limit or an outage, so its relaunch keeps a running process's own
+  // --effort (launched by hand, or from an older setting) in place of the seat's saved effort. The seat's explicit
+  // choice (`rig seat set-effort`) is the change a managed relaunch applies, so it goes ahead. A kept effort isn't saved
+  // as the seat's choice.
+  const effort = relaunch.effortChange ? await relaunch.effortChange(nodeId, seat.pane) : undefined;
+  const keepEffort = effort?.running && effort.running !== effort.relaunch && !effort.relaunchIsSeatChoice ? effort.running : undefined;
   const snapshot = relaunch.snapshot(rigId, nodeId);
   if (!snapshot.resumes) {
     return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
@@ -145,7 +142,7 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   touching();
   relaunch.setTokenRef(nodeId, checked.ref);
   let relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>;
-  try { relaunched = await relaunch.relaunchInPane(rigId, logicalId, snapshot.snapshotId); }
+  try { relaunched = await relaunch.relaunchInPane(rigId, logicalId, snapshot.snapshotId, keepEffort ? { effort: keepEffort } : undefined); }
   catch (err) { relaunched = { ok: false, effect: "unknown", code: "relaunch_threw", message: err instanceof Error ? err.message : String(err) }; }
   if (!relaunched.ok && relaunched.effect === "none") {
     relaunch.setTokenRef(nodeId, before);
@@ -153,6 +150,8 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
       message: `${input.seat} wasn't relaunched (${relaunched.code}: ${relaunched.message}) and wasn't touched, so it's as it was before the switch, with its token reference as it was.` };
   }
   report.loginChanged = true;
+  const effortUsed = effortNote(input.seat, effort);
+  if (effortUsed) report.effort = effortUsed;
   if (!relaunched.ok) {
     const recoveryCommand = `rig launch ${rigName} ${logicalId} --snapshot-id ${snapshot.snapshotId}`;
     report.restart = { outcome: relaunched.code, message: relaunched.message, recoveryCommand,
@@ -186,4 +185,20 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
   return { outcome: "rebind_in_progress", seat: report, message: checked.instead
     ? `Relaunched ${input.seat} in its own pane without its own token, resuming its conversation. It uses ${checked.instead}, which Claude Code ranks above its config dir's stored login.`
     : `Relaunched ${input.seat} in its own pane on its config dir's stored login, resuming its conversation. Work in flight when it stopped didn't carry over.` };
+}
+
+/** Which effort a switch's relaunch used, and why, when that isn't simply the effort already running. Nothing when no
+ *  reader is wired. */
+function effortNote(seat: string, effort: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>> | undefined): string | undefined {
+  if (effort === undefined) return undefined;
+  if (effort === null) return "the running effort couldn't be read, so the relaunch used the seat's saved effort, or the runtime default when it has none.";
+  if (effort.running === effort.relaunch) return undefined;
+  if (effort.relaunchIsSeatChoice) {
+    return `the seat's chosen effort ${effort.relaunch} (rig seat set-effort), in place of the running ${effort.running ?? "process's runtime default (no --effort flag)"}.`;
+  }
+  if (effort.running) {
+    return `kept the running effort ${effort.running}: the seat has no effort choice of its own, so the relaunch kept what it ran with. `
+      + `Its saved effort, ${effort.relaunch ?? "the runtime default (no --effort)"}, is unchanged; rig seat set-effort ${seat} <level> chooses one.`;
+  }
+  return `the running process had no --effort flag, so the relaunch used the seat's saved effort ${effort.relaunch}.`;
 }

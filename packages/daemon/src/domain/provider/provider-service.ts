@@ -69,8 +69,10 @@ export interface ClaudeSeatRelaunch {
    *  whether that one is the seat's own explicit choice (`rig seat set-effort`). null when the running process can't be read. */
   effortChange?(nodeId: string, pane: string): Promise<{ running: string | null; relaunch: string | null; relaunchIsSeatChoice: boolean } | null>;
   /** Relaunch only this seat from that snapshot in its own pane: its process ends in place, the pane and its scrollback stay,
-   *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. */
-  relaunchInPane(rigId: string, logicalId: string, snapshotId: string): Promise<{ ok: true; status: "resumed"; warnings: string[] }
+   *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. `effort`:
+   *  launch with it in place of the seat's saved effort (the running process's own, kept by a switch); it isn't saved as
+   *  the seat's choice. */
+  relaunchInPane(rigId: string, logicalId: string, snapshotId: string, opts?: { effort?: string }): Promise<{ ok: true; status: "resumed"; warnings: string[] }
     | { ok: false; effect: "none" | "unknown"; code: string; message: string }>;
 }
 
@@ -98,6 +100,8 @@ export interface SeatSwitchReport {
   restart?: { outcome: string; message: string; recoveryCommand?: string; remainingStep?: string };
   /** Claude: what the relaunch reported, such as a token it couldn't apply. */
   warnings?: string[];
+  /** Claude: which effort the relaunch used, and why, when that isn't simply the effort already running. */
+  effort?: string;
   /** Claude: false when the relaunch reported starting without the seat's token. True means no such fallback was reported;
    *  the seat's /status after a tool turn is the evidence. */
   tokenApplied?: boolean;
