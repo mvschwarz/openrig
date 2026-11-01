@@ -533,9 +533,11 @@ export interface RestoreNodeResult {
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
   /** Restore gaps that are not guidance: a resumed seat whose saved startup
-   *  context lacked a selection the current specification still makes (e.g. the
-   *  Claude activity-hook marker re-applied from the current selection). Like
-   *  guidanceGaps, this only discloses the gap; the rig rolls up partially_restored. */
+   *  context lacked a selection the current specification still makes and
+   *  whose re-apply was skipped, failed, or threw (e.g. the Claude
+   *  activity-hook marker that could not be re-applied). Like guidanceGaps,
+   *  this only discloses the gap; the rig rolls up partially_restored. A
+   *  healed re-apply or an undeterminable selection is a warning, not a gap. */
   restoreGaps?: string[];
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */

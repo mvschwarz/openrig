@@ -124,8 +124,8 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   if (allFailed) return "failed";
   // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
   if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
-  // Same for a healed restore gap (e.g. activity hooks re-applied from the current selection
-  // because the saved context predated them): the seat runs, but the restore was not whole.
+  // Same for an unhealed restore gap (e.g. a current-selection re-apply
+  // that was skipped, failed, or threw): the seat runs, but the restore was not whole.
   if (nodes.some((node) => (node.restoreGaps?.length ?? 0) > 0)) return "partially_restored";
   // A fresh launch loses a seat's conversation, except for a terminal seat, which has none.
   const lostConversation = (node: RestoreNodeResult) => (node.status === "fresh" || node.status === "fresh-primed") && !node.noConversation;
@@ -1398,11 +1398,15 @@ export class RestoreOrchestrator {
 
   /** #1530 — the saved startup context has no `claude_activity_hooks` entry.
    *  Re-apply the CURRENT selection as a marker when the current spec selects
-   *  it, and disclose the gap either way a determination is possible. The
-   *  marker is presence-only: the adapter reconciles hooks off the entry's
-   *  existence and reads none of its paths, so no install path is fabricated
-   *  and the saved context is never rewritten. Unknown selections and failed
-   *  projections are warned about, never guessed at. Never blocks the resume. */
+   *  it. A healed re-apply and an unknown selection are warnings only; a
+   *  restore gap is recorded only when a known-selected re-apply was skipped,
+   *  failed, or threw. The marker is presence-only: the adapter reconciles
+   *  hooks off the entry's existence and reads none of its paths, so no
+   *  install path is fabricated and the saved context is never rewritten.
+   *  Unknown selections are warned about, never guessed at. Never blocks
+   *  the resume. Only absolute `path:` agent refs resolve here; `local:` and
+   *  `builtin:` refs resolve to unknown (warn, no gap) because no
+   *  authoritative launch root is retained at restore time. */
   private async restoreCurrentActivityHooks(
     node: PlanEntry["node"],
     activityAdapter: import("./runtime-adapter.js").RuntimeAdapter,
@@ -1421,7 +1425,8 @@ export class RestoreOrchestrator {
     if (desired.status === "unknown") {
       const detail = `the current Claude activity-hook selection could not be determined (${desired.evidence}); no hooks were re-applied.`;
       warnings?.push(`Restore activity hooks: ${detail}`);
-      activityHookGaps?.push(`claude_activity_hooks: ${detail}`);
+      // Unknown is a warning only: nothing is known to be missing, so it
+      // must not downgrade the rig to partially_restored.
       return;
     }
     if (!desired.selected) return;
@@ -1441,7 +1446,9 @@ export class RestoreOrchestrator {
       if (result.projected.includes(marker.effectiveId)) {
         const detail = "saved startup context had no Claude activity-hook selection; the current seat specification selects it, so the current marker was re-applied without replaying startup content.";
         warnings?.push(`Restore activity hooks: ${detail}`);
-        activityHookGaps?.push(`claude_activity_hooks: ${detail}`);
+        // A healed re-apply is a warning only: the agent now has its hooks,
+        // so it must not downgrade the rig to partially_restored. A restore
+        // gap is recorded only when the re-apply was skipped, failed, or threw.
         return;
       }
       const detail = [

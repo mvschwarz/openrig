@@ -276,8 +276,7 @@ describe("contained Claude restore activity resources", () => {
     expect(recoveryCall![0].startup).toEqual({ files: [], actions: [] });
     expect(owned().length).toBeGreaterThan(0);
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
-    expect(result.result.nodes[0].restoreGaps![0]).toContain("claude_activity_hooks");
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
     expect(settings().hooks.Stop).toContainEqual(userHook);
     expect(settings().env).toEqual(originalSettings.env);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
@@ -288,7 +287,7 @@ describe("contained Claude restore activity resources", () => {
   // The recovery projection must be awaited: an adapter whose project()
   // suspends (real async work) must not have its warnings/gaps silently
   // dropped because postLaunchRestore continued to the rollup first.
-  it("waits for a suspending recovery projection before reporting restore gaps", async () => {
+  it("waits for a suspending recovery projection before packaging the restore result", async () => {
     const f = seed(true, false);
     const original = adapter.project.bind(adapter);
     vi.spyOn(adapter, "project").mockImplementation(async (planArg: ProjectionPlan, bindingArg: NodeBinding) => {
@@ -301,8 +300,7 @@ describe("contained Claude restore activity resources", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
-    expect(result.result.nodes[0].restoreGaps![0]).toContain("claude_activity_hooks");
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
   it("does not consult the current selection when a saved hooks entry exists", async () => {
@@ -335,7 +333,7 @@ describe("contained Claude restore activity resources", () => {
     if (!result.ok) return;
     expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
     expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
@@ -346,7 +344,7 @@ describe("contained Claude restore activity resources", () => {
     if (!result.ok) return;
     expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
   it("discloses a skipped recovery projection instead of reporting success", async () => {
@@ -419,7 +417,7 @@ profiles:
     if (!result.ok) return;
     expect(owned().length).toBeGreaterThan(0);
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
   });
 
@@ -438,6 +436,6 @@ profiles:
     if (!result.ok) return;
     expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
-    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 });
