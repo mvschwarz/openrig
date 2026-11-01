@@ -19,6 +19,8 @@ import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-deliv
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import type { LoadResult } from "../src/domain/gateway/human-registry.js";
 import { GatewayDispatcher } from "../src/domain/gateway/dispatcher.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -283,6 +285,49 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(await port.dispatchEscalation(repo.getById(row.qitemId)!, "later episode")).toMatchObject({ dispatched: true, resolved: false });
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     expect(port.hasAcceptedEscalation!(repo.getById(row.qitemId)!)).toBe(true);
+  });
+
+  it("a later ordinary episode posts once after the real gateway ACKed its earlier delivery", async () => {
+    const source = await repo.create({ sourceSession: "sender@fixture", destinationSession: "relay@fixture", body: "work", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@fixture", toSession: seat, nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_result=?, last_nudge_attempt=? WHERE qitem_id=?")
+      .run("failed:offline", new Date(Date.now() - 600_000).toISOString(), created.qitemId);
+    const posts: unknown[] = []; const port = engine(posts); const buffer = new DispatchBuffer(home);
+    const delivered = new SeenStore(join(home, "state", "slack-delivered-decisions.jsonl"));
+    const opts = { humanRung: "always" as const, retryCap: 0, attemptWake: async () => "failed:offline" };
+    await tick(port, opts);
+    const firstKey = notes(created.qitemId).join(" ").match(/notification_key=(\S+)/)![1]!;
+    await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(buffer.pending()).toEqual([]);
+      expect(delivered.load().has(`operator:${firstKey}`)).toBe(true); });
+    await tick(port, opts);
+    expect(notes(created.qitemId).some(n => n.startsWith("ladder-exhausted:"))).toBe(true);
+    await repo.update({ qitemId: created.qitemId, actorSession: seat, transitionNote: "continued work; another wake is needed" });
+    await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+    await tick(port, { ...opts, now: new Date(Date.now() + 360_000) });
+    await vi.waitFor(() => { expect(posts).toHaveLength(2); expect(buffer.pending()).toEqual([]); });
+    const receipts = notes(created.qitemId).filter(n => n.startsWith("slack-owner-notification-posted "));
+    expect(receipts).toHaveLength(2);
+    const secondKey = receipts[1]!.match(/notification_key=(\S+)/)![1]!;
+    expect(secondKey).not.toBe(firstKey); expect(delivered.load().has(`operator:${secondKey}`)).toBe(true);
+    await tick(port, { ...opts, now: new Date(Date.now() + 480_000) });
+    const transitions = repo.listTransitions(created.qitemId);
+    expect(transitions.at(-1)!.transitionNote).toContain("ladder-exhausted:");
+    await tick(port, { ...opts, now: new Date(Date.now() + 600_000) });
+    expect(posts).toHaveLength(2); expect(buffer.pending()).toEqual([]);
+  });
+
+  it.each([false, true])("legacy fixed-key custody survives in the same ordinary episode (ACKed=%s)", async acked => {
+    const row = await refusal(); const posts: unknown[] = []; const port = engine(posts);
+    const key = `${row.qitemId}:operator-rung`;
+    const accepted = wires.at(-1)!.dispatcher.dispatch(OUTBOUND_OP, "human-owner@external", {
+      qitemId: row.qitemId, notificationKey: key, destinationSession: "human-owner@external", sourceSession: row.sourceSession,
+      body: row.body, ownerNotificationLevel: "ALERT", tags: ["escalation"],
+    }, { decisionId: `operator:${key}` });
+    expect(accepted.ok).toBe(true);
+    if (acked) await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(new DispatchBuffer(home).pending()).toEqual([]); });
+    expect(port.hasAcceptedEscalation!(row)).toBe(true);
+    expect(await port.dispatchEscalation(row, "same episode")).toMatchObject({ dispatched: true, resolved: acked });
+    await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(new DispatchBuffer(home).pending()).toEqual([]); });
   });
 
   it.each([false, true, "posted", "terminated"] as const)("an accepted old human carrier is not rerouted or woken (marker=%s)", async marker => {
