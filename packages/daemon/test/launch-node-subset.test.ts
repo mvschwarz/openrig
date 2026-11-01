@@ -797,8 +797,21 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       (orchestrator as any).nodeLauncher = fastLauncher;
       const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepPane: true });
       expect(result.launched).toEqual([expect.objectContaining({ status: "failed", error: expect.stringContaining("did not exit") })]);
+      // TERM and KILL were sent, and a death probe that keeps failing looks exactly like this: the process may have ended,
+      // so the result doesn't claim nothing was stopped.
+      expect(result.launched![0]).not.toHaveProperty("nothingStopped");
       expect((tmux as any).signalPaneProcess).toHaveBeenCalledWith("%7", "KILL");
       expect((tmux as any).respawnPane).not.toHaveBeenCalled();
+    });
+
+    it("a pane that isn't in the session is left alone, and the result says nothing was stopped", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      Object.assign(tmux, { listPanes: vi.fn(async () => [{ id: "%8", index: 0, cwd: "/", width: 80, height: 24, active: true }]) });
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepPane: true });
+      expect(result.launched).toEqual([expect.objectContaining({ status: "failed", nothingStopped: true, error: expect.stringContaining("nothing was stopped") })]);
+      expect((tmux as any).signalPaneProcess).not.toHaveBeenCalled();
     });
 
     it("the takeover keeps its guarded seat target when another binding retains the same pane id", async () => {

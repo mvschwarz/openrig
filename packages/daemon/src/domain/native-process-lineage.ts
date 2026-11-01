@@ -71,6 +71,12 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
     && /\/\.local\/share\/claude\/versions\/\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(token);
 }
 
+/** Whether a process command names a Claude executable anywhere in its argv: `claude` by name, or the native
+ *  installer's versioned path (whose process runs as its version, not as `claude`). */
+export function commandNamesClaude(command: string): boolean {
+  return tokens(command).some((token) => claudeExecutable(token));
+}
+
 // Nixpkgs packages Claude as a wrapper that execs its sibling `.claude-unwrapped`
 // (wrapProgram: `.claude-wrapped`) with argv[0] inherited. Linux truncates that OS
 // name to 15 bytes, so ucomm reads `.claude-unwrapp`.
