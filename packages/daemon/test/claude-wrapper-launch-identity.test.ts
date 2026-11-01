@@ -105,3 +105,47 @@ it("leaves a Nix wrapProgram launch (also a #! script) as it is today", async ()
   // And a different launch's wrapper still does not prove it.
   expect(await verifyClaudePaneProcess(nixInput({ selectedExecutable: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-claude-code-2.1.281/bin/claude" }))).toBeNull();
 });
+
+// #2341: a wrapper that starts Claude WITHOUT exec stays the pane's foreground group leader, running the frozen script
+// (`/bin/sh <wrapper> …`), and Claude is its child under any name (here a versioned binary outside the native layout).
+const elf = "/opt/claude-runtime/2.1.316";
+const launched = `--permission-mode auto --session-id ${token} --name seat@rig`;
+function nonExec(patch: Partial<NativeProcessRow> = {}, wrapperCommand = `/bin/sh ${wrapper} ${launched}`): NativeProcessRow[] {
+  return [
+    { pid: 20, ppid: 1, pgid: 20, tpgid: 21, executableName: "bash", command: "/bin/bash", startedAt },
+    { pid: 21, ppid: 20, pgid: 21, tpgid: 21, executableName: "claude", command: wrapperCommand, startedAt },
+    { pid: 22, ppid: 21, pgid: 21, tpgid: 21, executableName: "2.1.316", command: `${elf} ${launched}`, startedAt, ...patch },
+  ];
+}
+const nonExecInput = (list: () => NativeProcessRow[], extra: Record<string, unknown> = {}) =>
+  input(list, { tmux: { getPanePid: async () => 20 }, ...extra });
+
+it("proves the Claude that a non-exec #! wrapper started, as the direct child of the process running the frozen script", async () => {
+  expect((await verifyClaudePaneProcess(nonExecInput(() => nonExec())))?.process.pid).toBe(22);
+  expect((await verifyClaudePaneRuntime(nonExecInput(() => nonExec())))?.process.pid).toBe(22);
+});
+
+it("accepts the script after one shebang option (`#!/bin/bash -e`)", async () => {
+  const list = () => nonExec({}, `/bin/bash -e ${wrapper} ${launched}`);
+  expect((await verifyClaudePaneProcess(nonExecInput(list)))?.process.pid).toBe(22);
+});
+
+const nonExecRefused: [string, () => NativeProcessRow[], Record<string, unknown>?][] = [
+  ["a child naming another conversation", () => nonExec({ command: `${elf} --session-id 00000000-0000-4000-8000-000000000002` })],
+  ["a child naming no conversation", () => nonExec({ command: `${elf} --print hello` })],
+  ["a parent running another script", () => nonExec({}, `/bin/sh /home/user/.local/bin/other ${launched}`)],
+  ["a script path that is only an argument", () => nonExec({}, `/bin/sh -c 'exec x' ${wrapper} ${launched}`)],
+  ["a child outside the foreground group", () => nonExec({ pgid: 88 })],
+  ["a grandchild of the script", () => [...nonExec({ executableName: "sh", command: "/bin/sh -c run-claude" }), { ...nonExec()[2]!, pid: 23, ppid: 22 }]],
+  ["two children naming the conversation", () => [...nonExec(), { ...nonExec()[2]!, pid: 23 }]],
+  ["a launch that wasn't a script", () => nonExec(), { scriptLaunch: false }],
+  ["another launch's wrapper", () => nonExec(), { selectedExecutable: "/home/user/.local/bin/claude-other" }],
+];
+it.each(nonExecRefused)("still refuses %s", async (_name, list, extra = {}) => {
+  expect(await verifyClaudePaneProcess(nonExecInput(list, extra))).toBeNull();
+});
+
+it("refuses a non-exec child whose process changes between the two samples", async () => {
+  let reads = 0;
+  expect(await verifyClaudePaneProcess(nonExecInput(() => nonExec(reads++ === 0 ? {} : { pid: 24 })))).toBeNull();
+});
