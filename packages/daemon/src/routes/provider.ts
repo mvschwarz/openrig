@@ -16,7 +16,7 @@ import type { SessionRegistry } from "../domain/session-registry.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
 import { processArgv, verifyClaudePaneRuntime, type NativeProcessLister } from "../domain/native-process-lineage.js";
-import { emittedEffortFromArgv, readSeatEffort } from "../domain/seat-effort.js";
+import { emittedEffortFromArgv, readSeatEffort, type LaunchEffortSelection } from "../domain/seat-effort.js";
 import type { ProviderKind } from "../domain/provider/provider-types.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
@@ -121,10 +121,11 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const restore = c.get("restoreOrchestrator" as never) as RestoreOrchestrator | undefined;
       if (!restore) return { ok: false, effect: "none", code: "restore_unavailable", message: "This daemon has no restore orchestrator." };
       const adapters = (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? {};
-      // The effort restore's launch selected, when this relaunch asked it to keep one.
-      const heard: { effort?: { effort: string | null; kept: boolean } } = {};
+      // The effort restore's launch selected, and why, heard on every relaunch.
+      const heard: { effort?: LaunchEffortSelection } = {};
       const result = await restore.launchSingleNode(rigId, logicalId, { snapshotId, adapters, fsOps: { exists: (p: string) => fs.existsSync(p) }, keepPane: true,
-        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort, onLaunchEffort: (selected: { effort: string | null; kept: boolean }) => { heard.effort = selected; } } : {}) });
+        onLaunchEffort: (selected: LaunchEffortSelection) => { heard.effort = selected; },
+        ...(relaunchOpts?.effort ? { keepEffort: relaunchOpts.effort } : {}) });
       const effort = heard.effort ? { effort: heard.effort } : {};
       // A refusal of the whole launch (no usable snapshot, no such seat) comes before anything is touched.
       if (!result.ok) return { ok: false, effect: "none", code: result.code ?? "launch_failed", message: result.message ?? "The seat wasn't launched from the snapshot." };

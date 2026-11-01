@@ -9,6 +9,7 @@ import type { RestartInPlaceResult } from "../seat-lifecycle-service.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 import type { ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import type { CredentialPrecedence } from "../claude-credential-precedence.js";
+import type { LaunchEffortSelection } from "../seat-effort.js";
 
 export interface ProviderPrecheckInput {
   seat: string;
@@ -72,10 +73,10 @@ export interface ClaudeSeatRelaunch {
    *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. `effort`:
    *  launch with it in place of the seat's saved effort (the running process's own, kept by a switch), unless the seat
    *  has an explicit choice when restore's launch reads it; it isn't saved as the seat's choice. The result's `effort` is
-   *  what that launch selected, and whether it was the kept one. */
+   *  what that launch selected and why, on every relaunch that reached the selection. */
   relaunchInPane(rigId: string, logicalId: string, snapshotId: string, opts?: { effort?: string }): Promise<
-    | { ok: true; status: "resumed"; warnings: string[]; effort?: { effort: string | null; kept: boolean } }
-    | { ok: false; effect: "none" | "unknown"; code: string; message: string; effort?: { effort: string | null; kept: boolean } }>;
+    | { ok: true; status: "resumed"; warnings: string[]; effort?: LaunchEffortSelection }
+    | { ok: false; effect: "none" | "unknown"; code: string; message: string; effort?: LaunchEffortSelection }>;
 }
 
 /** What would outrank a Claude seat's own token at its next launch (`ClaudeManagedLaunch.credentialPrecedence`). */
