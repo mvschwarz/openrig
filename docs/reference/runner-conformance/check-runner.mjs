@@ -461,8 +461,9 @@ const cases = {
         r.check("OpenRig records the prompt; the runner doesn't post permission_prompt itself", h.hooks("Notification", "permission_prompt").length === 0,
           "the runner posted permission_prompt for a created ask");
         const reads = h.permissionCalls("GET");
-        r.check("each read waits at most 25 s", reads.length > 0 && reads.every((p) => Number(p.query.waitSeconds) >= 1 && Number(p.query.waitSeconds) <= 25),
-          reads.map((p) => p.query.waitSeconds).join(", "));
+        // Section 7 bounds the wait at 25 s and no lower; OpenRig's read takes 0 to 25 or none.
+        r.check("each read waits at most 25 s", reads.length > 0 && reads.every((p) => p.query.waitSeconds === undefined || Number(p.query.waitSeconds) <= 25),
+          reads.map((p) => p.query.waitSeconds ?? "(none)").join(", "));
         r.check("after the answer, the turn's end is reported as usual", h.hooks("Stop", "end_turn").length > 0, "no Stop/end_turn after delivery");
       }
     }
