@@ -45,6 +45,9 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
     const rigRepo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
     const rig = rigRepo.createRig("rotation");
     const node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code" });
+    // resume-stale-generation: an earlier occupant of this seat, registered and no longer current (#2341 keeps an
+    // unregistered generation from moving the token; a real earlier occupant's hook keeps today's write).
+    const earlier = mode === "resume-stale-generation" ? registry.mintOccupantTenure(node.id, "initial").generationUuid : undefined;
     const session = registry.registerSession(node.id, name);
     registry.updateStatus(session.id, "running");
     registry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%1" });
@@ -112,7 +115,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
       // case, a parent whose relay never ran, so the child claims first and only process binding
       // refuses it.
       const resumeLaunchFirst = !(mode === "resume-after-launch-hook" || mode === "resume-in-process-missed-first");
-      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? "an-earlier-generation" : generation, resumeLaunch, hookPid, resumeLaunchFirst });
+      await hook(rotated, undefined, { source, generation: mode === "resume-stale-generation" ? earlier : generation, resumeLaunch, hookPid, resumeLaunchFirst });
       if (mode === "resume-then-clear" || mode === "resume-clear-resume") await hook(third, undefined, { source: "clear", generation });
       if (mode === "resume-clear-resume") await hook(rotated, undefined, { source: "resume", generation, resumeLaunch });
     } else if (mode !== "unchanged" && !tokenOnly) {
