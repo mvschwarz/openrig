@@ -44,11 +44,11 @@ import * as path from "node:path";
  *   is held, visibly, while the box holds text or can't be read.
  * - Definite pre-write prep failures retry at most three times. Uncertain
  *   delivery never replays. Unfinished preparation stops visibly until an
- *   explicit retry; it cannot arm a delayed compact after its deadline.
+ *   explicit retry. A completed automatic map keeps its bounded idle grace.
  * - Pre-compact prep: the first threshold crossing sends a normal
  *   user-channel prompt asking Claude to load the restore skill and
  *   write an attempt-bound restore map. Existing polls send /compact only after
- *   atomic publication of that completed artifact, within the preparation deadline.
+ *   atomic publication of that completed artifact, within the bounded map/idle wait.
  * - Post-compact restore: after a successful auto-compact, the enforcer
  *   first sends a turn-boundary handshake when the pane is idle, independently
  *   of trigger usage (including stale or unknown samples), then sends the
@@ -145,6 +145,7 @@ export type EnforcerSkipReason =
   | "stale_observation"
   | "preparation_pending"
   | "preparation_incomplete"
+  | "map_complete_seat_never_idle"
   | "preparation_stopped"
   | "preparation_directory_unavailable"
   | "occupant_generation_unavailable"
@@ -456,6 +457,8 @@ export interface PreparationState {
    *  the send's outcome was lost (never replayed). */
   compact: "not_sent" | "submitted_unconfirmed" | "uncertain";
   deadlineAt: number | null;
+  /** A completed automatic map may wait for idle until the original deadline plus the retry interval. */
+  idleDeadlineAt?: number;
   reason?: string;
   /** A record too old to resume that this attempt replaced (see `getStrandedCompaction`): its restore may have been owed. */
   supersedes?: StrandedCompaction;
@@ -560,7 +563,7 @@ export class ClaudeCompactionEnforcer {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly postCompactSendWaitMs: number;
-  /** The longest one /compact send waits for an idle seat (both paths), always within the attempt's deadline. */
+  /** The longest one /compact send waits for an idle seat, within the map/idle deadline. */
   private readonly compactSendIdleWaitMs: number;
   private readonly restoreCarry = new Map<string, RestoreCarry>();
   private readonly lastAutoCompactAt = new Map<string, number>();
@@ -747,6 +750,22 @@ export class ClaudeCompactionEnforcer {
       const policy = this.settingsStore.resolveClaudeCompactionPolicy();
       if (!isValidThresholdPercent(policy.thresholdPercent)) return { triggered: false, reason: "invalid_policy" };
       return (await this.drainPendingStage(unsampled, policy)) ?? { triggered: false, reason: "no_pending_stage" };
+    });
+  }
+
+  /** Finish only an already-armed automatic map when usage has gone stale; never request another preparation. */
+  async drainPendingPreparedCompact(input: Omit<EnforcerInput, "usedPercentage">): Promise<EnforcerOutcome> {
+    const unsampled = { ...input, usedPercentage: null };
+    this.recoverSeat(input);
+    this.reconcilePreparations();
+    const attempt = this.pendingPreCompactPrep.get(input.sessionName);
+    if (input.runtime !== "claude-code" || attempt?.mode !== "automatic" || attempt.status !== "waiting"
+      || attempt.delivery === "pending" || !this.mapReady(attempt)) return { triggered: false, reason: "no_pending_stage" };
+    if (!isValidThresholdPercent(this.settingsStore.resolveClaudeCompactionPolicy().thresholdPercent))
+      return { triggered: false, reason: "invalid_policy" };
+    return this.withDeliveryGuard(unsampled, async () => {
+      const result = await this.sendPreparedCompact(unsampled, attempt, false);
+      return result.ok ? { triggered: true } : { triggered: false, reason: result.reason === "waiting_for_idle" ? "waiting_for_idle" : "send_failed" };
     });
   }
 
@@ -1156,7 +1175,7 @@ export class ClaudeCompactionEnforcer {
     let idle;
     do {
       const remaining = attempt.deadlineAt! - this.now();
-      if (remaining <= 0) return failed("preparation_incomplete");
+      if (remaining <= 0) return failed(this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
       try { idle = await this.sessionTransport.waitUntilIdle(input.sessionName, remaining, attempt.controller.signal); }
       catch { idle = { ok: false, reason: "transport_unavailable" }; }
       this.reconcilePreparations();
@@ -1348,7 +1367,7 @@ export class ClaudeCompactionEnforcer {
       // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, attempt.deadlineAt - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
@@ -1372,11 +1391,11 @@ export class ClaudeCompactionEnforcer {
       const notSent = !writeAttempted && (guardRefused || result.outcome === "retained" || result.sent === false);
       if (notSent && marked) this.persist(input.sessionName, attempt.attemptId, { compactSending: undefined });
       // Only a known pre-input idle deferral keeps the automatic attempt armed for a later poll; the transport
-      // marks those `not_reached`. reconcilePreparations still ends it at the deadline or on an occupant change.
+      // marks those `not_reached`. Reconciliation still bounds the idle grace and stops on an occupant change.
       // A typing-guard draft hold (`draft_*`) is `not_reached` too, but it is a refusal, not an idle wait: it stops
       // as not sent, and a fresh attempt may begin after the retry cooldown.
       const draftHold = typeof result.reason === "string" && result.reason.startsWith("draft_");
-      if (attempt.mode === "automatic" && notSent && phase === "not_reached" && !draftHold) {
+      if (attempt.mode === "automatic" && attempt.status === "waiting" && notSent && phase === "not_reached" && !draftHold) {
         return { ok: false, reason: "waiting_for_idle" };
       }
       // A compact may have been sent despite a lost result. Never replay automatically.
@@ -1433,6 +1452,13 @@ export class ClaudeCompactionEnforcer {
     return completed ? { attemptMapPath: completed, noMapRequired: false } : { attemptMapPath: null, noMapRequired: true };
   }
 
+  /** Reuse the retry interval a new automatic preparation would otherwise wait through. The original deadline stays
+   *  fixed (and persisted), so polls and daemon restarts cannot reset this grace. Manual requests keep their budget. */
+  private compactDeadline(attempt: PreparationAttempt): number | null {
+    return attempt.deadlineAt === null ? null : attempt.deadlineAt
+      + (attempt.mode === "automatic" && this.mapReady(attempt) ? this.autoRetryAfterStopMs : 0);
+  }
+
   /** Existing monitor polls and manual waits call this even when context usage is stale. */
   reconcilePreparations(): void {
     if (this.pendingPreCompactPrep.size === 0) return;
@@ -1443,7 +1469,9 @@ export class ClaudeCompactionEnforcer {
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
       if (generation !== attempt.occupantGeneration) this.stopPreparation(session, "stale_generation");
       else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
-      else if (attempt.deadlineAt !== null && this.now() >= attempt.deadlineAt) this.stopPreparation(session, "preparation_incomplete");
+      else if (attempt.deadlineAt !== null && this.now() >= this.compactDeadline(attempt)!) {
+        this.stopPreparation(session, this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete");
+      }
       if (enabled) attempt.policyWasEnabled = true;
     }
   }
@@ -1597,7 +1625,8 @@ export class ClaudeCompactionEnforcer {
     if (!attempt) return null;
     const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, preparationRoot: _preparationRoot,
       compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, ...state } = attempt;
-    return state;
+    return { ...state, ...(attempt.mode === "automatic" && attempt.deadlineAt !== null && this.mapReady(attempt)
+      ? { idleDeadlineAt: this.compactDeadline(attempt)! } : {}) };
   }
 
   /** OPR.0.4.3.14 — read the surfaced manual-trigger state for a seat (AC-3). */

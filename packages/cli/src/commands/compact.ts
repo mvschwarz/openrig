@@ -52,10 +52,13 @@ from --state, asking it to skip reading if it did not compact; a retry would com
 An explicit retry still waits for the live pane to be idle; no automatic retry follows
 cancellation. --skip-map skips only the map requirement for this one
 manual request. Cancel an active preparation before retrying or using --skip-map.
-Automatic preparation waits at most 25 minutes from prep delivery, using existing
-polls. A stopped attempt does not restart automatically; rerun this command to
-start a fresh attempt. Cancellation disarms future input; it cannot undo a command
-already submitted. Raw provider /compact and normal messages are unchanged.`);
+Automatic preparation allows 25 minutes from prep delivery for the map. A completed
+map stays armed for idle through the next retry interval (10 minutes by default),
+without another preparation prompt; --state includes idleDeadlineAt. A completed
+map that never reaches idle reports map_complete_seat_never_idle; an unfinished
+map reports preparation_incomplete. Manual requests still share one 180-second budget.
+Stopped attempts may retry automatically after the cooldown; cancellation does not.
+Cancellation disarms future input; it cannot undo a command already submitted. Raw provider /compact and normal messages are unchanged.`);
 
   const getDepsF = (): CompactDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
