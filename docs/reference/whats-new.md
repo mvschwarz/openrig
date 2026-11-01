@@ -1,8 +1,9 @@
 # What changed in OpenRig 0.7.7
 
 This note is for an agent on an install that was just upgraded to 0.7.7. OpenRig
-0.7.7 is 0.7.6 with one fix. If you upgraded from 0.7.5 or earlier, also read
-"What changed in OpenRig 0.7.6" below. For the full capability map, read
+0.7.7 is 0.7.6 with three reliability fixes for managed Claude seats. If you
+upgraded from 0.7.5 or earlier, also read "What changed in OpenRig 0.7.6" below.
+For the full capability map, read
 `rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
 daemon starts, `rig context get reference/whats-new.md` describes this version.
 Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`;
@@ -15,7 +16,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
 - The bundled openrig-core plugin stays at 0.1.23 with unchanged files, so there
   is no managed plugin refresh.
 
-## The fix
+## The fixes
 
 - A Claude seat at an empty prompt reads idle again when Claude prints
   "✔ Update installed · /restart to apply" (or "Restart to apply") below its mode
@@ -23,14 +24,29 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   read unknown and managed compaction waited for an idle prompt it could not see.
   Both spellings are recognized; lines that only look similar still read unknown.
   ([#2311](https://github.com/mvschwarz/openrig/pull/2311))
+- Managed compaction checks the input box before it pastes its preparation
+  prompt, `/compact` or a restore prompt, even with the typing guard off. Typed,
+  unreadable or changed input holds that step. A manual `rig compact` then says it
+  stopped to preserve the input box; read `rig compact <seat> --state` and retry
+  once the box is empty. A held restore prompt waits and goes ahead on its own once
+  the box is empty. An empty box or a high-confidence suggestion goes ahead.
+  Ordinary `rig send` and the typing-guard defaults are unchanged.
+  ([#2347](https://github.com/mvschwarz/openrig/pull/2347))
+- A Claude seat whose `claude` is a `#!` wrapper that starts the real Claude without
+  `exec` can be rebuilt again (`rig seat handover --source rebuild`): readiness also
+  accepts the wrapper's direct child when it names this launch's conversation token,
+  and refuses every other process as before. A rebuild that fails no longer leaves
+  the seat's resume target on the new, unprimed conversation.
+  ([#2341](https://github.com/mvschwarz/openrig/issues/2341), [#2354](https://github.com/mvschwarz/openrig/pull/2354))
 
 ## Limits to keep in view
 
-- This fixes only that line. Other reasons managed compaction can wait are
-  unchanged.
-- It does not fix Claude seat rebuilds that stop at "Waiting to confirm the new
-  Claude process in this pane" on some Linux hosts
-  ([#2341](https://github.com/mvschwarz/openrig/issues/2341)).
+- Other reasons managed compaction can wait are unchanged.
+- The input-box check is a read just before the paste, not a lock: typing that
+  starts in the same moment can still be appended to.
+- If a seat's current occupant generation was never registered (an adopted Claude
+  with another generation, or a managed launch whose tenure record failed to write),
+  hooks don't move its resume token after the first one.
 - The 0.7.6 limits below still apply.
 
 ---
