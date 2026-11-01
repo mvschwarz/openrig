@@ -167,8 +167,8 @@ export class ContextMonitor {
    * data and absorbs enforcer errors so a trigger-path fault never
    * crashes telemetry polling.
    *
-   * Only a fresh, known sample can start a compaction. A stale or unknown
-   * sample still drains a post-compact stage that is already pending: the
+   * Only a fresh, known sample can start a preparation. A stale or unknown
+   * sample can finish an already-armed complete map or drain a pending restore: the
    * seat may take no turn after /compact, and only a turn refreshes its
    * sample.
    */
@@ -191,6 +191,11 @@ export class ContextMonitor {
         });
         return;
       }
+      const prepared = await this.compactionEnforcer.drainPendingPreparedCompact?.({
+        nodeId: session.node_id, sessionName: session.session_name, cwd: session.cwd, runtime: session.runtime,
+        isObservationCurrent: () => this.isCurrentSession(session),
+      });
+      if (prepared && (prepared.triggered || prepared.reason !== "no_pending_stage")) return;
       if (!this.compactionEnforcer.hasPendingPostCompactStage?.(session.session_name, { cwd: session.cwd, runtime: session.runtime })) return;
       await this.compactionEnforcer.drainPendingPostCompactStage({
         sessionName: session.session_name,

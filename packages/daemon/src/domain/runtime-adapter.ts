@@ -8,6 +8,7 @@ import type { ClaudeResumeRotation } from "./native-process-lineage.js";
 // The startup orchestrator (AS-T07) constructs NodeBinding from Binding + node.cwd.
 
 export interface NodeBinding extends Binding {
+  environmentRestore?: NonNullable<import("./types.js").SnapshotData["environmentBindingsByNode"]>[string];
   cwd: string;
   /** In-place Claude continuation only: executable observed before the old process exits. */
   claudeExecutable?: string;
@@ -224,7 +225,7 @@ export interface ForkSource {
 export interface RuntimeAdapter {
   /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
   readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate">;
-  preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; forkSource?: unknown }): Promise<void>;
+  preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void>;
   prepareEnvironmentStartup?(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
   /** Claude's managed capability/launch seam, shared with seat selection. */
   readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;

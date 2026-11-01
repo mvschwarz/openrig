@@ -14,12 +14,12 @@ const planId = "0123456789abcdef".repeat(4);
 const label = (id = "kernel", token = "l1") => `openrig:${id}#${planId.slice(0, 16)}#${token}`;
 interface Tab { workspace_id: string; tab_id: string; label: string }
 const spaceLabels: Record<string, string> = { "openrig-kernel": "openrig kernel", "old-name": "switchboard" };
-function fixture(tabs: Tab[] = [], id = "kernel", session?: string) {
+function fixture(tabs: Tab[] = [], id = "kernel", session?: string, localTmuxServer?: string[]) {
   const socketPath = session === undefined ? "/daemon home/herdr.sock" : `/daemon home/sessions/${session}/herdr.sock`;
   const panes = composeView(id, ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat,
     tmuxSession: `fixture-${seat}`, host: null, readOnly: false, alive: true,
-  })), { resolveHost: () => null, localTmux: "/fixture/bin/tmux" }).opened;
-  const composed = { id, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
+  })), { resolveHost: () => null, localTmux: "/fixture/bin/tmux", localTmuxServer }).opened;
+  const composed = { id, localTmuxServer, opened: panes, pages: [panes], absent: [] as Array<{ seat: string; host: string | null; reason: string }>, degraded: [] as Array<{ seat: string; host: string; reason: string }> };
   const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("preview") ? {
     planId, composed, ...(session !== undefined ? { session } : {}),
     status: { launch: { socketPath, ...(session !== undefined ? { session } : {}) } },
@@ -57,7 +57,7 @@ function fixture(tabs: Tab[] = [], id = "kernel", session?: string) {
   };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
-    clientFactory: () => ({ baseUrl: "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
+    clientFactory: () => ({ baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
   };
   return { tabs, composed, workspaces, list, focus, paneList, processInfo, clients, exec, post, get, socketPath, windowDeps, run: (args: string[] = ["--json"]) => new Command().addCommand(terminalCommand(deps)).parseAsync(["terminal", "open", `saved:${id}`, ...args], { from: "user" }) };
 }
@@ -72,6 +72,15 @@ describe("reopening a Herdr view in a desktop window", () => {
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
   });
   afterEach(() => { process.exitCode = originalExit; vi.restoreAllMocks(); });
+
+  it("confirms Herdr clients only on the daemon's selected server", async () => {
+    const socket = "/private/openrig instance.sock";
+    const f = fixture([{ workspace_id: "old", tab_id: "first", label: label() }], "kernel", undefined, ["-S", socket]);
+    await f.run();
+    expect(f.focus).toHaveBeenCalledExactlyOnceWith("first");
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.exec).toHaveBeenCalledWith("/fixture/bin/tmux", ["-S", socket, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+  });
 
   it.each([[undefined, true], ["daemon-named", true], [undefined, false], ["daemon-named", false]] as const)("following binds the exact custom endpoint before tab selection (session=%s matches=%s)", async (session, matches) => {
     const f = fixture([{ workspace_id: "follow-w", tab_id: "follow-t", label: "following" }], "kernel", session);

@@ -38,6 +38,7 @@ function harness(opts: {
   nextLaunch?: ReturnType<ClaudeSeatRelaunch["nextLaunch"]>;
   relaunch?: Relaunched | (() => Promise<Relaunched>);
   exclusive?: (fn: () => Promise<unknown>) => Promise<unknown>;
+  effort?: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>>;
 } = {}) {
   const calls: string[] = [];
   let ref: ClaudeSeatTokenRef | null = opts.ref ?? null;
@@ -57,6 +58,7 @@ function harness(opts: {
       queue = run.catch(() => undefined);
       return run;
     },
+    ...(opts.effort === undefined ? {} : { effortChange: async (nodeId: string, pane: string) => { calls.push(`effort ${nodeId} ${pane}`); return opts.effort!; } }),
     relaunchInPane: async (rigId, logicalId, snapshotId) => {
       calls.push(`relaunch ${rigId} ${logicalId} ${snapshotId} with ${ref ? ref.label : "no reference"}`);
       return typeof opts.relaunch === "function" ? opts.relaunch() : opts.relaunch ?? RESUMED;
@@ -73,6 +75,35 @@ function harness(opts: {
 const to = (account: string, file: string | null) => ({ seat: SEAT, toAccount: account, tokenFile: file, forceUnsafe: false });
 
 describe("rig provider switch --seat moves a Claude seat to its own subscription token on the same conversation, in its own pane", () => {
+  // The relaunch runs the seat's saved effort. A process running with another one would come back changed without anyone
+  // choosing it, so the switch stops before touching the seat and shows the difference, unless the relaunch's effort is the
+  // seat's own explicit choice (`rig seat set-effort`), which a managed relaunch is meant to apply.
+  it("stops before touching a seat whose running --effort its relaunch would drop, and shows the difference", async () => {
+    const h = harness({ effort: { running: "high", relaunch: null, relaunchIsSeatChoice: false } });
+    const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "failed_safely", reasons: ["effort_would_change"] });
+    expect(result.message).toContain("effort high");
+    expect(result.message).toContain("the runtime default");
+    expect(result.message).toContain(`rig seat set-effort ${SEAT} high`);
+    expect(h.calls).toContain("effort node-a %7");
+    expect(h.calls.some((call) => call.startsWith("setTokenRef") || call.startsWith("snapshot") || call.startsWith("relaunch"))).toBe(false);
+    expect(h.ref()).toBeNull();
+  });
+
+  it("relaunches when the seat's explicit effort choice is what changes, when the running process has no flag, or when it can't be read", async () => {
+    for (const effort of [
+      { running: "high", relaunch: "low", relaunchIsSeatChoice: true },
+      { running: null, relaunch: "high", relaunchIsSeatChoice: false },
+      { running: "high", relaunch: "high", relaunchIsSeatChoice: false },
+      null,
+    ]) {
+      const h = harness({ effort });
+      const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+      expect(result.outcome).toBe("rebind_in_progress");
+      expect(h.calls.some((call) => call.startsWith("relaunch"))).toBe(true);
+    }
+  });
+
   it("switches to an API-key reference and back without changing the resumed conversation", async () => {
     const h = harness();
     const file = tokenFile();
@@ -137,11 +168,12 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(h.calls.some((call) => call.startsWith("relaunch"))).toBe(false);
   });
 
-  it("a relaunch refused before the seat was touched puts the reference back, and the seat keeps running as it was", async () => {
+  it("a relaunch refused before the seat was touched puts the reference back, and says the seat is as it was, never that it runs", async () => {
     const before = { label: "personal", tokenFile: tokenFile() };
     const h = harness({ ref: before, relaunch: { ok: false, effect: "none", code: "awaiting-decision", message: "Restore stopped for a decision." } });
     const r = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
-    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["relaunch_awaiting_decision"], message: expect.stringContaining("keeps running as it was") });
+    expect(r).toMatchObject({ outcome: "failed_safely", reasons: ["relaunch_awaiting_decision"], message: expect.stringContaining("as it was before the switch") });
+    expect(r.message).not.toContain("keeps running");
     expect(h.ref()).toEqual(before);
   });
 

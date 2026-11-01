@@ -1,6 +1,6 @@
 // Real daemon routes, kernel composition/plan hashing, both clients and the window opener.
 // HTTP stays in-process; provider availability, tmux commands and desktop launching are simulated.
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { DaemonClient as CliClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
@@ -8,6 +8,8 @@ import { DaemonClient as TuiClient } from "../../tui/src/daemon-client.js";
 import { terminalRoutes } from "../../daemon/src/routes/terminal.js";
 import { TerminalService } from "../../daemon/src/domain/terminal/terminal-service.js";
 import type { TerminalProvider } from "../../daemon/src/domain/terminal/terminal-provider.js";
+
+vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => "window-fixture" }));
 
 const stdoutDescriptors = Object.getOwnPropertyDescriptors(process.stdout);
 function terminalWidth(columns?: number): void {
@@ -39,6 +41,7 @@ function fixture() {
     resolveHost: () => null, hasSession: name => alive.has(name), resolveLocalTmux: () => "/fixture/tmux",
   } as ConstructorParameters<typeof TerminalService>[0]);
   const app = new Hono();
+  app.get("/healthz", c => c.json({ selfHostId: "window-fixture" }));
   app.use("*", async (c, next) => { c.set("terminalService" as never, service); await next(); });
   app.route("/api/terminal", terminalRoutes());
   const fetchImpl: typeof fetch = async (url, init) => app.request(String(url), init);

@@ -65,6 +65,9 @@ export interface ClaudeSeatRelaunch {
   /** Runs `fn` holding the seat's lifecycle lease (the one its stop, launch and restore take), so no other one runs on the
    *  seat in between. A wait for it ends with the seat as it is then. */
   exclusive<T>(nodeId: string, fn: () => Promise<T>): Promise<T>;
+  /** The running Claude's `--effort` (null: launched without one) beside the effort its relaunch would launch with, and
+   *  whether that one is the seat's own explicit choice (`rig seat set-effort`). null when the running process can't be read. */
+  effortChange?(nodeId: string, pane: string): Promise<{ running: string | null; relaunch: string | null; relaunchIsSeatChoice: boolean } | null>;
   /** Relaunch only this seat from that snapshot in its own pane: its process ends in place, the pane and its scrollback stay,
    *  and restore resumes the conversation there. `effect: "none"` when it was refused before anything stopped. */
   relaunchInPane(rigId: string, logicalId: string, snapshotId: string): Promise<{ ok: true; status: "resumed"; warnings: string[] }

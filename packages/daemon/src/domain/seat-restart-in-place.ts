@@ -447,11 +447,13 @@ export class CodexInPlaceRestart {
     const byPid = new Map(rows.map(row => [row.pid, row]));
     const launcherFacts = new Map<number, ProcessFacts | null>();
     const visited = new Set<number>([process.pid]);
+    const processChain = [process];
     let ancestor = process;
     while (ancestor.pid !== panePid) {
       const parent = byPid.get(ancestor.ppid);
       if (!parent || visited.has(parent.pid)) break;
       visited.add(parent.pid);
+      processChain.push(parent);
       if (executableBase(parent) === "MainThread") {
         launcherFacts.set(parent.pid, await this.io.readProcess(parent.pid));
       }
@@ -469,7 +471,10 @@ export class CodexInPlaceRestart {
     const viaLaunchScript = !!between && between.ppid === panePid && isStagedLaunchScript(between);
     if (top.pid === panePid) paneShape = "direct_native";
     else if (root && (top.ppid === panePid || viaLaunchScript) && isShellForeground(executableBase(root))) paneShape = "shell_backed";
-    else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped." };
+    else return { ok: false, code: "pane_shape_unknown", message: "The pane is neither a shell running Codex (directly or through OpenRig's own launch script) nor Codex itself; nothing was stopped.",
+      // Report the observed chain from Codex toward the pane, never argv, paths or environment values.
+      detail: { panePid, processChain: processChain.map(row => ({ pid: row.pid, ppid: row.ppid, name: row.executableName ?? null })) },
+      guidance: "Leave the seat running. Repeat this command with --plan --json to inspect detail.processChain, and include that diagnostic with both CLI and daemon versions in a report. A null name means the process name was unavailable." };
 
     // Where the relaunched Codex would run, and with which home.
     let cwd: string;

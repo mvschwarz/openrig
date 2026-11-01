@@ -1,12 +1,19 @@
 // OPR.0.4.4.13 — the host-registry verbs (add / list / doctor — arch
-// R13-2a: no edit/remove/tunnel/bootstrap verbs; hand-editing hosts.yaml
-// remains the path for exotica; the bootstrap ships as script + runbook).
-// OPR.0.4.6.MH1 FR-1 extends the family with `select` — the persisted
-// host-selection pointer (kubectl current-context shape). The pointer
-// lives in the config twins as `host.selected`; this verb is a THIN
-// CLIENT of the daemon config write (one write path for CLI+UI
+// R13-2a originally: no edit/remove/tunnel/bootstrap verbs; hand-editing
+// hosts.yaml remains the path for exotica; the bootstrap ships as script +
+// runbook). OPR.0.4.6.MH1 FR-1 extends the family with `select` — the
+// persisted host-selection pointer (kubectl current-context shape). The
+// pointer lives in the config twins as `host.selected`; this verb is a
+// THIN CLIENT of the daemon config write (one write path for CLI+UI
 // convergence, arch ruling); reads resolve from the local ConfigStore
 // (env > file > default — zero new daemon lookups on read paths).
+// Issue #2128 (maintainer-approved boundary) extends the family again with
+// `edit` and `remove`: the SAME parity-pinned writer contract as add — id
+// and transport stay fixed on an edit, unknown fields fail loud, empty
+// string clears an optional field, and remove deletes only the registry
+// entry (no credential files, no learned identity, no selection change).
+// When the selected host is edited or removed, the selection outcome is
+// shown plainly — never a silent switch.
 //
 // Secret hygiene (FR-1): every render carries bearer POINTERS (env var /
 // file NAMES) only — no code path in this file resolves a bearer value
@@ -18,7 +25,7 @@ import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
@@ -685,6 +692,66 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         return;
       }
       console.log(`This host is now named: ${trimmed}`);
+    });
+
+  cmd
+    .command("edit")
+    .description("Edit a host entry (id and transport stay fixed; an empty string clears an optional field)")
+    .argument("<id>", "A registered host id")
+    .option("--target <target>", "SSH target — ssh transport")
+    .option("--user <user>", "SSH user — ssh transport (empty string clears the value)")
+    .option("--url <url>", "Remote daemon base URL — http transport")
+    .option("--notes <text>", "Free-form operator note (empty string clears the value)")
+    .option("--json", "JSON output")
+    .action((id: string, opts: { target?: string; user?: string; url?: string; notes?: string; json?: boolean }) => {
+      const changes: Record<string, unknown> = {};
+      if (opts.target !== undefined) changes["target"] = opts.target;
+      if (opts.user !== undefined) changes["user"] = opts.user;
+      if (opts.url !== undefined) changes["url"] = opts.url;
+      if (opts.notes !== undefined) changes["notes"] = opts.notes;
+
+      const res = updateHostEntry(id.trim(), changes);
+      if (!res.ok) {
+        console.error(res.error);
+        process.exitCode = 1;
+        return;
+      }
+      const wasSelected = readSelectedHost() === res.entry.id;
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, path: res.path, entry: res.entry, wasSelected }));
+        return;
+      }
+      console.log(`Updated host '${res.entry.id}' (${res.entry.transport}) at ${res.path}`);
+      for (const key of Object.keys(changes) as string[]) {
+        const rec = (e: HostEntry) => e as unknown as Record<string, unknown>;
+        const before = rec(res.previous)[key];
+        const after = rec(res.entry)[key];
+        if (before !== after) {
+          console.log(`  ${key}: ${before === undefined ? "(unset)" : String(before)} → ${after === undefined ? "(cleared)" : String(after)}`);
+        }
+      }
+      if (wasSelected) console.log(`note: '${res.entry.id}' is the selected host — it was edited in place and the selection still points at it.`);
+    });
+
+  cmd
+    .command("remove")
+    .description("Remove a host entry (deletes only the registry entry — credential files, the learned identity and the selection stay as they are)")
+    .argument("<id>", "A registered host id")
+    .option("--json", "JSON output")
+    .action((id: string, opts: { json?: boolean }) => {
+      const res = removeHostEntry(id.trim());
+      if (!res.ok) {
+        console.error(res.error);
+        process.exitCode = 1;
+        return;
+      }
+      const wasSelected = readSelectedHost() === res.entry.id;
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, path: res.path, entry: res.entry, wasSelected }));
+        return;
+      }
+      console.log(`Removed host '${res.entry.id}' (${res.entry.transport}) from ${res.path}`);
+      if (wasSelected) console.log(`note: '${res.entry.id}' was the selected host — the selection still points at '${res.entry.id}' and was NOT changed. Pick another: rig host select <id>`);
     });
 
   cmd

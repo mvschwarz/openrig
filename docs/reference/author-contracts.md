@@ -1,4 +1,4 @@
-# Integration author contracts — DRAFT for 0.7.6
+# Integration author contracts — DRAFT, published with 0.7.6
 
 OpenRig composes agents into a team. An integration author supplies the pieces that let a new harness participate, or let an existing harness run in a new environment. This guide divides that work into two contracts:
 
@@ -7,15 +7,15 @@ OpenRig composes agents into a team. An integration author supplies the pieces t
 
 These are draft author responsibilities. Some use implemented OpenRig interfaces; others describe a proposed integration whose code remains with its author. Including the guide in release documentation does not make every described capability available.
 
-## Candidate and support status
+## Release and support status
 
-This draft targets the **unsealed 0.7.6 candidate**. Its implemented-interface baseline is commit [`b6bd4633`](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63). That base includes the runner declaration and `passes_model` changes. Later release repairs and version text are still being assembled; no final tag or package publication is asserted here. References below use the immutable base instead of a moving branch.
+This draft was published with **OpenRig 0.7.6** (tag [`v0.7.6`](https://github.com/mvschwarz/openrig/tree/v0.7.6), source `c00c6321`). Its implemented-interface baseline is commit [`b6bd4633`](https://github.com/mvschwarz/openrig/tree/b6bd4633fbd94634a2b4bdef2574a6880f97be63). That base includes the runner declaration and `passes_model` changes. The published 0.7.6 adds release repairs and documentation on top of that base. References below use the immutable base instead of a moving branch.
 
 | Area | Status at this baseline | What the status means |
 |---|---|---|
 | Community launcher presets, RigSpec members and AgentSpec role/startup declarations | Implemented interfaces | They compose configuration. A launcher must implement its declared effects; successful parsing does not prove delivery or native behavior. |
-| `runner: true` with `launch_result: true` | Implemented candidate source | The declaration is retained at launch, and Core uses the runner identity/activity path. It does not supply a runner executable. |
-| `passes_model: true` | Implemented candidate source | Passes the declared model through `OPENRIG_MODEL`. It does not observe or verify the effective native model. Cursor and Hermes examples leave it off pending native qualification. |
+| `runner: true` with `launch_result: true` | Released in 0.7.6 | The declaration is retained at launch, and Core uses the runner identity/activity path. It does not supply a runner executable. |
+| `passes_model: true` | Released in 0.7.6 | Passes the declared model through `OPENRIG_MODEL`. It does not observe or verify the effective native model. Cursor and Hermes examples leave it off pending native qualification. |
 | The dsh/ACP input, cancellation and refusal-first permission recipe | Proposed author implementation | No end-to-end dsh integration is established. Native reopen capabilities and the tools-off case remain implementer questions. |
 | Exact native resume via an author launcher | Existing interface; integration-specific evidence | A requested conversation must reopen exactly or fail honestly. One provider/harness result does not establish portability to another. |
 | Environment preparation, projection, artifact export and owned-resource cleanup | Measured in a private wrapper; generic seam proposed | The platform chapter makes the responsibilities reusable. Core does not provide a generic platform driver or `DeploySpec` loader at this baseline. |

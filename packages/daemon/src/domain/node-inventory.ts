@@ -1,3 +1,4 @@
+import { sessionCommunityRunnerSelect } from "./session-registry.js";
 import { physicalSessionName } from "./session-registry.js";
 import fs from "node:fs";
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
@@ -26,7 +27,7 @@ import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { readReadyFreshLaunchFences } from "./fresh-occupant-relation.js";
-import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo, tmuxAttachCommand } from "../adapters/tmux-server.js";
 import { communityHarnessLabel } from "./community-harness-presets.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
@@ -67,6 +68,7 @@ interface InventoryRow {
   session_created_at: string | null;
   session_status: string | null;
   session_community_harness?: string | null;
+  session_community_runner?: number | null;
   intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -669,6 +671,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.created_at as session_created_at,
       s.status as session_status,
       ${sessionCommunityHarnessSelect(db)} as session_community_harness,
+      ${sessionCommunityRunnerSelect(db)} as session_community_runner,
       s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
@@ -786,7 +789,7 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
-    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null }) } : {}),
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!, undefined, { resumeType: row.resume_type, resumeToken: row.resume_token, resumeProvenance: row.resume_provenance ?? null, runner: row.session_community_runner === 1 }) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
     // An explicit down records a failed start's rolled-back session without changing its superseded status.
@@ -808,6 +811,10 @@ function buildInventoryEntry(
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
+    ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerArgs().length
+      ? { tmuxServerArgs: [...daemonTmuxServerArgs()] } : {}),
+    ...(row.binding_attachment_type === "tmux" && row.session_name && daemonTmuxServerInfo()
+      ? { tmuxServerMode: daemonTmuxServerInfo()!.mode } : {}),
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id), row.claude_mcp),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and

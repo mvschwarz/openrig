@@ -345,13 +345,19 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           console.log("Daemon PID is absent (stale state)");
           break;
         case "unverified":
+          // T2: a live start reservation names a launch in progress (listener not up yet).
+          if (status.startPending) {
+            const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+            console.log(`Daemon starting: launch reserved by pid ${status.startPending.pid}${since}; not listening yet`);
+          }
           // 1ae863d2 — C3 semantics: we could NOT confirm up or down; never claim stopped.
           if (status.siblingHint) {
             console.log("Daemon state UNVERIFIED — the resolved OPENRIG_HOME has no daemon state, but a live daemon appears under a sibling home:");
             console.log(`  resolved: ${status.siblingHint.resolvedHome}`);
             console.log(`  sibling:  ${status.siblingHint.siblingHome}`);
             console.log("  Fix: point OPENRIG_HOME at the right home (or check your shell env) — this CLI is likely resolving the wrong home.");
-          } else {
+          } else if (!status.startPending) {
+            // A pending start's probe was refused, not inconclusive; its line above says what is known.
             console.log("Daemon state UNVERIFIED — the probe timed out or was inconclusive (this is NOT evidence the daemon is down).");
             console.log("  Re-check with: rig daemon status  ·  direct: curl the daemon /healthz");
           }

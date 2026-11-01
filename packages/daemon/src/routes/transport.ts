@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { expectedConversation, type ExpectedConversation } from "../domain/expected-conversation.js";
+import { Hono, type Context } from "hono";
 import { CAPTURE_INPUT_BOX_DEADLINE_MS, CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, resolveRecordedIdentity, transportSenderSession } from "./require-sender-identity.js";
@@ -28,11 +29,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
   const terminalToken = opts?.bearerToken ?? null;
   router.use("*", authBearerTokenMiddleware({ expectedToken: terminalToken }));
 
-  router.post("/send", async (c) => {
+  const send = async (c: Context) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
     const body = await c.req.json<{
       session?: string;
       deliveryId?: string;
+      expectedIdentity?: unknown;
       text: string;
       verify?: boolean;
       force?: boolean;
@@ -48,6 +50,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       exactText?: string;
       urgent?: boolean;
     }>();
+
+    let expectedIdentity: ExpectedConversation | undefined;
+    if (c.req.path.endsWith("/send-expected") || body.expectedIdentity !== undefined) {
+      try { expectedIdentity = expectedConversation(body.expectedIdentity); }
+      catch (error) { return c.json({ ok: false, sent: false, reason: "invalid_expected_identity", error: (error as Error).message }, 400); }
+    }
 
     // submitOnly (mechanics-gate fix d9b3989a) sends NO text — the Enter-only retry for staged
     // content; every other send still requires text.
@@ -122,6 +130,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const target = resolved.sessions.length === 1 ? resolved.sessions[0]!.sessionName : null;
     const switching = target ? runtimeSwitchSummary(db, { session: target }) : null;
     if (target && switching && (switching.phase === "preparing" || switching.phase === "confirmed")) {
+      if (expectedIdentity) return c.json({ ok: false, sessionName: target, sent: false, inputPhase: "not_reached",
+        reason: "expected_identity_unavailable", error: "The seat is switching runtime. No input or expected-identity constraint was retained; retry the conditional endpoint with the original expectedIdentity.",
+        runtimeSwitch: switching }, 409);
       return c.json({ ok: true, sessionName: target, outcome: "retained", sent: false, verified: false, reason: "runtime_switch_in_progress",
         runtimeSwitch: switching,
         warning: `${target} is switching runtime (${switching.from} -> ${switching.to}, switch ${switching.id}) until about ${switching.deadlineAt}. Send it again after the switch; it then reaches whoever holds the seat.` });
@@ -130,6 +141,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     const result = await transport.send(body.session, body.text ?? "", {
       deliveryId: body.deliveryId,
+      expectedIdentity,
       verify: body.verify,
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
@@ -158,6 +170,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     if (!result.ok) {
       const statusMap: Record<string, number> = {
+        expected_identity_mismatch: 409,
+        expected_identity_unavailable: 409,
+        invalid_expected_identity: 400,
         typing_guard_enabled: 409,
         caller_cancelled: 409,
         guard_target_unknown: 409,
@@ -239,7 +254,10 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     return c.json(result);
-  });
+  };
+  router.post("/send", send);
+  // Separate capability path: an older daemon refuses with 404 instead of ignoring a new field.
+  router.post("/send-expected", send);
 
   router.post("/capture", async (c) => {
     const transport = c.get("sessionTransport" as never) as SessionTransport;

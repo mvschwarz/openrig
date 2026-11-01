@@ -73,10 +73,13 @@ describe("D5 p2 — an inherited TMUX_TMPDIR is ABSENT from the child and REPLAC
   it("proves both halves independently", () => {
     const inherited = mkdtempSync(join(tmpdir(), "ambient-tmux-"));
     try {
-      const s = prepareHermeticEnv({ baseEnv: { ...cleanBase(), TMUX_TMPDIR: inherited } });
+      const s = prepareHermeticEnv({ baseEnv: { ...cleanBase(), TMUX_TMPDIR: inherited,
+        OPENRIG_TMUX_SERVER: "isolated", RIGGED_TMUX_SERVER: "isolated" } });
       scaffolds.push(s);
       // (a) the inherited value is gone
       expect(s.env.TMUX_TMPDIR).not.toBe(inherited);
+      expect(s.env.OPENRIG_TMUX_SERVER).toBeUndefined();
+      expect(s.env.RIGGED_TMUX_SERVER).toBeUndefined();
       // (b) it is replaced by a scaffold-OWNED, existing directory
       expect(s.env.TMUX_TMPDIR).toBe(s.tmuxTmpDir);
       expect(s.tmuxTmpDir.startsWith(s.root)).toBe(true);

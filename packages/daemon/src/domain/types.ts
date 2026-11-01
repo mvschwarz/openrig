@@ -392,6 +392,7 @@ export interface NodeStartupSnapshot {
 }
 
 export interface SnapshotData {
+  environmentBindingsByNode?: Record<string, { version: 1; bindingId: string; resourceId: string; generation: string | null; checkpointId: string | null; nativeType: string | null; nativeId: string | null; destinationCwd: string; nativeState: string }>;
   rig: Rig;
   nodes: NodeWithBinding[];
   edges: Edge[];
@@ -504,6 +505,8 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
+  /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
+  nothingStopped?: true;
   nodeId: string;
   logicalId: string;
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
@@ -532,6 +535,13 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** Restore gaps that are not guidance: a resumed seat whose saved startup
+   *  context lacked a selection the current specification still makes and
+   *  whose re-apply was skipped, failed, or threw (e.g. the Claude
+   *  activity-hook marker that could not be re-applied). Like guidanceGaps,
+   *  this only discloses the gap; the rig rolls up partially_restored. A
+   *  healed re-apply or an undeterminable selection is a warning, not a gap. */
+  restoreGaps?: string[];
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;
@@ -751,6 +761,10 @@ export interface NodeInventoryEntry {
   previousOccupant: string | null;
   handoverAt: string | null;
   tmuxAttachCommand: string | null;
+  /** Structured server identity for clients that attach without a shell. */
+  tmuxServerArgs?: string[];
+  /** Effective mode; inherited non-default sockets also have server arguments. */
+  tmuxServerMode?: "inherit" | "isolated";
   resumeCommand: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
   latestError: string | null;

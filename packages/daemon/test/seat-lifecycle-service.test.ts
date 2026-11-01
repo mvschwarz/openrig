@@ -241,6 +241,16 @@ describe("SeatLifecycleService", () => {
     expect(events[0]).toMatchObject({ nodeId: a.node.id, sessionName: a.sessionName, reason: "single-seat stop test", operator: "op@rig" });
   });
 
+  it("labels a managed community stop as pane-only while retaining its normal seat audit", async () => {
+    const a = seatFixture("community-stop", "dev.worker");
+    db.prepare("UPDATE nodes SET runtime='openshell-claude' WHERE id=?").run(a.node.id);
+    sessionRegistry.recordCommunityHarnessSelection(a.session.id, "openshell-claude");
+    const result = await service.stopSeat({ seatRef: a.sessionName, reason: "close selected viewer" });
+    expect(result).toMatchObject({ ok: true, paneOnly: true });
+    expect(tmux.killed).toEqual([a.sessionName]);
+    expect(eventsOfType(db, "session.stopped")).toHaveLength(1);
+  });
+
   describe("intentional stop in the rig lifecycle", () => {
     function summary(rigId: string) {
       return new PsProjectionService({ db }).getEntries().find((entry) => entry.rigId === rigId)!;

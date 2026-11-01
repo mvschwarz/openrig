@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
-import { loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
+import { communityHarnessLabel, loadCommunityHarnessPreset } from "../src/domain/community-harness-presets.js";
 import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harness-runtime-adapter.js";
 import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -57,6 +57,15 @@ describe("declaring a runner preset", () => {
   ])("refuses %s", (_case, extra, message) => {
     expect(loadCommunityHarnessPreset("synth", presetDir(BASE + extra))).toMatchObject({ ok: false, message: expect.stringContaining(message) });
   });
+});
+
+it("labels runner activity from the recorded launch, never a later preset edit", () => {
+  const dir = presetDir(BASE + "launch_result: true\nrunner: true\n");
+  const session = { resumeType: null, resumeToken: null, resumeProvenance: null, runner: true };
+  expect(communityHarnessLabel("synth", dir, session).needsInput).toBe("from structured activity and screen observations");
+  writeFileSync(join(dir, "synth.yaml"), BASE);
+  expect(communityHarnessLabel("synth", dir, session).needsInput).toBe("from structured activity and screen observations");
+  expect(communityHarnessLabel("synth", dir, { ...session, runner: false }).needsInput).toBe("from the screen only: no harness prompt pattern");
 });
 
 describe("the runner declaration recorded with the launch", () => {

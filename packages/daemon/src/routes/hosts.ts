@@ -1,7 +1,9 @@
 // OPR.0.4.6.MH1 FR-5/FR-6 — THE narrow named host add/pair route family
-// (arch B1 ruling, pin P1: host add + the pair handshake ONLY — no
-// generic registry-write route exists, remove/edit stay out of scope;
-// the daemon reader module stays read-only-forever).
+// (arch B1 ruling, pin P1: named verbs ONLY — no generic REST registry-write
+// route exists; edit/remove joined the named family as the bounded #2128
+// extension (maintainer-approved boundary: id+transport fixed on edit,
+// secret VALUES refused, invalid registry never clobbered, remove deletes
+// only the registry entry); the daemon reader module stays read-only-forever).
 //
 // Surface map:
 //   POST /api/hosts/pair-request      TARGET side, OPEN (pre-token
@@ -22,6 +24,15 @@
 //                                     delegates to the parity-pinned
 //                                     writer twin (P3); never accepts
 //                                     secret VALUES (P2).
+//   POST /api/hosts/update            LOCAL side, WRITE (bearer-gated like
+//                                     /add). Edit ONE entry through the
+//                                     same writer twin: id+transport FIXED,
+//                                     unknown fields fail loud, empty string
+//                                     clears an optional field.
+//   POST /api/hosts/remove            LOCAL side, WRITE (bearer-gated like
+//                                     /add). Deletes ONLY the registry entry
+//                                     — no credential files, no learned
+//                                     identity, no selection changes.
 //   POST /api/hosts/pair              LOCAL side, WRITE. The browser's
 //                                     pair-client seam (B1: the UI's
 //                                     write seam is its local daemon).
@@ -41,7 +52,7 @@ import { randomUUID, randomInt } from "node:crypto";
 import { connect } from "node:net";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry } from "../domain/hosts/hosts-registry-writer.js";
+import { addHostEntry, updateHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
 import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
@@ -89,6 +100,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // bearer is configured, pass-through on loopback/tailnet-trust daemons.
   const requireAuth = authBearerTokenMiddleware({ expectedToken: bearerToken });
   router.use("/add", requireAuth);
+  router.use("/update", requireAuth);
+  router.use("/remove", requireAuth);
   router.use("/pair", requireAuth);
   router.use("/pair/:pairId", requireAuth);
 
@@ -263,6 +276,73 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       return c.json({ error: "invalid_host_entry", message: res.error }, 400);
     }
     return c.json({ ok: true, entry: res.entry, path: res.path });
+  });
+
+  // ------------------------------------------------------------------------
+  // OPR.0.4.6.MH1 FR-1 extension (issue #2128): the two named write verbs
+  // beside /add — POST /update and POST /remove, both bearer-gated exactly
+  // like /add (no new auth surface) and both refusing secret-shaped fields
+  // with add's own no_secret_values check BEFORE any write. Update keeps the
+  // host's id and transport FIXED (the boundary's first rule), refuses
+  // unknown fields and invalid values through the SAME writer+validator as
+  // add, and never clobbers an invalid registry. Remove deletes ONLY the
+  // registry entry — no credential files, no learned identity, no selection
+  // changes. Both responses report wasSelected, read exactly like the GET
+  // route reads it, so a dashboard can tell its user when the selection now
+  // names a removed or just-edited entry; the pointer itself is never
+  // rewritten here.
+  // ------------------------------------------------------------------------
+
+  function selectedHost(c: { get: (key: string) => unknown }): string {
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    return (store?.resolveOne("host.selected").value as string | undefined) ?? "local";
+  }
+
+  router.post("/update", async (c) => {
+    const body = (await c.req.json<Record<string, unknown>>().catch(() => null));
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "invalid_host_entry", message: "body must be a host entry object with at least { id }" }, 400);
+    }
+    const secretField = SECRET_SHAPED_FIELDS.find((f) => f in body);
+    if (secretField) {
+      return c.json({
+        error: "no_secret_values",
+        message: `field '${secretField}' looks like a secret VALUE — hosts.yaml carries bearer POINTERS only (bearer_env / bearer_file). Nothing was written.`,
+      }, 400);
+    }
+    const id = body["id"];
+    if (typeof id !== "string" || !id.trim()) {
+      return c.json({ error: "host_id_required", message: "body.id must be a non-empty host id to update" }, 400);
+    }
+    const { id: _id, ...changes } = body;
+    const res = updateHostEntry(id.trim(), changes);
+    if (!res.ok) {
+      return c.json({ error: "invalid_host_entry", message: res.error }, 400);
+    }
+    return c.json({ ok: true, entry: res.entry, previous: res.previous, path: res.path, wasSelected: id.trim() === selectedHost(c) });
+  });
+
+  router.post("/remove", async (c) => {
+    const body = (await c.req.json<Record<string, unknown>>().catch(() => null));
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "invalid_host_entry", message: "body must be an object with { id }" }, 400);
+    }
+    const secretField = SECRET_SHAPED_FIELDS.find((f) => f in body);
+    if (secretField) {
+      return c.json({
+        error: "no_secret_values",
+        message: `field '${secretField}' looks like a secret VALUE — hosts.yaml carries bearer POINTERS only (bearer_env / bearer_file). Nothing was written.`,
+      }, 400);
+    }
+    const id = body.id;
+    if (typeof id !== "string" || !id.trim()) {
+      return c.json({ error: "host_id_required", message: "body.id must be a non-empty host id to remove" }, 400);
+    }
+    const res = removeHostEntry(id.trim());
+    if (!res.ok) {
+      return c.json({ error: "invalid_host_entry", message: res.error }, 400);
+    }
+    return c.json({ ok: true, entry: res.entry, path: res.path, wasSelected: id.trim() === selectedHost(c) });
   });
 
   router.post("/pair", async (c) => {
