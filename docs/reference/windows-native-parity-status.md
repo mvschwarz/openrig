@@ -2027,8 +2027,10 @@ directory; its original cause is not established. Paused-seat checks found no
 potentially active protected sessions. Two stale active parked-owner consumers
 were stopped; their readback showed no new firing.
 
-The user confirmed that the newly opened deployment TUI window renders normally.
-Keyboard navigation and full page coverage remain separate checks.
+The user confirmed that the newly opened deployment TUI window renders normally,
+and that entering `:help`, pressing Enter and returning with Esc works. This is
+actual user-observed rendering and command-palette keyboard interaction; full
+page coverage remains a separate check.
 
 The production Compose adapter exercised a real Docker 29.4.1 engine using an
 owned project, existing Python image and loopback-only HTTP port. Start, status,
