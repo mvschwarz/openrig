@@ -10,8 +10,9 @@ import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 
-it.runIf(process.platform === "win32").each([["pi", false], ["omp", false], ["pi", true]] as const)("dispatches native %s fresh and resume commands without POSIX quoting (route refusal: %s)", async (runtime, routed) => {
+it.runIf(process.platform === "win32").each([["pi", false], ["omp", false], ["pi", true], ["pi", "success"]] as const)("dispatches native %s fresh and resume commands without POSIX quoting (route refusal: %s)", async (runtime, routed) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-native-"));
   try {
     const cwd = path.join(root, "working '用户 & space");
@@ -32,7 +33,13 @@ it.runIf(process.platform === "win32").each([["pi", false], ["omp", false], ["pi
     const Adapter = runtime === "pi" ? PiRuntimeAdapter : OmpRuntimeAdapter;
     const Resume = runtime === "pi" ? PiResumeAdapter : OmpResumeAdapter;
     const model = "fixture/model ' & 用户";
-    const seatLaunchEnvironment = routed ? { command: async () => "owned-unroutable-command" } as never : undefined;
+    const seatLaunchEnvironment = routed ? { command: async (_session: string, command: string) => {
+      if (routed === "success") {
+        expect(command).toContain(process.execPath);
+        return renderWindowsLaunch(command, {});
+      }
+      return "owned-unroutable-command";
+    } } as never : undefined;
     const adapter = new Adapter({ platform: "win32", tmux, fsOps: io, stateRoot, runnerEntryPath: entry, newLaunchId: () => "owned-fresh", seatLaunchEnvironment });
     const fresh = await adapter.launchHarness({ tmuxSession: session, cwd, model, launchPosture: "floor" } as NodeBinding, { name: session });
     expect(fresh, JSON.stringify(fresh)).toMatchObject({ ok: true, resumeToken: sessionFile });

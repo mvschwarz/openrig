@@ -323,10 +323,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       openRouterCharge: this.runtime === "pi" && this.openRouterChargeEnabled(),
     });
 
-    const bareCommand = this.platform === "win32"
-      ? renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}) : cmd;
+    const runnerCommand = this.platform === "win32" ? `${shellQuote(process.execPath)} ${cmd.slice("node ".length)}` : cmd;
+    const bareCommand = this.platform === "win32" ? renderWindowsLaunch(runnerCommand, {}) : cmd;
     const command = this.runtime === "pi" && this.seatLaunchEnvironment
-      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+      ? await this.seatLaunchEnvironment.command(sessionName, runnerCommand, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
       : bareCommand;
     // Stage long commands without leaving a shell above the live runner.
     let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });

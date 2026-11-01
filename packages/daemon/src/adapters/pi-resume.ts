@@ -122,10 +122,10 @@ export class PiResumeAdapter {
       openRouterCharge: this.runtime === "pi" && (this.options.openRouterChargeEnabled?.() ?? false),
     });
 
-    const bareCommand = process.platform === "win32"
-      ? renderWindowsLaunch(`${shellQuote(process.execPath)} ${cmd.slice("node ".length)}`, {}) : cmd;
+    const runnerCommand = process.platform === "win32" ? `${shellQuote(process.execPath)} ${cmd.slice("node ".length)}` : cmd;
+    const bareCommand = process.platform === "win32" ? renderWindowsLaunch(runnerCommand, {}) : cmd;
     const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, runnerCommand, { runtime: this.runtime })
       : bareCommand;
     // Short commands retain the direct path; long commands exec from a private script.
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
