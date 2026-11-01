@@ -257,7 +257,9 @@ function conservativeAsk(command, policy) {
     if (decide(command, policy) === "ask") return "ask";
   } catch { /* the words-level scan below reuses the same helpers */ }
   try {
-    return findAsk(command, policy) ? "ask" : undefined;
+    // Scan only the heredoc-stripped text, as decide() does: a quoted
+    // heredoc body is data, never a command that can execute.
+    return findAsk(splitHeredocs(command).main, policy) ? "ask" : undefined;
   } catch {
     return undefined;
   }

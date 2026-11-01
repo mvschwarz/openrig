@@ -226,6 +226,9 @@ describe("Claude team command permissions", () => {
       '{"tool_name":"Bash","tool_input":{"command":"rig down',
       '{"tool_name":"Bash","tool_input":{',
       "not json at all",
+      // A quoted heredoc body is data, not a command: the lifecycle-looking
+      // text inside it must not make the ask-only fallback emit "ask".
+      "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat <<'EOF'\\nrig down example\\nEOF\"",
     ])("emits no decision on truncated input: %s", raw => {
       expect(askDecision(raw)).toBeUndefined();
     });
