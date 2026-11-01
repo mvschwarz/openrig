@@ -453,15 +453,13 @@ function readSuspension(
   const override = process.env[WAKE_SUSPEND_OVERRIDE_ENV];
   if (override) {
     for (const entry of override.split(",")) {
-      const idx = entry.lastIndexOf(":");
-      const session = entry.slice(0, entry.indexOf(":"));
-      const untilIso = entry.slice(entry.indexOf(":") + 1);
-      void idx;
-      if (session === destination) {
-        const until = Date.parse(untilIso);
-        if (!Number.isNaN(until) && now.getTime() < until) {
-          return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
-        }
+      // Match this destination's own prefix: an external destination can itself hold a colon
+      // (`slack:U...@external`), and the rest is whatever date form Date.parse reads.
+      if (!entry.startsWith(`${destination}:`)) continue;
+      const untilIso = entry.slice(destination.length + 1);
+      const until = Date.parse(untilIso);
+      if (!Number.isNaN(until) && now.getTime() < until) {
+        return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
       }
     }
   }
