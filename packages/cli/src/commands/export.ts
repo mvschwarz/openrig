@@ -69,7 +69,10 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
       } else {
         deps.writeFile(opts.output, res.data);
         console.log(`Exported to ${opts.output}`);
-        for (const line of String(res.data).split("\n")) if (line.startsWith("# Not carried: ")) console.log(line.slice(2));
+        for (const line of String(res.data).split("\n")) {
+          if (line.startsWith("# Not carried: ")) console.log(line.slice(2));
+          if (line.startsWith("# Member startup not carried for ")) console.warn(`Warning: ${line.slice(2)}`);
+        }
 
         // Check for referenced culture_file and startup files resolving from the output directory
         const checkExists = deps.exists ?? ((p) => fs.existsSync(p));
@@ -94,7 +97,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
             const pods = parsed["pods"] as Array<{
               id?: string;
               startup?: ExportedStartupBlock;
-              members?: Array<{ id?: string; agent_ref?: string }>;
+              members?: Array<{ id?: string; agent_ref?: string; startup?: ExportedStartupBlock }>;
             }> | undefined;
             for (const pod of Array.isArray(pods) ? pods : []) {
               for (const member of Array.isArray(pod.members) ? pod.members : []) {
@@ -123,7 +126,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
 
             const startupBlocks = [
               parsed["startup"] as ExportedStartupBlock | undefined,
-              ...(Array.isArray(pods) ? pods.map((pod) => pod.startup) : []),
+              ...(Array.isArray(pods) ? pods.flatMap((pod) => [pod.startup, ...(pod.members ?? []).map((member) => member.startup)]) : []),
             ];
             for (const startup of startupBlocks) {
               if (startup && Array.isArray(startup.files)) {
