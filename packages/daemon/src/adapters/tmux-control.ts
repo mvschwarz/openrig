@@ -24,7 +24,8 @@ import type { ArgvExecFn } from "./tmux.js";
  * reply, where a spawned client prints a hook's output after its command's. Anything else (a launch,
  * which takes the spawning process's environment; `load-buffer`, see ROUTED; a command line that cannot be written on
  * one line; a global flag other than this client's server selection; no server yet, or one before 3.2) goes to the
- * spawned client, as before.
+ * spawned client, as before. On servers older than tmux 3.7c, or whose version is unknown, all commands use spawned
+ * clients: creating a control client can crash those servers when another session is created (#2304).
  */
 
 /** The session option that marks a control session: its value is the owner id of the daemon whose client made it. */
@@ -126,13 +127,15 @@ function quote(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
-/** Whether tmux's version (`tmux -V`, or a server's `#{version}`) names 3.2 or later: the client flags of
- *  `new-session -f`. */
+/** Only known fixed server releases: tmux before 3.7c can crash while a control client starts and any other
+ * session is created (#2304). Development/unknown versions fall back to spawned clients; a client binary's
+ * version alone is not evidence of the server's version. */
 export function supportsControlMode(versionLine: string): boolean {
-  const match = /(\d+)\.(\d+)/.exec(versionLine);
+  const match = /^(?:tmux\s+)?(\d+)\.(\d+)([a-z]?)(?=\||\s|$)/.exec(versionLine.trim());
   if (!match) return false;
   const major = Number(match[1]);
-  return major > 3 || (major === 3 && Number(match[2]) >= 2);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && (minor > 7 || (minor === 7 && match[3]! >= "c")));
 }
 
 /** A command's reply: its output lines, none once they went past the bound (`overflow`). */
@@ -412,7 +415,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     ";", "set-option", "detach-on-destroy", "on",
   ];
 
-  /** Whether a server runs that a control client may attach to: one of tmux 3.2 or later (its own version, not the
+  /** Whether a server runs that a control client may attach to: one of tmux 3.7c or later (its own version, not the
    *  tmux binary's) with a session that is no control session, read by a spawned client. With none, no client is
    *  started: it never starts a server, nor keeps one up that would exit without it (`checkAlone`). */
   const serverReady = async (): Promise<boolean> => {

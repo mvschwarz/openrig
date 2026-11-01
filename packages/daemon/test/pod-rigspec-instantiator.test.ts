@@ -140,6 +140,23 @@ describe("PodRigInstantiator", () => {
     } finally { db.close(); }
   });
 
+  it("#1631 bootstrap instantiate retains the member-only startup root for export", async () => {
+    const { db, rigRepo, sessionRegistry, inst } = setup({ [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl") });
+    try {
+      const spec = makeRigSpec();
+      spec.pods[0]!.members[0]!.startup = { files: [{ path: "member.md", deliveryHint: "auto", required: false, appliesOn: ["fresh_start", "restore"] }], actions: [] };
+      const result = await inst.instantiate(RigSpecCodec.serialize(spec), nodePath.resolve(RIG_ROOT));
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) return;
+      expect(rigRepo.getRigStartupLayers(result.result.rigId)?.root).toBe(nodePath.resolve(RIG_ROOT));
+      const { RigSpecExporter } = await import("../src/domain/rigspec-exporter.js");
+      const exporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo: new PodRepository(db) });
+      const exported = exporter.exportRig(result.result.rigId) as RigSpec;
+      expect(exported.pods[0]!.members[0]!.startup?.files[0]?.path).toBe("member.md");
+      expect(exporter.memberStartupNotCarried(result.result.rigId)).toEqual([]);
+    } finally { db.close(); }
+  });
+
   it("#1631 bootstrap instantiate preserves action-only pod startup for export", async () => {
     const root = nodePath.resolve(RIG_ROOT);
     const { db, rigRepo, sessionRegistry, inst } = setup({ [nodePath.resolve(root, "agents/impl/agent.yaml")]: agentYaml("impl") });

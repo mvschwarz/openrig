@@ -140,6 +140,8 @@ describe("S12 instance mission control", () => {
     expect(whole).toMatch(/empty\s+—\s+\(no seats\).*stopped/);
     expect(whole).toMatch(/dev\s+[\s\S]*┈{8,}[\s\S]*qa\s+/);
     expect((whole.match(/┈{8,}/g) ?? [])).toHaveLength(1);
+    expect(whole).toMatch(/build\s+qa\s+[^\n]*\n[^\n]*─{8,}[^\n]*\n[^\n]*docs\s+write/);
+    expect(whole).toMatch(/docs\s+write\s+[^\n]*\n[^\n]*─{8,}[^\n]*\n[^\n]*empty\s+—/);
     expect(whole).not.toMatch(/\+\d+|more hidden/i);
     expect(reached).toEqual(expectedAgents);
     expect(scrolledSeatRows).toBeGreaterThan(0);

@@ -58,13 +58,14 @@ export function getOfflineHelpPath(): string | undefined {
 }
 
 /** Whether a command should make its real request: false only when the daemon is confirmed down
- *  (stopped, a stale record, or a refused health probe, meaning nothing is listening), when this
+ *  (stopped, a stale record, or a refused health probe, meaning nothing is listening, including one under a
+ *  pending start, whose `startPending` is set only on a refused probe), when this
  *  machine blocked the health probe, or when a live sibling home suggests the request would reach
  *  another home's daemon. A daemon that is alive but busy (its health check slow, failing or
  *  reporting a starved loop) gets the request, under its normal timeout. */
 export function daemonMayAnswer(status: DaemonStatus): boolean {
   if (status.state === "stopped" || status.state === "stale") return false;
-  if (status.probeErrorCode === "ECONNREFUSED") return false;
+  if (status.probeErrorCode === "ECONNREFUSED" || status.startPending) return false;
   if (status.siblingHint || isBlockedConnectionCode(status.probeErrorCode)) return false;
   return true;
 }

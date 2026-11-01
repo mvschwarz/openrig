@@ -1465,7 +1465,15 @@ export class RestoreOrchestrator {
     if (launchedSessionId) {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
     }
+    // The stop awaited. Clear only the binding this lease still holds: a seat another operation rebound meanwhile keeps
+    // its binding. Then rebind the lease to the cleared seat, with no await between, so the fresh launch that follows
+    // under this lease owns it.
+    const guard = this.tmuxAdapter.deliveryGuard;
+    let leased: boolean;
+    try { leased = !!guard?.ownsLifecycle(nodeId); }
+    catch (error) { return { ok: false, error: `could not retire provisional session: ${(error as Error).message}` }; }
     this.sessionRegistry.clearBinding(nodeId);
+    if (leased) guard!.rebindLifecycle(nodeId);
     return { ok: true };
   }
 

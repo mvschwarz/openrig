@@ -1066,7 +1066,7 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
     try {
       wire.startServices?.();
       const make = (mod as { makeOperatorDeliveryEngine: (deps: unknown) => { dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean }> } }).makeOperatorDeliveryEngine;
-      const port = make({ home, queueRepo: repo, dispatch: (op: string, ref: string, payload: unknown) => wire.dispatcher.dispatch(op, ref, payload), registry: { loadHumanRegistry: () => registryWith({ deliveryClass: "B", availability: "available" }) } });
+      const port = make({ home, readiness: async () => ({ ready: true, reason: "fixture" }), queueRepo: repo, dispatch: (op: string, ref: string, payload: unknown) => wire.dispatcher.dispatch(op, ref, payload), registry: { loadHumanRegistry: () => registryWith({ deliveryClass: "B", availability: "available" }) } });
 
       const src = await repo.create({ sourceSession: "sender@r", destinationSession: "relay@r", body: "obligation" });
       const { created } = await repo.handoff({ qitemId: src.qitemId, fromSession: "relay@r", toSession: "worker@r", nudge: false });
