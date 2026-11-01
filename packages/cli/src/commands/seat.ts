@@ -188,6 +188,11 @@ function sessionReason(reason: string | null | undefined): string | null {
   return reason === "session_missing" ? "tmux session missing; restore or relaunch the seat" : null;
 }
 
+// #2350: set-typing-guard's refusal when the request names no caller (routes/seat.ts), and the shared helper's code.
+const TYPING_GUARD_IDENTITY_REFUSALS = new Set(["Sender identity required for preference audit", "actor_required"]);
+const TYPING_GUARD_IDENTITY_HINT = "No typing-guard change was made: it is recorded under the caller's seat, and this shell has none "
+  + "(OPENRIG_SESSION_NAME is not set). Run it from a managed seat's shell, or join this shell to a seat first (rig attach --self --help).";
+
 const LEVEL_WORDS: Record<string, string> = {
   "openrig-urgent": "OpenRig's own messages and anything marked urgent type.",
   "urgent-only": "Only messages marked urgent type.",
@@ -398,6 +403,7 @@ export function seatCommand(depsOverride?: SeatDeps & { readStdin?: () => Promis
     const result = method === "GET" ? await client.get<Record<string, unknown>>(path) : await client.post<Record<string, unknown>>(path, body ?? {});
     console.log(JSON.stringify(result.data, null, json ? undefined : 2));
     if (result.status >= 400) process.exitCode = result.status >= 500 ? 2 : 1;
+    return result;
   };
   cmd.command("history")
     .requiredOption("--rig <id>", "Exact rig ID")
@@ -438,6 +444,10 @@ at an empty prompt; --enabled true keeps that existing behavior. Draft-aware hol
 when the current input contains a draft or cannot be read. It returns the exact
 reason and held message ID immediately, without automatic retry.
 Off (--enabled false) permits new automatic sends.
+
+The change is recorded under the caller's seat, which the CLI takes from
+OPENRIG_SESSION_NAME. Run this from a managed seat's shell, or join this shell to
+a seat first (rig attach --self --help).
 
 Between off (always interrupt) and hold (full quiet):
   openrig-urgent  OpenRig's own messages (watchdogs, scheduled wakes, notices) and
@@ -480,9 +490,14 @@ Examples:
         console.error("Choose --enabled true|false or --mode off|draft-aware|openrig-urgent|urgent-only|sends-only|hold.");
         process.exitCode = 1; return;
       }
-      await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
+      const result = await guardRequest("POST", `/api/seat/set-typing-guard/${encodeURIComponent(seat)}`, {
         ...(opts.mode === undefined ? { enabled: opts.enabled === "true" } : { mode: opts.mode }), reason: opts.reason,
       }, opts.json);
+      // The daemon records the change under the caller's transport identity and refuses without one. Its JSON stays
+      // on stdout; the next step goes to stderr.
+      if (result?.status === 400 && TYPING_GUARD_IDENTITY_REFUSALS.has(String((result.data as { error?: unknown } | undefined)?.error))) {
+        console.error(TYPING_GUARD_IDENTITY_HINT);
+      }
     });
   cmd.command("held-messages").argument("<seat>").option("--limit <n>", "Page size", "100").option("--offset <n>", "Page offset", "0").option("--id <id>", "Read one retained or retired record by ID").option("--json")
     .description("Read retained messages outside the protected terminal; reading never delivers them")
