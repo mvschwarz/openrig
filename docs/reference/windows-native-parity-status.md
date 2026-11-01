@@ -2253,3 +2253,25 @@ first isolated, tools-disabled provider request failed with `refresh_token_reuse
 (401). That account needs a fresh interactive Pi login before remote provider
 continuity/full-session restore can be completed. No credential was printed or
 copied. ACP companion cleanup remains separately unresolved.
+
+### ACP companion fixture teardown repaired (2026-11-02)
+
+The full ACP connector file now passes 23/23 without skips, including its
+afterEach directory removal. The detached-companion test still requires the
+process to survive the ACP connection and still requires the connector's
+incomplete-process note; product ACP behavior is unchanged.
+
+Previously teardown sent SIGKILL by PID and immediately removed the fixture
+directory. The test companion now accepts a test-owned synthetic stop file,
+acknowledges its PID, reason and original cwd, then exits normally. Teardown
+checks that acknowledgement, verifies the cwd still resolves to the original
+fixture directory, and observes ESRCH before removing the files. No retry loop
+was added to directory deletion, and the companion was not moved elsewhere to
+hide a directory hold.
+
+Read-only inspection of the old retained roots found native DELETE access
+available and deletePending=false; no matching cwd was found among readable
+candidate processes, including canonical short-path comparisons. This does not
+identify the old force-stop EPERM's exact handle/OS cause. The passing result
+establishes the corrected fixture lifecycle and supersedes the earlier ACP
+cleanup failure for this file, not a product shutdown fix or broad ACP matrix.

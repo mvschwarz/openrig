@@ -8,7 +8,8 @@
 //   error          a JSON-RPC error carrying the original code, message and data
 //   hang           never answers the prompt
 // FAKE_ACP_LOAD=1 advertises loadSession. FAKE_ACP_COMPANION_PID_FILE starts a detached companion that outlives
-// stdin close (like Hermes's gateway) and writes its pid there. FAKE_ACP_IGNORE_EOF=1 keeps the agent itself running
+// stdin close (like Hermes's gateway) and writes its pid there. Its owning test can request a normal exit by creating
+// <pid-file>.stop; the companion acknowledges that request in <pid-file>.stopped. FAKE_ACP_IGNORE_EOF=1 keeps the agent itself running
 // after its stdin closes, with stdout still open.
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -70,7 +71,10 @@ function handle(packet) {
     case "initialize": {
       const pidFile = process.env.FAKE_ACP_COMPANION_PID_FILE;
       if (pidFile) {
-        const companion = spawn(process.execPath, ["-e", "setTimeout(() => {}, 300000)"], { detached: true, stdio: "ignore" });
+        const companionCode = `const fs=require('node:fs');const pidFile=${JSON.stringify(pidFile)};
+const poll=setInterval(()=>{if(fs.existsSync(pidFile+'.stop')){clearInterval(poll);fs.writeFileSync(pidFile+'.stopped',JSON.stringify({pid:process.pid,reason:'owner-request',cwd:process.cwd()}));process.exit(0);}},10);
+setTimeout(()=>process.exit(0),300000).unref();`;
+        const companion = spawn(process.execPath, ["-e", companionCode], { detached: true, stdio: "ignore" });
         companion.unref();
         writeFileSync(pidFile, String(companion.pid));
       }

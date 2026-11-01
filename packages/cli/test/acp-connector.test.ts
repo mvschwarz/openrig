@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,8 +12,23 @@ const DETACH_RUNNER = fileURLToPath(new URL("./fixtures/acp-detach-runner.ts", i
 const SEAT = "builder@studio";
 const dirs: string[] = [];
 const leftovers: number[] = [];
-afterEach(() => {
+const companionStops: string[] = [];
+afterEach(async () => {
   vi.unstubAllEnvs();
+  for (const pidFile of companionStops.splice(0)) {
+    if (!existsSync(pidFile)) continue;
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    writeFileSync(pidFile + ".stop", "owner-request");
+    await expect.poll(() => {
+      try { return JSON.parse(readFileSync(pidFile + ".stopped", "utf8")); } catch { return null; }
+    }, { timeout: 3000 }).toMatchObject({ pid, reason: "owner-request" });
+    const stopped = JSON.parse(readFileSync(pidFile + ".stopped", "utf8"));
+    expect(realpathSync(stopped.cwd)).toBe(realpathSync(dirname(pidFile)));
+    await expect.poll(() => {
+      try { process.kill(pid, 0); return false; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return true; throw error; }
+    }, { timeout: 3000 }).toBe(true);
+  }
   for (const pid of leftovers.splice(0)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -269,10 +284,10 @@ describe("rig acp run", () => {
     const q = memoryQueue("scenario:reply PONG");
     const run = options();
     const pidFile = join(run.cwd, "companion.pid");
+    companionStops.push(pidFile);
     vi.stubEnv("FAKE_ACP_COMPANION_PID_FILE", pidFile);
     await runAcpAssignment(q.queue, run);
     const companion = Number(readFileSync(pidFile, "utf8"));
-    leftovers.push(companion);
     expect(() => process.kill(companion, 0)).not.toThrow();
     expect(q.task().notes.at(-1)).toMatch(new RegExp(`incomplete: 1 process\\(es\\) carrying this run's marker still run \\(${companion}\\)`));
   });
