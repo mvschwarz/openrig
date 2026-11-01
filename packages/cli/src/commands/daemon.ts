@@ -345,6 +345,11 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           console.log("Daemon PID is absent (stale state)");
           break;
         case "unverified":
+          // T2: a live start reservation names a launch in progress (listener not up yet).
+          if (status.startPending) {
+            const since = status.startPending.since ? ` since ${status.startPending.since}` : "";
+            console.log(`Daemon starting: launch reserved by pid ${status.startPending.pid}${since}; not listening yet`);
+          }
           // 1ae863d2 — C3 semantics: we could NOT confirm up or down; never claim stopped.
           if (status.siblingHint) {
             console.log("Daemon state UNVERIFIED — the resolved OPENRIG_HOME has no daemon state, but a live daemon appears under a sibling home:");
