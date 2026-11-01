@@ -359,6 +359,10 @@ function printResult(json: boolean, body: unknown, status: number): void {
 /** #2276: the daemon's checks of a new row's human-facing fields (missing summary or evidence for a person,
  *  notification, questions, reply-to). The queue repository raises them before the row's first write, inside the
  *  create's transaction. A remote host's refusal arrives as remote_queue_write_failed instead, so it isn't one of these. */
+// Priority is matched exactly where it matters (the founder view, attention ranks), so a typo like "Critical" would
+// quietly file the row as ordinary work. The daemon stores what it's given, so the documented values are checked here.
+const queuePriorityArg = enumArg(["routine", "urgent", "critical"]);
+
 const PRE_WRITE_CREATE_REFUSALS = new Set([
   "human_route_fields_required", "invalid_human_notification", "invalid_human_questions", "reply_to_requires_update", "reply_to_not_found",
 ]);
@@ -911,7 +915,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--mission <id>", "First-class mission scope; translated to a mission:<id> tag (composes with --tags)")
     .option("--slice <id>", "First-class slice scope; translated to a slice:<id> tag (composes with --tags)")
     .option("--gate <role>", "OPR.0.4.3.16: mark this as a gate qitem; translated to a gate:<role> tag (role e.g. guard | spec-review | pm-lead | qa | human). The idle-gate watchdog reads this predicate. Composes with --tags.")
-    .option("--priority <priority>", "Priority: routine | urgent | critical", "routine")
+    .option("--priority <priority>", "Priority: routine | urgent | critical", queuePriorityArg, "routine")
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
@@ -1385,7 +1389,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")
@@ -1489,7 +1493,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
-    .option("--priority <priority>", "Override priority for the new qitem")
+    .option("--priority <priority>", "Override priority for the new qitem: routine | urgent | critical", queuePriorityArg)
     .option("--tier <tier>", "Override tier for the new qitem")
     .option("--tags <tags>", "Comma-separated tags for the new qitem")
     .option("--gate <role>", "OPR.0.4.3.16: mark the new qitem as gate work; translated to a gate:<role> tag (e.g. guard | spec-review). The idle-gate watchdog reads this predicate. Composes with --tags.")

@@ -64,6 +64,24 @@ describe("Slice 15 — CLI contract honesty", () => {
       expect(parsed.error.message).toMatch(/positive integer/);
     });
 
+    it.each([
+      ["create", ["--source", "a@r", "--destination", "b@r", "--summary", "s", "--body", "x"]],
+      ["handoff", ["qitem-x", "--to", "b@r"]],
+      ["handoff-and-complete", ["qitem-x", "--to", "b@r"]],
+    ])("queue %s --priority refuses a value it doesn't document, before anything is sent", async (verb, args) => {
+      const { deps, calls } = makeQueueDeps();
+      const { err, exitCode } = await runCli(["queue", verb, ...args, "--priority", "Critical"], { queueDeps: deps });
+      expect(exitCode).toBe(1);
+      expect(err).toContain("must be one of: routine, urgent, critical; got 'Critical'");
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each(["routine", "urgent", "critical"])("queue create --priority accepts %s", async (priority) => {
+      const { deps, calls } = makeQueueDeps();
+      await runCli(["queue", "create", "--source", "a@r", "--destination", "b@r", "--summary", "s", "--body", "x", "--priority", priority, "--json"], { queueDeps: deps });
+      expect(calls.filter((c) => c.path === "/api/queue/create")).toHaveLength(1);
+    });
+
     it("without --json, the same failure is plain text on stderr (no JSON on stdout) + nonzero exit", async () => {
       const { deps } = makeQueueDeps();
       const { out, err, exitCode } = await runCli(["queue", "list", "--limit", "-1"], { queueDeps: deps });
