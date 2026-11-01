@@ -1,7 +1,8 @@
 // A minimal ACP runner that keeps the runner contract, for testing the conformance check (docs/reference/runner-conformance).
 // It's a test double, not a reference runner. Each --break <name> breaks one promise, so the test can show the check
 // catches it.
-//   node minimal-acp-runner.mjs --agent <command> [--break <name>]...
+//   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none]
+// --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -9,6 +10,8 @@ import { request } from "node:http";
 const argv = process.argv.slice(2);
 const agentCommand = argv[argv.indexOf("--agent") + 1];
 const breaks = new Set(argv.flatMap((a, i) => (a === "--break" ? [argv[i + 1]] : [])));
+const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait") + 1] : "25";
+const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
@@ -154,10 +157,10 @@ async function onPermission(msg) {
   if (agent.exitCode !== null || agent.signalCode !== null) { await withdrawLive("exited"); return; }
   if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
   for (;;) {
-    const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}?waitSeconds=25`);
+    const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
     if (ask.done && !breaks.has("late-deliver")) return;
     const state = read.status === 200 ? read.body?.state : undefined;
-    if (state === "pending") continue;
+    if (state === "pending") { if (readWait !== "25") await new Promise((done) => setTimeout(done, 200)); continue; }
     // A listed answer means OpenRig closed its ask; anything else leaves it open, to withdraw at the turn's end.
     if (["answered", "permitted", "refused", "withdrawn", "stale"].includes(state)) ask.open = false;
     if ((state === "answered" || state === "permitted") && ask.offered.includes(read.body.optionId)) {

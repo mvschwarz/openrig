@@ -106,6 +106,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(1);
   }, 90_000);
 
+  // Section 7 bounds a read's wait at 25 s and no lower: OpenRig's read takes 0 to 25 or none. A runner that polls without
+  // waiting, and sleeps between reads itself, keeps the contract.
+  it.each(["0", "none"])("passes 4b for a runner that reads with waitSeconds %s and waits between reads itself", async (wait) => {
+    const { code, report } = await check(["--cases", "4b"], ` --read-wait ${wait}`);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
   // --wait-ms is for slow machines: a larger one must stretch the fake agent's own timings with the check's settling times,
   // so a runner that keeps the contract still passes. With fixed fake timings, a factor of 3 outgrows case 1's handshake
   // delay; case 2's holds would first be outgrown at about a factor of 5.
