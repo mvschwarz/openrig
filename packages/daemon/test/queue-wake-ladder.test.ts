@@ -469,7 +469,7 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     const tag = consumed ? `consumed-hop:${baton.qitemId}` : (await ladderMod()).escalationDedupTag(baton.destinationSession);
     const carriers = repo.list({ limit: 500 }).filter(row => row.tags?.includes(tag));
     expect(carriers).toHaveLength(1);
-    expect(carriers[0]).toMatchObject({ sourceSession: staleSource, destinationSession: baton.destinationSession });
+    expect(carriers[0]).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: baton.destinationSession });
     await tick(overrides);
     expect(posted).toEqual([baton.qitemId]);
   });

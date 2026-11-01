@@ -11,9 +11,9 @@ import type { ArgvExecFn } from "./tmux.js";
  * Each spawned client costs the daemon a fork of its whole process: some 28 ms of CPU a command at its size, against
  * 0.3 ms for a line written to a client already connected. The client makes a session of its own as it attaches
  * (`new-session`: an existing session is never taken over, whatever its name), named after this daemon's owner id and
- * marked with it (`@openrig-control`), and `destroy-unattached`: tmux destroys it when the client leaves, so the daemon
- * never kills a session itself. Listings leave out this daemon's own session and client, and nothing else: a session
- * another daemon or a person made, whatever its name or mark, is listed as any other.
+ * marked with it (`@openrig-control`), which tmux kills once no client is left in it (a `client-detached` hook, see
+ * `clientArgs`), so the daemon never kills a session itself. Listings leave out this daemon's own session and client,
+ * and nothing else: a session another daemon or a person made, whatever its name or mark, is listed as any other.
  *
  * What it runs and what it gives back are the spawned client's: the same commands, their output, the same error text
  * in `execStderr`, a chain stopped at its first failing command, and output past TMUX_MAX_BUFFER failed with execFile's
@@ -24,7 +24,8 @@ import type { ArgvExecFn } from "./tmux.js";
  * reply, where a spawned client prints a hook's output after its command's. Anything else (a launch,
  * which takes the spawning process's environment; `load-buffer`, see ROUTED; a command line that cannot be written on
  * one line; a global flag other than this client's server selection; no server yet, or one before 3.2) goes to the
- * spawned client, as before.
+ * spawned client, as before. On servers older than tmux 3.7c, or whose version is unknown, all commands use spawned
+ * clients: creating a control client can crash those servers when another session is created (#2304).
  */
 
 /** The session option that marks a control session: its value is the owner id of the daemon whose client made it. */
@@ -126,13 +127,15 @@ function quote(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
-/** Whether tmux's version (`tmux -V`, or a server's `#{version}`) names 3.2 or later: the client flags of
- *  `new-session -f`. */
+/** Only known fixed server releases: tmux before 3.7c can crash while a control client starts and any other
+ * session is created (#2304). Development/unknown versions fall back to spawned clients; a client binary's
+ * version alone is not evidence of the server's version. */
 export function supportsControlMode(versionLine: string): boolean {
-  const match = /(\d+)\.(\d+)/.exec(versionLine);
+  const match = /^(?:tmux\s+)?(\d+)\.(\d+)([a-z]?)(?=\||\s|$)/.exec(versionLine.trim());
   if (!match) return false;
   const major = Number(match[1]);
-  return major > 3 || (major === 3 && Number(match[2]) >= 2);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && (minor > 7 || (minor === 7 && match[3]! >= "c")));
 }
 
 /** A command's reply: its output lines, none once they went past the bound (`overflow`). */
@@ -352,8 +355,8 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     else backOff();
   };
 
-  /** Ends a client as tmux ends one whose input closes: it detaches, after answering what it was sent, and tmux
-   *  destroys its session (`destroy-unattached`). Killed if it has not gone within END_MS. */
+  /** Ends a client as tmux ends one whose input closes: it detaches, after answering what it was sent, and tmux kills
+   *  its session once it has gone (`clientArgs`). Killed if it has not gone within END_MS. */
   const end = (c: ControlClient): Promise<void> => new Promise((resolve) => {
     if (!live.has(c)) {
       resolve();
@@ -393,16 +396,26 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
   };
 
   /** The control client's arguments: a session of its own, made as it attaches and never one that exists, marked with
-   *  this daemon's id, destroyed by tmux once no client is in it, and never moving its client elsewhere when it goes. */
+   *  this daemon's id, killed by tmux once no client is in it, and never moving its client elsewhere when it goes.
+   *
+   *  Killed by a `client-detached` hook, not destroyed by `destroy-unattached` (set off here, whatever a tmux.conf sets
+   *  globally). Before tmux 3.8, a client whose input has closed stops counting as in its session while tmux still
+   *  holds it: another client leaving then has tmux destroy the session under it, and the server crashes on the session
+   *  gone (#2304). The hook runs once the client has gone, and `kill-session` takes any client still in the session out
+   *  of it first. tmux also runs a session's `client-detached` for a client that left another session (one whose
+   *  session is gone gets the hooks of the session active last), so the hook kills the session only while no client
+   *  is in it. A hook's commands run in the session the hook is set on, so `kill-session` names no session and kills
+   *  this one, renamed or not. `if-shell -F` reads a format and runs no shell. */
   const clientArgs = (): string[] => [
     ...serverArgs, "-C", "new-session", "-s", controlSessionName(owner), "-x", "80", "-y", "24", "-f", "no-output,ignore-size",
     "--", ...KEEP_ALIVE,
     ";", "set-option", CONTROL_OPTION, owner,
-    ";", "set-option", "destroy-unattached", "on",
+    ";", "set-option", "destroy-unattached", "off",
+    ";", "set-hook", "client-detached", "if-shell -F '#{==:#{session_attached},0}' kill-session",
     ";", "set-option", "detach-on-destroy", "on",
   ];
 
-  /** Whether a server runs that a control client may attach to: one of tmux 3.2 or later (its own version, not the
+  /** Whether a server runs that a control client may attach to: one of tmux 3.7c or later (its own version, not the
    *  tmux binary's) with a session that is no control session, read by a spawned client. With none, no client is
    *  started: it never starts a server, nor keeps one up that would exit without it (`checkAlone`). */
   const serverReady = async (): Promise<boolean> => {
@@ -581,7 +594,7 @@ export function tmuxControlExec(fallback: ArgvExecFn, options: TmuxControlOption
     }
   };
 
-  /** Ends every client, one attaching included, each after what it was sent: the daemon is stopping. tmux destroys
+  /** Ends every client, one attaching included, each after what it was sent: the daemon is stopping. tmux kills
    *  their sessions as they leave. */
   const close = async (): Promise<void> => {
     closed = true;

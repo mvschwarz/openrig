@@ -241,6 +241,16 @@ function classifyWriteError(err: unknown): TmuxResult {
   return { ok: false, code: "unknown", message: err.message };
 }
 
+/** tmux 3.7+ refuses every send-keys, `-l` included, while the target client is read-only (`tmux attach -r`). */
+function isReadOnlyClientRefusal(result: TmuxResult): boolean {
+  return !result.ok && /client is read-only/i.test(result.message);
+}
+
+/** The key names that submit staged input; both reach the pane as a carriage return. */
+function isSubmitKey(key: string): boolean {
+  return key === "Enter" || key === "C-m";
+}
+
 /** The launch warning when the parent-session identity cleanup could not finish (#771). */
 function parentSessionEnvWarning(target: string, err: unknown): string {
   const reason = err instanceof Error ? err.message : String(err);
@@ -1034,11 +1044,21 @@ export class TmuxAdapter {
   async sendKeys(target: string, keys: string[], beforeInput?: () => void, options?: { beforeKeys?: () => Promise<void> }): Promise<TmuxResult> {
     return this.guardedInput(target, async (pane, beforeWrite) => {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
-      const submit = keys.some(key => key === "Enter" || key === "C-m");
-      if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
-      if (options?.beforeKeys) await options.beforeKeys();
+      const submit = keys.some(isSubmitKey);
+      const check = async () => {
+        if (this.deliveryGuard?.needsInputCheck(identity)) await this.deliveryGuard.beforeInput(identity, submit);
+        if (options?.beforeKeys) await options.beforeKeys();
+      };
+      await check();
       beforeWrite(); beforeInput?.();
-      const result = await this.sendKeysUnchecked(pane, keys);
+      let result = await this.sendKeysUnchecked(pane, keys);
+      // A read-only client stops send-keys but not load-buffer/paste-buffer (#2090). A lone submit key goes as its
+      // carriage return through the unbracketed paste, once the same checks pass again, so input that changed in
+      // the gap is not submitted.
+      if (keys.length === 1 && isSubmitKey(keys[0]!) && isReadOnlyClientRefusal(result)) {
+        result = await this.sendTextUnchecked(pane, "\r", () => { beforeWrite(); beforeInput?.(); }, false,
+          { beforePaste: check, afterPaste: async () => {} });
+      }
       if (result.ok && submit) this.deliveryGuard?.noteSubmitted(identity);
       return result;
     }, false, "keys");

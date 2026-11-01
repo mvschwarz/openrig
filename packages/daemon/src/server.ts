@@ -463,6 +463,9 @@ export function createGuestActivityApp(deps: AppDeps): Hono {
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("runtimeAdapters" as never, deps.runtimeAdapters ?? {});
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
+    // Read only by the runner permission routes, the one other thing a grant can do on this router.
+    c.set("queueRepo" as never, deps.queueRepo);
+    c.set("rigRepo" as never, deps.rigRepo);
     await next();
   });
   app.route("/api/activity", guestActivityRoutes);

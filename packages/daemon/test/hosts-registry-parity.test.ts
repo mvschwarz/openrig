@@ -7,8 +7,8 @@
 // through BOTH validators and must agree verdict-for-verdict; a divergence
 // here means one twin drifted.
 
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,7 +17,8 @@ import {
   resolveHost,
   resolvePlacementHost,
 } from "../src/domain/hosts/hosts-registry-reader.js";
-import { validateHostRegistry as cliValidate } from "../../cli/src/host-registry.js";
+import { validateHostRegistry as cliValidate, addHostEntry as cliAddHostEntry, updateHostEntry as cliUpdateHostEntry, removeHostEntry as cliRemoveHostEntry } from "../../cli/src/host-registry.js";
+import { addHostEntry as daemonAddHostEntry, updateHostEntry as daemonUpdateHostEntry, removeHostEntry as daemonRemoveHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
 
 const SRC = "/fixture/hosts.yaml";
 
@@ -84,6 +85,75 @@ describe("hosts-registry reader — CLI/daemon validator parity (shared fixtures
       }
     });
   }
+});
+
+describe("hosts-registry writer twins — update/remove byte parity (issue #2128)", () => {
+  let dirA: string; // CLI twin
+  let dirB: string; // daemon twin
+
+  beforeEach(() => {
+    dirA = mkdtempSync(join(tmpdir(), "mw-parity-cli-"));
+    dirB = mkdtempSync(join(tmpdir(), "mw-parity-daemon-"));
+  });
+  afterEach(() => {
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  });
+
+  const SEED: Array<Record<string, unknown>> = [
+    { id: "vm-a", transport: "ssh", target: "vm-a.local", user: "admin", notes: "old" },
+    { id: "h1", transport: "http", url: "http://h1:7433", bearer_env: "H1_TOKEN" },
+  ];
+
+  function seedBoth(pathA: string, pathB: string) {
+    for (const entry of SEED) {
+      expect(cliAddHostEntry(entry, pathA).ok).toBe(true);
+      expect(daemonAddHostEntry(entry, pathB).ok).toBe(true);
+    }
+  }
+
+  it("same edit/remove sequence in → identical yaml bytes out", () => {
+    const pathA = join(dirA, "hosts.yaml");
+    const pathB = join(dirB, "hosts.yaml");
+    seedBoth(pathA, pathB);
+
+    expect(cliUpdateHostEntry("vm-a", { target: "vm-b.local", user: "bob", notes: "moved" }, pathA).ok).toBe(true);
+    expect(daemonUpdateHostEntry("vm-a", { target: "vm-b.local", user: "bob", notes: "moved" }, pathB).ok).toBe(true);
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+
+    expect(cliUpdateHostEntry("h1", { url: "http://h2:7433" }, pathA).ok).toBe(true);
+    expect(daemonUpdateHostEntry("h1", { url: "http://h2:7433" }, pathB).ok).toBe(true);
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+
+    expect(cliRemoveHostEntry("vm-a", pathA).ok).toBe(true);
+    expect(daemonRemoveHostEntry("vm-a", pathB).ok).toBe(true);
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+  });
+
+  it("identical refusal verdicts: unknown id / fixed id / fixed transport / unknown field / no changes — same error text", () => {
+    const pathA = join(dirA, "hosts.yaml");
+    const pathB = join(dirB, "hosts.yaml");
+    seedBoth(pathA, pathB);
+
+    const PAIRS: Array<[string, () => { ok: boolean; error?: string }, () => { ok: boolean; error?: string }]> = [
+      ["unknown id", () => cliUpdateHostEntry("nope", { target: "x" }, pathA), () => daemonUpdateHostEntry("nope", { target: "x" }, pathB)],
+      ["fixed id", () => cliUpdateHostEntry("vm-a", { id: "other" }, pathA), () => daemonUpdateHostEntry("vm-a", { id: "other" }, pathB)],
+      ["fixed transport", () => cliUpdateHostEntry("vm-a", { transport: "http" }, pathA), () => daemonUpdateHostEntry("vm-a", { transport: "http" }, pathB)],
+      ["unknown field", () => cliUpdateHostEntry("vm-a", { targets: "x" }, pathA), () => daemonUpdateHostEntry("vm-a", { targets: "x" }, pathB)],
+      ["no changes", () => cliUpdateHostEntry("vm-a", {}, pathA), () => daemonUpdateHostEntry("vm-a", {}, pathB)],
+      ["remove unknown", () => cliRemoveHostEntry("nope", pathA), () => daemonRemoveHostEntry("nope", pathB)],
+    ];
+    for (const [label, cli, daemon] of PAIRS) {
+      const a = cli();
+      const b = daemon();
+      expect(a.ok, label).toBe(false);
+      expect(b.ok, label).toBe(false);
+      expect((b as { error: string }).error.replaceAll(pathB, "<path>"), label)
+        .toBe((a as { error: string }).error.replaceAll(pathA, "<path>"));
+    }
+    // nothing was written by any refusal
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+  });
 });
 
 describe("hosts-registry reader — daemon behaviors", () => {

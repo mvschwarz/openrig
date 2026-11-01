@@ -153,6 +153,7 @@ export type RigEvent =
   | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.permissions_to_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permission_rules_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only"; replaced?: unknown }
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
@@ -504,6 +505,8 @@ export interface RestoreValidationBlocker {
 export interface RestoreNodeResult {
   /** An in-place restore started a replacement shell; a later refusal cannot leave the predecessor untouched. */
   launchStarted?: true;
+  /** An in-place restore failed before its takeover stopped anything. It says nothing about whether the seat's process runs. */
+  nothingStopped?: true;
   nodeId: string;
   logicalId: string;
   /** Set only by an explicit selected-history startup; these are runtime row IDs, not native tokens. */
@@ -532,6 +535,13 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** Restore gaps that are not guidance: a resumed seat whose saved startup
+   *  context lacked a selection the current specification still makes and
+   *  whose re-apply was skipped, failed, or threw (e.g. the Claude
+   *  activity-hook marker that could not be re-applied). Like guidanceGaps,
+   *  this only discloses the gap; the rig rolls up partially_restored. A
+   *  healed re-apply or an undeterminable selection is a warning, not a gap. */
+  restoreGaps?: string[];
   /** An ordinary terminal seat (`isOrdinaryTerminalSeat`) has no conversation, so its fresh launch is its whole restore
    *  and doesn't leave the rig partially restored. */
   noConversation?: true;

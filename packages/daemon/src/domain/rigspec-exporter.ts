@@ -9,6 +9,8 @@ import type {
 } from "./types.js";
 import { RigNotFoundError } from "./errors.js";
 import { seatLaunchAdditionsForNode } from "./seat-launch-additions.js";
+import { isAbsolute, normalize } from "node:path";
+import { validateSafePath } from "./path-safety.js";
 
 interface RigSpecExporterDeps {
   rigRepo: RigRepository;
@@ -44,6 +46,44 @@ export class RigSpecExporter {
       const additions = seatLaunchAdditionsForNode(this.db, node.id);
       return !!additions && (!!additions.agent || !!additions.appendSystemPromptFile || additions.pluginDirs.length > 0);
     }).map((node) => node.logicalId).sort();
+  }
+
+  /** Member declarations that cannot be honestly represented by this rig's single export root. */
+  memberStartupNotCarried(rigId: string): Array<{ logicalId: string; reason: "source unavailable" | "different source root" }> {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return [];
+    return rig.nodes.filter(node => node.podId !== null).flatMap(node => {
+      const result = this.memberStartupSource(rigId, node);
+      return result.reason ? [{ logicalId: node.logicalId, reason: result.reason }] : [];
+    }).sort((a, b) => a.logicalId.localeCompare(b.logicalId));
+  }
+
+  private memberStartupSource(rigId: string, node: import("./types.js").NodeWithBinding): {
+    startup?: import("./types.js").StartupBlock; reason?: "source unavailable" | "different source root";
+  } {
+    const recipe = this.rigRepo.getNodeLaunchRecipe(node.id);
+    // A materialized seat can be exported before its first launch creates a recipe.
+    const materialized = this.rigRepo.getRigStartupLayers(rigId)?.materializedSources?.filter(source => source.nodeIds.includes(node.id)) ?? [];
+    if (!recipe && materialized.length !== 1) return { reason: "source unavailable" };
+    const source = recipe ? { root: recipe.rigRoot, spec: recipe.rigSpec } : materialized[0]!;
+    // A malformed retained materialization cannot authorize exporting its contents.
+    if (!source.spec || !Array.isArray(source.spec.pods) || typeof source.root !== "string") return { reason: "source unavailable" };
+    const [podId, memberId] = node.logicalId.split(".");
+    const pods = source.spec.pods.filter(pod => pod && pod.id === podId);
+    const members = pods.length === 1 && Array.isArray(pods[0]!.members) ? pods[0]!.members.filter(member => member && member.id === memberId) : [];
+    if (members.length !== 1) return { reason: "source unavailable" };
+    const startup = members[0]!.startup;
+    if (!startup) return {};
+    if (!Array.isArray(startup.files) || !Array.isArray(startup.actions)
+      || startup.files.some(file => !file || validateSafePath(file.path, "member startup"))) return { reason: "source unavailable" };
+    const exportRoot = this.rigRepo.getRigStartupLayers(rigId)?.root;
+    // The wire format has one rig root and prohibits absolute/traversing startup paths.
+    // Do not silently resolve a second source's files against the first source.
+    // Without a stored original root, a non-portable legacy declaration cannot
+    // honestly be exported as if its files resolved from the output folder.
+    if (startup.files.length && (!exportRoot || !isAbsolute(source.root) || !isAbsolute(exportRoot)
+      || normalize(source.root) !== normalize(exportRoot))) return { reason: "different source root" };
+    return { startup };
   }
 
   /** Name dormant Claude MCP choices omitted from declarations for another runtime. */
@@ -205,6 +245,8 @@ export class RigSpecExporter {
         if (envelope !== undefined) member.codexPermissions = envelope;
         if (node.env) member.env = node.env;
         if (node.sessionSource) member.sessionSource = node.sessionSource;
+        const ownStartup = this.memberStartupSource(rigId, node).startup;
+        if (ownStartup) member.startup = ownStartup;
         const rp = getRestorePolicy(node.id);
         if (rp) member.restorePolicy = rp;
         return member;
