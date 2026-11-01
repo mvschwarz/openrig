@@ -34,11 +34,33 @@ function isBridge(row: ProcessRow): boolean {
     && encoded === Buffer.from(loader(file), "utf16le").toString("base64");
 }
 
+function isScopedBootstrap(row: ProcessRow): boolean {
+  if (!executable(row, "powershell")) return false;
+  const words = parseWindowsCommandLine(row.command);
+  if (words.length !== 5 || words[1] !== "-NoLogo" || words[2] !== "-NoProfile" || words[3] !== "-EncodedCommand") return false;
+  const source = Buffer.from(words[4]!, "base64").toString("utf16le");
+  const match = /^\$s=\[IO\.File\]::ReadAllText\('((?:[^']|'')*)'\); Remove-Item -LiteralPath '((?:[^']|'')*)' -ErrorAction Stop; & \(\[ScriptBlock\]::Create\(\$s\)\)$/.exec(source);
+  if (!match || match[1] !== match[2]) return false;
+  const file = match[1]!.replaceAll("''", "'");
+  return path.win32.isAbsolute(file) && isStagedSendName(path.win32.basename(file))
+    && words[4] === Buffer.from(source, "utf16le").toString("base64");
+}
+
 /** A direct PowerShell parent, or exactly one managed PowerShell loader under cmd. */
 export function windowsManagedRunnerParent(rows: ProcessRow[], panePid: number): number | null {
   if (new Set(rows.map(row => row.pid)).size !== rows.length) return null;
   const pane = rows.find(row => row.pid === panePid);
   if (!pane) return null;
+  if (isScopedBootstrap(pane)) {
+    const children = rows.filter(row => row.ppid === panePid);
+    const start = Date.parse(pane.startedAt ?? "");
+    if (!Number.isFinite(start) || children.length !== 1 || !Number.isFinite(Date.parse(children[0]!.startedAt ?? ""))
+      || Date.parse(children[0]!.startedAt!) < start) return null;
+    const shell = children[0]!;
+    if (executable(shell, "powershell") || executable(shell, "pwsh")) return shell.pid;
+    if (executable(shell, "cmd")) return windowsManagedRunnerParent(rows, shell.pid);
+    return null;
+  }
   if (executable(pane, "powershell") || executable(pane, "pwsh")) return panePid;
   if (!executable(pane, "cmd")) return null;
   const children = rows.filter(row => row.ppid === panePid);
