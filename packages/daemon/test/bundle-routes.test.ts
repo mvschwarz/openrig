@@ -1198,7 +1198,9 @@ describe("Bundle API routes", () => {
 
       const archiveEntries: Array<{ path: string; type: string; linkpath: string }> = [];
       await tar.list({ file: bundlePath, onReadEntry: entry => { archiveEntries.push({ path: entry.path, type: entry.type, linkpath: entry.linkpath }); } });
-      expect(archiveEntries).toContainEqual({ path: "evil-symlink", type: "SymbolicLink", linkpath: "/etc/passwd" });
+      const expectedLink = archiveKind === "filesystem"
+        ? fs.readlinkSync(path.join(stagingDir, "evil-symlink")).replaceAll("\\", "/") : "/etc/passwd";
+      expect(archiveEntries).toContainEqual({ path: "evil-symlink", type: "SymbolicLink", linkpath: expectedLink });
 
       // Write a valid sibling .sha256 so digest verification PASSES — proving
       // the prescan is what catches the symlink, not the digest check.

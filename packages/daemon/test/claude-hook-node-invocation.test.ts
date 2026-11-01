@@ -11,6 +11,19 @@ import { parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hoo
 import { RestoreCheckService, type NodeInventoryEntry } from "../src/domain/restore-check-service.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
+import { windowsClaudePluginHooks } from "../src/domain/windows-claude-plugin-hooks.js";
+
+const nativeShell = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe") : "/bin/sh";
+const shellArgs = (command: string) => process.platform === "win32" ? ["-NoProfile", "-NonInteractive", "-Command", command] : ["-c", command];
+const shellOnlyPath = process.platform === "win32" ? path.dirname(nativeShell) : "";
+// Retain Windows process infrastructure while removing every spelling of PATH.
+// A nearly empty environment can silently prevent PowerShell's native child
+// from consuming redirected stdin, which does not exercise the hook contract.
+const shellEnvironment = () => {
+  const env = process.platform === "win32" ? { ...process.env } : {};
+  for (const key of Object.keys(env)) if (key.toUpperCase() === "PATH") delete env[key];
+  return { ...env, PATH: shellOnlyPath };
+};
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -136,7 +149,7 @@ it("keeps non-node-named runtimes on the recognized legacy form through refresh 
 
 it("executes both actual generated commands with no Node on PATH and quoted interpreter/project names", async () => {
   const f = fixture();
-  const executable = path.join(f.root, "Node O'Brien", "node");
+  const executable = path.join(f.root, "Node O'Brien", process.platform === "win32" ? "node.exe" : "node");
   fs.mkdirSync(path.dirname(executable)); fs.symlinkSync(process.execPath, executable);
   const result = await f.project(f.adapter(executable));
   const posts: unknown[] = [];
@@ -150,8 +163,8 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
     const command = result.hooks.Stop[0].hooks[0].command as string;
     expect(command).toBe(activityCommand(executable, f.relayDest));
     await new Promise<void>((ok, fail) => {
-      const child = spawn("/bin/sh", ["-c", command], { cwd: f.cwd, timeout: 5000,
-        env: { PATH: "", HOME: f.root, OPENRIG_HOME: f.state, OPENRIG_URL: `http://127.0.0.1:${port}`,
+      const child = spawn(nativeShell, shellArgs(command), { cwd: f.cwd, timeout: 5000, windowsHide: true,
+        env: { ...shellEnvironment(), HOME: f.root, OPENRIG_HOME: f.state, OPENRIG_URL: `http://127.0.0.1:${port}`,
           OPENRIG_ACTIVITY_HOOK_TOKEN: "fixture-only", OPENRIG_RUNTIME: "claude-code", OPENRIG_NODE_ID: "fixture-node",
           OPENRIG_SESSION_NAME: "fixture-worker", OPENRIG_OCCUPANT_GENERATION: "fixture-generation" }, stdio: ["pipe", "ignore", "pipe"] });
       let error = ""; child.stderr.on("data", chunk => { error += chunk; });
@@ -160,17 +173,17 @@ it("executes both actual generated commands with no Node on PATH and quoted inte
     });
     expect(posts).toEqual([expect.objectContaining({ hookEvent: "Stop", nodeId: "fixture-node", generation: "fixture-generation" })]);
     const sample = { session_id: "fixture-id", session_name: "fixture-worker", context_window: { used_percentage: 37 } };
-    const r = spawnSync("/bin/sh", ["-c", result.statusLine.command], {
-      cwd: f.cwd, env: { PATH: "", HOME: f.root }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000,
+    const r = spawnSync(nativeShell, shellArgs(result.statusLine.command), {
+      cwd: f.cwd, env: { ...shellEnvironment(), HOME: f.root }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000, windowsHide: true,
     });
     expect(r.status, r.stderr).toBe(0);
     expect(JSON.parse(fs.readFileSync(path.join(f.state, "state/context-usage/fixture-worker.json"), "utf8")))
       .toMatchObject({ session_id: "fixture-id", context_window: { used_percentage: 37 } });
     fs.unlinkSync(executable);
-    const missing = spawnSync("/bin/sh", ["-c", result.statusLine.command], {
-      cwd: f.cwd, env: { PATH: process.env.PATH }, input: JSON.stringify(sample), encoding: "utf8", timeout: 5000,
+    const missing = spawnSync(nativeShell, shellArgs(result.statusLine.command), {
+      cwd: f.cwd, env: shellEnvironment(), input: JSON.stringify(sample), encoding: "utf8", timeout: 5000, windowsHide: true,
     });
-    expect(missing.status).toBe(127); // no hidden fallback to a different PATH interpreter
+    expect(missing.status).toBe(process.platform === "win32" ? 1 : 127); // no hidden fallback to a different PATH interpreter
   } finally { await new Promise<void>(ok => server.close(() => ok())); }
 });
 
@@ -237,14 +250,17 @@ it.runIf(process.platform === "win32").for(["PowerShell", "Git Bash"])("executes
 it.each(["explicit", "legacy"])("runs every Claude plugin hook command with the %s interpreter selection", kind => {
   const f = fixture();
   const plugin = path.join(f.root, "plugin's hooks");
-  const manifest = JSON.parse(fs.readFileSync(path.resolve(path.dirname(relay), "../claude.json"), "utf8"));
-  const commands = Object.values(manifest.hooks).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks.map((h: any) => h.command))) as string[];
-  for (const command of commands) {
-    const relative = /\$\{CLAUDE_PLUGIN_ROOT\}([^"\s]+)/.exec(command)![1]!;
+  const source = fs.readFileSync(path.resolve(path.dirname(relay), "../claude.json"), "utf8");
+  const manifest = JSON.parse(process.platform === "win32" ? windowsClaudePluginHooks(source) : source);
+  const hooks = Object.values(manifest.hooks).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks)) as Array<{ command: string; args?: string[] }>;
+  for (const hook of hooks) {
+    const relative = process.platform === "win32" ? hook.args!.find(arg => arg.startsWith("${CLAUDE_PLUGIN_ROOT}/"))!.slice("${CLAUDE_PLUGIN_ROOT}".length)
+      : /\$\{CLAUDE_PLUGIN_ROOT\}([^"\s]+)/.exec(hook.command)![1]!;
     const script = path.join(plugin, relative);
     fs.mkdirSync(path.dirname(script), { recursive: true });
     fs.writeFileSync(script, 'process.stdout.write(JSON.stringify({ node: process.execPath, args: process.argv.slice(2) }));');
-    const r = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 5000,
+    const r = spawnSync(process.platform === "win32" ? hook.command : "/bin/sh",
+      process.platform === "win32" ? hook.args!.map(arg => arg.replaceAll("${CLAUDE_PLUGIN_ROOT}", plugin)) : ["-c", hook.command], { encoding: "utf8", timeout: 5000, windowsHide: true,
       env: { PATH: kind === "explicit" ? "" : path.dirname(process.execPath), CLAUDE_PLUGIN_ROOT: plugin,
         ...(kind === "explicit" ? { OPENRIG_NODE: process.execPath } : {}) } });
     expect(r.status, r.stderr).toBe(0);

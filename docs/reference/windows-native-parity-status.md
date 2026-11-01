@@ -2137,3 +2137,29 @@ After the compiler-scratch repair, the source-stable installed-package Gate at
 `57adaae` passed build, pack, isolated-prefix install, SQLite ABI, installed
 context/spec operations, capture environment forwarding and the real `rig.cmd`
 entry. This remains scoped package evidence, not an all-feature acceptance claim.
+
+### Developer Mode symlink acceptance (2026-11-01)
+
+After the user enabled Windows Developer Mode, its live registry value was 1
+and fresh file and directory symbolic-link creation both succeeded. This
+supersedes the earlier host EPERM limitation for the tested process.
+
+The selected 11 CLI files containing the formerly blocked symlink assertions
+passed 183 tests with zero failures and 11 skips. The selected 10 daemon files
+passed 287 tests with zero failures and 17 skips. The protected private diagnostic
+was neither selected nor read. These are bounded native reruns, not a complete
+workspace-suite result; skipped checks are not counted as passing coverage.
+
+The daemon rerun initially exposed five fixture failures. The tar assertion now
+compares the actual filesystem link target (Windows makes a root-relative target
+drive-qualified), retaining the separate crafted-header assertion and rejection
+check. Project-boundary fixtures set Windows TEMP/TMP alongside TMPDIR. Hook
+execution fixtures use native PowerShell or the actual Windows exec projection,
+an executable .exe link, and a PATH without Node. They retain Windows process
+infrastructure: an independent probe showed a nearly empty environment returned
+zero without delivering stdin to its native child. The repaired test verifies
+the actual HTTP activity post, context file output and failure after removal of
+the pinned interpreter. The hook file also passes independently, 21/21.
+
+ACP companion cleanup remains unresolved. Remote SSH/SFTP recovery remains
+explicitly deferred by the user. Neither boundary is closed by these results.

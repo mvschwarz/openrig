@@ -939,6 +939,7 @@ describe("the plugin's seat effects stay inside the seat's project", () => {
   }
   const envFor = (c: { claude?: string; launch?: string }, base: Record<string, string>) => {
     const env: Record<string, string> = { PATH: process.env.PATH ?? "", ...base };
+    if (process.platform === "win32" && base.TMPDIR) { env.TEMP = base.TMPDIR; env.TMP = base.TMPDIR; }
     if (c.claude !== undefined) env.CLAUDE_PROJECT_DIR = c.claude;
     if (c.launch !== undefined) env.OPENRIG_SEAT_PROJECT_DIR = c.launch;
     return env;
