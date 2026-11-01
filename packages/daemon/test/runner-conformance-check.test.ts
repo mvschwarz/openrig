@@ -7,16 +7,17 @@ import { promisify } from "node:util";
 // against copies of it that each break one promise: the check must pass the first and catch every break.
 const CHECK = resolve(__dirname, "../../../docs/reference/runner-conformance/check-runner.mjs");
 const RUNNER = resolve(__dirname, "fixtures/runner-conformance/minimal-acp-runner.mjs");
+const LATE_TIMERS = resolve(__dirname, "fixtures/runner-conformance/late-check-timers.cjs");
 const hasTmux = spawnSync("tmux", ["-V"]).status === 0;
 
 type Check = { name: string; ok: boolean; detail?: string };
 type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?: boolean; checks: Check[]; reason?: string };
 type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
-async function check(args: string[], runnerFlags = ""): Promise<{ code: number; report: Report }> {
+async function check(args: string[], runnerFlags = "", nodeArgs: string[] = []): Promise<{ code: number; report: Report }> {
   const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
   try {
-    const { stdout } = await promisify(execFile)(process.execPath, [CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: 90_000 });
+    const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: 90_000 });
     return { code: 0, report: JSON.parse(stdout) };
   } catch (error) {
     const failed = error as { code?: number; stdout?: string; stderr?: string };
@@ -110,6 +111,23 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   // waiting, and sleeps between reads itself, keeps the contract.
   it.each(["0", "none"])("passes 4b for a runner that reads with waitSeconds %s and waits between reads itself", async (wait) => {
     const { code, report } = await check(["--cases", "4b"], ` --read-wait ${wait}`);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // A busy machine delays the check's own timers. Case 1 must still pass a runner that writes its record only after the
+  // answer: whether a record came early is read against the fake agent's log, not against a fixed settle.
+  it("passes case 1 for a runner that keeps the contract when the check's own timers run late", async () => {
+    const { code, report } = await check(["--cases", "1"], "", ["--require", LATE_TIMERS]);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"]]);
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
+  it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
+    const { code, report } = await check(["--cases", "4b"], " --withdraw-after-stop");
     expect(failing(report)).toEqual([]);
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
     expect(code).toBe(0);

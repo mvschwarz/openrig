@@ -1,8 +1,10 @@
 // A minimal ACP runner that keeps the runner contract, for testing the conformance check (docs/reference/runner-conformance).
 // It's a test double, not a reference runner. Each --break <name> breaks one promise, so the test can show the check
 // catches it.
-//   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none]
+//   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none] [--withdraw-after-stop]
 // --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
+// --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
+// posted, not before; the contract doesn't order the two posts.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -12,6 +14,9 @@ const agentCommand = argv[argv.indexOf("--agent") + 1];
 const breaks = new Set(argv.flatMap((a, i) => (a === "--break" ? [argv[i + 1]] : [])));
 const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait") + 1] : "25";
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
+const withdrawAfterStop = argv.includes("--withdraw-after-stop");
+// With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
+let deferredWithdraw = null;
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
@@ -200,6 +205,10 @@ function withdrawLive(reason) {
   }
   if (!ask.open || breaks.has("no-withdraw")) return Promise.resolve();
   ask.open = false;
+  if (withdrawAfterStop && busy && (reason === "turn_cancelled" || reason === "turn_ended")) {
+    deferredWithdraw ??= { askId: ask.askId, reason };
+    return Promise.resolve();
+  }
   return api("POST", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}/withdraw`, { reason });
 }
 
@@ -217,6 +226,11 @@ async function prompt(text) {
   } else {
     const reason = breaks.has("cancelled-always") && cancelSent ? "cancelled" : res.result.stopReason;
     if (!attention || breaks.has("stop-while-attention")) await post("Stop", reason);
+  }
+  if (deferredWithdraw) {
+    const { askId, reason } = deferredWithdraw;
+    deferredWithdraw = null;
+    await api("POST", `/api/activity/permission-requests/${encodeURIComponent(askId)}/withdraw`, { reason });
   }
   busy = false;
   if (queue.length) void prompt(queue.shift());
