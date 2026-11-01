@@ -64,8 +64,9 @@ describe("Specs CLI", () => {
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
-      const url = decodeURIComponent(req.url ?? "");
-      libraryRequests.push(url);
+      const rawUrl = req.url ?? "";
+      libraryRequests.push(rawUrl);
+      const url = decodeURIComponent(rawUrl);
       if (url === "/api/specs/library" || url.startsWith("/api/specs/library?")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         const kind = new URL(`http://localhost${url}`).searchParams.get("kind");
@@ -153,9 +154,15 @@ describe("Specs CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", ""]);
     });
     expect(stderr.join("\n")).toContain("Warning: unrecognized --kind ''. Supported kinds: rig, agent, workflow");
-    expect(stdout.join("\n")).toContain("review-rig");
+    expect(stdout.join("\n")).toContain("No  specs found");
     expect(exitCode).toBeUndefined();
     expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=");
+  });
+
+  it("specs ls --kind encodes special characters in daemon request", async () => {
+    const requestStart = libraryRequests.length;
+    await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "rig#draft"]);
+    expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=rig%23draft");
   });
 
   it.each(["rig", "agent", "workflow"])("specs ls --kind %s runs without warning", async (kind) => {

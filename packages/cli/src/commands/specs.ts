@@ -157,8 +157,11 @@ export async function resolveLibrarySpec(
   nameOrId: string,
   opts?: { kind?: string },
 ): Promise<LibraryEntry> {
-  const res = await client.get<LibraryEntry[]>(opts?.kind !== undefined ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library");
-  const entries = res.data ?? [];
+  const res = await client.get<LibraryEntry[]>(
+    opts?.kind !== undefined ? `/api/specs/library?kind=${encodeURIComponent(opts.kind)}` : "/api/specs/library",
+  );
+  const rawEntries = res.data ?? [];
+  const entries = opts?.kind !== undefined ? rawEntries.filter((e) => e.kind === opts.kind) : rawEntries;
 
   // Try exact ID match first
   const byId = entries.find((e) => e.id === nameOrId);
@@ -229,10 +232,11 @@ Examples:
       try {
         warnIfUnknownKind(opts.kind);
         const client = await getClient();
-        const url = opts.kind !== undefined ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library";
+        const url = opts.kind !== undefined ? `/api/specs/library?kind=${encodeURIComponent(opts.kind)}` : "/api/specs/library";
         const res = await client.get<LibraryEntry[]>(url);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
-        const entries = res.data ?? [];
+        const rawEntries = res.data ?? [];
+        const entries = opts.kind !== undefined ? rawEntries.filter((e) => e.kind === opts.kind) : rawEntries;
 
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
