@@ -672,9 +672,11 @@ export class SeatActivityService {
       if (trust === "positive-only" && evd.activity !== "working") continue;
       // A durable rung's idle or attention boundary holds; a bare working boundary still expires, then falls to the
       // rungs below, so a turn whose end was lost can't read working forever.
+      // A runner's counted working beat lasts its own livenessSeconds instead (the runner contract §4).
       if (rung === "lifecycle-hooks" && !(this.durableBoundaries(seat, rung) && (evd.activity !== "working"
           || (this.latestByRung(seat, rung)?.needsInput?.count ?? 0) > 0))
-          && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
+          && nowMs - Date.parse(evd.observedAt) > (evd.activity === "working" && evd.workingLivenessSeconds
+            ? evd.workingLivenessSeconds * 1000 : HOOK_AUTHORITY_WINDOW_MS)) continue;
       // An idle boundary whose source promised to keep reporting holds for two reports. A source that goes quiet (a runner
       // killed or out of memory) stops reading idle, but only when nothing is waiting on a person: attention holds.
       if (rung === "lifecycle-hooks" && evd.activity === "idle-at-prompt" && evd.livenessSeconds
