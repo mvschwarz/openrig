@@ -149,7 +149,7 @@ export function parseQuestionAction(blockId: unknown, actionId: unknown): { ques
 /** #193 — the questions as blocks (a section, then a button row, per question) plus the
  *  complete text they must also appear as in the accessible fallback. Without buttons (a shared channel, where a click
  *  records nothing), each question's options are a list and the reader is asked to reply in the thread. */
-function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true): { blocks: unknown[]; text: string } {
+function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true, resolved = false): { blocks: unknown[]; text: string } {
   const blocks: unknown[] = [];
   const lines: string[] = [];
   for (const q of questions) {
@@ -157,7 +157,8 @@ function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true
     const options = q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`);
     blocks.push({ type: "section", text: { type: "mrkdwn", text: question } });
     lines.push(question, ...options);
-    if (!buttons) {
+    // A resolved decision keeps its questions as history: options as text, no live buttons, no reply hint.
+    if (!buttons || resolved) {
       blocks.push({ type: "section", text: { type: "mrkdwn", text: bounded(options.join("\n"), SLACK_SECTION_CAP, "options") } });
       continue;
     }
@@ -173,6 +174,7 @@ function buildQuestionBlocks(questions: readonly HumanQuestion[], buttons = true
       })),
     });
   }
+  if (resolved) return { blocks, text: lines.join("\n") };
   const hint = buttons ? TYPED_REPLY_HINT : CHANNEL_REPLY_HINT;
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: hint }] });
   lines.push(hint);
@@ -589,7 +591,8 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
-  const questionParts = q.humanQuestions?.length ? buildQuestionBlocks(q.humanQuestions, !q.sharedChannel) : null;
+  const resolvedDecision = q.ownerNotificationKind === "human-decision-resolved";
+  const questionParts = q.humanQuestions?.length ? buildQuestionBlocks(q.humanQuestions, !q.sharedChannel, resolvedDecision) : null;
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }

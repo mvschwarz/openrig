@@ -170,6 +170,24 @@ describe("structured human questions (#193)", () => {
       expect(json).toContain("&lt;!channel&gt;");
     });
 
+    it.each([{ sharedChannel: false }, { sharedChannel: true }])("a resolved notice carries no buttons and no reply hint, in blocks or fallback (sharedChannel=$sharedChannel)", ({ sharedChannel }) => {
+      const resolved = buildOutboundMessage({ qitemId: "q", summary: "Two quick questions", body: "Pick one for each.", humanQuestions: questions, ownerNotificationKind: "human-decision-resolved", sharedChannel }, { sourceLabel: "proof" });
+      expect((resolved.blocks as Block[]).some((b) => b.type === "actions")).toBe(false);
+      expect(JSON.stringify(resolved.blocks)).not.toMatch(/reply in this thread|Or reply in this thread/i);
+      expect(resolved.text).not.toMatch(/reply in this thread/i);
+      // The question still reads as history: its text and options are kept, without the live controls.
+      for (const s of ["Which database?", "Postgres (recommended)", "Ship this week?", "No"]) expect(resolved.text).toContain(s);
+    });
+
+    it("an open ask keeps its buttons and reply hint, and so does a shared-channel ask", () => {
+      for (const sharedChannel of [false, true]) {
+        const open = buildOutboundMessage({ qitemId: "q", summary: "S", body: "B", humanQuestions: questions, ownerNotificationKind: "human-required", sharedChannel }, { sourceLabel: "proof" });
+        const hasButtons = (open.blocks as Block[]).some((b) => b.type === "actions");
+        expect(hasButtons).toBe(!sharedChannel);
+        expect(open.text).toMatch(/reply in this thread/i);
+      }
+    });
+
     it("renders a plain decision exactly as before", () => {
       const plain = buildOutboundMessage({ qitemId: "q", summary: "S", body: "B" }, { sourceLabel: "proof" });
       expect((plain.blocks as Block[]).some((b) => b.type === "actions")).toBe(false);
