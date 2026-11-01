@@ -2125,6 +2125,15 @@ private write then succeeded while the caller still used the same shared TEMP.
 The underlying host behavior is not attributed beyond those observations.
 
 File/directory symlinks still return EPERM on this host. No developer-mode or
-account configuration was changed. A distinct-user synthetic-file check is
-prepared, but remains unverified without a user-owned second ordinary account.
+account configuration was changed. The user ran the prepared synthetic-file
+check from a distinct ordinary Windows account and supplied its output:
+`DifferentUser`, `PublicControlReadable`, `PrivateReadDenied` and `Pass` were all
+true. This verifies cross-user read denial on the helper-created private file,
+with a readable public file in the same directory as a traversal control. It
+does not establish foreign-user daemon endpoint access or every DACL operation.
 ACP companion cleanup retains its separately documented unresolved boundary.
+
+After the compiler-scratch repair, the source-stable installed-package Gate at
+`57adaae` passed build, pack, isolated-prefix install, SQLite ABI, installed
+context/spec operations, capture environment forwarding and the real `rig.cmd`
+entry. This remains scoped package evidence, not an all-feature acceptance claim.
