@@ -639,6 +639,17 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// A misspelled state ("in_progress") would otherwise read as an empty queue, not as a mistake: the list route matches
+// names as given. Each name is checked and trimmed the way the route trims it.
+const QUEUE_STATE_NAMES = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+function queueStatesArg(value: string): string {
+  const unknown = value.split(",").map((name) => name.trim()).filter((name) => name && !QUEUE_STATE_NAMES.includes(name));
+  if (unknown.length > 0) {
+    throw new InvalidArgumentError(`must be a comma-separated list of: ${QUEUE_STATE_NAMES.join(", ")}; got '${unknown.join("', '")}'`);
+  }
+  return value;
+}
+
 // Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
 // renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
 const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
@@ -1696,7 +1707,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .option("-o <format>", "Output format: json", enumArg(["json"]))
     .option("--destination <session>", "Filter by destination session")
     .option("--source <session>", "Filter by source session")
-    .option("--state <state>", "Filter by state (comma-separated for multiple)")
+    .option("--state <state>", "Filter by state (comma-separated for multiple)", queueStatesArg)
     .option("--target-repo <name>", "PL-007: filter qitems by target_repo (exact match)")
     .option("--limit <n>", "Result limit", positiveIntArg, 100)
     .option("--json", "JSON output (compact; use --full --json for complete fields)")

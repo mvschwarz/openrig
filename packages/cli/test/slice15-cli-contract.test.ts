@@ -72,6 +72,28 @@ describe("Slice 15 — CLI contract honesty", () => {
       expect(err).toMatch(/positive integer/);
     });
 
+    it("queue list --state refuses a misspelled name instead of listing an empty queue", async () => {
+      const { deps, calls } = makeQueueDeps();
+      const { out, err, exitCode } = await runCli(["queue", "list", "--state", "pending, in_progress"], { queueDeps: deps });
+      expect(exitCode).toBe(1);
+      expect(out).toBe("");
+      expect(err).toContain("got 'in_progress'");
+      expect(err).toContain("in-progress");
+      expect(calls.filter((c: { path: string }) => c.path.startsWith("/api/queue/list"))).toHaveLength(0);
+
+      const json = await runCli(["queue", "list", "--state", "bogus", "--json"], { queueDeps: deps });
+      expect(json.exitCode).toBe(1);
+      expect(JSON.parse(json.out).error.code).toBe("commander.invalidArgument");
+    });
+
+    it.each(["pending", " pending , in-progress ", "done,handed-off,failed,denied,canceled,blocked", "pending,"])(
+      "queue list --state accepts %j", async (state) => {
+        const { deps, calls } = makeQueueDeps();
+        const { exitCode } = await runCli(["queue", "list", "--state", state, "--json"], { queueDeps: deps });
+        expect(exitCode ?? 0).toBe(0);
+        expect(calls.filter((c: { path: string }) => c.path.startsWith("/api/queue/list"))).toHaveLength(1);
+      });
+
     it("the path is SHARED across families — a send-family error also emits JSON under --json", async () => {
       const { out, exitCode } = await runCli(["send", "--json", "--no-such-flag"]);
       expect(exitCode).toBe(1);
