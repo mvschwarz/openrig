@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { piSeatPaths, PI_RUNNER_READY_MARKER } from "../src/adapters/pi-runner-protocol.js";
 
-it.runIf(process.platform === "win32")("resolves relative npm PATH from the actual Pi child cwd through the runner handshake", async () => {
+it.runIf(process.platform === "win32").each(["runtime-exit", "stdin-eof"])("resolves relative npm PATH and drains the actual child (%s)", async mode => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-win-path-"));
   const cwd = path.join(temp, "seat"), modules = path.join(cwd, "node_modules");
   const bin = path.join(modules, ".bin"), pkg = path.join(modules, "@earendil-works", "pi-coding-agent");
@@ -19,8 +19,9 @@ it.runIf(process.platform === "win32")("resolves relative npm PATH from the actu
   fs.writeFileSync(path.join(pkg, "entry.cjs"), `
 require('node:fs').writeFileSync(${JSON.stringify(observed)},JSON.stringify({cwd:process.cwd(),argv:process.argv.slice(2)}));
 setTimeout(()=>process.exit(0),3000);
+process.stdin.once('end',()=>{ console.log('OWNED_RPC_EOF_DRAINED'); setTimeout(()=>process.exit(0),30); });
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
- const c=JSON.parse(line); if(c.type==='get_state') { console.log(JSON.stringify({type:'response',id:c.id,success:true,data:{sessionFile:${JSON.stringify(session)},sessionId:'offline'}})); setTimeout(()=>process.exit(0),250); }
+ const c=JSON.parse(line); if(c.type==='get_state') { console.log(JSON.stringify({type:'response',id:c.id,success:true,data:{sessionFile:${JSON.stringify(session)},sessionId:'offline'}})); ${mode === "runtime-exit" ? "setTimeout(()=>process.exit(0),250);" : ""} }
 });`);
   const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
     "--session-name", "fixture", "--state-root", path.join(temp, "state"), "--cwd", cwd, "--launch-id", "native-path-attempt", "--no-approve"], {
@@ -29,7 +30,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
   });
   let output = "", timedOut = false;
-  child.stdout.on("data", data => { output += data; }); child.stderr.on("data", data => { output += data; });
+  child.stdout.on("data", data => { output += data; if (mode === "stdin-eof" && output.includes(PI_RUNNER_READY_MARKER)) child.stdin.end(); }); child.stderr.on("data", data => { output += data; });
   const closed = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
   const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 10_000);
   try {
@@ -37,6 +38,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     expect(timedOut, output).toBe(false);
     expect(child.exitCode, output).toBe(0);
     expect(output).toContain(PI_RUNNER_READY_MARKER);
+    if (mode === "stdin-eof") expect(output).toContain("OWNED_RPC_EOF_DRAINED");
     expect(JSON.parse(fs.readFileSync(observed, "utf8"))).toMatchObject({ cwd, argv: expect.arrayContaining(["--mode", "rpc"]) });
   } finally {
     clearTimeout(timer);

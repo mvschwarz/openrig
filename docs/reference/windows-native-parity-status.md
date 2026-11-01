@@ -2051,3 +2051,21 @@ Fresh native file and directory symlink attempts both failed with `EPERM`.
 The installed WinGet binary runs (`1.29.380`); actual package installation and
 agreement/alias behavior remain unverified. Distinct-user permission checks,
 exhausted ACP cleanup, full restore and remote integration remain open.
+
+### Actual Pi runner EOF drain repair (2026-11-01)
+
+A real installed Pi CLI reached READY but remained alive for the 12-second
+fixture bound after the runner's input pipe closed. The runner closed its line
+reader without forwarding EOF to the RPC child's stdin. It now ends that input
+stream once, allowing the runtime to drain and exit normally. The same actual
+CLI witness exits zero in 25 ms after EOF. A native offline-child regression
+also requires its explicit EOF-drained acknowledgement, so a later timer exit
+cannot conceal a missing EOF delivery.
+
+The real OAuth runner fixture subsequently completed input, normal zero exit,
+reopening the same persisted session, exact marker recall and a second normal
+zero exit. No process-tree force stop was used in that passing fixture; its
+temporary native-private access-token file was removed. This supersedes the
+forced-teardown limit for that specific Pi input/resume fixture, not ACP cleanup,
+psmux-pane attachment or full snapshot restore. The related three-file run passed
+125 tests with 12 platform skips before the added EOF-specific regression.

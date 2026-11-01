@@ -1483,6 +1483,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
+  // Closing the pane/pipe is an input EOF, not a reason to leave the RPC child
+  // waiting forever. Let the runtime drain its pending work and exit normally.
+  input.once("close", () => {
+    if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  });
 
   if (runtime === "pi") {
     child.on("error", (err) => {
