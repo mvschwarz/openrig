@@ -9,5 +9,6 @@ export const streamIntakeCursorSchema: Migration = {
       last_sort_key TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_stream_items_archived_sort_key ON stream_items(archived_at, stream_sort_key);
   `,
 };

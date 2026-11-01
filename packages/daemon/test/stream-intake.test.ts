@@ -368,6 +368,11 @@ describe("StreamIntakeCoordinator", () => {
       if (throwError) throw new Error("Injected write failure");
       return origCreate(input);
     };
+    const origCreateTx = queueRepo.createWithinTransaction.bind(queueRepo);
+    queueRepo.createWithinTransaction = (input) => {
+      if (throwError) throw new Error("Injected write failure");
+      return origCreateTx(input);
+    };
 
     const coordinator = new StreamIntakeCoordinator({
       db,
@@ -553,6 +558,213 @@ describe("StreamIntakeCoordinator", () => {
 
       const rows = queueRepo.list();
       expect(rows).toHaveLength(0);
+    } finally {
+      coordinator.stop();
+    }
+  });
+
+  it("restart after note stored before notification resolves adds no duplicate note or item (pending and closed batches)", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+
+    // 1. Pending batch case
+    const coord1 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord1.start();
+
+    // First item creates the initial batch
+    const item1 = streamStore.emit({ sourceSession: "test@s", body: "First batch item" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Second item adds a note to the pending batch and atomically advances the cursor
+    const item2 = streamStore.emit({ sourceSession: "test@s", body: "Second item note", hintUrgency: "critical" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Stop coordinator immediately (simulating restart after atomic commit of note + cursor)
+    coord1.stop();
+
+    const rowsPending = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(rowsPending).toHaveLength(1);
+    const transBefore = queueRepo.listTransitions(rowsPending[0]!.qitemId);
+    const notesBefore = transBefore.filter((t) => t.transitionNote?.includes(item2.streamItemId));
+    expect(notesBefore).toHaveLength(1);
+
+    // Restart coordinator and run catch-up
+    const coord2 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord2.start();
+    await new Promise((r) => setTimeout(r, 100));
+    coord2.stop();
+
+    // Verify pending batch got no duplicate note or second item
+    const rowsAfterRestart = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(rowsAfterRestart).toHaveLength(1);
+    const transAfter = queueRepo.listTransitions(rowsAfterRestart[0]!.qitemId);
+    const notesAfter = transAfter.filter((t) => t.transitionNote?.includes(item2.streamItemId));
+    expect(notesAfter).toHaveLength(1);
+
+    // 2. Closed/claimed batch case
+    // Mark the pending batch as closed
+    queueRepo.update({
+      qitemId: rowsAfterRestart[0]!.qitemId,
+      actorSession: "worker@kernel",
+      state: "done",
+      closureReason: "no-follow-on",
+    });
+
+    // Restart coordinator again
+    const coord3 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord3.start();
+    await new Promise((r) => setTimeout(r, 100));
+    coord3.stop();
+
+    // Verify no second intake item was opened for already-processed item2
+    const allRows = queueRepo.list({ destinationSession: "queue.worker" });
+    expect(allRows).toHaveLength(1);
+    expect(allRows[0]!.state).toBe("done");
+  });
+
+  it("preserves checkpoint and does not initialize cursor as fresh install when cursor read fails", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+
+    // First start to establish a valid cursor
+    const coord1 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coord1.start();
+    const item1 = streamStore.emit({ sourceSession: "test@s", body: "Initial item" });
+    await new Promise((r) => setTimeout(r, 50));
+    coord1.stop();
+
+    const cursorBefore = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+    expect(cursorBefore.last_sort_key).toBe(item1.streamSortKey);
+
+    // Emit more items while stopped
+    const item2 = streamStore.emit({ sourceSession: "test@s", body: "Item during stop" });
+
+    // Simulate database error when reading cursor
+    const origPrepare = db.prepare.bind(db);
+    db.prepare = ((sql: string) => {
+      if (sql.includes("SELECT last_sort_key FROM stream_intake_cursor")) {
+        throw new Error("Simulated disk read error");
+      }
+      return origPrepare(sql);
+    }) as any;
+
+    const coord2 = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    // start() calls catchUp() which encounters the read failure
+    coord2.start();
+    await new Promise((r) => setTimeout(r, 50));
+    coord2.stop();
+
+    // Restore prepare
+    db.prepare = origPrepare;
+
+    // Check that the cursor row was NOT overwritten or moved to item2's sort key
+    const cursorAfter = db.prepare("SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1").get() as {
+      last_sort_key: string;
+    };
+    expect(cursorAfter.last_sort_key).toBe(item1.streamSortKey);
+  });
+
+  it("bounds long fields with honest ellipsis in intake bodies and notes", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const coordinator = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coordinator.start();
+
+    try {
+      const longSession = "session-" + "x".repeat(200);
+      const longTag = "tag-" + "y".repeat(200);
+      const item1 = streamStore.emit({
+        sourceSession: longSession,
+        body: "First observation",
+        hintTags: [longTag],
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const rows = queueRepo.list({ destinationSession: "queue.worker" });
+      expect(rows).toHaveLength(1);
+      const body = rows[0]!.body;
+      expect(body).toContain("...");
+      expect(rows[0]!.summary).toContain("...");
+
+      // Add a note with long fields
+      streamStore.emit({
+        sourceSession: longSession,
+        body: "Second observation",
+        hintType: "longtype-" + "z".repeat(150),
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const transitions = queueRepo.listTransitions(rows[0]!.qitemId);
+      const note = transitions.find((t) => t.transitionNote?.startsWith("Stream observation added:"))?.transitionNote;
+      expect(note).toBeDefined();
+      expect(note).toContain("...");
+    } finally {
+      coordinator.stop();
+    }
+  });
+
+  it("subscribes even when started with intake 'off', and processes emits if destination dynamically becomes active", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    let dynamicDest = "off";
+
+    const coordinator = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: () => dynamicDest,
+    });
+    coordinator.start();
+
+    try {
+      // While off, emits are ignored
+      streamStore.emit({ sourceSession: "test@s", body: "While off" });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(queueRepo.list()).toHaveLength(0);
+
+      // Now switch destination to active without restarting coordinator
+      dynamicDest = "queue.worker";
+      const activeItem = streamStore.emit({ sourceSession: "test@s", body: "After turning on" });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const rows = queueRepo.list({ destinationSession: "queue.worker" });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.body).toContain(activeItem.streamItemId);
     } finally {
       coordinator.stop();
     }

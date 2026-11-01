@@ -63,12 +63,6 @@ export class StreamIntakeCoordinator {
   }
 
   start(): void {
-    try {
-      if (this.getDestinationConfig() === "off") return;
-    } catch {
-      // ignore startup config error and allow fallback
-    }
-
     this.unsubscribeBus = this.eventBus.subscribe((event: PersistedEvent) => {
       if (event.type === "stream.emitted") {
         try {
@@ -80,7 +74,7 @@ export class StreamIntakeCoordinator {
     });
 
     try {
-      this.catchUp();
+      void this.catchUp();
     } catch (err) {
       console.error("[stream-intake] error during startup catch-up:", err);
     }
@@ -94,52 +88,60 @@ export class StreamIntakeCoordinator {
   }
 
   private enqueue(streamItemId: string): void {
+    if (this.getDestinationConfig() === "off") return;
     if (!this.pendingStreamItemIds.includes(streamItemId)) {
       this.pendingStreamItemIds.push(streamItemId);
     }
     void this.drain();
   }
 
-  private getCursor(): string | null {
-    try {
-      const row = this.db
-        .prepare(`SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1`)
-        .get() as { last_sort_key: string } | undefined;
-      return row ? row.last_sort_key : null;
-    } catch {
-      return null;
-    }
+  private readCursor(): string | undefined {
+    const row = this.db
+      .prepare(`SELECT last_sort_key FROM stream_intake_cursor WHERE id = 1`)
+      .get() as { last_sort_key: string } | undefined;
+    return row?.last_sort_key;
   }
 
-  private updateCursor(sortKey: string): void {
+  private writeCursor(sortKey: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO stream_intake_cursor (id, last_sort_key, updated_at)
+         VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET last_sort_key = excluded.last_sort_key, updated_at = excluded.updated_at`
+      )
+      .run(sortKey, now);
+  }
+
+  private async catchUp(): Promise<void> {
+    let existingCursor: string | undefined;
     try {
-      const now = new Date().toISOString();
-      this.db
-        .prepare(
-          `INSERT INTO stream_intake_cursor (id, last_sort_key, updated_at)
-           VALUES (1, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET last_sort_key = excluded.last_sort_key, updated_at = excluded.updated_at`
-        )
-        .run(sortKey, now);
+      existingCursor = this.readCursor();
     } catch (err) {
-      console.error("[stream-intake] failed to update cursor:", err);
-    }
-  }
-
-  private catchUp(): void {
-    const existingCursor = this.getCursor();
-    if (existingCursor === null) {
-      // First start after upgrade or fresh install:
-      // Record a cursor at the newest stream item and do not replay older history.
-      const newest = this.db
-        .prepare(`SELECT stream_sort_key FROM stream_items ORDER BY stream_sort_key DESC LIMIT 1`)
-        .get() as { stream_sort_key: string } | undefined;
-      const initialSortKey = newest?.stream_sort_key ?? "";
-      this.updateCursor(initialSortKey);
+      console.error("[stream-intake] failed to read cursor, preserving checkpoint without advancing:", err);
       return;
     }
 
-    // Existing cursor: page through stream items emitted since cursor in bounded pages
+    if (existingCursor === undefined) {
+      // Record is truly missing: first start after upgrade or fresh install.
+      // Record cursor at the newest stream item and do not replay older history.
+      try {
+        const newest = this.db
+          .prepare(`SELECT stream_sort_key FROM stream_items ORDER BY stream_sort_key DESC LIMIT 1`)
+          .get() as { stream_sort_key: string } | undefined;
+        const initialSortKey = newest?.stream_sort_key ?? "";
+        this.writeCursor(initialSortKey);
+      } catch (err) {
+        console.error("[stream-intake] failed to initialize cursor on first start:", err);
+      }
+      return;
+    }
+
+    if (this.getDestinationConfig() === "off") {
+      return;
+    }
+
+    // Existing cursor: page through stream items emitted since cursor in bounded batches with yield
     let currentCursor = existingCursor;
     const PAGE_SIZE = 100;
     while (true) {
@@ -160,10 +162,13 @@ export class StreamIntakeCoordinator {
       }
 
       currentCursor = items[items.length - 1]!.stream_sort_key;
-      if (items.length < PAGE_SIZE) break;
-    }
+      await this.drain();
 
-    void this.drain();
+      if (items.length < PAGE_SIZE) break;
+
+      // Yield between batches so startup work is bounded and does not starve other tasks
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
 
   private async drain(): Promise<void> {
@@ -191,7 +196,6 @@ export class StreamIntakeCoordinator {
         try {
           await this.handleStreamItem(item, destination);
           this.pendingStreamItemIds.shift();
-          this.updateCursor(item.streamSortKey);
         } catch (err) {
           console.error("[stream-intake] failed to handle stream item:", err);
           // Leave the item pending and stop drain loop to retry later
@@ -219,19 +223,28 @@ export class StreamIntakeCoordinator {
 
     if (existing) {
       let promoted = false;
-      // Promote priority if incoming item is critical or interrupt
-      if (isUrgent && existing.priority !== "urgent" && existing.priority !== "critical") {
-        this.db.prepare("UPDATE queue_items SET priority = 'urgent' WHERE qitem_id = ?").run(existing.qitemId);
-        promoted = true;
-      }
+      let persistedEvents: PersistedEvent[] = [];
+      const note = formatIntakeNote(item, isUrgent);
 
-      // Add note to the existing unclaimed intake row
-      const note = `Stream observation added: ${item.streamItemId} (${item.sourceSession})${isUrgent ? " [promoted to urgent]" : ""} - hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}, destination=${item.hintDestination ?? "none"}`;
-      this.queueRepo.update({
-        qitemId: existing.qitemId,
-        actorSession: "daemon@kernel",
-        transitionNote: note,
-      });
+      // Atomically update priority, add transition note, and advance cursor together
+      this.db.transaction(() => {
+        if (isUrgent && existing.priority !== "urgent" && existing.priority !== "critical") {
+          this.db.prepare("UPDATE queue_items SET priority = 'urgent' WHERE qitem_id = ?").run(existing.qitemId);
+          promoted = true;
+        }
+
+        const updateResult = this.queueRepo.updateWithinTransaction({
+          qitemId: existing.qitemId,
+          actorSession: "daemon@kernel",
+          transitionNote: note,
+        });
+        persistedEvents = updateResult.persistedEvents;
+
+        this.writeCursor(item.streamSortKey);
+      })();
+
+      // Post-commit side effects: notify subscribers and maybe nudge
+      this.queueRepo.notifyCommitted(persistedEvents);
 
       if (promoted) {
         try {
@@ -246,23 +259,49 @@ export class StreamIntakeCoordinator {
     // Open a new intake row
     const qitemId = streamIntakeQitemId(item.streamSortKey);
     const body = formatIntakeBody(item);
+    const summary = boundText(`1 new stream observation(s) from ${item.sourceSession}`, 200);
+
+    let createResult:
+      | { qitemId: string; persistedEvent: PersistedEvent; destinationSession: string; nudge?: boolean }
+      | undefined;
 
     try {
-      await this.queueRepo.create({
-        qitemId,
-        sourceSession: "daemon@kernel",
-        destinationSession: destination,
-        body,
-        summary: `1 new stream observation(s) from ${item.sourceSession}`.slice(0, 200),
-        tags: [STREAM_INTAKE_TAG],
-        priority: isUrgent ? "urgent" : "routine",
-      });
+      this.db.transaction(() => {
+        createResult = this.queueRepo.createWithinTransaction({
+          qitemId,
+          sourceSession: "daemon@kernel",
+          destinationSession: destination,
+          body,
+          summary,
+          tags: [STREAM_INTAKE_TAG],
+          priority: isUrgent ? "urgent" : "routine",
+        });
+
+        this.writeCursor(item.streamSortKey);
+      })();
     } catch (err) {
-      // If already exists with same ID (e.g. race or restart), treat as handled
+      // If already exists with same ID (e.g. race or restart), treat as handled and advance cursor
       if (err instanceof Error && err.message.includes("already exists")) {
+        this.writeCursor(item.streamSortKey);
         return;
       }
       throw err;
+    }
+
+    if (createResult) {
+      this.eventBus.notifySubscribers(createResult.persistedEvent);
+      try {
+        await this.queueRepo.maybeNudge(
+          createResult.qitemId,
+          createResult.destinationSession,
+          createResult.nudge,
+          "daemon@kernel",
+          undefined,
+          undefined
+        );
+      } catch (err) {
+        console.error("[stream-intake] failed to nudge destination for new intake row:", err);
+      }
     }
   }
 
@@ -298,14 +337,44 @@ export class StreamIntakeCoordinator {
   }
 }
 
-function formatIntakeBody(item: StreamItem): string {
+/**
+ * Bounds display text with an honest ellipsis when truncated.
+ */
+export function boundText(val: string | undefined | null, maxLen = 120): string {
+  if (val === undefined || val === null || val === "") return "none";
+  const str = String(val).trim();
+  if (str.length <= maxLen) return str;
+  return str.slice(0, Math.max(0, maxLen - 3)) + "...";
+}
+
+export function formatIntakeBody(item: StreamItem): string {
+  const boundedId = boundText(item.streamItemId, 120);
+  const boundedSource = boundText(item.sourceSession, 120);
+  const boundedEmitted = boundText(item.tsEmitted, 60);
+  const boundedType = boundText(item.hintType, 80);
+  const boundedUrgency = boundText(item.hintUrgency, 40);
+  const boundedDestination = boundText(item.hintDestination, 120);
+  const rawTags = (item.hintTags ?? []).join(",");
+  const boundedTags = rawTags ? boundText(rawTags, 160) : "none";
+  const boundedSortKey = boundText(item.streamSortKey, 120);
+
   return [
-    `# Stream observation intake: ${item.streamItemId}`,
+    `# Stream observation intake: ${boundedId}`,
     "",
-    `- stream_item_id: ${item.streamItemId}`,
-    `- source: ${item.sourceSession}`,
-    `- emitted: ${item.tsEmitted}`,
-    `- hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}, destination=${item.hintDestination ?? "none"}, tags=${(item.hintTags ?? []).join(",") || "none"}`,
-    `- cursor: rig stream list --after ${item.streamSortKey}`,
+    `- stream_item_id: ${boundedId}`,
+    `- source: ${boundedSource}`,
+    `- emitted: ${boundedEmitted}`,
+    `- hints: type=${boundedType}, urgency=${boundedUrgency}, destination=${boundedDestination}, tags=${boundedTags}`,
+    `- cursor: rig stream list --after ${boundedSortKey}`,
   ].join("\n");
+}
+
+export function formatIntakeNote(item: StreamItem, isUrgent: boolean): string {
+  const boundedId = boundText(item.streamItemId, 120);
+  const boundedSource = boundText(item.sourceSession, 120);
+  const boundedType = boundText(item.hintType, 80);
+  const boundedUrgency = boundText(item.hintUrgency, 40);
+  const boundedDestination = boundText(item.hintDestination, 120);
+
+  return `Stream observation added: ${boundedId} (${boundedSource})${isUrgent ? " [promoted to urgent]" : ""} - hints: type=${boundedType}, urgency=${boundedUrgency}, destination=${boundedDestination}`;
 }
