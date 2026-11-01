@@ -349,6 +349,21 @@ describe("transport routes", () => {
     }
   });
 
+  it("a header-LESS broadcast carries the delivered-unsigned notice only when something was sent", async () => {
+    seedRig();
+    const post = (body: Record<string, unknown>) => sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify(body),
+    });
+    const missed = (await (await post({ rig: "no-such-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(missed.sent).toBe(0);
+    expect(missed.warning).toBeUndefined();
+    const sent = (await (await post({ rig: "my-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(sent.sent).toBeGreaterThan(0);
+    expect(sent.warning).toContain("Delivered without sender identity");
+  });
+
   it("A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/broadcast", {

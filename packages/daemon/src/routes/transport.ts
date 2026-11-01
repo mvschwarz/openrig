@@ -428,8 +428,9 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     // S2 (OPR.0.5.4.3) sender-side honesty: an unattributed fan-out's response carries the
-    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged.
-    if (!derivedActor) {
+    // sign-it notice for the CLI renderers to surface. Attributed fan-outs are unchanged. The notice says the text was
+    // delivered, so a fan-out that reached nobody (an unknown rig, every send refused) doesn't carry it.
+    if (!derivedActor && result.sent > 0) {
       return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
     }
     return c.json(result);
