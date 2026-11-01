@@ -35,7 +35,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     case "session/resume": case "session/load": {
       if (process.env.FAKE_RESUME === "missing") return fail(-32002, "Resource not found");
       if (process.env.FAKE_RESUME === "error") return fail(-32603, "the session store is locked");
+      // dsh 0.2.1-rc.2 answers -32602 both for an id it doesn't have and for a session active elsewhere.
+      if (process.env.FAKE_RESUME === "notresumable") return fail(-32602, "session is not resumable");
       session = message.params.sessionId; return reply({});
+    }
+    case "session/list": {
+      // FAKE_LIST: pages of saved session ids, as JSON; the cursor is the next page's index.
+      if (process.env.FAKE_LIST === "error") return fail(-32603, "the session index is locked");
+      const pages = JSON.parse(process.env.FAKE_LIST ?? "[[]]");
+      const page = Number(message.params?.cursor ?? 0);
+      return reply({ sessions: (pages[page] ?? []).map((sessionId) => ({ sessionId, cwd: process.cwd() })),
+        ...(page + 1 < pages.length ? { nextCursor: String(page + 1) } : {}) });
     }
     case "session/cancel": cancelled = true; if (held) { held(); held = null; } return;
     case "session/prompt": {
@@ -427,6 +437,48 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(seat.launch()).toBeUndefined();
     expect(requests(seat.log(), "session/new")).toEqual([]);
     expect(seat.out()).toMatch(/the session store is locked/);
+  });
+
+  // dsh answers -32602 for a conversation it doesn't have and for one active elsewhere, so that error can't mean missing.
+  // When dsh advertises session/list, the list, asked before anything else, says whether the conversation exists.
+  const listing = { sessionCapabilities: { list: {}, resume: {} } };
+
+  it("reports a conversation dsh doesn't list as missing, without reopening it or starting a new one", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-gone", FAKE_CAPS: JSON.stringify(listing),
+      FAKE_LIST: JSON.stringify([["sess-other"]]), FAKE_RESUME: "notresumable" });
+    expect(await seat.exited).toBe(3);
+    expect(seat.launch()).toMatchObject({ format: 1, attempt: "attempt-1", harness: "dsh", error: "missing" });
+    const log = seat.log();
+    expect(requests(log, "session/list")).toHaveLength(1);
+    expect(requests(log, "session/resume")).toEqual([]);
+    expect(requests(log, "session/new")).toEqual([]);
+  });
+
+  it("follows the list's pages before deciding, and reopens a conversation it finds", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing),
+      FAKE_LIST: JSON.stringify([["sess-a"], ["sess-old-7"]]) });
+    expect(await waitFor(seat.launch, "the launch record")).toMatchObject({ nativeRef: "sess-old-7" });
+    expect(requests(seat.log(), "session/list").map((entry) => (entry.params as { cursor?: string }).cursor)).toEqual([undefined, "1"]);
+  });
+
+  it("leaves a listed conversation that won't reopen unconfirmed, whatever dsh's error says", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing),
+      FAKE_LIST: JSON.stringify([["sess-old-7"]]), FAKE_RESUME: "notresumable" });
+    expect(await seat.exited).toBe(4);
+    expect(seat.launch()).toBeUndefined();
+    expect(requests(seat.log(), "session/new")).toEqual([]);
+  });
+
+  it("decides nothing from a list that fails, so a resume dsh won't make stays unconfirmed", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing),
+      FAKE_LIST: "error", FAKE_RESUME: "notresumable" });
+    expect(await seat.exited).toBe(4);
+    expect(seat.launch()).toBeUndefined();
+    expect(requests(seat.log(), "session/new")).toEqual([]);
   });
 
   it("reports the agent's exit as exited, never idle", async () => {
