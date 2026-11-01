@@ -5,7 +5,7 @@ import { leftAttachedReason } from "./restore-plan-preview.js";
 import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydrate-eligibility.js";
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
-import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
+import { effortPrecedence, readSeatEffort, type LaunchEffortSelection } from "./seat-effort.js";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
@@ -617,12 +617,17 @@ export class RestoreOrchestrator {
   }
 
   /** `keepPane`: the seat is running and is relaunched in its own pane (its process ended in place, the pane and scrollback
-   *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. */
+   *  kept) instead of a new session; nothing checks whether it is live first, since that is the point. `keepEffort`, with
+   *  `keepPane`: launch with that effort (the running process's own, kept by a provider switch) in place of the seat's
+   *  saved one, unless the seat has an explicit choice when the launch reads it; it isn't saved as the seat's choice.
+   *  `onLaunchEffort`, with `keepPane`, hears the effort the launch selected and why, whether or not one was kept. */
   async launchSingleNode(rigId: string, logicalId: string, opts?: {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     snapshotId?: string;
     keepPane?: boolean;
+    keepEffort?: string;
+    onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
   }): Promise<NarrowLaunchResult> {
     return this.launchNodeTargets(rigId, [logicalId], { ...opts, namedAgent: true, nonTargetMode: "unchanged" });
@@ -634,6 +639,8 @@ export class RestoreOrchestrator {
     holdReason?: string;
     snapshotId?: string;
     keepPane?: boolean;
+    keepEffort?: string;
+    onLaunchEffort?: (selected: LaunchEffortSelection) => void;
     selectedHistory?: SelectedRestoreHistory;
     namedAgent?: boolean;
     nonTargetMode: "unchanged" | "detach_and_hold";
@@ -689,7 +696,8 @@ export class RestoreOrchestrator {
       }
       if (opts.keepPane) {
         launched.push(await this.restoreNodeWithCompensation({ node }, rigId, snapshot.id, snapshot.data,
-          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry }, subsetWarnings));
+          { adapters: opts.adapters, fsOps: opts.fsOps, keepPane: true, resumePeriodicCarry,
+            ...(opts.keepEffort ? { keepEffort: opts.keepEffort } : {}), ...(opts.onLaunchEffort ? { onLaunchEffort: opts.onLaunchEffort } : {}) }, subsetWarnings));
         continue;
       }
       // An external CLI's claim has no tmux session to probe; restoreNodeWithCompensation leaves it attached.
@@ -1071,7 +1079,7 @@ export class RestoreOrchestrator {
     rigId: string,
     snapshotId: string,
     data: SnapshotData,
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; onSessionLaunched?: (nodeId: string, sessionId: string) => void; automaticReplacements?: AutomaticSeatReplacement[]; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void; selectedHistory?: SelectedRestoreHistory; resumePeriodicCarry?: boolean },
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
@@ -1590,7 +1598,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean; keepEffort?: string; onLaunchEffort?: (selected: LaunchEffortSelection) => void },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1611,9 +1619,14 @@ export class RestoreOrchestrator {
           ? "SELECT id FROM nodes WHERE id = ? AND rig_id = ? AND logical_id = ?"
           : "SELECT id FROM nodes WHERE rig_id = ? AND logical_id = ?").get(...(selected ? [node.id, rigId, node.logicalId] : [rigId, node.logicalId])) as
           { id: string } | undefined;
-        const decided = effortPrecedence.restoreLaunchEffort({ snapshot: node, live: readSeatEffort(this.db, liveRow?.id ?? node.id) });
+        const live = readSeatEffort(this.db, liveRow?.id ?? node.id);
+        // A provider switch's relaunch keeps the effort its seat was running with, unless the seat has an explicit choice
+        // by now: read here, at launch, the latest choice wins. A kept effort isn't saved as the seat's choice.
+        const kept = opts?.keepEffort && !live?.choice ? opts.keepEffort : undefined;
+        const decided: { effort: string | null; warning?: string } = kept ? { effort: kept } : effortPrecedence.restoreLaunchEffort({ snapshot: node, live });
         if (decided.warning) warnings?.push(`Restore: ${node.logicalId}: ${decided.warning}`);
         restoreEffort = decided;
+        opts?.onLaunchEffort?.({ effort: decided.effort, source: kept !== undefined ? "kept" : live?.choice ? "seat_choice" : "saved" });
       }
       return restoreEffort.effort;
     };

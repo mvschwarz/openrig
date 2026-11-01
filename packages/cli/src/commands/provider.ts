@@ -24,7 +24,7 @@ export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "different" | "unknown"; effect: string; step?: string };
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
 type SwitchReport = { credentialKind?: "api-key"; home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
-  restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean };
+  restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean; effort?: string };
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
 const SWITCH_TIMEOUT_MS = 120_000;
@@ -735,6 +735,7 @@ CLAUDE_CONFIG_DIR and are not isolated by an account home; check them before rel
           console.log(`Claude ${seat.credentialKind === "api-key" ? "API key" : "token"}: ${seat.tokenFile ? `"${seat.account}", read from ${seat.tokenFile}` : "the config dir's stored login"}${seat.loginChanged
             ? seat.tokenApplied === false ? " (reference saved; the token didn't take effect)" : " (set)" : ""}`);
           for (const warning of seat.warnings ?? []) console.log(`warning: ${warning}`);
+          if (seat.effort) console.log(`effort: ${seat.effort}`);
           if (seat.conversation) console.log(`conversation: ${seat.conversation}`);
           if (seat.undo) console.log(`to switch back: ${seat.undo}`);
         }
