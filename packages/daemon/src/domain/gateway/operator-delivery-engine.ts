@@ -71,7 +71,13 @@ export function makeOperatorDeliveryEngine(deps: {
 }): OperatorDeliveryEngine {
   const notificationKeyFor = (row: QueueItem): string => {
     const owner = deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
-    return owner ? `${row.qitemId}:${owner.transitionId}` : `${row.qitemId}:operator-rung`;
+    if (owner) return `${row.qitemId}:${owner.transitionId}`;
+    const legacy = `${row.qitemId}:operator-rung`;
+    // Aggregates have one episode; keep any current legacy custody across an upgrade too.
+    if (row.tags?.includes("wake-prompt-refusal") || resolvedFor(row, legacy)
+      || new DispatchBuffer(deps.home).pending().some(d => d.decisionId === `operator:${legacy}`)) return legacy;
+    const episode = lastMeaningfulTransition(deps.queueRepo.db, row.qitemId)?.id ?? 0;
+    return `${legacy}:${episode}`;
   };
   const resolvedFor = (row: QueueItem, key: string): string | null => {
     const transitions = deps.queueRepo.listTransitions(row.qitemId);
@@ -99,8 +105,8 @@ export function makeOperatorDeliveryEngine(deps: {
     },
     async dispatchEscalation(row: QueueItem, _reason: string) {
       // The episode identity the receipt must carry (Slice 14's ledger accepts
-      // only the current qitemId:transitionId key; a baton row with no owner
-      // transition gets the stable synthetic operator-rung episode).
+      // the current qitemId:transitionId key; an ordinary row without an owner
+      // transition uses its meaningful-progress episode in the synthetic key).
       const notificationKey = notificationKeyFor(row);
 
       const decisionId = `operator:${notificationKey}`;
