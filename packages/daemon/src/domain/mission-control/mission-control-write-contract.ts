@@ -51,6 +51,7 @@ import {
 import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 import { resolveDefaultPerson } from "../gateway/participants.js";
+import { runnerPermissionOrigin } from "../runner-permissions.js";
 
 /** The primary user when several people are registered and none is the default, or when no one is registered and the
  *  claimed actor is a shared channel: the generic human seat the web UI also records. */
@@ -162,7 +163,8 @@ export class MissionControlWriteContract {
     const source = this.requireMutableQitem(input.qitemId);
     // Whose ask this settles: the person a row is parked on, else a person it's addressed to.
     const parkedOn = source.state === "blocked" && source.blockedOn && isHumanSeatSessionRef(source.blockedOn) ? source.blockedOn : null;
-    const acting = this.asActor(input, parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null));
+    const asked = parkedOn ?? (this.queueRepo.isPersonAddress(source.destinationSession) ? source.destinationSession : null);
+    const acting = this.asActor(input, runnerPermissionOrigin(source) && this.queueRepo.answersAsk(source, input.actorSession) ? null : asked);
     input = acting.input;
 
     if ((input.verb === "route" || input.verb === "handoff") && !input.destinationSession) {
@@ -197,6 +199,11 @@ export class MissionControlWriteContract {
 
         // 2. For route/handoff: create the destination packet in same txn.
         if ((input.verb === "route" || input.verb === "handoff") && input.destinationSession) {
+          // A runner's permission ask passed to a colleague: the colleague decides, so a person gets the agent's options
+          // (found back along the handoffs when it came through an agent seat), and the row records what it was handed
+          // from, as the queue's own handoff does, so the request follows it exactly.
+          const permission = runnerPermissionOrigin(source) !== null;
+          const questions = permission && this.queueRepo.isPersonAddress(input.destinationSession) ? this.queueRepo.permissionQuestionsFor(source) : null;
           const created = this.queueRepo.createWithinTransaction({
             sourceSession: input.actorSession,
             destinationSession: input.destinationSession,
@@ -209,6 +216,8 @@ export class MissionControlWriteContract {
               ? [...source.tags, `mission-control:${input.verb}`]
               : [`mission-control:${input.verb}`],
             chainOfRecord: [...(source.chainOfRecord ?? []), input.qitemId],
+            ...(permission ? { handedOffFrom: input.qitemId } : {}),
+            ...(questions ? { humanIntent: "decision" as const, humanAlert: true, humanQuestions: questions } : {}),
             // Default nudge handled post-commit per Phase D pattern.
             nudge: input.notify,
           });
@@ -529,9 +538,10 @@ export class MissionControlWriteContract {
       throw new MissionControlWriteContractError("qitem_not_found", `qitem ${input.qitemId} not found`, { qitemId: input.qitemId });
     }
     const primaryUser = input.authority === "primary-user";
-    input = this.asActor(input, ask.destinationSession).input;
-    // The asked person answers, or the primary user does on anyone's ask.
-    if ((ask.destinationSession !== input.actorSession && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
+    // A runner's permission request takes any registered person's answer, so it isn't "someone else's" to settle.
+    input = this.asActor(input, runnerPermissionOrigin(ask) && this.queueRepo.answersAsk(ask, input.actorSession) ? null : ask.destinationSession).input;
+    // The asked person answers, or the primary user does on anyone's ask (and any registered person on a runner's request).
+    if ((!this.queueRepo.answersAsk(ask, input.actorSession) && !primaryUser) || ask.humanIntent === "update" || !this.queueRepo.isPersonAddress(ask.destinationSession)) {
       throw new MissionControlWriteContractError("answer_not_recorded",
         `qitem ${input.qitemId} isn't an ask to ${input.actorSession}, so ${input.actorSession} can't answer it.`, { qitemId: input.qitemId });
     }
@@ -600,8 +610,10 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
+    // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
     const decision = chose || resume
-      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ") : humanAnswerText(returned.body);
+      ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
+      : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
     if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })
       && this.queueRepo.getById(input.qitemId)?.state !== "done") {
       throw new MissionControlWriteContractError("answer_not_closed",

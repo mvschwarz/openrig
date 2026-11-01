@@ -6,11 +6,11 @@ import { composeView } from "../../daemon/src/domain/terminal/view-composer.js";
 
 function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
-  const composed = { id: "kernel", opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
+  const composed = { id: "kernel", localTmuxServer: undefined as string[] | undefined, opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
   const preview = { planId: "bound-plan", composed, status: { launch: { socketPath: "/daemon home/herdr.sock", session: "daemon-session" } } };
   const get = vi.fn(async (url: string): Promise<{ status: number; data: unknown }> => ({ status: 200, data: url.includes("preview") ? preview : { providers: [{ liveness: { alive: options.alive !== false } }] } }));
   const post = vi.fn(async (): Promise<{ status: number; data: unknown }> => options.refusal ? { status: options.refusal, data: { error: "view changed" } } : { status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } });
-  const client = { baseUrl: "http://localhost:7433", get, post } as unknown as DaemonClient;
+  const client = { baseUrl: "http://localhost:7433", isLocalInstance: vi.fn(async () => true), get, post } as unknown as DaemonClient;
   let pane = 0;
   const exec = vi.fn(async (file: string, args: string[]) => {
     if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: [] } });
@@ -22,7 +22,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : "window";
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
     if (args.at(-1) === "default-size") return "120x40";
-    if (args[0] === "show-options" && args.at(-1) === "window-size") return "latest";
+    if (args.includes("show-options") && args.at(-1) === "window-size") return "latest";
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });
@@ -31,6 +31,23 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
 }
 
 describe("desktop terminal view", () => {
+  it("creates and attaches its viewer on the server named by the daemon preview", async () => {
+    const f = fixture({ herdr: false });
+    const socket = "/private/openrig instance.sock";
+    f.preview.composed.localTmuxServer = ["-S", socket];
+    for (const pane of f.preview.composed.opened) {
+      pane.paneCommand = `tmux -S '${socket}' attach -t '=fixture-${pane.seat}'`;
+    }
+    f.deps.env.TMUX = "/unrelated/default,1,0";
+    const result = await openTerminalWindow(f.client, "saved:kernel", "tmux", f.deps);
+    expect(result.ok).toBe(true);
+    const commands = f.exec.mock.calls.filter(([file]) => file === "/fixture/bin/tmux");
+    expect(commands.length).toBeGreaterThan(0);
+    for (const [, args] of commands) expect(args.slice(0, 2)).toEqual(["-S", socket]);
+    expect(f.exec.mock.calls.find(([file]) => file === "/usr/bin/osascript")![1].join(" "))
+      .toContain(`-S '${socket}' attach-session -t '=openrig-view-owned-test'`);
+  });
+
   it.each([
     { TERM_PROGRAM: "Apple_Terminal" },
     { TERM_PROGRAM: "tmux", __CFBundleIdentifier: "com.apple.Terminal" },
@@ -319,7 +336,7 @@ describe("desktop terminal view", () => {
 
   it.each(["remote", "headless", "empty"])("%s makes no window or tmux mutations", async reason => {
     const f = fixture({ empty: reason === "empty" });
-    if (reason === "remote") Object.assign(f.client, { baseUrl: "http://192.0.2.2:7433" });
+    if (reason === "remote") Object.assign(f.client, { baseUrl: "http://192.0.2.2:7433", isLocalInstance: vi.fn(async () => false) });
     if (reason === "headless") Object.assign(f.deps, { platform: "linux", env: {} });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result.ok).toBe(false);

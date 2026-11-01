@@ -210,7 +210,12 @@ const modeBars = [
 // Claude seats; reported as the last line on another seat) below the mode bar.
 const updateBanner = "Update available! Run: mise upgrade claude";
 const clearHint = "new task? /clear to save 324.1k tokens";
-const warningSets = [[update], [focus], [weekly], [update, focus], [updateBanner], [clearHint], [update, updateBanner]];
+// Claude's footer once it has installed an update, in both spellings seen: "/restart to apply" on a Claude seat
+// (2026-10-30) and "Restart to apply" in startup-submit-confirmation's screen.
+const installedSlash = "✔ Update installed · /restart to apply";
+const installedWord = "✔ Update installed · Restart to apply";
+const warningSets = [[update], [focus], [weekly], [update, focus], [updateBanner], [clearHint], [update, updateBanner],
+  [installedSlash], [installedWord], [update, installedSlash]];
 // Native, from a Claude seat running a hook mid-turn (2026-10-05): the timer follows a hook label.
 const hookRow = "✽ Sketching… (running PostToolUse hook · 3m 12s · ↓ 7.9k tokens)";
 function modePane(hint: string, trailers: string[], composer = "❯\u00a0", before = "● Ready.\n\n✻ Crunched for 2s") {
@@ -277,6 +282,18 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
     expect(classifyPaneActivity(reported)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
     expect(classifyPaneActivity(reported.replace("Update available! Run: mise upgrade claude", clearHint)))
       .toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+  });
+
+  // The installed-update footer last, as a Claude seat showed it (2026-10-30): an empty prompt under it read unknown,
+  // so managed compaction never saw the idle seat. Only the exact line is a status line; a near miss stays unknown.
+  it.each([installedSlash, installedWord])("reads an empty prompt under the installed-update footer as idle: %s", footer => {
+    const content = modePane("⏵⏵ auto mode on (shift+tab to cycle)", [footer]);
+    for (const options of [{ runtime: "claude-code" }, {}]) {
+      expect(classifyPaneActivity(content, options)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+      for (const nearMiss of [`${footer} now`, footer.replace("✔ ", ""), footer.replace("installed", "downloaded")]) {
+        expect(classifyPaneActivity(content.replace(footer, nearMiss), options).state).toBe("unknown");
+      }
+    }
   });
 });
 

@@ -45,7 +45,9 @@ export function handleExportYaml(c: Context): Response {
       .map((seat) => `# Not carried: ${seat}'s launch additions (agent_file, append_system_prompt_file, plugin_dirs); add them back by hand.\n`);
     notCarried.push(...exporter.claudeMcpNotCarried(rigId)
       .map((seat) => `# Not carried: ${seat}'s claude_mcp: none; add it again if this exported copy is switched back to Claude.\n`));
-    const yaml = notCarried.join("") + serialized;
+    const memberStartupOmissions = isPodAware ? exporter.memberStartupNotCarried(rigId)
+      .map(({ logicalId, reason }) => `# Member startup not carried for ${JSON.stringify(logicalId)} (${reason}); inspect the source before importing.\n`) : [];
+    const yaml = notCarried.join("") + memberStartupOmissions.join("") + serialized;
     const startupLayers = rigRepo.getRigStartupLayers(rigId);
     const headers: Record<string, string> = { "Content-Type": "text/yaml" };
     if (startupLayers?.root) {
@@ -70,7 +72,8 @@ export function handleExportJson(c: Context): Response {
 
   try {
     const spec = exporter.exportRig(rigId);
-    return c.json(spec);
+    const omissions = "pods" in spec ? exporter.memberStartupNotCarried(rigId) : [];
+    return c.json(spec, 200, omissions.length ? { "X-OpenRig-Export-Warnings": encodeURIComponent(JSON.stringify(omissions)) } : {});
   } catch (err) {
     if (err instanceof RigNotFoundError) {
       return c.json({ error: err.message }, 404);

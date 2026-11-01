@@ -1,3 +1,5 @@
+import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
+import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
@@ -238,6 +240,8 @@ const CLAUDE_STATUS_WARNINGS = [
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30) or "Restart to apply".
+  /^✔ Update installed · (?:\/restart|Restart) to apply$/,
 ];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
@@ -1718,6 +1722,7 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
+  expectedIdentity?: ExpectedConversation;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -1738,6 +1743,8 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** Internal: managed lifecycle input must preserve a person's draft even when the optional typing guard is off. */
+  preserveInput?: true;
   /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
    *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
    *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
@@ -1857,6 +1864,8 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  checkedIdentity?: ExpectedConversation;
+  identityContract?: 1;
   existingInput?: ExistingInput;
   ok: boolean;
   sessionName: string;
@@ -1959,6 +1968,7 @@ export interface TransportReadinessChecker {
 }
 
 interface SessionTransportDeps {
+  contextUsageStore?: ContextUsageStore;
   db: Database.Database;
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
@@ -2014,6 +2024,7 @@ interface SessionReconciliationSnapshot {
 }
 
 export class SessionTransport {
+  private contextUsageStore?: ContextUsageStore;
   readonly db: Database.Database;
   readonly guardedDelivery?: DraftAwareDelivery;
   private rigRepo: RigRepository;
@@ -2034,6 +2045,7 @@ export class SessionTransport {
   private verifyInputBox?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
+    this.contextUsageStore = deps.contextUsageStore;
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
@@ -2426,6 +2438,61 @@ export class SessionTransport {
   }
 
   private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // Ordinary sends without an input ID have no stored constraint to hydrate.
+    if (!opts?.expectedIdentity && !opts?.deliveryId && !opts?.committedOutboxIds?.length) return this.sendClassifiedInput(sessionName, text, opts);
+    // The constraint belongs to the durable input, including later committed dispatch and ID reuse.
+    const outbox = new OutboxHandler(this.db);
+    let ids = opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []);
+    let admitted = false;
+    try {
+      let expected = opts?.expectedIdentity ? expectedConversation(opts.expectedIdentity) : undefined;
+      for (const id of ids) {
+        const saved = outbox.expectedIdentity(id);
+        if (!saved) continue;
+        const bound = expectedConversation(saved);
+        if (expected && !sameConversation(expected, bound)) throw new DeliveryGuardError("delivery_identity_conflict", "This input ID is bound to another original conversation.");
+        expected = bound;
+      }
+      if (!expected) return this.sendClassifiedInput(sessionName, text, opts);
+      if (sessionName !== expected.sessionName) throw new DeliveryGuardError("expected_identity_mismatch", "The destination must be the expected canonical session.");
+      if (!ids.length) ids = [`expected-send-${randomUUID()}`];
+      this.db.transaction(() => {
+        for (const id of ids) {
+          const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
+          if (opts?.committedOutboxIds && !prior) throw new DeliveryGuardError("delivery_identity_conflict", "Committed input ID is missing.");
+          outbox.bindExpectedIdentity(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
+            outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text,
+            identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal,
+          }, expected!);
+        }
+      })();
+      admitted = true;
+      await resolveExpectedConversation(expected, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+      const result = await this.sendClassifiedInput(sessionName, text, { ...opts, expectedIdentity: expected,
+        ...(opts?.committedOutboxIds ? {} : { deliveryId: ids[0] }) });
+      if (result.outcome !== "retained") {
+        try {
+          for (const id of ids) {
+            if (result.ok) outbox.markDelivered(id);
+            else if (result.sent === false || result.inputPhase === "not_reached") outbox.markFailed(id);
+            else outbox.markIndeterminate(id);
+          }
+        } catch { result.warning = [result.warning, "Conditional input receipt could not be finalized; inspect before retrying."].filter(Boolean).join(" "); }
+      }
+      return { ...result, identityContract: 1, outboxIds: result.outboxIds ?? ids };
+    } catch (error) {
+      // Before-input conditional failures never fall back to an ordinary send.
+      const written = (error as { inputWritten?: boolean }).inputWritten;
+      const attempted = (error as { inputAttempted?: boolean }).inputAttempted;
+      if (admitted && !written && !attempted) for (const id of ids) { try { if (outbox.getById(id)) outbox.markFailed(id); } catch { /* Original refusal remains authoritative. */ } }
+      return { ok: false, sessionName, identityContract: 1, outboxIds: ids,
+        sent: written ? true : attempted ? undefined : false,
+        inputPhase: written ? "written" : attempted ? "attempted" : "not_reached",
+        reason: (error as { code?: string }).code ?? "expected_identity_unavailable", error: (error as Error).message };
+    }
+  }
+
+  private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
@@ -2497,7 +2564,7 @@ export class SessionTransport {
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
-            memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
+            memberOpts?.committedOutboxIds ?? [memberOpts?.expectedIdentity && memberOpts.deliveryId ? memberOpts.deliveryId : `guard-send-${randomUUID()}`]);
         }
         return this.sendUnguarded(sessionName, memberText, memberOpts);
       }, async target => {
@@ -2701,6 +2768,13 @@ export class SessionTransport {
     sessionName = physicalSessionName(this.db, sessionName);
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
+    let checkedIdentity: ExpectedConversation | undefined;
+    let originalCheck: Awaited<ReturnType<typeof resolveExpectedConversation>> | undefined;
+    const checkOriginal = opts?.expectedIdentity ? async () => {
+      originalCheck = await resolveExpectedConversation(opts.expectedIdentity!, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+      checkedIdentity = originalCheck.identity;
+    } : undefined;
+    const beforeOriginalInput = () => { originalCheck?.assertCurrent(); opts?.beforeWrite?.(); };
     const runtime = sessionMeta.runtime;
     const readTarget = sessionMeta.pane ?? sessionName;
     let runtimeAdvisory: string | undefined;
@@ -2749,6 +2823,7 @@ export class SessionTransport {
     let existingInput: ExistingInput | undefined;
     let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
+      if (checkedIdentity) result = { ...result, checkedIdentity, identityContract: 1 };
       if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
@@ -2903,7 +2978,8 @@ export class SessionTransport {
       try {
         submitResult = await this.runStage(
           "session_transport.submit",
-          () => beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+          () => checkOriginal ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], () => { beforeOriginalInput(); beforeKey?.(); }, { beforeKeys: checkOriginal })
+            : beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
           (result) => result.ok ? "ok" : "failed",
         );
       } catch (error) {
@@ -2913,7 +2989,7 @@ export class SessionTransport {
       }
       if (!submitResult.ok && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
-        return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
+        return { ok: false, sessionName, ...(submitResult.code?.startsWith("expected_identity_") ? { sent: false, inputPhase: "not_reached" as const } : {}), reason: submitResult.code?.startsWith("expected_identity_") ? submitResult.code : "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
       try { opts.onInputEffect?.("submitted"); } catch { /* Observation cannot change an input result. */ }
       return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
@@ -3206,6 +3282,15 @@ export class SessionTransport {
     const cancel = callerSignal(opts);
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
+    const preserveInput = opts?.preserveInput ? async () => {
+      const box = runtime === "claude-code" || runtime === "codex"
+        ? await this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      if (bindingChanged()) throw new DeliveryGuardError("draft_input_changed", "The managed input target changed; no input was written.");
+      if (box?.status !== "empty" && !(box?.status === "likely-suggestion" && box.confidence === "high")) {
+        throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
+          `Managed input waits for an empty composer (it reads ${box?.status ?? "unknown"}). Your draft was left untouched; inspect the pane before retrying.`);
+      }
+    } : undefined;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
     const tagIssued = (error: unknown): never => {
@@ -3217,7 +3302,12 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
+        if (checkOriginal) return this.tmuxAdapter.sendText(sessionName, text, () => { beforeOriginalInput(); beforePaste?.(); }, {
+          ...(promptOverride ? { bracketed: false } : {}), beforePaste: async () => { await overrideBeforePaste?.(); await checkOriginal(); if (preserveInput) await preserveInput(); },
+        });
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false,
+          beforePaste: preserveInput ? async () => { await overrideBeforePaste?.(); await preserveInput(); } : overrideBeforePaste });
+        if (preserveInput) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { beforePaste: preserveInput });
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
@@ -3227,7 +3317,7 @@ export class SessionTransport {
     }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
-      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
+      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
       return observe({
         ok: false,
         sessionName,
@@ -3279,11 +3369,15 @@ export class SessionTransport {
       // 5. Submit (Enter)
       submitResult = await this.runStage(
         "session_transport.submit",
-        () => { opts?.beforeWrite?.(); enterIssued = true; return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
+        () => {
+          if (checkOriginal) return this.tmuxAdapter.sendKeys(sessionName, ["Enter"], () => { beforeOriginalInput(); enterIssued = true; }, { beforeKeys: checkOriginal });
+          opts?.beforeWrite?.(); enterIssued = true;
+          return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]);
+        },
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
-        const policyRefusal = typeof submitResult.code === "string" && (submitResult.code.startsWith("draft_") || submitResult.code === "managed_compaction_pending");
+        const policyRefusal = typeof submitResult.code === "string" && (submitResult.code.startsWith("expected_identity_") || submitResult.code.startsWith("draft_") || submitResult.code === "managed_compaction_pending");
         return observe({
           ok: false,
           sessionName,

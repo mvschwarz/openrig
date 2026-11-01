@@ -33,7 +33,7 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
   const windowDeps: WindowDeps = { platform: options.platform ?? "darwin", env: options.env ?? { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), herdrConfig: vi.fn(() => "/fixture/private herdr.toml"), id: () => "fixture" };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
-    clientFactory: () => ({ baseUrl: options.remote ? "http://192.0.2.2:7433" : "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
+    clientFactory: () => ({ baseUrl: options.remote ? "http://192.0.2.2:7433" : "http://localhost:7433", isLocalInstance: vi.fn(async () => !options.remote), get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
   };
   const command = new Command().addCommand(terminalCommand(deps));
   return { get, post, exec, windowDeps, run: (args: string[]) => command.parseAsync(["terminal", "open", ...args], { from: "user" }) };

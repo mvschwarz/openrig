@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { restoreCommand } from "../src/commands/restore.js";
 import { DaemonClient } from "../src/client.js";
@@ -110,7 +111,7 @@ describe("Restore CLI (L3)", () => {
     // compiled module's signal handler text via a lightweight regex.
     const fs = await import("node:fs");
     const path = await import("node:path");
-    const here = path.dirname(new URL(import.meta.url).pathname);
+    const here = path.dirname(fileURLToPath(import.meta.url));
     const restoreSrc = fs.readFileSync(path.resolve(here, "../src/commands/restore.ts"), "utf-8");
 
     // Must include the honest interrupt message mentioning daemon-side work

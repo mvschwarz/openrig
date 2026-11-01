@@ -117,6 +117,7 @@ export class OpenRouterChargeLookup {
   private readonly unposted = new Map<string, Unposted>();
   private running = false;
   private flushScheduled = false;
+  private flushDue = false;
 
   constructor(private readonly io: ChargeLookupIo, private readonly retryDelaysMs = RETRY_DELAYS_MS) {}
 
@@ -146,13 +147,16 @@ export class OpenRouterChargeLookup {
         const outcome = await this.lookUp(next);
         if (outcome === "retry") {
           this.io.schedule(() => { this.queue.push(next); void this.pump(); }, this.delay(next.attempts));
+          if (this.flushDue) { await this.flush(); this.flushDue = false; }
           continue;
         }
         this.unposted.set(`${next.piSessionId}\u0000${next.entryId}`, { piSessionId: next.piSessionId, charge: outcome, posts: 0 });
         await this.flush();
+        this.flushDue = false; // this post also satisfies a retry that became due while it was running
       }
     } finally {
       this.running = false;
+      if (this.flushDue) void this.flushAlone();
     }
   }
 
@@ -183,12 +187,14 @@ export class OpenRouterChargeLookup {
 
   /** A scheduled post retry on a quiet seat: posts only, never another lookup. */
   private async flushAlone(): Promise<void> {
-    if (this.running) return; // the pump in progress flushes on its own
+    if (this.running) { this.flushDue = true; return; }
+    this.flushDue = false;
     this.running = true;
-    try { await this.flush(); } finally {
+    try { await this.flush(); this.flushDue = false; } finally {
       this.running = false;
       // A retry that came due during this post found the pump busy and only queued itself: run it now.
-      if (this.queue.length > 0) void this.pump();
+      if (this.flushDue) void this.flushAlone();
+      else if (this.queue.length > 0) void this.pump();
     }
   }
 

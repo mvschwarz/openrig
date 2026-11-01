@@ -503,7 +503,39 @@ describe("rig seat restart --keep-conversation: gates before any signal", () => 
   it("refuses a pane that is neither a shell running Codex nor Codex itself", async () => {
     const w = world();
     w.setRows([{ ...shellRow(100, 200), executableName: "python3", command: "python3 wrapper.py" }, codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`)]);
-    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: "pane_shape_unknown",
+      detail: { panePid: 100, processChain: [{ pid: 200, ppid: 100, name: "codex" }, { pid: 100, ppid: 1, name: "python3" }] } });
+  });
+
+  it.each([true, false])("reports only process names and parent links for an unrecognized wrapper (plan: %s)", async plan => {
+    const w = world({ between: "/usr/bin/python3 /private/project/wrapper.py --token private-wrapper-token" });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan, reason: "refresh hooks" });
+    expect(result).toMatchObject({ ok: false, code: "pane_shape_unknown", guidance: expect.stringContaining("--plan --json") });
+    expect((result as { detail: unknown }).detail).toEqual({ panePid: 100, processChain: [
+      { pid: 200, ppid: 150, name: "codex" },
+      { pid: 150, ppid: 100, name: "python3" },
+      { pid: 100, ppid: 1, name: "bash" },
+    ] });
+    expect(JSON.stringify(result)).not.toMatch(/private-wrapper-token|\/private\/project|019a0000/);
+    expect(w.calls).toEqual([]);
+    expect(w.builds).toEqual([]);
+    expect(w.events()).toEqual([]);
+  });
+
+  it("leaves an unavailable process name unknown rather than deriving it from command arguments", async () => {
+    const w = world();
+    w.setRows([shellRow(100, 150),
+      { pid: 150, ppid: 100, pgid: 150, tpgid: 150, command: "/private/wrapper --token private-wrapper-token", startedAt: LSTART },
+      codexRow(200, 150, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`, LSTART, 150)]);
+    const result = await w.service.restartInPlace({ seatRef: SEAT, plan: true });
+    expect(result).toMatchObject({ ok: false, code: "pane_shape_unknown" });
+    expect((result as { detail: unknown }).detail).toEqual({ panePid: 100, processChain: [
+      { pid: 200, ppid: 150, name: "codex" },
+      { pid: 150, ppid: 100, name: null },
+      { pid: 100, ppid: 1, name: "bash" },
+    ] });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(w.calls).toEqual([]);
   });
 
   it("refuses while an earlier restart has no recorded result, and a request that waited behind another", async () => {

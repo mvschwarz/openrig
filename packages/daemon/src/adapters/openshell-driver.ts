@@ -4,6 +4,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { randomUUID } from "node:crypto";
+import { OpenShellPodmanObserver, type PodmanCleanupSelection } from "./openshell-podman-observer.js";
+import type { NativeObservation } from "../domain/environment-lifecycle.js";
 import { EnvironmentError, regularBytes, sha256, type EnvironmentBinding, type EnvironmentDriver, type EnvironmentResource, type Placement } from "../domain/environment-platform.js";
 
 const runFile = promisify(execFile);
@@ -43,14 +45,15 @@ export class OpenShellDriver implements EnvironmentDriver {
   async inspect(binding: EnvironmentBinding): Promise<EnvironmentResource> {
     return this.resource(JSON.parse(await this.command([...this.prefix(binding.placement), "get", binding.placement.name, "--output", "json"])));
   }
-  private async checked(binding: EnvironmentBinding): Promise<void> {
+  private async checked(binding: EnvironmentBinding, ready = true): Promise<void> {
     const actual = await this.inspect(binding), saved = binding.resource;
     if (!saved || actual.id !== saved.id || actual.name !== saved.name || actual.workspace !== saved.workspace
       || saved.fingerprint && actual.fingerprint !== saved.fingerprint) throw new EnvironmentError("environment_identity_changed", "The live OpenShell resource does not match the saved binding");
-    if (actual.phase !== "Ready") throw new EnvironmentError("environment_not_ready", "The bound OpenShell resource is not Ready");
+    if (ready && actual.phase !== "Ready") throw new EnvironmentError("environment_not_ready", "The bound OpenShell resource is not Ready");
   }
-  async guest(binding: EnvironmentBinding, args: string[]): Promise<Record<string, any>> {
+  async guest(binding: EnvironmentBinding, args: string[], beforeDispatch?: () => boolean): Promise<Record<string, any>> {
     await this.checked(binding);
+    if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected stop is no longer eligible; no command was dispatched");
     const result = JSON.parse(await this.command([...this.prefix(binding.placement), "exec", binding.placement.name,
       "--no-login-shell", "--timeout", "20", "--", "python3", "/opt/openrig/guest.py", "--root", binding.guestRoot, ...args]));
     if (!result || result.ok !== true) throw new EnvironmentError(result?.code ?? "environment_guest_refused", "The guest operation was not confirmed");
@@ -76,6 +79,39 @@ export class OpenShellDriver implements EnvironmentDriver {
   async download(binding: EnvironmentBinding, source: string, destination: string): Promise<void> {
     const bytes = await this.read(binding, source);
     writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
+  }
+  async captureCleanup(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection> {
+    await this.checked(binding, false);
+    return new OpenShellPodmanObserver().capture(binding, socket);
+  }
+  async cleanupState(binding: EnvironmentBinding, selection?: PodmanCleanupSelection) {
+    return new OpenShellPodmanObserver().observe(binding, selection);
+  }
+  async nativeIdentity(binding: EnvironmentBinding): Promise<NativeObservation> {
+    const observed = await this.guest(binding, ["--identity"]);
+    if (typeof observed.running !== "boolean" || typeof observed.nativeId !== "string" || typeof observed.generation !== "string")
+      throw new EnvironmentError("environment_native_unconfirmed", "The exact native execution is not observed");
+    return observed as NativeObservation;
+  }
+  async stopNative(binding: EnvironmentBinding, native: NativeObservation, _operationId: string, beforeDispatch?: () => boolean): Promise<void> {
+    await this.guest(binding, ["--stop-native", native.nativeId, "--generation", native.generation], beforeDispatch);
+  }
+  async checkpointFiles(binding: EnvironmentBinding, _native: NativeObservation): Promise<Array<{ path: string; sha256: string; bytes: number }>> {
+    const result = await this.guest(binding, ["--checkpoint-files"]);
+    if (!Array.isArray(result.files) || result.files.length !== 1) throw new EnvironmentError("environment_checkpoint_invalid", "The guest did not return one exact history contract");
+    return result.files;
+  }
+  async stopCompute(binding: EnvironmentBinding, _operationId: string, beforeDispatch?: () => boolean): Promise<void> {
+    await this.checked(binding, false);
+    if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected stop is no longer eligible; no command was dispatched");
+    await this.command([...this.prefix(binding.placement), "stop", binding.placement.name]);
+  }
+  async deleteEnvironment(binding: EnvironmentBinding, _operationId: string): Promise<void> {
+    const actual = await this.inspect(binding);
+    if (!binding.resource || actual.id !== binding.resource.id || actual.name !== binding.resource.name || actual.workspace !== binding.resource.workspace
+      || binding.resource.fingerprint && actual.fingerprint !== binding.resource.fingerprint)
+      throw new EnvironmentError("environment_identity_changed", "The selected compute changed before deletion");
+    await this.command([...this.prefix(binding.placement), "delete", binding.placement.name]);
   }
   connectArgs(binding: EnvironmentBinding): string[] { return [...this.prefix(binding.placement), "connect", binding.placement.name]; }
 }

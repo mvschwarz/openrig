@@ -120,13 +120,16 @@ describe("contained Claude restore activity resources", () => {
     db.prepare("DELETE FROM bindings WHERE node_id=?").run(node.id);
     return { rig, node, snap, saved };
   }
-  function restore(f: ReturnType<typeof seed>, runtimeAdapter: RuntimeAdapter = adapter, beforeResume = () => {}) {
+  function restore(f: ReturnType<typeof seed>, runtimeAdapter: RuntimeAdapter = adapter, beforeResume = () => {}, desired?: (nodeId: string) =>
+    | { status: "known"; selected: boolean } | { status: "unknown"; evidence: string },
+    adapters?: Record<string, RuntimeAdapter>) {
     const claude = { canResume: () => true, resume: vi.fn(async () => { beforeResume(); return { ok: true }; }) } as unknown as ClaudeResumeAdapter;
     const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
     const orch = new RestoreOrchestrator({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events,
       snapshotRepo: snapshots, snapshotCapture: capture, checkpointStore: checkpoints, nodeLauncher, tmuxAdapter: tmux,
-      claudeResume: claude, codexResume: { canResume: () => true, resume: async () => ({ ok: true }) } as unknown as CodexResumeAdapter });
-    return orch.restore(f.snap.id, { adapters: { [runtimeAdapter.runtime]: runtimeAdapter }, fsOps: { exists: fs.existsSync } });
+      claudeResume: claude, codexResume: { canResume: () => true, resume: async () => ({ ok: true }) } as unknown as CodexResumeAdapter,
+      ...(desired ? { getDesiredClaudeActivityHooks: desired } : {}) });
+    return orch.restore(f.snap.id, { adapters: adapters ?? { [runtimeAdapter.runtime]: runtimeAdapter }, fsOps: { exists: fs.existsSync } });
   }
 
   it.each([false, true])("preserves selected hooks, including at native launch (pod=%s)", async pod => {
@@ -251,5 +254,224 @@ describe("contained Claude restore activity resources", () => {
     expect(launch).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ resumeToken: token }));
     expect(other.deliverStartup).toHaveBeenCalledWith([], expect.anything());
     expect(writes).toEqual([]);
+  });
+
+  // #1530: a saved startup context that predates the hooks selection must not
+  // leave a resumed seat hookless when the current spec still selects them.
+  it("re-applies the current selection when the saved context has no hooks entry", async () => {
+    const f = seed(true, false);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({
+      status: "attention_required", error: expect.stringContaining("joined restore proof is incomplete"),
+    });
+    // Marker-only recovery: one reconstructed entry, empty startup payload, no replay.
+    const recoveryCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(recoveryCall).toBeDefined();
+    expect(recoveryCall![0].entries).toHaveLength(1);
+    expect(recoveryCall![0].entries[0]).toMatchObject({
+      category: "runtime_resource", resourceType: "claude_activity_hooks", sourceSpec: "current-selection",
+    });
+    expect(recoveryCall![0].startup).toEqual({ files: [], actions: [] });
+    expect(owned().length).toBeGreaterThan(0);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(settings().hooks.Stop).toContainEqual(userHook);
+    expect(settings().env).toEqual(originalSettings.env);
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, "CLAUDE.md"))).toBe(false);
+  });
+
+  // The recovery projection must be awaited: an adapter whose project()
+  // suspends (real async work) must not have its warnings/gaps silently
+  // dropped because postLaunchRestore continued to the rollup first.
+  it("waits for a suspending recovery projection before packaging the restore result", async () => {
+    const f = seed(true, false);
+    const original = adapter.project.bind(adapter);
+    vi.spyOn(adapter, "project").mockImplementation(async (planArg: ProjectionPlan, bindingArg: NodeBinding) => {
+      if (planArg.entries.some((e) => e.resourceType === "claude_activity_hooks")) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return original(planArg, bindingArg);
+    });
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  it("does not consult the current selection when a saved hooks entry exists", async () => {
+    const f = seed(true);
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, adapter, () => {}, desired);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(desired).not.toHaveBeenCalled();
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(owned().length).toBeGreaterThan(0);
+  });
+
+  it("does not consult the current selection for saved entries when no Claude adapter was supplied", async () => {
+    // Legacy (non-pod) restore proceeds without a runtime adapter, so the
+    // guard is reached; with a saved entry present the current selection
+    // must stay unread and no gap may be recorded for it.
+    const f = seed(false);
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, adapter, () => {}, desired, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(desired).not.toHaveBeenCalled();
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  it("does not project when the current spec does not select hooks", async () => {
+    const f = seed(true, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: false }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("warns without projecting when the current selection is unknown", async () => {
+    const f = seed(true, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "unknown", evidence: "no agent file" }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined") && w.includes("p.seat"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("reports a gap when the current selection is known but no Claude adapter was supplied", async () => {
+    const f = seed(false, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("seat") && w.includes("could not be re-applied"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(result.result.nodes[0].restoreGaps?.[0]).toContain("claude_activity_hooks");
+  });
+
+  it("warns without a gap when the selection is unknown and no Claude adapter was supplied", async () => {
+    const f = seed(false, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "unknown", evidence: "no agent file" }), {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be determined") && w.includes("seat"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  it("treats a throwing selection reader as unknown, never as selected", async () => {
+    const f = seed(true, false);
+    const result = await restore(f, adapter, () => {}, () => { throw new Error("boom"); });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  it("discloses a skipped recovery projection instead of reporting success", async () => {
+    const f = seed(true, false);
+    const missing = path.join(shipped, "scripts/activity-relay.cjs");
+    fsOps.exists = p => p !== missing && fs.existsSync(p);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recovery = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(recovery).toBeDefined();
+    const outcomes = await Promise.all(project.mock.results.map((r) => r.value));
+    expect(outcomes.find((v) => v.skipped?.includes("claude_activity_hooks")))
+      .toMatchObject({ projected: [], skipped: ["claude_activity_hooks"], failed: [] });
+    expect(result.result.warnings.some((w) => w.includes("Restore activity hooks:") && w.includes("could not be re-applied"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toHaveLength(1);
+    expect(settings().hooks).toEqual(originalSettings.hooks);
+  });
+
+  it("does not duplicate already-owned hooks when re-applying the current selection", async () => {
+    await adapter.project(plan([activity()]), binding());
+    const before = owned();
+    expect(before.length).toBeGreaterThan(0);
+    const f = seed(true, false);
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    expect(owned()).toEqual(before);
+  });
+
+  it("rolls a resumed node with a restore gap up to partially_restored", async () => {
+    const { rollupRestoreRigResult } = await import("../src/domain/restore-orchestrator.js");
+    const resumed = { nodeId: "n", logicalId: "seat", status: "resumed" as const };
+    expect(rollupRestoreRigResult([resumed])).toBe("fully_restored");
+    expect(rollupRestoreRigResult([{ ...resumed, restoreGaps: ["claude_activity_hooks: test gap"] }])).toBe("partially_restored");
+  });
+
+  // Real current-spec resolution: an agent.yaml on disk, read through the
+  // shared reader restore-check uses — no stubbed selection.
+  async function restoreWithRealSpec(selects: boolean, specExists = true) {
+    const { createDesiredClaudeActivityHooksReader } = await import("../src/domain/desired-claude-activity-hooks.js");
+    const f = seed(true, false);
+    const specDir = path.join(root, "spec");
+    if (specExists) {
+      fs.mkdirSync(path.join(specDir, "runtime"), { recursive: true });
+      fs.writeFileSync(path.join(specDir, "runtime/claude-activity-hooks.json"), "{}\n");
+      fs.writeFileSync(path.join(specDir, "agent.yaml"), `name: impl
+version: "1.0.0"
+resources:
+  skills: []
+  runtime_resources:
+    - id: claude-activity-hooks
+      path: runtime/claude-activity-hooks.json
+      runtime: claude-code
+      type: claude_activity_hooks
+profiles:
+  default:
+    uses:
+      skills: []
+      runtime_resources: ${selects ? "[claude-activity-hooks]" : "[]"}`);
+    }
+    db.prepare("UPDATE nodes SET agent_ref = ?, profile = ? WHERE id = ?").run(`path:${specDir}`, "default", f.node.id);
+    const reader = createDesiredClaudeActivityHooksReader(db, { exists: fs.existsSync, readFile: (p) => fs.readFileSync(p, "utf8") });
+    return { f, result: await restore(f, adapter, () => {}, reader) };
+  }
+
+  it("resolves the current selection from the real agent file and re-applies it", async () => {
+    const { f, result } = await restoreWithRealSpec(true);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned().length).toBeGreaterThan(0);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
+  });
+
+  it("does not project when the real agent file does not select hooks", async () => {
+    const { result } = await restoreWithRealSpec(false);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  it("reports unknown when the real agent file is missing", async () => {
+    const { result } = await restoreWithRealSpec(true, false);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.includes("could not be determined"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 });

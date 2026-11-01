@@ -309,6 +309,31 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     expect(markersOf(baton.qitemId, "ladder-suspend:")[0]).toMatch(/operator/i); // named as the override
   });
 
+  it("DECLARED WINDOW PARSES EXTERNAL DESTINATIONS: a colon in the session does not disable the override", async () => {
+    const baton = await mkBaton("slack:U123@external");
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `slack:U123@external:${new Date(Date.now() + 3600_000).toISOString()}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
+  // Any form Date.parse reads keeps suspending: `date -u '+%Y-%m-%d %H:%M'` prints the space form. (A comma can't
+  // appear: entries are comma-separated, so the textual form drops toUTCString's weekday.)
+  it.each([
+    ["the space form", "worker@r", (d: Date) => d.toISOString().replace("T", " ")],
+    ["the space form", "slack:U123@external", (d: Date) => d.toISOString().replace("T", " ")],
+    ["a textual date", "worker@r", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+    ["a textual date", "slack:U123@external", (d: Date) => d.toUTCString().replace(/^\w+, /, "")],
+  ])("DECLARED WINDOW KEEPS EVERY DATE FORM Date.parse reads: %s suspends %s", async (_form, destination, format) => {
+    const baton = await mkBaton(destination);
+    setNudgeResult(baton.qitemId, "failed:tmux session not found", 60);
+    process.env.OPENRIG_WAKE_SUSPEND = `${destination}:${format(new Date(Date.now() + 3600_000))}`;
+    await tick();
+    expect(calls).toHaveLength(0);
+    expect(markersOf(baton.qitemId, "ladder-suspend:")).toHaveLength(1);
+  });
+
   // ── G5: F3 — STORMS AGGREGATE ────────────────────────────────────────────────
 
   it("STORMS AGGREGATE: one dead destination x five stuck batons yields ONE aggregated escalation naming all five, refreshed not duplicated", async () => {
@@ -469,7 +494,7 @@ describe("S01 wake-or-escalate — retry ladder, named rungs, derived suspension
     const tag = consumed ? `consumed-hop:${baton.qitemId}` : (await ladderMod()).escalationDedupTag(baton.destinationSession);
     const carriers = repo.list({ limit: 500 }).filter(row => row.tags?.includes(tag));
     expect(carriers).toHaveLength(1);
-    expect(carriers[0]).toMatchObject({ sourceSession: staleSource, destinationSession: baton.destinationSession });
+    expect(carriers[0]).toMatchObject({ sourceSession: "daemon@kernel", destinationSession: baton.destinationSession });
     await tick(overrides);
     expect(posted).toEqual([baton.qitemId]);
   });

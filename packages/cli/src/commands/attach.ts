@@ -11,7 +11,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).trim();
+const defaultTmuxExec: TmuxExecFn = (cmd: string) => execSync(cmd, { encoding: "utf-8" }).replace(/\r?\n$/, "");
 
 // tmux writes a control character in its output as "_", so a newline between fields can't separate them, and a
 // session name may hold spaces or underscores. Ask for the two fixed-shape ids first; the rest of the line is the name.
@@ -20,7 +20,7 @@ const TMUX_CONTEXT_LINE = /^(%\d+) (@\d+) (.+)$/;
 
 export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
   | { attachmentType: "external_cli" }
-  | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string } {
+  | { attachmentType: "tmux"; tmuxSession: string; tmuxWindow?: string; tmuxPane: string; tmuxSocketPath?: string } {
   const tmuxPane = process.env["TMUX_PANE"];
   if (!tmuxPane) {
     return { attachmentType: "external_cli" };
@@ -31,7 +31,11 @@ export function resolveAttachContext(tmuxExec: TmuxExecFn = defaultTmuxExec):
     const match = TMUX_CONTEXT_LINE.exec(output.trim());
     if (match) {
       const [, resolvedPane, tmuxWindow, tmuxSession] = match;
-      return { attachmentType: "tmux", tmuxSession: tmuxSession!, tmuxWindow, tmuxPane: resolvedPane! };
+      // Read the socket separately: tmux replaces control-character delimiters,
+      // and session names and socket paths may both contain literal spaces.
+      const tmuxSocketPath = tmuxExec(`tmux display-message -p -t ${shellQuote(resolvedPane!)} '#{socket_path}'`).replace(/\r?\n$/, "");
+      return { attachmentType: "tmux", tmuxSession: tmuxSession!, tmuxWindow, tmuxPane: resolvedPane!,
+        ...(tmuxSocketPath ? { tmuxSocketPath } : {}) };
     }
   } catch {
     // Fall back to external_cli if tmux metadata cannot be resolved.
@@ -120,6 +124,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
         body["tmuxSession"] = attachContext.tmuxSession;
         if (attachContext.tmuxWindow) body["tmuxWindow"] = attachContext.tmuxWindow;
         body["tmuxPane"] = attachContext.tmuxPane;
+        if (attachContext.tmuxSocketPath) body["tmuxSocketPath"] = attachContext.tmuxSocketPath;
       }
       if (opts.displayName) body["displayName"] = opts.displayName;
 

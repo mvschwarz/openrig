@@ -18,6 +18,7 @@ import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
 import { checkProviderReadiness } from "../provider-auth.js";
+import { getOpenRigHome, readOpenRigUrl } from "../openrig-compat.js";
 
 interface DoctorCheck {
   name: string;
@@ -40,7 +41,12 @@ export interface DoctorDeps {
   env?: NodeJS.ProcessEnv;
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
-  fetch?: (url: string) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  fetch?: (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json?: () => Promise<unknown> }>;
+  /** The caller's effective user id, compared with the one the port's daemon reports. Absent: this process's own;
+   *  null: this platform has none. */
+  callerUid?: number | null;
+  /** How long the port's /healthz body may take to arrive (default 2000 ms); after that its owner is unknown. */
+  ownerReportTimeoutMs?: number;
   /**
    * Build B — path to a rig spec to check against the RUNNING rig of the same name (`--spec`).
    *
@@ -56,6 +62,71 @@ export interface DoctorDeps {
 
 const DEFAULT_PORT = 7433;
 const CMUX_SOCKET_CONTROL_FIX = 'In cmux Settings > Automation, select "Automation mode" for Socket Control Mode, or set automation.socketControlMode to "automation" in ~/.config/cmux/cmux.json (older versions use ~/.config/cmux/settings.json; current cmux reads that legacy file only for keys absent from cmux.json). cmux reloads saved settings automatically; rerun `rig doctor` to re-probe without restarting the daemon.';
+
+/** The port's OpenRig daemon, judged by the OS user it reports. /healthz's pid and euid are the daemon's own report,
+ *  not authentication, and every line says so. Another user's daemon warns, since a share set up through config alone
+ *  looks the same and must keep working; it passes when OPENRIG_URL selects this endpoint on purpose. An owner that can't
+ *  be compared, or a body that doesn't arrive in time, warns too. Nothing is stopped or refused here. */
+async function listenerOwnerCheck(where: string, base: string, res: { json?: () => Promise<unknown> }, release: () => void,
+  deps: DoctorDeps): Promise<DoctorCheck> {
+  const env = deps.env ?? process.env;
+  const at = `Port ${where} (${base}, OpenRig home ${getOpenRigHome(env)})`;
+  const callerUid = deps.callerUid === undefined ? process.geteuid?.() : deps.callerUid ?? undefined;
+  const boundMs = deps.ownerReportTimeoutMs ?? 2000;
+  let reported: { pid?: unknown; euid?: unknown } = {};
+  let late = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const read = res.json ? res.json() : Promise.resolve(null);
+    // Releasing the request after the bound rejects the abandoned read; that's expected, not an error.
+    read.catch(() => {});
+    const body: unknown = await Promise.race([
+      read,
+      new Promise<null>(resolve => { timer = setTimeout(() => { late = true; resolve(null); }, boundMs); }),
+    ]);
+    if (body && typeof body === "object") reported = body as { pid?: unknown; euid?: unknown };
+  } catch { /* no readable body: the owner stays unknown */ }
+  finally { clearTimeout(timer); release(); }
+  const pid = Number.isSafeInteger(reported.pid) && (reported.pid as number) > 0 ? `, pid ${reported.pid as number}` : "";
+  const euid = Number.isSafeInteger(reported.euid) && (reported.euid as number) >= 0 ? reported.euid as number : undefined;
+  const ownDaemon = "To run your own, give this OpenRig home a free port and start its daemon there: rig config set daemon.port <free-port>, then rig daemon start.";
+  if (euid === undefined || callerUid === undefined) {
+    return {
+      name: "port", status: "warn",
+      message: `${at} is in use by an OpenRig daemon whose OS user is unknown.`,
+      reason: late
+        ? `Its /healthz report didn't finish within ${boundMs / 1000} s, so doctor can't tell whether it's yours or another user's on this machine.`
+        : euid === undefined
+          ? "It doesn't report an effective user id, so doctor can't tell whether it's yours or another user's on this machine."
+          : "This platform has no effective user id to compare, so doctor can't tell whether it's yours.",
+      fix: `Check that it's yours with rig daemon status. ${ownDaemon}`,
+    };
+  }
+  const reports = `the endpoint reports euid ${euid}${pid}`;
+  if (euid === callerUid) return { name: "port", status: "pass", message: `${at} is in use by your OpenRig daemon: ${reports}, the same as yours.` };
+  const users = `another OS user: ${reports}; your euid is ${callerUid}`;
+  if (sameEndpoint(readOpenRigUrl(env), base)) {
+    return { name: "port", status: "pass", message: `${at} is the endpoint OPENRIG_URL selects, served by an OpenRig daemon of ${users}.` };
+  }
+  return {
+    name: "port", status: "warn",
+    message: `${at} is in use by an OpenRig daemon of ${users}.`,
+    reason: `It isn't this OpenRig home's daemon, unless that user shares it with you: a command that reaches ${base} acts in that user's OpenRig. The pid and euid are the daemon's own report on /healthz, a self-report rather than authentication.`,
+    fix: `${ownDaemon} To use a shared daemon on purpose, set OPENRIG_URL to its address.`,
+  };
+}
+
+/** Whether OPENRIG_URL names this endpoint: the same scheme, host and port, with localhost read as 127.0.0.1. */
+function sameEndpoint(url: string | undefined, base: string): boolean {
+  if (!url) return false;
+  try {
+    const [a, b] = [new URL(url), new URL(base)];
+    const host = (u: URL) => u.hostname === "localhost" ? "127.0.0.1" : u.hostname;
+    return a.protocol === b.protocol && a.port === b.port && host(a) === host(b);
+  } catch {
+    return url === base;
+  }
+}
 
 function defaultCheckPort(port: number, host: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -234,13 +305,13 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     if (available) {
       return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} available.` };
     }
-    // Port in use — check if it's our daemon via healthz
+    // Port in use — check if it's an OpenRig daemon via healthz, and whose.
+    const owner = new AbortController();
     try {
-      const res = await fetchFn(`${daemonBase}/healthz`);
-      if (res.ok) {
-        return { name: "port", status: "pass", message: `Port ${daemonHost}:${daemonPort} in use by OpenRig daemon.` };
-      }
+      const res = await fetchFn(`${daemonBase}/healthz`, { signal: owner.signal });
+      if (res.ok) return await listenerOwnerCheck(`${daemonHost}:${daemonPort}`, daemonBase, res, () => owner.abort(), deps);
     } catch { /* not our daemon */ }
+    finally { owner.abort(); }
     return {
       name: "port",
       status: "fail",

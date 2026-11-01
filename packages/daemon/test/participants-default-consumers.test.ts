@@ -35,7 +35,7 @@ describe("the default person, for escalations and Mission Control's my-queue", (
 
   const escalate = async () => {
     const sentTo: string[] = [];
-    const engine = makeOperatorDeliveryEngine({ home, queueRepo: repo,
+    const engine = makeOperatorDeliveryEngine({ home, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, queueRepo: repo,
       dispatch: (_op, ref, _payload, opts) => { sentTo.push(ref); return { ok: true, decisionId: opts?.decisionId ?? "d" }; } });
     const row = await repo.create({ sourceSession: "sender@fixture", destinationSession: "worker@fixture", body: "stuck work", summary: "stuck", nudge: false });
     const result = await engine.dispatchEscalation(row as never, "blocked");
