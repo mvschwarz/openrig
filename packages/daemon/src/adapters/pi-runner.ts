@@ -724,8 +724,19 @@ export class RunnerCore {
    *  deciding after 15s, HOOK_AUTHORITY_WINDOW_MS). Beat while ready and not waiting on the
    *  operator: idle (Stop) when no turn is in flight, streaming (active) while `streaming` says
    *  one is, each at most once per its own interval behind the newest real event. Same honesty
-   *  rule: a runner that dies stops beating and the seat goes back to `unknown`. Pi only; the OMP
-   *  identity handshake has its own retry. */
+   *  rule: a runner that dies stops beating and the seat goes back to `unknown` (handlePiExit
+   *  clears `ready`, so no beat outlives the process it vouches for). Pi only; the OMP identity
+   *  handshake has its own retry.
+   *
+   *  Liveness of `streaming` (CodeRabbit 2336): the flag opens on agent_start/turn_start and
+   *  closes only on agent_end — can a turn end without one? Pi's run loop (dist/bundle/chunks,
+   *  runLoop, pi 0.84.4) emits agent_end on every exit: `stopReason === "error" ||
+   *  "aborted"` → finishTurn, turn_end, agent_end, return; decision end → turn_end, agent_end,
+   *  return; loop break → agent_end. That covers /abort (stopReason "aborted"), assistant errors
+   *  and exhausted auto-retries (stopReason "error"), and turns opened by turn_start alone
+   *  (turn_start fires only inside runLoop). A child crash is handlePiExit's honest exit, not a
+   *  silent working state. So a lost agent_end is not a Pi outcome, and no time limit is needed
+   *  on the beat — long silent turns stay covered. */
   heartbeat(): void {
     if (this.runtime !== "pi" || !this.ready || this.attention) return;
     const now = Date.parse(this.io.now());
@@ -1055,11 +1066,24 @@ export function inOrder<A, R>(send: (arg: A) => Promise<R>): (arg: A) => Promise
 const IDENTITY_RETRY_MS = 30_000;
 /** Below the daemon's 5 minute hook freshness window (AGENT_ACTIVITY_FRESHNESS_MS). */
 const IDLE_HEARTBEAT_MS = 3 * 60_000;
-const IDLE_HEARTBEAT_TICK_MS = 15_000;
-/** Below the seat-activity oracle's HOOK_AUTHORITY_WINDOW_MS (15s): a bare working hook only
- *  decides the arbitration while inside that window, so the streaming beat must land more often
- *  than that, not merely more often than the store's freshness expiry. */
-const STREAM_HEARTBEAT_MS = 10_000;
+/** One 5s scheduler tick drives both beats. CodeRabbit 2336: the first cut ticked every 15s, so a
+ *  streaming beat could land ~15s (+ delivery) behind a real event — the edge of
+ *  HOOK_AUTHORITY_WINDOW_MS, with a worst case near 25s. A 5s tick with a 5s minimum age posts a
+ *  streaming beat 5–10s after the newest event or beat: inside the window with headroom. The idle
+ *  beat's own 3-minute age gate makes the extra ticks free. */
+const PI_HEARTBEAT_TICK_MS = 5_000;
+/** Minimum age of the newest activity post before the streaming beat may re-assert it. */
+const STREAM_HEARTBEAT_MS = 5_000;
+
+/** The Pi heartbeat scheduler — one 5s tick drives both beats (see PI_HEARTBEAT_TICK_MS).
+ *  Exported so tests drive the real interval with fake timers instead of calling heartbeat()
+ *  by hand, which is exactly the gap that hid the 15s-tick latency in the first cut. */
+export function startHeartbeatTimer(core: { heartbeat(): void }, runtime: RunnerRuntime): { stop(): void } {
+  if (runtime !== "pi") return { stop() {} };
+  const timer = setInterval(() => core.heartbeat(), PI_HEARTBEAT_TICK_MS);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
+}
 
 export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
@@ -1365,8 +1389,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
-  const idleHeartbeat = runtime === "pi" ? setInterval(() => core.heartbeat(), IDLE_HEARTBEAT_TICK_MS) : undefined;
-  idleHeartbeat?.unref();
+  const heartbeatTimer = startHeartbeatTimer(core, runtime);
   // The last few stderr lines, so an OMP that exits during startup is
   // reported with its own words in the error, not only above it.
   const stderrTail: string[] = [];
@@ -1417,7 +1440,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
-    clearInterval(idleHeartbeat);
+    heartbeatTimer.stop();
     if (!core.isReady()) {
       const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
       const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
