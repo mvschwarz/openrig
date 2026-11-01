@@ -19,6 +19,28 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
   });
 }
 
+function captureOutputs(fn: () => Promise<void>): Promise<{ stdout: string[]; stderr: string[]; exitCode: number | undefined }> {
+  return new Promise(async (resolve) => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const origExitCode = process.exitCode;
+    process.exitCode = undefined;
+    console.log = (...args: unknown[]) => stdout.push(args.join(" "));
+    console.error = (...args: unknown[]) => stderr.push(args.join(" "));
+    try {
+      await fn();
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    const exitCode = process.exitCode;
+    process.exitCode = origExitCode;
+    resolve({ stdout, stderr, exitCode });
+  });
+}
+
 function runningDeps(port: number): StatusDeps {
   return { lifecycleDeps: { ...mockLifecycleDeps(), exists: vi.fn((p: string) => p === STATE_FILE), readFile: vi.fn((p: string) => { if (p === STATE_FILE) return JSON.stringify({ pid: 123, port, db: "test.sqlite", startedAt: "2026-04-03T00:00:00Z" } as DaemonState); return null; }), fetch: vi.fn(async () => ({ ok: true })) }, clientFactory: (baseUrl) => new DaemonClient(baseUrl) };
 }
@@ -112,22 +134,40 @@ describe("Specs CLI", () => {
     expect(parsed.length).toBe(2);
   });
 
-  async function assertKindRefusal(args: string[]): Promise<void> {
-    let stderr = "";
-    const origWrite = process.stderr.write;
-    process.stderr.write = ((chunk: unknown) => { stderr += String(chunk); return true; }) as never;
-    try {
-      await expect(makeCmd().parseAsync(["node", "rig", "specs", ...args])).rejects.toThrow(
-        'process.exit unexpectedly called with "1"',
-      );
-      expect(stderr).toContain("must be one of: rig, agent, workflow; got 'invalid'");
-    } finally {
-      process.stderr.write = origWrite;
-    }
-  }
+  it("specs ls --kind warns on unrecognized kind and still queries daemon", async () => {
+    const { stdout, stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stdout.join("\n")).toContain("No invalid specs found");
+    expect(exitCode).toBeUndefined();
+  });
 
-  it("specs ls --kind refuses an unknown kind value before querying daemon", async () => {
-    await assertKindRefusal(["ls", "--kind", "invalid"]);
+  it.each(["rig", "agent", "workflow"])("specs ls --kind %s runs without warning", async (kind) => {
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", kind]);
+    });
+    expect(stderr.join("\n")).not.toContain("Warning:");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("specs ls with --kind reports 'No <kind> specs found' when empty", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "workflow"]);
+    });
+    expect(stdout.join("\n")).toContain("No workflow specs found");
+    expect(stdout.join("\n")).not.toContain("No specs in library");
+    expect(stderr.join("\n")).not.toContain("Warning:");
+  });
+
+  it("specs ls --kind invalid --json emits parseable JSON on stdout and warning on stderr", async () => {
+    const { stdout, stderr } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", "invalid", "--json"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    const parsed = JSON.parse(stdout.join("\n"));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBe(0);
   });
 
   it("specs show resolves by name and prints metadata", async () => {
@@ -192,12 +232,22 @@ describe("Specs CLI", () => {
     expect(exitCode).toBeUndefined();
   });
 
-  it("specs show --kind refuses an unknown kind value before querying daemon", async () => {
-    await assertKindRefusal(["show", "review-rig", "--kind", "invalid"]);
+  it("specs show --kind warns on unrecognized kind and still queries daemon", async () => {
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stderr.join("\n")).toContain("Spec 'review-rig' not found in invalid library");
+    expect(exitCode).toBe(1);
   });
 
-  it("specs preview --kind refuses an unknown kind value before querying daemon", async () => {
-    await assertKindRefusal(["preview", "review-rig", "--kind", "invalid"]);
+  it("specs preview --kind warns on unrecognized kind and still queries daemon", async () => {
+    const { stderr, exitCode } = await captureOutputs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "specs", "preview", "review-rig", "--kind", "invalid"]);
+    });
+    expect(stderr.join("\n")).toContain("Warning: unrecognized --kind 'invalid'. Supported kinds: rig, agent, workflow");
+    expect(stderr.join("\n")).toContain("Spec 'review-rig' not found in invalid library");
+    expect(exitCode).toBe(1);
   });
 
   it("specs show not-found error points people back to managed apps in the library", async () => {
