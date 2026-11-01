@@ -204,6 +204,10 @@ describe("provider routes", () => {
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "awaiting-decision" });
       launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", error: "the pane couldn't be respawned" }] };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "unknown", code: "failed" });
+      // A launch that failed while the seat's process still runs (its pane wasn't found, or the process didn't end)
+      // left the seat as it was, so the switch puts its token reference back.
+      launched = { ok: true, launched: [{ logicalId: "dev.a", status: "failed", processKept: true, error: "did not exit after graceful TERM + forced KILL" }] };
+      expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "failed" });
       launched = { ok: false, code: "snapshot_not_found", message: "no such snapshot" };
       expect(await lent.relaunchInPane(rig.id, "dev.a", "snap-1")).toMatchObject({ ok: false, effect: "none", code: "snapshot_not_found" });
     } finally { db.close(); }

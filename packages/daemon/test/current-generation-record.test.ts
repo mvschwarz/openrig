@@ -157,6 +157,13 @@ describe("paneClaudeSessionIdArgument (a CANDIDATE source, never the answer alon
     expect(out).toEqual({ ok: true, id: "daaeb7b4-841b-45cb-8a33-b062e0ce8296" });
   });
 
+  it("finds a claude that IS the pane process (exec'd at launch), not only one under a shell", async () => {
+    const out = await paneClaudeSessionIdArgument("s", { ...deps, listProcesses: async () => [
+      { pid: 10, ppid: 1, command: "claude --resume daaeb7b4-841b-45cb-8a33-b062e0ce8296" },
+    ] });
+    expect(out).toEqual({ ok: true, id: "daaeb7b4-841b-45cb-8a33-b062e0ce8296" });
+  });
+
   it("no pane pid / no claude process / no id argument each yield a NAMED reason, never a silent null", async () => {
     const none = await paneClaudeSessionIdArgument("s", { ...deps, getPanePid: async () => null });
     expect(!none.ok && none.reason).toContain("no live pane pid");

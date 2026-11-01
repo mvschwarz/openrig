@@ -796,7 +796,8 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
         paneExit: { pollMs: 1, timeoutMs: 2, sleep: async () => {} } });
       (orchestrator as any).nodeLauncher = fastLauncher;
       const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": readyAdapter("claude-code") }, keepPane: true });
-      expect(result.launched).toEqual([expect.objectContaining({ status: "failed", error: expect.stringContaining("did not exit") })]);
+      // The seat's process still runs, so the result says so: a caller that changed something first can put it back.
+      expect(result.launched).toEqual([expect.objectContaining({ status: "failed", processKept: true, error: expect.stringContaining("did not exit") })]);
       expect((tmux as any).signalPaneProcess).toHaveBeenCalledWith("%7", "KILL");
       expect((tmux as any).respawnPane).not.toHaveBeenCalled();
     });
