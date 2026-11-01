@@ -144,10 +144,10 @@ describe("idle heartbeat", () => {
     expect(c.beats()).toHaveLength(1);
   });
 
-  // agent_start is not the only way a turn runs: turn_start, compaction and auto-retry report the agent working
-  // without setting `streaming`, and a beat in those stretches would read idle mid-turn.
+  // agent_start is not the only way a turn runs, but turn_start DOES open the streaming flag:
+  // a turn opened by turn_start alone gets beats. Compaction and auto-retry report the agent
+  // working without opening a turn, and a beat in those stretches would read idle mid-turn.
   it.each([
-    ["a turn opened by turn_start alone", { type: "turn_start" }],
     ["a compaction", { type: "compaction_start" }],
     ["an automatic retry", { type: "auto_retry_start" }],
   ])("stays quiet during %s, and resumes after agent_end", (_name, event) => {
@@ -202,6 +202,86 @@ describe("idle heartbeat", () => {
     const c = clocked("omp");
     ready(c.core);
     c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+});
+
+// ── Streaming heartbeat ─────────────────────────────────────────────────────
+
+describe("streaming heartbeat", () => {
+  function clocked(runtime?: "pi" | "omp") {
+    const f = fakeIo();
+    let t = Date.parse("2026-07-06T10:00:00Z");
+    f.io.now = () => new Date(t).toISOString();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, runtime ? { runtime } : undefined);
+    core.start();
+    const beats = () => f.activity.filter(a => a.subtype === "streaming");
+    return { core, f, beats, advance: (ms: number) => { t += ms; } };
+  }
+  const ready = (core: RunnerCore) => core.handlePiLine(JSON.stringify({
+    type: "response", id: "pi-runner-get-state", data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" } }));
+
+  // A silent inference leaves no events for the daemon; without a beat, a `running` hook older than
+  // the freshness window decays to `unknown` minutes into the turn it saw start.
+  it("re-asserts working behind a turn that runs silently, at most once per interval", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "active", subtype: "streaming", runtime: "pi" })]);
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(2);
+  });
+
+  // CodeRabbit 2336 — some turn paths omit agent_start; turn_start alone opens the turn.
+  it("keeps beating on a turn opened by turn_start alone", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([expect.objectContaining({ subtype: "streaming" })]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1); // closed: idle branch resumes
+  });
+
+  it("stays quiet while real events keep arriving, then spaces the beat behind the newest one", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    for (let i = 0; i < 10; i++) { c.advance(1_000); c.core.handlePiLine(JSON.stringify({ type: "tool_execution_start", toolName: "bash" })); }
+    c.core.heartbeat();
+    expect(c.beats()).toEqual([]); // the newest post (a tool call) is 1s old — well inside the interval
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats()).toHaveLength(1);
+  });
+
+  it("stops when agent_end closes the turn, and after the pi child exits", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiExit(1);
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("says nothing before the runner is ready", () => {
+    const c = clocked();
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000); c.core.heartbeat();
+    expect(c.beats()).toEqual([]);
+  });
+
+  it("is a Pi-only behaviour", () => {
+    const c = clocked("omp");
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.advance(20_000); c.core.heartbeat();
     expect(c.beats()).toEqual([]);
   });
 });
@@ -504,6 +584,14 @@ describe("mapPiEvent", () => {
     });
     expect(mapPiEvent({ type: "agent_end" })).toMatchObject({
       streaming: false, activity: { hookEvent: "Stop", subtype: "agent_end" },
+    });
+  });
+
+  // Some turn paths omit agent_start; turn_start alone opens the turn, so it must open the
+  // streaming flag too — the beat's only in-flight signal — or that path still goes blind.
+  it("turn_start opens streaming for pi", () => {
+    expect(mapPiEvent({ type: "turn_start" })).toMatchObject({
+      streaming: true, activity: { hookEvent: "active", subtype: "turn_start" },
     });
   });
 

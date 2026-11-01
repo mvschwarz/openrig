@@ -218,8 +218,10 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // Pi keeps main's mapping: turn_end carries no notice.
       return runtime === "omp" ? { mirrorLines: [], ...modelErrorNotice(event, runtime) } : { mirrorLines: [] };
     case "turn_start":
-      // Some turn paths omit agent_start; turn_start still opens a turn, so it reports the seat working.
-      return { mirrorLines: [], activity: { hookEvent: "active", subtype: "turn_start" } };
+      // Some turn paths omit agent_start; turn_start still opens a turn, so it reports the seat
+      // working and opens the streaming flag — the beat must cover a turn whose only opening
+      // event was turn_start, or a long quiet turn on that path still loses its working state.
+      return { mirrorLines: [], activity: { hookEvent: "active", subtype: "turn_start" }, streaming: runtime === "omp" ? undefined : true };
     case "message_start":
       return { mirrorLines: [] };
     case "message_update": {
@@ -387,6 +389,9 @@ export class RunnerCore {
   private lastEntryId: string | undefined;
   private ready = false;
   private lastHeartbeatMs: number | null = null;
+  /** When this runner last posted any activity payload, so the streaming beat spaces itself
+   *  behind real events (a tool call is evidence enough; the beat covers the silent gaps). */
+  private lastActivityPostMs: number | null = null;
   /** Hook event of the last activity this runner posted; null until it posts one. */
   private lastPostedHook: string | null = null;
   private assistantErrorShown = false;
@@ -712,17 +717,26 @@ export class RunnerCore {
     this.io.postActivity(this.activityPayload("Notification", next === "transient_turn_error" ? "runtime_error" : next));
   }
 
-  /** Idle heartbeat. A Pi runner only reports when something happens, and the daemon reads any hook older than
-   *  its freshness window as `unknown` (`stale_runtime_hook`), so an idle seat read `unknown` five minutes after
-   *  its last turn, and a restored seat read `unknown` (`generation_mismatch`) until its first turn. Re-asserting
-   *  idle while ready, not mid-turn and not waiting on the operator keeps the verdict honest: a runner that dies
-   *  stops beating and the seat goes back to `unknown`. Pi only; the OMP identity handshake has its own retry. */
+  /** Idle and streaming heartbeat. A Pi runner only reports at turn and tool boundaries, and the
+   *  daemon reads any hook older than its freshness window as `unknown` (`stale_runtime_hook`): an
+   *  idle seat read `unknown` five minutes after its last turn, and a seat mid-turn read `unknown`
+   *  through a long silent LLM request (the seat-activity oracle stops a bare working hook from
+   *  deciding after 15s, HOOK_AUTHORITY_WINDOW_MS). Beat while ready and not waiting on the
+   *  operator: idle (Stop) when no turn is in flight, streaming (active) while `streaming` says
+   *  one is, each at most once per its own interval behind the newest real event. Same honesty
+   *  rule: a runner that dies stops beating and the seat goes back to `unknown`. Pi only; the OMP
+   *  identity handshake has its own retry. */
   heartbeat(): void {
-    if (this.runtime !== "pi" || !this.ready || this.streaming || this.attention) return;
+    if (this.runtime !== "pi" || !this.ready || this.attention) return;
+    const now = Date.parse(this.io.now());
+    if (this.streaming) {
+      if (this.lastActivityPostMs !== null && now - this.lastActivityPostMs < STREAM_HEARTBEAT_MS) return;
+      this.io.postActivity(this.activityPayload("active", "streaming"));
+      return;
+    }
     // `streaming` follows only agent_start/agent_end; turn_start, compaction and auto-retry also report the agent
     // working. Beat only when the last thing posted was a Stop (or nothing yet), so a beat never lands mid-turn.
     if (this.lastPostedHook !== null && this.lastPostedHook !== "Stop") return;
-    const now = Date.parse(this.io.now());
     if (this.lastHeartbeatMs !== null && now - this.lastHeartbeatMs < IDLE_HEARTBEAT_MS) return;
     this.io.postActivity(this.activityPayload("Stop", "idle_heartbeat"));
   }
@@ -879,6 +893,7 @@ export class RunnerCore {
 
   private activityPayload(hookEvent: string, subtype: string | null): Record<string, unknown> {
     this.lastPostedHook = hookEvent;
+    this.lastActivityPostMs = Date.parse(this.io.now());
     // Any posted Stop is an idle report, so the next beat is due a full interval after it, not just after a beat.
     if (hookEvent === "Stop") this.lastHeartbeatMs = Date.parse(this.io.now());
     return {
@@ -1041,6 +1056,10 @@ const IDENTITY_RETRY_MS = 30_000;
 /** Below the daemon's 5 minute hook freshness window (AGENT_ACTIVITY_FRESHNESS_MS). */
 const IDLE_HEARTBEAT_MS = 3 * 60_000;
 const IDLE_HEARTBEAT_TICK_MS = 15_000;
+/** Below the seat-activity oracle's HOOK_AUTHORITY_WINDOW_MS (15s): a bare working hook only
+ *  decides the arbitration while inside that window, so the streaming beat must land more often
+ *  than that, not merely more often than the store's freshness expiry. */
+const STREAM_HEARTBEAT_MS = 10_000;
 
 export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
