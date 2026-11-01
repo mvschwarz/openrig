@@ -526,6 +526,28 @@ describe("a default permit's record", () => {
     expect(records[0]!.body).toContain("allow_once");
   });
 
+  it("names who closed the ask, not whoever added a later receipt to the closed row", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    f.queueRepo.transitionLog.append({ qitemId: askId, state: f.queueRepo.getById(askId)!.state, actorSession: "queue@system",
+      transitionNote: "a later delivery receipt" });
+    expect(await f.read(askId)).toMatchObject({ body: { state: "permitted", optionId: "allow" } });
+    const records = f.permits();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.body).toContain(`${PERSON} closed the ask`);
+    expect(records[0]!.body).not.toContain("queue@system");
+  });
+
+  it("permits as before when the record's details can't be read", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "drop", qitemId: askId, actorSession: PERSON, reason: "from the Feed" } as never);
+    f.queueRepo.closingTransition = () => { throw new Error("the transition log can't be read"); };
+    expect(await f.read(askId)).toMatchObject({ status: 200, body: { state: "permitted", optionId: "allow" } });
+    expect(f.permits()).toHaveLength(0);
+  });
+
   it("records an agent seat's row closed as failed, which permits", async () => {
     const f = fixture();
     const SEAT_B = "dev-other@perm-rig";

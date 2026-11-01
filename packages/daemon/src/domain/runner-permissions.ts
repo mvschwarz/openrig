@@ -177,7 +177,7 @@ export class RunnerPermissions {
       if (!allow) return { ok: false, code: "options_unsupported", message: `No one can be asked (${why}), and the agent offered no allow option to permit.` };
       // One record per request and turn: a resubmitted request finds its record already there.
       const key = JSON.stringify([seat.nodeId, seat.generation, request.nativeRef, request.requestId, request.turnId]);
-      this.recordPermit(`runner-permit-request-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`, seat.sessionName, seat.nodeId, [
+      this.recordPermit(`runner-permit-request-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`, seat.sessionName, seat.nodeId, () => [
         `OpenRig permitted ${seat.sessionName}'s agent by default, without asking anyone: ${why}.`,
         "",
         `- **Tool call:** ${clip(request.toolCall.title ?? "a tool call", MAX_AGENT_TEXT)} (${clip(request.toolCall.kind ?? "other", MAX_AGENT_TEXT)}), as the agent described it.`,
@@ -275,23 +275,27 @@ export class RunnerPermissions {
 
   /** The record of a permit after an ask closed without a choice: one per ask, however often the runner reads it. */
   private recordClosedAsk(asked: QueueItem, closed: QueueItem, nodeId: string, allowId: string): void {
-    const closer = this.deps.queueRepo.listTransitions(closed.qitemId).at(-1)?.actorSession ?? "someone";
-    const row = closed.qitemId === asked.qitemId ? "the ask" : `${closed.qitemId}, the row it was handed to at ${closed.destinationSession},`;
-    const label = asked.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.find((option) => option.id === allowId)?.label;
-    this.recordPermit(`runner-permit-ask-${asked.qitemId.slice(ASK_PREFIX.length)}`, asked.sourceSession, nodeId, [
-      `OpenRig permitted ${asked.sourceSession}'s agent by default: its permission ask ${asked.qitemId} closed without a choice.`
-        + ` ${closer} closed ${row} as ${closed.state}${closed.closureReason ? ` (${closed.closureReason})` : ""}.`,
-      "",
-      `- **Ask:** ${asked.summary ?? "a permission request"}, asked of ${asked.destinationSession}.`,
-      `- **Option given:** ${optionText(label ?? allowId, tagValue(asked, ALLOW_KIND_TAG), allowId)}.`,
-    ]);
+    this.recordPermit(`runner-permit-ask-${asked.qitemId.slice(ASK_PREFIX.length)}`, asked.sourceSession, nodeId, () => {
+      // Who closed it: the close itself, since later notes and delivery receipts on a closed row repeat its state.
+      const closer = this.deps.queueRepo.closingTransition(closed.qitemId, closed.state)?.actorSession ?? "someone";
+      const row = closed.qitemId === asked.qitemId ? "the ask" : `${closed.qitemId}, the row it was handed to at ${closed.destinationSession},`;
+      const label = asked.humanQuestions?.find((question) => question.id === QUESTION_ID)?.options.find((option) => option.id === allowId)?.label;
+      return [
+        `OpenRig permitted ${asked.sourceSession}'s agent by default: its permission ask ${asked.qitemId} closed without a choice.`
+          + ` ${closer} closed ${row} as ${closed.state}${closed.closureReason ? ` (${closed.closureReason})` : ""}.`,
+        "",
+        `- **Ask:** ${asked.summary ?? "a permission request"}, asked of ${asked.destinationSession}.`,
+        `- **Option given:** ${optionText(label ?? allowId, tagValue(asked, ALLOW_KIND_TAG), allowId)}.`,
+      ];
+    });
   }
 
-  /** Best effort: a record that can't be written is logged, and the permit goes ahead unchanged. */
-  private recordPermit(streamItemId: string, sessionName: string, nodeId: string, lines: string[]): void {
+  /** Best effort: a record that can't be built or written is logged, and the permit goes ahead unchanged. With no stream,
+   *  nothing is read to build one. */
+  private recordPermit(streamItemId: string, sessionName: string, nodeId: string, lines: () => string[]): void {
     if (!this.deps.stream) return;
     try {
-      this.deps.stream.emit({ streamItemId, sourceSession: sessionName, body: lines.join("\n"), hintType: "observation", hintUrgency: "low",
+      this.deps.stream.emit({ streamItemId, sourceSession: sessionName, body: lines().join("\n"), hintType: "observation", hintUrgency: "low",
         hintTags: [RUNNER_PERMIT_TAG, `${NODE_TAG}${nodeId}`] });
     } catch (error) {
       console.error(`[runner-permissions] the record of a default permit for ${sessionName} wasn't written`, error);
