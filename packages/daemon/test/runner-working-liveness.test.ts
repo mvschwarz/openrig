@@ -1,0 +1,152 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { Hono } from "hono";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { SeatActivityService, HOOK_AUTHORITY_WINDOW_MS } from "../src/domain/seat-activity-service.js";
+import { activityRoutes, restoredRunnerHookEvidence } from "../src/routes/activity.js";
+import { runtimeRungInventory } from "../src/domain/activity-taxonomy.js";
+
+// The runner contract's working beat (section 4): `active` / `liveness` keeps a long, quiet turn reading working while
+// the runner says its prompt is outstanding and its agent alive. A beat counts only for the live generation's latest
+// accepted turn that hasn't ended, with a sequence above every earlier post's, and never while attention is
+// outstanding; it lasts its livenessSeconds, clamped to 5-60 s (30 s without one), then the seat reads unknown again.
+// Every test posts what a runner posts, through the real route, recorder and activity service.
+
+const cleanups: Array<() => void> = [];
+afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
+
+function fixture() {
+  const runtime = "pi";
+  const clock = { now: Date.parse("2026-11-01T12:00:00.000Z") };
+  const db = createFullTestDb();
+  cleanups.push(() => db.close());
+  const rigs = new RigRepository(db);
+  const rig = rigs.createRig("working-liveness");
+  const node = rigs.addNode(rig.id, "dev.a", { runtime });
+  const sessions = new SessionRegistry(db);
+  const oldSession = sessions.registerSession(node.id, "dev-a-old@working-liveness");
+  const oldGeneration = sessions.currentOccupantTenure(node.id)!.generationUuid;
+  sessions.updateStatus(oldSession.id, "exited");
+  const session = sessions.registerSession(node.id, "dev-a@working-liveness", "handover");
+  sessions.updateStatus(session.id, "running");
+  const eventBus = new EventBus(db);
+  const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock.now),
+    resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
+    isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
+  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
+    now: () => new Date(clock.now), restoreHookEvidence: (seat, seatRuntime) => restoredRunnerHookEvidence(store, seat, seatRuntime) });
+  oracle.declareRungInventory({ seatNodeId: node.id, sessionName: session.sessionName }, runtimeRungInventory(runtime));
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("agentActivityStore" as never, store as never);
+    c.set("activityHookToken" as never, "fixture-token" as never);
+    c.set("seatActivityService" as never, oracle as never);
+    await next();
+  });
+  app.route("/api/activity", activityRoutes);
+  const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+  async function post(hookEvent: string, subtype: string | null, over: Record<string, unknown> = {}) {
+    const response = await app.request("/api/activity/hooks", { method: "POST",
+      headers: { authorization: "Bearer fixture-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionName: session.sessionName, nodeId: node.id, generation, runtime, hookEvent, subtype,
+        occurredAt: new Date(clock.now).toISOString(), ...over }) });
+    expect(response.status).toBe(200);
+    return await response.json() as { ok: boolean; ignored?: string };
+  }
+  let sequence = 0;
+  const next = () => ++sequence;
+  const accepted = (turnId: string) => post("UserPromptSubmit", "accepted", { turnId, sequence: next() });
+  const beat = (turnId: string, over: Record<string, unknown> = {}) =>
+    post("active", "liveness", { turnId, sequence: next(), livenessSeconds: 30, ...over });
+  const state = () => oracle.getSeatState(node.id)!;
+  const later = (ms: number) => { clock.now += ms; };
+  return { post, accepted, beat, next, state, later, oldGeneration, runtime };
+}
+
+describe("the runner's working beat", () => {
+  it("keeps a long silent turn reading working while beats keep coming, then unknown, never idle, once they stop", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    for (let i = 0; i < 8; i++) {
+      f.later(12_000);
+      expect(await f.beat("1")).toEqual({ ok: true, activity: expect.anything() });
+      f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000); // past the 15 s a bare working post has, inside the beat's 30 s
+      expect(f.state()).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
+      f.later(-(HOOK_AUTHORITY_WINDOW_MS + 5_000));
+    }
+    f.later(31_000); // the last beat's 30 s are up
+    expect(f.state()).toMatchObject({ activity: "unknown", decidedBy: null });
+  });
+
+  it("lasts its livenessSeconds, clamped to 5-60 s, and 30 s when the beat has none", async () => {
+    for (const [given, lasts] of [[600, 60], [1, 5], [undefined, 30], [20, 20]] as const) {
+      const f = fixture();
+      await f.accepted("1");
+      await f.beat("1", given === undefined ? { livenessSeconds: undefined } : { livenessSeconds: given });
+      f.later(lasts * 1000 - 500);
+      expect(f.state().activity, `livenessSeconds ${given} still counts at ${lasts} s`).toBe("working");
+      f.later(1_000);
+      expect(f.state().activity, `livenessSeconds ${given} has lapsed after ${lasts} s`).toBe("unknown");
+    }
+  });
+
+  it("is ignored after its turn's Stop, for an earlier turn, out of order, or with no sequence", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    await f.post("Stop", "end_turn", { sequence: f.next(), livenessSeconds: 180 });
+    expect(await f.beat("1")).toMatchObject({ ok: true, ignored: "turn_ended" });
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt" });
+    await f.accepted("2");
+    expect(await f.beat("1")).toMatchObject({ ignored: "wrong_turn" });
+    expect(await f.beat("2", { sequence: 2 })).toMatchObject({ ignored: "out_of_order" });
+    expect(await f.beat("2", { sequence: undefined })).toMatchObject({ ignored: "no_sequence" });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 1_000);
+    expect(f.state()).toMatchObject({ activity: "unknown" }); // none of them kept turn 2 working
+  });
+
+  it("is ignored before any accepted turn, and from the previous occupant's generation", async () => {
+    const f = fixture();
+    expect(await f.beat("1")).toMatchObject({ ignored: "no_turn" });
+    await f.accepted("1");
+    expect(await f.beat("1", { generation: f.oldGeneration })).toMatchObject({ ignored: "stale_generation" });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 1_000);
+    expect(f.state()).toMatchObject({ activity: "unknown" });
+  });
+
+  it("never clears attention; after the runner's permission_resolved, the same turn's beats count again", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    // OpenRig records the seat's permission prompt when it opens an ask, with no runner sequence.
+    await f.post("Notification", "permission_prompt", { turnId: "1" });
+    const delayed = f.next(); // a beat posted before the ask, arriving after it
+    expect(await f.beat("1", { sequence: delayed })).toMatchObject({ ignored: "attention_outstanding" });
+    expect(f.state().needsInput).toMatchObject({ count: 1 });
+    // The answer is delivered and the agent goes on with turn 1.
+    await f.post("active", "permission_resolved", { turnId: "1", askId: "ask-1", sequence: f.next() });
+    expect(f.state()).toMatchObject({ activity: "working", needsInput: { count: 0 } });
+    expect(await f.beat("1", { sequence: delayed })).toMatchObject({ ignored: "out_of_order" });
+    expect(await f.beat("1")).toEqual({ ok: true, activity: expect.anything() });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
+    expect(f.state()).toMatchObject({ activity: "working", needsInput: { count: 0 } });
+  });
+
+  it("is ignored after the agent's exit", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    await f.post("Stop", `${f.runtime}_exited`, { sequence: f.next() });
+    expect(await f.beat("1")).toMatchObject({ ignored: "turn_ended" });
+    expect(f.state()).toMatchObject({ activity: "unknown" });
+  });
+
+  it("leaves a runner that sends no beats as before: a quiet turn falls to unknown after 15 s", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    f.later(HOOK_AUTHORITY_WINDOW_MS - 1_000);
+    expect(f.state()).toMatchObject({ activity: "working" });
+    f.later(2_000);
+    expect(f.state()).toMatchObject({ activity: "unknown" });
+  });
+});
