@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage } from "../daemon-lifecycle.js";
-import { renderCaughtTransportError } from "../cli-error.js";
+import { enumArg, renderCaughtTransportError } from "../cli-error.js";
 import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -212,10 +212,12 @@ Examples:
     return deps.clientFactory(getDaemonUrl(status));
   }
 
+  const specKindArg = enumArg(["rig", "agent", "workflow"]);
+
   // specs ls
   cmd.command("ls")
     .description("List library rigs, agents, and managed apps")
-    .option("--kind <kind>", "Filter by kind (rig, agent, or workflow)")
+    .option("--kind <kind>", "Filter by kind (rig, agent, or workflow)", specKindArg)
     .option("--json", "JSON output")
     .action(async (opts: { kind?: string; json?: boolean }) => {
       try {
@@ -248,7 +250,7 @@ Examples:
   cmd.command("show")
     .argument("<name-or-id>", "Spec name or library ID")
     .description("Show spec metadata and path")
-    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)")
+    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)", specKindArg)
     .option("--json", "JSON output")
     .action(async (nameOrId: string, opts: { kind?: LibraryEntry["kind"]; json?: boolean }) => {
       try {
@@ -276,7 +278,7 @@ Examples:
   cmd.command("preview")
     .argument("<name-or-id>", "Spec name or library ID")
     .description("Show structured spec review, including managed app details")
-    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)")
+    .option("--kind <kind>", "Disambiguate by kind (rig, agent, or workflow)", specKindArg)
     .option("--json", "JSON output")
     .action(async (nameOrId: string, opts: { kind?: LibraryEntry["kind"]; json?: boolean }) => {
       try {

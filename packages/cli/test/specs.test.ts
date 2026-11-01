@@ -112,6 +112,24 @@ describe("Specs CLI", () => {
     expect(parsed.length).toBe(2);
   });
 
+  async function assertKindRefusal(args: string[]): Promise<void> {
+    let stderr = "";
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => { stderr += String(chunk); return true; }) as never;
+    try {
+      await expect(makeCmd().parseAsync(["node", "rig", "specs", ...args])).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(stderr).toContain("must be one of: rig, agent, workflow; got 'invalid'");
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  it("specs ls --kind refuses an unknown kind value before querying daemon", async () => {
+    await assertKindRefusal(["ls", "--kind", "invalid"]);
+  });
+
   it("specs show resolves by name and prints metadata", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig"]);
@@ -172,6 +190,14 @@ describe("Specs CLI", () => {
     expect(output).toContain("Kind:     rig");
     expect(output).toContain("/builtin/review-rig.yaml");
     expect(exitCode).toBeUndefined();
+  });
+
+  it("specs show --kind refuses an unknown kind value before querying daemon", async () => {
+    await assertKindRefusal(["show", "review-rig", "--kind", "invalid"]);
+  });
+
+  it("specs preview --kind refuses an unknown kind value before querying daemon", async () => {
+    await assertKindRefusal(["preview", "review-rig", "--kind", "invalid"]);
   });
 
   it("specs show not-found error points people back to managed apps in the library", async () => {
