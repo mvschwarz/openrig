@@ -30,6 +30,8 @@ const NOT_LIVE = ["stale_generation", "activity_grant_wrong_seat", "activity_gra
 const ENDED = ["refused", "withdrawn", "stale", "answered"];
 const CANCELLED = { outcome: { outcome: "cancelled" } };
 const ACP_RESOURCE_NOT_FOUND = -32002;
+// The most pages of dsh's session list read before a resume; a longer list decides nothing.
+const LIST_PAGES = 50;
 
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
@@ -472,17 +474,37 @@ async function main() {
   const capabilities = init?.agentCapabilities ?? {};
   const producer = `${RUNNER}; dsh ${init?.agentInfo?.version ?? "(version not reported)"}; ACP ${init?.protocolVersion ?? "?"}`;
   const resumeRef = env.OPENRIG_RESUME_REF;
+  // Whether dsh's own session list names a conversation, following its pages: true or false, or undefined when the list
+  // fails, answers in another shape, or runs past LIST_PAGES pages.
+  const listsConversation = async (id) => {
+    let cursor;
+    for (let page = 0; page < LIST_PAGES; page += 1) {
+      let listing;
+      try { listing = await peer.request("session/list", cursor ? { cursor } : {}); } catch { return undefined; }
+      if (!Array.isArray(listing?.sessions)) return undefined;
+      if (listing.sessions.some((session) => session?.sessionId === id)) return true;
+      if (typeof listing.nextCursor !== "string" || !listing.nextCursor) return false;
+      cursor = listing.nextCursor;
+    }
+    return undefined;
+  };
   if (resumeRef) {
     // The method dsh advertises; with neither advertised, session/resume, the method dsh 0.2.1-rc.2 answered in its
-    // maintainer's checks. Only dsh's own "not found" counts as missing; anything else leaves the resume unconfirmed.
+    // maintainer's checks. dsh 0.2.1-rc.2 answers -32602 both for a conversation it doesn't have and for one active
+    // elsewhere, so that error can't mean missing. When dsh advertises session/list, its list, asked of this fresh dsh
+    // before anything else, says whether the conversation exists. Otherwise only dsh's own "not found" counts as missing.
+    // Anything else leaves the resume unconfirmed.
     const method = capabilities.sessionCapabilities?.resume ? "session/resume" : capabilities.loadSession ? "session/load" : "session/resume";
+    const listed = capabilities.sessionCapabilities?.list ? await listsConversation(resumeRef) : undefined;
+    const missing = (why) => {
+      writeLaunchRecord({ error: "missing", producer });
+      return fatal(`dsh says conversation ${resumeRef} doesn't exist (${why}); no new one was started`, 3);
+    };
+    if (listed === false) return missing("its session list doesn't name it");
     try {
       await peer.request(method, { sessionId: resumeRef, cwd, mcpServers: [] });
     } catch (error) {
-      if (error.code === ACP_RESOURCE_NOT_FOUND) {
-        writeLaunchRecord({ error: "missing", producer });
-        return fatal(`dsh says conversation ${resumeRef} doesn't exist (${error.message}); no new one was started`, 3);
-      }
+      if (error.code === ACP_RESOURCE_NOT_FOUND && listed !== true) return missing(error.message);
       return fatal(`dsh couldn't reopen conversation ${resumeRef} (${method}: ${error.message}); the resume is unconfirmed and no new conversation was started`, 4);
     }
     state.sessionId = resumeRef;
