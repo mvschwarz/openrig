@@ -863,6 +863,7 @@ export class ClaudeCompactionEnforcer {
       && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
     const sendOpts = {
       openrigNotice: true as const,
+      preserveInput: true as const,
       beforeWrite: () => {
         if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
       },
@@ -1301,7 +1302,7 @@ export class ClaudeCompactionEnforcer {
         overflowCompactInstruction: composed.instructionInCommand ? null : attempt.compactInstruction,
         usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
-      }), { openrigNotice: true, beforeWrite: () => {
+      }), { openrigNotice: true, preserveInput: true, beforeWrite: () => {
         this.reconcilePreparations();
         if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted || attempt.status === "stopped")
           throw new DeliveryGuardError("preparation_stopped", "This compaction attempt ended before preparation input.");
@@ -1367,7 +1368,7 @@ export class ClaudeCompactionEnforcer {
       // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
