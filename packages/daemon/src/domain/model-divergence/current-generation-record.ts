@@ -9,6 +9,7 @@ import { piPinReadings, piSeatPinReadings, readPiEffectiveModel } from "./effect
 import { piSeatPaths } from "../../adapters/pi-runner-protocol.js";
 import { canonicalModelPin, modelsMatch } from "./model-divergence-monitor.js";
 import { isShellForeground } from "../shell-classifier.js";
+import { commandNamesClaude } from "../native-process-lineage.js";
 
 export interface ProcessRow {
   pid: number;
@@ -97,7 +98,7 @@ export async function paneClaudeSessionIdArgument(
   const panePid = await deps.getPanePid(sessionTarget);
   if (!panePid) return { ok: false, reason: `no live pane pid for ${sessionTarget}` };
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
+  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
   if (claudePids.length === 0) return { ok: false, reason: `no claude process under the live pane of ${sessionTarget}` };
   const ids = new Set<string>();
   for (const pid of claudePids) {
@@ -162,7 +163,7 @@ export async function resolveIdentityVerifiedClaudeRecord(
   }
 
   const processes = await deps.listProcesses();
-  const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
+  const claudePids = findDescendants(processes, panePid, commandNamesClaude);
   if (claudePids.length === 0) {
     return { ok: false, reason: `no claude process under verified pane ${binding.tmuxPane}` };
   }
