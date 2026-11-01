@@ -40,26 +40,17 @@ export class StreamIntakeCoordinator {
     this.streamStore = deps.streamStore;
     this.queueRepo = deps.queueRepo;
     this.rawDestination = deps.destination;
-    this.ensureCursorTable();
-  }
-
-  private ensureCursorTable(): void {
-    try {
-      this.db.exec(
-        `CREATE TABLE IF NOT EXISTS stream_intake_cursor (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          last_sort_key TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );`
-      );
-    } catch (err) {
-      console.error("[stream-intake] failed to ensure cursor table:", err);
-    }
   }
 
   private getDestinationConfig(): string {
     if (typeof this.rawDestination === "function") {
-      return this.rawDestination().trim();
+      try {
+        const val = this.rawDestination();
+        return (val || "queue.worker").trim();
+      } catch (err) {
+        console.error("[stream-intake] failed to resolve destination from callback:", err);
+        return "queue.worker";
+      }
     }
     if (typeof this.rawDestination === "string") {
       return this.rawDestination.trim();
@@ -72,7 +63,11 @@ export class StreamIntakeCoordinator {
   }
 
   start(): void {
-    if (this.getDestinationConfig() === "off") return;
+    try {
+      if (this.getDestinationConfig() === "off") return;
+    } catch {
+      // ignore startup config error and allow fallback
+    }
 
     this.unsubscribeBus = this.eventBus.subscribe((event: PersistedEvent) => {
       if (event.type === "stream.emitted") {
@@ -172,10 +167,12 @@ export class StreamIntakeCoordinator {
   }
 
   private async drain(): Promise<void> {
-    if (this.processing || this.pendingStreamItemIds.length === 0 || this.getDestinationConfig() === "off") return;
+    if (this.processing || this.pendingStreamItemIds.length === 0) return;
     this.processing = true;
 
     try {
+      if (this.getDestinationConfig() === "off") return;
+
       while (this.pendingStreamItemIds.length > 0) {
         const streamItemId = this.pendingStreamItemIds[0]!;
         const item = this.streamStore.getById(streamItemId);
@@ -221,18 +218,28 @@ export class StreamIntakeCoordinator {
     const existing = existingRows[0];
 
     if (existing) {
+      let promoted = false;
       // Promote priority if incoming item is critical or interrupt
       if (isUrgent && existing.priority !== "urgent" && existing.priority !== "critical") {
         this.db.prepare("UPDATE queue_items SET priority = 'urgent' WHERE qitem_id = ?").run(existing.qitemId);
+        promoted = true;
       }
 
       // Add note to the existing unclaimed intake row
-      const note = `Stream observation added: ${item.streamItemId} (${item.sourceSession})${isUrgent ? " [promoted to urgent]" : ""} - hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}`;
+      const note = `Stream observation added: ${item.streamItemId} (${item.sourceSession})${isUrgent ? " [promoted to urgent]" : ""} - hints: type=${item.hintType ?? "none"}, urgency=${item.hintUrgency ?? "none"}, destination=${item.hintDestination ?? "none"}`;
       this.queueRepo.update({
         qitemId: existing.qitemId,
         actorSession: "daemon@kernel",
         transitionNote: note,
       });
+
+      if (promoted) {
+        try {
+          await this.queueRepo.maybeNudge(existing.qitemId, destination, true, "daemon@kernel", undefined, "openrig");
+        } catch (err) {
+          console.error("[stream-intake] failed to re-wake destination after urgent promotion:", err);
+        }
+      }
       return;
     }
 

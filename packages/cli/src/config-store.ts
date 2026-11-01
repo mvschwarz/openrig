@@ -229,6 +229,10 @@ export interface RiggedConfig {
     wakeSwapGraceSeconds: number;
     wakeHumanRung: string;
   };
+  // Issue #1856 — stream intake setting
+  stream: {
+    intake: string;
+  };
 }
 
 const DEFAULT_WORKSPACE_ROOT = getDefaultOpenRigPath("workspace");
@@ -1397,6 +1401,9 @@ export class ConfigStore {
         wakeUnconfirmedWindowMinutes: v("queue.wake_unconfirmed_window_minutes") as number,
         wakeSwapGraceSeconds: v("queue.wake_swap_grace_seconds") as number,
         wakeHumanRung: v("queue.wake_human_rung") as string,
+      },
+      stream: {
+        intake: v("stream.intake") as string,
       },
     };
   }

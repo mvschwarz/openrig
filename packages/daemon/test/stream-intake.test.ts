@@ -161,8 +161,16 @@ describe("StreamIntakeCoordinator", () => {
     }
   });
 
-  it("promotes pending routine intake batch to urgent when a subsequent critical item arrives", async () => {
+  it("promotes pending routine intake batch to urgent and re-wakes when a subsequent critical item arrives", async () => {
     const { db, bus, streamStore, queueRepo } = setup();
+    const sends: Array<{ target: string; text: string; opts: any }> = [];
+    queueRepo.attachTransport({
+      send: async (target: string, text: string, opts: any) => {
+        sends.push({ target, text, opts });
+        return { ok: true, verified: true };
+      },
+    });
+
     const coordinator = new StreamIntakeCoordinator({
       db,
       eventBus: bus,
@@ -177,18 +185,37 @@ describe("StreamIntakeCoordinator", () => {
       await new Promise((r) => setTimeout(r, 50));
       const rowBefore = queueRepo.list({ destinationSession: "queue.worker" })[0]!;
       expect(rowBefore.priority).toBe("routine");
+      expect(sends).toHaveLength(1);
 
-      streamStore.emit({ sourceSession: "dev@s", body: "Urgent problem!", hintUrgency: "critical" });
+      streamStore.emit({ sourceSession: "dev@s", body: "Urgent problem!", hintUrgency: "critical", hintDestination: "reviewer@kernel" });
       await new Promise((r) => setTimeout(r, 50));
       const rowAfter = queueRepo.getById(rowBefore.qitemId)!;
       expect(rowAfter.priority).toBe("urgent");
+
+      // Verify re-wake was triggered with urgent admission
+      expect(sends).toHaveLength(2);
+      expect(sends[1]!.target).toBe("queue.worker");
+      expect(sends[1]!.opts.urgent).toEqual({ by: "OpenRig" });
+
+      // Verify note includes the destination hint
+      const transitions = queueRepo.listTransitions(rowBefore.qitemId);
+      const lastNote = transitions[transitions.length - 1]?.transitionNote;
+      expect(lastNote).toContain("destination=reviewer@kernel");
     } finally {
       coordinator.stop();
     }
   });
 
-  it("promotes pending routine intake batch to urgent when a subsequent interrupt item arrives", async () => {
+  it("promotes pending routine intake batch to urgent and re-wakes when a subsequent interrupt item arrives", async () => {
     const { db, bus, streamStore, queueRepo } = setup();
+    const sends: Array<{ target: string; text: string; opts: any }> = [];
+    queueRepo.attachTransport({
+      send: async (target: string, text: string, opts: any) => {
+        sends.push({ target, text, opts });
+        return { ok: true, verified: true };
+      },
+    });
+
     const coordinator = new StreamIntakeCoordinator({
       db,
       eventBus: bus,
@@ -203,11 +230,17 @@ describe("StreamIntakeCoordinator", () => {
       await new Promise((r) => setTimeout(r, 50));
       const rowBefore = queueRepo.list({ destinationSession: "queue.worker" })[0]!;
       expect(rowBefore.priority).toBe("routine");
+      expect(sends).toHaveLength(1);
 
       streamStore.emit({ sourceSession: "dev@s", body: "Interrupt signal!", interrupt: true });
       await new Promise((r) => setTimeout(r, 50));
       const rowAfter = queueRepo.getById(rowBefore.qitemId)!;
       expect(rowAfter.priority).toBe("urgent");
+
+      // Verify re-wake was triggered with urgent admission
+      expect(sends).toHaveLength(2);
+      expect(sends[1]!.target).toBe("queue.worker");
+      expect(sends[1]!.opts.urgent).toEqual({ by: "OpenRig" });
     } finally {
       coordinator.stop();
     }
@@ -267,6 +300,61 @@ describe("StreamIntakeCoordinator", () => {
       streamStore.emit({ sourceSession: "dev@s", body: "Emit without kernel" });
       await new Promise((r) => setTimeout(r, 50));
       expect(queueRepo.list()).toHaveLength(0);
+    } finally {
+      coordinator.stop();
+    }
+  });
+
+  it("routes to real session when kernel rig has a queue.worker session", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-kernel', 'kernel')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-qw', 'rig-kernel', 'queue.worker')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name) VALUES ('ses-qw', 'node-qw', 'queue.worker@kernel')").run();
+
+    const coordinator = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: "queue.worker",
+    });
+    coordinator.start();
+
+    try {
+      const item = streamStore.emit({
+        sourceSession: "dev-build@starter",
+        body: "Real kernel session routing observation",
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const rows = queueRepo.list({ destinationSession: "queue.worker@kernel" });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.destinationSession).toBe("queue.worker@kernel");
+      expect(rows[0]!.qitemId).toBe(streamIntakeQitemId(item.streamSortKey));
+    } finally {
+      coordinator.stop();
+    }
+  });
+
+  it("does not crash or unhandled reject when destination callback throws", async () => {
+    const { db, bus, streamStore, queueRepo } = setup();
+    const coordinator = new StreamIntakeCoordinator({
+      db,
+      eventBus: bus,
+      streamStore,
+      queueRepo,
+      destination: () => {
+        throw new Error("SyntaxError: Unexpected token in JSON at position 42");
+      },
+    });
+    coordinator.start();
+
+    try {
+      streamStore.emit({ sourceSession: "dev@s", body: "Resilient emit on bad json" });
+      await new Promise((r) => setTimeout(r, 50));
+      const rows = queueRepo.list({ destinationSession: "queue.worker" });
+      expect(rows).toHaveLength(1);
     } finally {
       coordinator.stop();
     }
