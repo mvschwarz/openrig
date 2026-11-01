@@ -2163,3 +2163,37 @@ the pinned interpreter. The hook file also passes independently, 21/21.
 
 ACP companion cleanup remains unresolved. Remote SSH/SFTP recovery remains
 explicitly deferred by the user. Neither boundary is closed by these results.
+
+### Real Windows-to-Windows SSH/SFTP and remote persistence (2026-11-02)
+
+The user resumed remote acceptance and prepared a second owned Windows host at
+the same source revision, `c1ae79f`. Its ED25519 host fingerprint was compared
+against the independently supplied host-side value before connection. Strict
+verification remained enabled through a dedicated known-hosts file; public-key
+non-interactive SSH execution succeeded.
+
+The production native SFTP copy implementation then used real OpenSSH transport
+to upload and download three synthetic files, including spaces, Chinese names,
+a nested directory and a 131089-byte binary. Original, remote Get-FileHash and
+downloaded SHA-256 values all matched. A repeated unchanged upload transferred
+zero files. The first independent hash-report fixture needed explicit UTF-8
+PowerShell console output; the transferred names and bytes already round-tripped.
+
+An isolated remote daemon used its own home, loopback port and no kernel/team
+startup. Existing workspace junctions were initially untraversable from the SSH
+token; recreating only the four verified in-repository workspace junctions made
+the CLI usable. A topology was materialized without launching sessions. Across
+a real daemon stop/start, the PID changed and the same synthetic queue ID/body
+persisted exactly once. A final read-only SQLite check reported integrity `ok`.
+This is remote daemon/queue persistence, not provider-session snapshot recovery
+or queue pickup/delivery; the synthetic destination was not a running seat.
+
+Two lifecycle limits remain explicit. A daemon reported started inside SSH was
+absent after that SSH session ended; the termination mechanism is not established.
+HTTP readiness also preceded publication of the native control capability, so
+the bounded persistence fixture waited for that file before stop. The first
+stop/restart completed successfully; final teardown observed PID absence and
+no listener, but reported no matching clean-shutdown receipt. That final drain
+is unverified. No remote provider credentials were read or copied, and no remote
+real-provider continuity or full-session restore is claimed. The owned daemon
+and listener are stopped; existing teams were not started.
