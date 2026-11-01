@@ -8,6 +8,39 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.7.7]
+
+OpenRig 0.7.7 is 0.7.6 with one fix: a Claude seat's idle prompt is recognized
+again under Claude's "Update installed" line, so managed compaction no longer
+waits on it.
+
+### Before you upgrade
+
+- **Restart the daemon after installing** so the fix takes effect:
+  ```bash
+  npm install -g @openrig/cli@0.7.7
+  rig daemon stop && rig daemon start
+  ```
+  There are no database migrations. The bundled openrig-core plugin stays at
+  0.1.23 with unchanged files.
+
+### Fixed
+
+- **A Claude seat under the "Update installed" line reads idle again.** After
+  Claude installs an update, it prints "✔ Update installed · /restart to apply"
+  (or "Restart to apply") below its mode bar. OpenRig didn't recognize that line,
+  so a seat at an empty prompt read unknown instead of idle, and managed
+  compaction waited. Both spellings are now recognized; lines that only look
+  similar still read unknown. ([#2311](https://github.com/mvschwarz/openrig/pull/2311))
+
+### Known limits
+
+- **This fixes only that line.** Other reasons managed compaction can wait are
+  unchanged.
+- **Claude seat rebuilds that stop at readiness on some Linux hosts are not
+  fixed** ([#2341](https://github.com/mvschwarz/openrig/issues/2341)).
+- **The 0.7.6 known limits below still apply.**
+
 ## [0.7.6]
 
 OpenRig 0.7.6 lets one terminal workspace follow the current owners of a slice's

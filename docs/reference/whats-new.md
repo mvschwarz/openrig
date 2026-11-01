@@ -1,13 +1,45 @@
-# What changed in OpenRig 0.7.6
+# What changed in OpenRig 0.7.7
 
-This note is for an agent on an install that was just upgraded to 0.7.6. It lists
-changes since 0.7.5 and what to do about them. For the full capability map, read
+This note is for an agent on an install that was just upgraded to 0.7.7. OpenRig
+0.7.7 is 0.7.6 with one fix. If you upgraded from 0.7.5 or earlier, also read
+"What changed in OpenRig 0.7.6" below. For the full capability map, read
 `rig context get onboarding-width/public-what-you-can-do.md`. After the upgraded
 daemon starts, `rig context get reference/whats-new.md` describes this version.
 Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`;
 `$OPENRIG_HOME/reference/whats-new.md` can still be the previous copy until startup.
 
 ## After the upgrade
+
+- Restart the daemon (`rig daemon stop`, then `rig daemon start`) to load the new
+  code. There are no database migrations.
+- The bundled openrig-core plugin stays at 0.1.23 with unchanged files, so there
+  is no managed plugin refresh.
+
+## The fix
+
+- A Claude seat at an empty prompt reads idle again when Claude prints
+  "✔ Update installed · /restart to apply" (or "Restart to apply") below its mode
+  bar after installing an update. Before, that line hid the mode bar, so the seat
+  read unknown and managed compaction waited for an idle prompt it could not see.
+  Both spellings are recognized; lines that only look similar still read unknown.
+  ([#2311](https://github.com/mvschwarz/openrig/pull/2311))
+
+## Limits to keep in view
+
+- This fixes only that line. Other reasons managed compaction can wait are
+  unchanged.
+- It does not fix Claude seat rebuilds that stop at "Waiting to confirm the new
+  Claude process in this pane" on some Linux hosts
+  ([#2341](https://github.com/mvschwarz/openrig/issues/2341)).
+- The 0.7.6 limits below still apply.
+
+---
+
+## What changed in OpenRig 0.7.6
+
+The changes from 0.7.5 to 0.7.6, for an install upgrading from 0.7.5 or earlier.
+
+### After the upgrade
 
 - Restart the daemon (`rig daemon stop`, then `rig daemon start`) to load the new
   code. Two database migrations record account-home selection and whether a
@@ -18,7 +50,7 @@ Without a running daemon, read the packaged `daemon/docs/reference/whats-new.md`
   replaced files under `$OPENRIG_HOME/backups/managed-refresh/<id>/`; reapply
   local edits you still need from the preserved copy.
 
-## Follow a slice's work in one workspace
+### Follow a slice's work in one workspace
 
 Use `rig terminal open slice:<name-or-id> --follow --provider herdr`. Membership
 comes from pending, in-progress and blocked queue rows tagged with the exact
@@ -50,7 +82,7 @@ following is not included. See
 Configured Herdr session endpoints now carry through viewer/follow operations.
 The TUI's terminal action opens the agent, pod or rig currently being viewed.
 
-## Changes agents should act on
+### Changes agents should act on
 
 - **A readiness deadline does not end a still-starting daemon.** A nonzero
   pending result names the child PID, launch endpoint and log. The child stays
@@ -101,7 +133,7 @@ The TUI's terminal action opens the agent, pod or rig currently being viewed.
   reading the body code. Unsupported follow kinds keep `follow_view_required`
   in a 200 `ok:false` response.
 
-## Limits to keep in view
+### Limits to keep in view
 
 - The reported [Codex hook-refresh refusal (#2200)](https://github.com/mvschwarz/openrig/issues/2200)
   remains unresolved. A verified Node-launcher fix is included, but that does
