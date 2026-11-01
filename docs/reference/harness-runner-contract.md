@@ -183,11 +183,11 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
   - take answers typed into the pane;
   - route an approval to another seat.
 
-  So a job that needed an edit or a command approved couldn't finish. The answered path below, added in 0.7.7,
+  So a job that needed an edit or a command approved couldn't finish. The answered path below, added in 0.7.8,
   replaces this as the default.
 - **Unknown requests from the agent:** answer with JSON-RPC `-32601` and carry on.
 
-### The answered path (0.7.7)
+### The answered path (0.7.8)
 
 **Only requests the agent actually makes reach anyone.** The harness's own permission mode decides that, and a harness
 that runs without asking gains no approval step. Ordinary conversation and `rig send` are unchanged.
@@ -286,7 +286,7 @@ permission nobody chose. That covers:
   times first);
 - a refusal the table marks "permits", and any status or code this section doesn't list.
 
-**Limits in 0.7.7:**
+**Limits in 0.7.8:**
 - **The answer owner is a registered person.** Choosing a seat (another agent) to answer is a later change.
 - **A colleague's answer is followed on this host.** If the ask is handed to another host, the request waits, shown as
   needs input, until the agent's turn ends.
@@ -371,7 +371,7 @@ permission nobody chose. That covers:
 2. **For the dsh maintainer:** can dsh's ACP profile run with tools off? A first journey that needs no permission
    answers is the simplest to check.
 3. **For OpenRig:** should a later version route permission requests to a chosen seat, as `rig acp run` already does
-   with queue tasks? 0.7.7 routes them to the default person, or to a person chosen for the seat (section 7). A chosen
+   with queue tasks? 0.7.8 routes them to the default person, or to a person chosen for the seat (section 7). A chosen
    seat is still open.
 4. **For OpenRig:** once a second ACP harness exists, should one shared ACP runner live in OpenRig rather than one per
    harness?
