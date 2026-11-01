@@ -555,10 +555,19 @@ const cases = {
       if (!h) continue;
       const withdrawn = await waitFor(() => withdraws(h)[0], scale(4000));
       r.check(`${label}: the ask is withdrawn with ${reason}`, withdrawn?.body?.reason === reason, `withdraw: ${JSON.stringify(withdrawn?.body)}`);
-      // The turn's own Stop, before or after the withdraw (the contract doesn't order them): any after the ask was submitted.
-      const submitted = h.permissionCalls("POST").find((c) => !c.path.endsWith("/withdraw"));
-      if (reason === "turn_ended") r.check(`${label}: nothing is held once the ask is withdrawn`,
-        await waitFor(() => nonExitStops(h, submitted?.at ?? 0).length > 0, scale(3000)), "no Stop after the ask was submitted");
+      // The turn's own end: a Stop with the agent's own stop reason, after the agent answered that turn's session/prompt,
+      // on either side of the withdraw (the contract doesn't order them). A Stop posted before the turn ended doesn't count.
+      if (reason === "turn_ended") {
+        const turnEnd = await waitFor(() => {
+          const asked = h.sent("session/request_permission")[0];
+          const prompt = asked && h.received("session/prompt").filter((p) => p.at <= asked.at).at(-1);
+          return prompt && h.replyTo(prompt);
+        }, scale(4000));
+        const stopReason = turnEnd?.msg.result?.stopReason;
+        r.check(`${label}: nothing is held once the ask is withdrawn`,
+          stopReason && await waitFor(() => h.hooks("Stop", stopReason).some((p) => p.at >= turnEnd.at), scale(3000)),
+          `no Stop/${stopReason ?? "(no turn end)"} after the agent ended the turn`);
+      }
     }
     return r;
   },
