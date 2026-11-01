@@ -39,8 +39,9 @@ function harness(opts: {
   relaunch?: Relaunched | (() => Promise<Relaunched>);
   exclusive?: (fn: () => Promise<unknown>) => Promise<unknown>;
   effort?: Awaited<ReturnType<NonNullable<ClaudeSeatRelaunch["effortChange"]>>>;
-  // What restore's launch-effort seam selected for a relaunch asked to keep an effort (default: the kept one).
-  selected?: { effort: string | null; kept: boolean };
+  // What restore's launch-effort seam selected and why (default: the kept effort when one was asked for, else what the
+  // seat's effort read before the relaunch implies).
+  selected?: { effort: string | null; source: "kept" | "seat_choice" | "saved" } | null;
 } = {}) {
   const calls: string[] = [];
   let ref: ClaudeSeatTokenRef | null = opts.ref ?? null;
@@ -64,7 +65,12 @@ function harness(opts: {
     relaunchInPane: async (rigId, logicalId, snapshotId, o) => {
       calls.push(`relaunch ${rigId} ${logicalId} ${snapshotId} with ${ref ? ref.label : "no reference"}${o?.effort ? ` keeping effort ${o.effort}` : ""}`);
       const done = typeof opts.relaunch === "function" ? await opts.relaunch() : opts.relaunch ?? RESUMED;
-      return o?.effort && done.ok ? { ...done, effort: opts.selected ?? { effort: o.effort, kept: true } } : done;
+      const read = opts.effort;
+      const selected = opts.selected !== undefined ? opts.selected
+        : o?.effort ? { effort: o.effort, source: "kept" as const }
+        : read ? { effort: read.relaunch, source: read.relaunchIsSeatChoice ? "seat_choice" as const : "saved" as const }
+        : read === null ? { effort: null, source: "saved" as const } : null;
+      return done.ok && selected ? { ...done, effort: selected } : done;
     },
   };
   const claudePrecedence = async (nodeId: string, o?: { storedLogin?: boolean }) => {
@@ -102,12 +108,13 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(result.seat?.restart?.recoveryCommand).toBe("rig launch rig dev.a --snapshot-id snap-1");
     expect(result.seat?.effort).not.toContain("kept the running effort");
     expect(result.seat?.effort).toContain("asked to keep the running effort high");
-    expect(result.seat?.effort).toContain("saved effort low");
+    expect(result.seat?.effort).toContain("explicit effort choice at that time, else the snapshot's effort");
+    expect(result.seat?.effort).not.toContain("saved effort low");
     expect(result.seat?.effort).toContain(`rig seat set-effort ${SEAT} high`);
   });
 
   it("reports the seat's chosen effort when a choice saved during the switch won at restore's launch-effort seam", async () => {
-    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false }, selected: { effort: "medium", kept: false } });
+    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: false }, selected: { effort: "medium", source: "seat_choice" } });
     const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
     expect(result.outcome).toBe("rebind_in_progress");
     expect(h.calls).toContain("relaunch rig-1 dev.a snap-1 with work keeping effort high");
@@ -121,8 +128,9 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     const chosen = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: true }, relaunch: unknown });
     const c = await chosen.svc.switchAccount(to("work", tokenFile()), chosen.seatRestart, chosen.claudeSeat);
     expect(c.outcome).toBe("unknown");
-    expect(c.seat?.effort).toContain("chosen effort low");
     expect(c.seat?.effort).toContain("didn't report resuming");
+    expect(c.seat?.effort).toContain("explicit effort choice at that time");
+    expect(c.seat?.effort).not.toContain("low");
     const unread = harness({ effort: null, relaunch: unknown });
     const u = await unread.svc.switchAccount(to("work", tokenFile()), unread.seatRestart, unread.claudeSeat);
     expect(u.outcome).toBe("unknown");
@@ -147,6 +155,23 @@ describe("rig provider switch --seat moves a Claude seat to its own subscription
     expect(h.calls).toContain("relaunch rig-1 dev.a snap-1 with work");
     expect(result.seat?.effort).toContain("the seat's chosen effort low");
     expect(result.seat?.effort).not.toContain("kept");
+  });
+
+  it("reports the explicit choice the launch actually used when another choice was saved during the switch", async () => {
+    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: true }, selected: { effort: "medium", source: "seat_choice" } });
+    const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(result.outcome).toBe("rebind_in_progress");
+    expect(h.calls).toContain("relaunch rig-1 dev.a snap-1 with work");
+    expect(result.seat?.effort).toContain("the seat's chosen effort medium");
+    expect(result.seat?.effort).not.toContain("low");
+  });
+
+  it("says which effort launched wasn't reported, rather than naming the effort read before the relaunch", async () => {
+    const h = harness({ effort: { running: "high", relaunch: "low", relaunchIsSeatChoice: true }, selected: null });
+    const result = await h.svc.switchAccount(to("work", tokenFile()), h.seatRestart, h.claudeSeat);
+    expect(result.outcome).toBe("rebind_in_progress");
+    expect(result.seat?.effort).toContain("didn't report which effort it launched");
+    expect(result.seat?.effort).not.toContain("low");
   });
 
   it("relaunches with the saved effort when the running effort can't be read, and says it wasn't read, never that it was kept", async () => {

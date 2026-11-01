@@ -748,7 +748,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepEffort: "high", onLaunchEffort });
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
       expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "high" }), expect.anything());
-      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "high", kept: true });
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "high", source: "kept" });
       expect(db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeIds[0])).toEqual({ effort: "low", effort_choice: null });
     });
 
@@ -767,8 +767,24 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepEffort: "high", onLaunchEffort });
       expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
       expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "medium" }), expect.anything());
-      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "medium", kept: false });
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "medium", source: "seat_choice" });
       expect(db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeIds[0])).toEqual({ effort: "low", effort_choice: "medium" });
+    });
+
+    it("reports the effort a relaunch without a kept effort selected: a newer explicit choice saved during its awaits", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET effort = 'low', effort_choice = 'low' WHERE id = ?").run(nodeIds[0]);
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      (tmux as any).respawnPane = vi.fn(async () => {
+        db.prepare("UPDATE nodes SET effort_choice = 'medium' WHERE id = ?").run(nodeIds[0]);
+        return { ok: true as const };
+      });
+      const adapter = readyAdapter("claude-code");
+      const onLaunchEffort = vi.fn();
+      await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, onLaunchEffort });
+      expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "medium" }), expect.anything());
+      expect(onLaunchEffort).toHaveBeenCalledWith({ effort: "medium", source: "seat_choice" });
     });
 
     it("a pane that isn't in the seat's session is left alone, and the seat's records are put back", async () => {
