@@ -33,7 +33,10 @@ agent OpenRig drives over RPC**: that interface cannot operate the selector.
 For RPC seats, an optional [community-maintained helper][helper] provides
 read-only status and an explicit command that adds only named intended tools.
 It is maintained outside OpenRig, is not bundled, and this link is not a support
-claim. Review its [shared implementation][runtime] and
+claim. Loading it also registers the agent-callable `openrig_runtime_status` and
+`openrig_slots` tools; the latter reads a snapshot of the bound rig's agents and
+active queue items. It can add a prompt section when a guidance file is set.
+Review its [shared implementation][runtime] and
 [setup/capability limits][setup] before opting in through Pi's per-seat extension
 configuration. Keep the two helper files together; do not install the separate
 RepoStew application just to use the neutral bridge. Verify what the target
@@ -46,6 +49,10 @@ With that helper already loaded, these are **Pi extension commands**, not new
 /openrig-status
 /openrig-restore-tools read
 ```
+
+For an agent OpenRig drives over RPC, send each extension command with
+`rig send <agent> --raw "<command>"` so it arrives without a messaging envelope;
+the usual interactive-prompt guard still applies.
 
 The second command means that `read` is intended now. It does not restore every
 configured default. If `bash` was deliberately disabled, leave it disabled
