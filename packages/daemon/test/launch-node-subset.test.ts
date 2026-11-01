@@ -738,6 +738,18 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(live.id)).toEqual({ status: "superseded" });
     });
 
+    it("launches a kept running effort in place of the saved one, without saving it as the seat's choice", async () => {
+      const { rigId, nodeIds } = seedPodAwareRig();
+      db.prepare("UPDATE nodes SET effort = 'low' WHERE id = ?").run(nodeIds[0]);
+      seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
+      liveDriver(rigId, nodeIds[0]!);
+      const adapter = readyAdapter("claude-code");
+      const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter }, keepPane: true, keepEffort: "high" });
+      expect(result.launched).toEqual([expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" })]);
+      expect(adapter.launchHarness).toHaveBeenCalledWith(expect.objectContaining({ effort: "high" }), expect.anything());
+      expect(db.prepare("SELECT effort, effort_choice FROM nodes WHERE id = ?").get(nodeIds[0])).toEqual({ effort: "low", effort_choice: null });
+    });
+
     it("a pane that isn't in the seat's session is left alone, and the seat's records are put back", async () => {
       const { rigId, nodeIds } = seedPodAwareRig();
       seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
