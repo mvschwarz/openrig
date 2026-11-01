@@ -340,7 +340,7 @@ async function nativeHelperAsync(): Promise<string> {
     await new Promise<void>((resolveRun, reject) => {
       const compiler = execFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
         ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-        { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000 },
+        { env: { ...process.env, TEMP: directory, TMP: directory, OPENRIG_OWNED_TEXT_HELPER: file }, windowsHide: true, timeout: 10_000 },
         error => error ? reject(error) : resolveRun());
       compiler.stdin!.end(FILE_SOURCE);
     }).catch(error => { retireFailedCompilation(file, directory, error); throw error; });
@@ -380,7 +380,7 @@ function nativeHelper(): string {
   try {
     execFileSync(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-      { env: { ...process.env, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
+      { env: { ...process.env, TEMP: directory, TMP: directory, OPENRIG_OWNED_TEXT_HELPER: file }, input: FILE_SOURCE, windowsHide: true, timeout: 10_000, stdio: "pipe" });
   } catch (error) { retireFailedCompilation(file, directory, error); throw error; }
   executable = file;
   process.once("exit", () => {
