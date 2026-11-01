@@ -159,7 +159,8 @@ describe("structured human questions (#193)", () => {
       const { text } = render();
       for (const s of ["Which database?", "Postgres (recommended)", "SQLite", "Ship this week?", "Yes", "No"]) expect(text).toContain(s);
       expect(text).toMatch(/reply in this thread/i);
-      expect(JSON.stringify(render().blocks)).toMatch(/reply in this thread/i);
+      expect(text).toContain("A typed reply submits your answer without waiting for every question");
+      expect(JSON.stringify(render().blocks)).toContain("A typed reply submits your answer without waiting for every question");
     });
 
     it("escapes question and option text like any other queue-authored field", () => {
@@ -520,6 +521,22 @@ describe("structured human questions (#193)", () => {
       );
       expect(repliesToSeat()).toHaveLength(1);
       expect(repliesToSeat()[0]?.body).toContain(text);
+      expect(repliesToSeat()[0]?.body).toContain("Read the person's words; closing the decision does not mean approval.");
+    });
+
+    it("#2299 recognizes an old-footer answer replay after the ask closes, but not a different event", async () => {
+      const text = "Not yet, revise the plan.";
+      await typeReply(text, { ts: "3001.1" });
+      const answer = repliesToSeat()[0]!;
+      const oldBody = answer.body.replace("\nRead the person's words; closing the decision does not mean approval.", "");
+      repo.db.prepare("UPDATE queue_items SET body = ? WHERE qitem_id = ?").run(oldBody, answer.qitemId);
+      rmSync(join(home, "state", "slack-inbound-seen.jsonl"), { force: true });
+      await typeReply(text, { ts: "3001.1" });
+      expect(repliesToSeat()).toHaveLength(1);
+      expect(repliesToSeat()[0]!.body).toBe(oldBody);
+      await typeReply("A different follow-up.", { ts: "3002.1" });
+      expect(repliesToSeat()).toHaveLength(2);
+      expect(repliesToSeat().some((row) => row.body.includes("A different follow-up."))).toBe(true);
     });
 
     it("preserves a previous button answer when the remaining question gets a typed reply", async () => {
