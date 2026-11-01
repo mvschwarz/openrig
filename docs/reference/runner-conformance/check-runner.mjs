@@ -257,8 +257,17 @@ const cases = {
     const h = await launch("1", { scenario: { newDelayMs: scale(2000), sessionId: "fake-session-1" } });
     const asked = await waitFor(() => h.received("session/new")[0]);
     if (!r.check("the runner opens a conversation with session/new", asked, "no session/new arrived")) return r;
-    await sleep(scale(800));
-    r.check("no launch record while session/new is still unanswered", !h.record(), `a record was written early: ${JSON.stringify(h.record())}`);
+    // Until the agent's answer is logged, there must be no record. The agent logs each message before it sends it, so a
+    // record read before a log that still holds no answer was written before the answer went out. Reading against the
+    // agent's log, not after a fixed settle, keeps a busy machine from reading a correct runner's record as early.
+    let early;
+    await waitFor(() => {
+      const record = h.record();
+      if (h.replyTo(asked)) return true;
+      if (record) early = record;
+      return early;
+    }, scale(2000) + opts.waitMs);
+    r.check("no launch record while session/new is still unanswered", !early, `a record was written early: ${JSON.stringify(early)}`);
     const record = await ready(h);
     r.check("a launch record arrives after session/new is answered", record, `no record with a nativeRef at ${h.recordPath}`);
     if (!record) return r;
@@ -524,15 +533,17 @@ const cases = {
         h.paste(message(h, "allow it"));
         await sleep(scale(800));
         r.check("pending: a pasted message isn't an answer", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
+        const abortedAt = Date.now();
         h.paste("/abort");
         const withdrawn = await waitFor(() => withdraws(h)[0], scale(3000));
         r.check("pending: /abort withdraws the ask with turn_cancelled", withdrawn?.body?.reason === "turn_cancelled", `withdraw: ${JSON.stringify(withdrawn?.body)}`);
         r.check("pending: the agent's request is answered cancelled", (await waitFor(() => outcome(h), scale(3000)))?.outcome === "cancelled",
           `got ${JSON.stringify(outcome(h))}`);
         // Once the ask is withdrawn no person is still waiting, so the cancelled turn's own end is reported as usual (the
-        // pasted message above runs as the next turn, so only that turn's Stop/cancelled counts).
+        // pasted message above runs as the next turn, so only that turn's Stop/cancelled counts). The contract doesn't
+        // order the Stop and the withdraw, so the Stop is any after /abort, not only one after the withdraw arrived.
         r.check("pending: after /abort, the turn's end is reported, holding nothing",
-          await waitFor(() => h.hooks("Stop", "cancelled").some((p) => p.at >= (withdrawn?.at ?? 0)), scale(3000)), "no Stop/cancelled after the withdraw");
+          await waitFor(() => h.hooks("Stop", "cancelled").some((p) => p.at >= abortedAt), scale(3000)), "no Stop/cancelled after /abort");
         await sleep(scale(1200));
         r.check("pending: an answer after the withdraw isn't delivered", answers(h).every((a) => a.msg.result?.outcome?.outcome !== "selected"),
           `answers: ${JSON.stringify(answers(h).map((a) => a.msg.result))}`);
@@ -544,8 +555,10 @@ const cases = {
       if (!h) continue;
       const withdrawn = await waitFor(() => withdraws(h)[0], scale(4000));
       r.check(`${label}: the ask is withdrawn with ${reason}`, withdrawn?.body?.reason === reason, `withdraw: ${JSON.stringify(withdrawn?.body)}`);
+      // The turn's own Stop, before or after the withdraw (the contract doesn't order them): any after the ask was submitted.
+      const submitted = h.permissionCalls("POST").find((c) => !c.path.endsWith("/withdraw"));
       if (reason === "turn_ended") r.check(`${label}: nothing is held once the ask is withdrawn`,
-        await waitFor(() => nonExitStops(h, withdrawn?.at ?? 0).length > 0, scale(3000)), "no Stop after the withdraw");
+        await waitFor(() => nonExitStops(h, submitted?.at ?? 0).length > 0, scale(3000)), "no Stop after the ask was submitted");
     }
     return r;
   },
