@@ -19,6 +19,8 @@ import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-deliv
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { DispatchBuffer } from "../src/domain/gateway/dispatch-buffer.js";
+import { SeenStore } from "../src/domain/gateway/slack/state-store.js";
+import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import type { LoadResult } from "../src/domain/gateway/human-registry.js";
 import { GatewayDispatcher } from "../src/domain/gateway/dispatcher.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -53,7 +55,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   });
   afterEach(() => { for (const w of wires.splice(0)) w.stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
-  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true, to?: string[]) {
+  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true, to?: string[], readiness = async () => ({ ready: true, reason: "fixture delivery ready" })) {
     const load = typeof registered === "function" ? registered : () => registered ? registry : { ok: true as const, entities: [] };
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=fixture-only\n", { mode: 0o600 });
@@ -72,7 +74,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       },
     });
     wires.push(wire); wire.startServices?.();
-    return makeOperatorDeliveryEngine({ home, queueRepo: repo,
+    return makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness },
       registry: { loadHumanRegistry: load },
       dispatch: (op, ref, payload, opts) => { to?.push(ref); return wire.dispatcher.dispatch(op, ref, payload, opts); },
     });
@@ -144,10 +146,219 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual([]);
     expect(alerts()).toHaveLength(1);
     expect(alerts()[0]?.destinationSession).toBe(seat); // carrier only, never a pane nudge
-    expect(alerts()[0]?.sourceSession).toBe(staleSource); // provenance is not rewritten
+    expect(alerts()[0]?.sourceSession).toBe("daemon@kernel"); // scheduling is OpenRig; member provenance remains in its own row
     expect(JSON.stringify(posts)).toContain(row.qitemId);
     await tick(port);
     expect(posts).toHaveLength(1);
+  });
+
+  it("a human operator setting uses a local carrier and preserves explicit-only for a choice", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "human-owner@external");
+    try {
+      await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+      const posts: unknown[] = [];
+      await tick(engine(posts), { humanRung: "explicit-only", loadHumanRegistry: () => registry });
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.destinationSession).not.toBe("human-owner@external");
+      expect(posts).toEqual([]);
+      expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each(["not-ready", "indeterminate"])("%s delivery retains one visible alert, then uses the same episode when ready", async status => {
+    await refusal(); let ready = false; const posts: unknown[] = [];
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: status }));
+    await tick(port); await tick(port);
+    expect(posts).toEqual([]);
+    expect(alerts()).toHaveLength(1);
+    const id = alerts()[0]!.qitemId;
+    expect(notes(id).join("\n")).toContain("unavailable:human-delivery");
+    expect(notes(id).join("\n")).not.toContain("dispatched-to-engine");
+    ready = true; await tick(port, { now: new Date(Date.now() + 240_000) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    await tick(port); expect(posts).toHaveLength(1); expect(alerts()[0]!.qitemId).toBe(id);
+  });
+
+  it("the real readiness check keeps a disabled connector out of the dispatch buffer", async () => {
+    const row = await refusal(); const dispatch = vi.fn(() => ({ ok: true as const, decisionId: "disabled-fixture" }));
+    const secrets = join(home, "disabled.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=fixture-only\n");
+    saveConfig({ ...DEFAULT_CONFIG, enabled: false, channel: "CFIXTURE", secretsEnvFile: secrets }, home);
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry }, dispatch });
+    const result = await port.dispatchEscalation(row, "permission prompt");
+    expect(result).toMatchObject({ dispatched: false, resolved: false });
+    expect(result.decision).toContain("unavailable:human-delivery");
+    expect(dispatch).not.toHaveBeenCalled(); expect(new DispatchBuffer(home).pending()).toEqual([]);
+  });
+
+  it.each([true, false])("an undelivered notice about a ladder alert does not recurse (ladder=%s)", async ladderNotice => {
+    const notice = await repo.create({ sourceSession: "sender@fixture", destinationSession: "human-owner@external",
+      body: "original undelivered notice", tags: ladderNotice ? ["wake-escalation"] : [], nudge: false });
+    const finding = await refusal();
+    db.prepare("UPDATE queue_items SET tags=? WHERE qitem_id=?").run(JSON.stringify([
+      `stuck-sweep:undelivered-human-notice:${notice.qitemId}`, `recovery-for:${notice.qitemId}`,
+    ]), finding.qitemId);
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port); await tick(port);
+    expect(alerts()).toHaveLength(ladderNotice ? 0 : 1);
+    if (!ladderNotice) await vi.waitFor(() => expect(posts).toHaveLength(1));
+    else expect(posts).toEqual([]);
+    expect(repo.getById(finding.qitemId)!.state).toBe("in-progress");
+    expect(repo.getById(notice.qitemId)!.state).toBe("pending");
+  });
+
+  it("an unreadable human registry still permits a valid agent carrier", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "ops@fixture");
+    try {
+      await refusal(); const posts: unknown[] = [];
+      await tick(engine(posts, false), { loadHumanRegistry: () => ({ ok: false, error: "no registered people" }) });
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.destinationSession).toBe("ops@fixture");
+      expect(posts).toEqual([]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each([
+    { choice: true, orchMarker: false }, { choice: true, orchMarker: true },
+    { choice: false, orchMarker: false }, { choice: false, orchMarker: true },
+  ])("an unaccepted old human carrier is repaired in place ($choice/$orchMarker)", async ({ choice, orchMarker }) => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (${choice ? "selection_prompt" : "target_needs_input"}). No text was sent.`);
+    let ready = false; const posts: unknown[] = [];
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: "not-ready" }));
+    await tick(port, { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    if (!orchMarker) db.prepare("DELETE FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'escalation-rung: orchestrator%'").run(old.qitemId);
+    ready = choice; // a choice must not use restored readiness to bypass explicit-only
+    const wakes: string[] = [];
+    await tick(port, { humanRung: "explicit-only", loadHumanRegistry: () => registry, now: new Date(Date.now() + 240_000),
+      attemptWake: async (_id, target) => { wakes.push(target); return "failed:fixture"; } });
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.qitemId).toBe(old.qitemId);
+    expect(alerts()[0]!.body).toBe(old.body);
+    expect(alerts()[0]!.destinationSession).not.toBe("human-owner@external");
+    expect(wakes).toEqual([]); expect(posts).toEqual([]);
+    expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+    if (!choice) {
+      ready = true; await tick(port, { humanRung: "explicit-only", now: new Date(Date.now() + 360_000) });
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()[0]!.qitemId).toBe(old.qitemId);
+    }
+  });
+
+  it.each([true, false])("a repaired carrier wakes its newly configured lead before the human rung (choice=%s)", async choice => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (${choice ? "selection_prompt" : "target_needs_input"}). No text was sent.`);
+    const posts: unknown[] = []; let ready = false;
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: "fixture" }));
+    await tick(port, { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    expect(notes(old.qitemId).join("\n")).toContain("orchestrator self-skip");
+    if (choice) repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "wake-ladder@system",
+      transitionNote: "ladder-exhausted: explicit-only floor: a visible row, not posted to a person" });
+    ready = true; const wakes: string[] = [];
+    const opts = { humanRung: "explicit-only" as const, loadHumanRegistry: () => registry, resolveOrchestrator: () => "lead@fixture",
+      attemptWake: async (_id: string, target: string) => { wakes.push(target); return "failed:offline"; } };
+    await tick(port, opts);
+    expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
+    expect(alerts()[0]!.qitemId).toBe(old.qitemId); expect(alerts()[0]!.body).toBe(old.body);
+    expect(alerts()[0]!.destinationSession).toBe("lead@fixture");
+    await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+    if (choice) expect(posts).toEqual([]);
+    else await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(wakes).toEqual(["lead@fixture"]);
+    expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+  });
+
+  it.each([
+    { kind: "posted", boundary: "progress" }, { kind: "terminated", boundary: "progress" },
+    { kind: "posted", boundary: "dispatch" }, { kind: "terminated", boundary: "dispatch" },
+  ])("a fixed-key old $kind does not resolve a later $boundary episode", async ({ kind, boundary }) => {
+    const row = await refusal(); const key = `${row.qitemId}:operator-rung`;
+    expect(repo.transitionLog.latestOwnerNotificationForQitem(row.qitemId)).toBeNull();
+    repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "daemon@kernel",
+      transitionNote: `${kind === "posted" ? "slack-owner-notification-posted" : "delivery-termination:"} notification_key=${key}` });
+    if (boundary === "progress") await repo.update({ qitemId: row.qitemId, actorSession: seat, transitionNote: "continuing the obligation" });
+    else repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "wake-ladder@system",
+      transitionNote: `escalation-rung: operator dispatched-to-engine notification_key=${key}` });
+    const posts: unknown[] = []; const port = engine(posts);
+    expect(port.hasAcceptedEscalation!(repo.getById(row.qitemId)!)).toBe(false);
+    expect(await port.dispatchEscalation(repo.getById(row.qitemId)!, "later episode")).toMatchObject({ dispatched: true, resolved: false });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(port.hasAcceptedEscalation!(repo.getById(row.qitemId)!)).toBe(true);
+  });
+
+  it("a later ordinary episode posts once after the real gateway ACKed its earlier delivery", async () => {
+    const source = await repo.create({ sourceSession: "sender@fixture", destinationSession: "relay@fixture", body: "work", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@fixture", toSession: seat, nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_result=?, last_nudge_attempt=? WHERE qitem_id=?")
+      .run("failed:offline", new Date(Date.now() - 600_000).toISOString(), created.qitemId);
+    const posts: unknown[] = []; const port = engine(posts); const buffer = new DispatchBuffer(home);
+    const delivered = new SeenStore(join(home, "state", "slack-delivered-decisions.jsonl"));
+    const opts = { humanRung: "always" as const, retryCap: 0, attemptWake: async () => "failed:offline" };
+    await tick(port, opts);
+    const firstKey = notes(created.qitemId).join(" ").match(/notification_key=(\S+)/)![1]!;
+    await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(buffer.pending()).toEqual([]);
+      expect(delivered.load().has(`operator:${firstKey}`)).toBe(true); });
+    await tick(port, opts);
+    expect(notes(created.qitemId).some(n => n.startsWith("ladder-exhausted:"))).toBe(true);
+    await repo.update({ qitemId: created.qitemId, actorSession: seat, transitionNote: "continued work; another wake is needed" });
+    await tick(port, { ...opts, now: new Date(Date.now() + 240_000) });
+    await tick(port, { ...opts, now: new Date(Date.now() + 360_000) });
+    await vi.waitFor(() => { expect(posts).toHaveLength(2); expect(buffer.pending()).toEqual([]); });
+    const receipts = notes(created.qitemId).filter(n => n.startsWith("slack-owner-notification-posted "));
+    expect(receipts).toHaveLength(2);
+    const secondKey = receipts[1]!.match(/notification_key=(\S+)/)![1]!;
+    expect(secondKey).not.toBe(firstKey); expect(delivered.load().has(`operator:${secondKey}`)).toBe(true);
+    await tick(port, { ...opts, now: new Date(Date.now() + 480_000) });
+    const transitions = repo.listTransitions(created.qitemId);
+    expect(transitions.at(-1)!.transitionNote).toContain("ladder-exhausted:");
+    await tick(port, { ...opts, now: new Date(Date.now() + 600_000) });
+    expect(posts).toHaveLength(2); expect(buffer.pending()).toEqual([]);
+  });
+
+  it.each([false, true])("legacy fixed-key custody survives in the same ordinary episode (ACKed=%s)", async acked => {
+    const row = await refusal(); const posts: unknown[] = []; const port = engine(posts);
+    const key = `${row.qitemId}:operator-rung`;
+    const accepted = wires.at(-1)!.dispatcher.dispatch(OUTBOUND_OP, "human-owner@external", {
+      qitemId: row.qitemId, notificationKey: key, destinationSession: "human-owner@external", sourceSession: row.sourceSession,
+      body: row.body, ownerNotificationLevel: "ALERT", tags: ["escalation"],
+    }, { decisionId: `operator:${key}` });
+    expect(accepted.ok).toBe(true);
+    if (acked) await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(new DispatchBuffer(home).pending()).toEqual([]); });
+    expect(port.hasAcceptedEscalation!(row)).toBe(true);
+    expect(await port.dispatchEscalation(row, "same episode")).toMatchObject({ dispatched: true, resolved: acked });
+    await vi.waitFor(() => { expect(posts).toHaveLength(1); expect(new DispatchBuffer(home).pending()).toEqual([]); });
+  });
+
+  it.each([false, true, "posted", "terminated"] as const)("an accepted old human carrier is not rerouted or woken (marker=%s)", async marker => {
+    await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+    await tick(engine([], false), { humanRung: "always" });
+    const old = alerts()[0]!;
+    db.prepare("UPDATE queue_items SET destination_session=? WHERE qitem_id=?").run("human-owner@external", old.qitemId);
+    db.prepare("DELETE FROM queue_transitions WHERE qitem_id=? AND transition_note LIKE 'escalation-rung: orchestrator%'").run(old.qitemId);
+    const buffer = new DispatchBuffer(home);
+    const dispatcher = new GatewayDispatcher({ buffer, send: () => { throw new Error("fixture interrupted after persistence"); } });
+    dispatcher.onCapability({ kind: "capability", connectorId: "fixture", platform: "slack", protocolVersion: 1, ops: ["post_message"] });
+    const accepting = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+      readiness: async () => ({ ready: true, reason: "fixture" }), dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
+    const accepted = await accepting.dispatchEscalation(repo.getById(old.qitemId)!, "permission prompt");
+    expect(accepted.dispatched).toBe(true); const pending = buffer.pending(); expect(pending).toHaveLength(1);
+    if (marker === true) repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "wake-ladder@system",
+      transitionNote: `escalation-rung: operator dispatched-to-engine decision=accepted-pending resolved=false notification_key=${accepted.notificationKey} decision_id=${accepted.decisionId}` });
+    if (marker === "posted" || marker === "terminated") {
+      buffer.ack(pending[0]!.decisionId);
+      repo.transitionLog.append({ qitemId: old.qitemId, state: old.state, actorSession: "gateway@system",
+        transitionNote: `${marker === "posted" ? "slack-owner-notification-posted" : "delivery-termination:"} notification_key=${accepted.notificationKey}` });
+    }
+    const expectedPending = buffer.pending();
+    const readReady = vi.fn(async () => ({ ready: false, reason: "unavailable after acceptance" }));
+    const send = vi.fn(() => { throw new Error("must not dispatch again"); }); const wakes = vi.fn(async () => "failed:fixture");
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry }, readiness: readReady, dispatch: send });
+    await tick(port, { humanRung: "explicit-only", loadHumanRegistry: () => registry, now: new Date(Date.now() + 240_000), attemptWake: wakes });
+    expect(repo.getById(old.qitemId)!.destinationSession).toBe("human-owner@external");
+    expect(repo.getById(old.qitemId)!.body).toBe(old.body);
+    expect(buffer.pending()).toEqual(expectedPending); expect(wakes).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled(); expect(readReady).not.toHaveBeenCalled();
   });
 
   it("an invalid sender does not turn an explicit-only choice alert into a human post", async () => {
@@ -435,6 +646,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(classifyPromptAfterRefusal({ ...idle, needsInput: { count: 1, reason: "permission prompt" } }, refusedAt)).toBe("blocked");
     expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: after, needsInputEvidence: clearAt(after) }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal(null, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "working", needsInputEvidence: clearAt(after) }, refusedAt)).toBe("clear");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "working", needsInputEvidence: null }, refusedAt)).toBe("unknown");
   });
 
   it("activity-only Codex and generic changes cannot clear a refused prompt", () => {
@@ -656,7 +869,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     const row = await refusal(); const buffer = new DispatchBuffer(home); let sends = 0;
     const dispatcher = new GatewayDispatcher({ buffer, send: () => { sends++; throw new Error("connector disconnected after persist"); } });
     dispatcher.onCapability({ kind: "capability", connectorId: "fixture", platform: "slack", protocolVersion: 1, ops: ["post_message"] });
-    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry: { loadHumanRegistry: () => registry },
       dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
     expect(await port.dispatchEscalation(row, "blocked")).toMatchObject({ decision: "accepted-pending", dispatched: true, resolved: false });
     const pending = new DispatchBuffer(home).pending(); expect(pending).toHaveLength(1);
@@ -697,7 +910,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   it("an unadvertised connector is unresolved with no buffer entry or repeated note", async () => {
     await refusal(); const sends = vi.fn();
     const dispatcher = new GatewayDispatcher({ buffer: new DispatchBuffer(home), send: sends });
-    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry: { loadHumanRegistry: () => registry },
       dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
     await tick(port); const id = alerts()[0]!.qitemId; const before = repo.listTransitions(id);
     await tick(port); await tick(port);

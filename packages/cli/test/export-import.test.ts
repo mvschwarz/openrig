@@ -330,6 +330,53 @@ edges: []
     }
   });
 
+  it("#1631 export warns for a missing required member file and accepts it when copied beside the output", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-member-files-"));
+    const source = path.join(root, "source"), out = path.join(root, "out");
+    fs.mkdirSync(source); fs.mkdirSync(out);
+    fs.writeFileSync(path.join(source, "member.md"), "member guidance");
+    const yaml = `version: '0.2'
+name: member-files
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: worker
+        agent_ref: local:agents/worker
+        runtime: codex
+        profile: default
+        cwd: .
+        startup:
+          files:
+            - path: member.md
+              required: true
+            - path: optional.md
+              required: false
+    edges: []
+edges: []
+`;
+    srv.exports.set("member-startup", { root: source, yaml });
+    try {
+      const output = path.join(out, "rig.yaml");
+      const client = { baseUrl: "http://127.0.0.1", get: vi.fn(async () => ({ status: 200, data: [{ id: "member-startup", name: "member-startup", archivedAt: null }] })),
+        getText: vi.fn(async () => ({ status: 200, data: yaml, headers: new Headers({ "X-Rig-Root": encodeURIComponent(source) }) })) } as unknown as DaemonClient;
+      const deps = exportDeps({ writeFile: (p, text) => fs.writeFileSync(p, text), clientFactory: () => client });
+      const run = () => new Command().addCommand(exportCommand(deps))
+        .parseAsync(["node", "rig", "export", "member-startup", "-o", output]).then(() => {});
+      const missing = (await captureLogs(run)).join("\n");
+      expect(missing).toContain("Referenced file 'member.md'");
+      expect(missing).not.toContain("optional.md");
+      fs.copyFileSync(path.join(source, "member.md"), path.join(out, "member.md"));
+      const delivered = (await captureLogs(run)).join("\n");
+      expect(delivered).not.toContain("Referenced file 'member.md'");
+      expect(fs.readFileSync(path.join(out, "member.md"), "utf8")).toBe("member guidance");
+      expect(fs.readFileSync(output, "utf8")).toBe(yaml);
+    } finally {
+      srv.exports.delete("member-startup");
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["copy", "existing", "symlink", "missing", "remote", "relative"].filter(mode => mode !== "symlink" || process.platform !== "win32"))("export: shares culture and explains nonportable refs/name (%s)", async mode => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "export-share-"));
     const source = path.join(root, "source"), out = path.join(root, "out"), outside = path.join(root, "outside");
