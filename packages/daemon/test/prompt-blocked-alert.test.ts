@@ -53,7 +53,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   });
   afterEach(() => { for (const w of wires.splice(0)) w.stop(); db.close(); rmSync(home, { recursive: true, force: true }); });
 
-  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true, to?: string[]) {
+  function engine(posts: unknown[], registered: boolean | (() => LoadResult) = true, to?: string[], readiness = async () => ({ ready: true, reason: "fixture delivery ready" })) {
     const load = typeof registered === "function" ? registered : () => registered ? registry : { ok: true as const, entities: [] };
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=fixture-only\n", { mode: 0o600 });
@@ -72,7 +72,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       },
     });
     wires.push(wire); wire.startServices?.();
-    return makeOperatorDeliveryEngine({ home, queueRepo: repo,
+    return makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness },
       registry: { loadHumanRegistry: load },
       dispatch: (op, ref, payload, opts) => { to?.push(ref); return wire.dispatcher.dispatch(op, ref, payload, opts); },
     });
@@ -144,10 +144,64 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(wakes).toEqual([]);
     expect(alerts()).toHaveLength(1);
     expect(alerts()[0]?.destinationSession).toBe(seat); // carrier only, never a pane nudge
-    expect(alerts()[0]?.sourceSession).toBe(staleSource); // provenance is not rewritten
+    expect(alerts()[0]?.sourceSession).toBe("daemon@kernel"); // scheduling is OpenRig; member provenance remains in its own row
     expect(JSON.stringify(posts)).toContain(row.qitemId);
     await tick(port);
     expect(posts).toHaveLength(1);
+  });
+
+  it("a human operator setting uses a local carrier and preserves explicit-only for a choice", async () => {
+    vi.stubEnv("OPENRIG_WORKSPACE_OPERATOR_SEAT_NAME", "human-owner@external");
+    try {
+      await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+      const posts: unknown[] = [];
+      await tick(engine(posts), { humanRung: "explicit-only", loadHumanRegistry: () => registry });
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.destinationSession).not.toBe("human-owner@external");
+      expect(posts).toEqual([]);
+      expect(repo.getById(episodeRows[0]!)!.state).toBe("in-progress");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it.each(["not-ready", "indeterminate"])("%s delivery retains one visible alert, then uses the same episode when ready", async status => {
+    await refusal(); let ready = false; const posts: unknown[] = [];
+    const port = engine(posts, true, undefined, async () => ({ ready, reason: status }));
+    await tick(port); await tick(port);
+    expect(posts).toEqual([]);
+    expect(alerts()).toHaveLength(1);
+    const id = alerts()[0]!.qitemId;
+    expect(notes(id).join("\n")).toContain("unavailable:human-delivery");
+    expect(notes(id).join("\n")).not.toContain("dispatched-to-engine");
+    ready = true; await tick(port, { now: new Date(Date.now() + 240_000) });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    await tick(port); expect(posts).toHaveLength(1); expect(alerts()[0]!.qitemId).toBe(id);
+  });
+
+  it("the real readiness check keeps a disabled connector out of the dispatch buffer", async () => {
+    const row = await refusal(); const dispatch = vi.fn(() => ({ ok: true as const, decisionId: "disabled-fixture" }));
+    const secrets = join(home, "disabled.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=fixture-only\n");
+    saveConfig({ ...DEFAULT_CONFIG, enabled: false, channel: "CFIXTURE", secretsEnvFile: secrets }, home);
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry }, dispatch });
+    const result = await port.dispatchEscalation(row, "permission prompt");
+    expect(result).toMatchObject({ dispatched: false, resolved: false });
+    expect(result.decision).toContain("unavailable:human-delivery");
+    expect(dispatch).not.toHaveBeenCalled(); expect(new DispatchBuffer(home).pending()).toEqual([]);
+  });
+
+  it.each([true, false])("an undelivered notice about a ladder alert does not recurse (ladder=%s)", async ladderNotice => {
+    const notice = await repo.create({ sourceSession: "sender@fixture", destinationSession: "human-owner@external",
+      body: "original undelivered notice", tags: ladderNotice ? ["wake-escalation"] : [], nudge: false });
+    const finding = await refusal();
+    db.prepare("UPDATE queue_items SET tags=? WHERE qitem_id=?").run(JSON.stringify([
+      `stuck-sweep:undelivered-human-notice:${notice.qitemId}`, `recovery-for:${notice.qitemId}`,
+    ]), finding.qitemId);
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port); await tick(port);
+    expect(alerts()).toHaveLength(ladderNotice ? 0 : 1);
+    if (!ladderNotice) await vi.waitFor(() => expect(posts).toHaveLength(1));
+    else expect(posts).toEqual([]);
+    expect(repo.getById(finding.qitemId)!.state).toBe("in-progress");
+    expect(repo.getById(notice.qitemId)!.state).toBe("pending");
   });
 
   it("an invalid sender does not turn an explicit-only choice alert into a human post", async () => {
@@ -435,6 +489,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(classifyPromptAfterRefusal({ ...idle, needsInput: { count: 1, reason: "permission prompt" } }, refusedAt)).toBe("blocked");
     expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: after, needsInputEvidence: clearAt(after) }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal(null, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "working", needsInputEvidence: clearAt(after) }, refusedAt)).toBe("clear");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "working", needsInputEvidence: null }, refusedAt)).toBe("unknown");
   });
 
   it("activity-only Codex and generic changes cannot clear a refused prompt", () => {
@@ -656,7 +712,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     const row = await refusal(); const buffer = new DispatchBuffer(home); let sends = 0;
     const dispatcher = new GatewayDispatcher({ buffer, send: () => { sends++; throw new Error("connector disconnected after persist"); } });
     dispatcher.onCapability({ kind: "capability", connectorId: "fixture", platform: "slack", protocolVersion: 1, ops: ["post_message"] });
-    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry: { loadHumanRegistry: () => registry },
       dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
     expect(await port.dispatchEscalation(row, "blocked")).toMatchObject({ decision: "accepted-pending", dispatched: true, resolved: false });
     const pending = new DispatchBuffer(home).pending(); expect(pending).toHaveLength(1);
@@ -697,7 +753,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   it("an unadvertised connector is unresolved with no buffer entry or repeated note", async () => {
     await refusal(); const sends = vi.fn();
     const dispatcher = new GatewayDispatcher({ buffer: new DispatchBuffer(home), send: sends });
-    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry },
+    const port = makeOperatorDeliveryEngine({ home, queueRepo: repo, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry: { loadHumanRegistry: () => registry },
       dispatch: (op, ref, payload, opts) => dispatcher.dispatch(op, ref, payload, opts) });
     await tick(port); const id = alerts()[0]!.qitemId; const before = repo.listTransitions(id);
     await tick(port); await tick(port);

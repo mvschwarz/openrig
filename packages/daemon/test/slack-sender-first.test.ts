@@ -48,7 +48,7 @@ describe("a wake-rung escalation names the seat the work is waiting on", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "sender-first-"));
     try {
       const sent: Array<Record<string, unknown>> = [];
-      const engine = makeOperatorDeliveryEngine({ home, registry,
+      const engine = makeOperatorDeliveryEngine({ home, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, registry,
         queueRepo: { transitionLog: { latestOwnerNotificationForQitem: () => null }, db: undefined } as never,
         dispatch: (_op, _ref, payload) => { sent.push(payload as Record<string, unknown>); return { ok: true, decisionId: "d" } as never; } });
       await engine.dispatchEscalation({ qitemId: "q-stuck", body: "Please review.", tags: [], ...row } as QueueItem, "unclaimed");
