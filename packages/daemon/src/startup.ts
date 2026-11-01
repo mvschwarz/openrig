@@ -53,6 +53,7 @@ import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
 import { SnapshotCapture } from "./domain/snapshot-capture.js";
 import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
+import { createDesiredClaudeActivityHooksReader } from "./domain/desired-claude-activity-hooks.js";
 import { ClaudeManagedLaunch } from "./domain/claude-managed-launch.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
@@ -803,6 +804,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume,
     transcriptStore, serviceOrchestrator,
+    getDesiredClaudeActivityHooks: createDesiredClaudeActivityHooksReader(db, {
+      exists: (p: string) => fs.existsSync(p), readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    }),
     freshLaunch: async (rigId, nodeId) => persistedFreshPodLaunch
       ? persistedFreshPodLaunch(rigId, nodeId)
       : { status: "failed", error: "Pod instantiator is not ready for a fresh launch." },

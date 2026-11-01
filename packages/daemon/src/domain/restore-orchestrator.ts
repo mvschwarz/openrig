@@ -34,6 +34,7 @@ import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyCl
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
+import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 import type {
@@ -123,6 +124,9 @@ export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigRe
   if (allFailed) return "failed";
   // A seat running without part of its guidance keeps its own status; the rig isn't fully restored.
   if (nodes.some((node) => (node.guidanceGaps?.length ?? 0) > 0)) return "partially_restored";
+  // Same for an unhealed restore gap (e.g. a current-selection re-apply
+  // that was skipped, failed, or threw): the seat runs, but the restore was not whole.
+  if (nodes.some((node) => (node.restoreGaps?.length ?? 0) > 0)) return "partially_restored";
   // A fresh launch loses a seat's conversation, except for a terminal seat, which has none.
   const lostConversation = (node: RestoreNodeResult) => (node.status === "fresh" || node.status === "fresh-primed") && !node.noConversation;
   if (nodes.some((node) => lostConversation(node) || node.status === "awaiting-decision" || node.status === "failed" || node.status === "attention_required")) {
@@ -247,6 +251,11 @@ interface RestoreOrchestratorDeps {
   freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
   /** Where the person's seat-skills line answer is read (default: the OpenRig settings). */
   routerLineSettings?: Pick<SettingsStore, "resolveOne">;
+  /** Read-only current authored selection for Claude activity hooks (the
+   *  restore-check precedent, shared via desired-claude-activity-hooks).
+   *  Absent in older wiring/tests: the current selection is unknown, so a
+   *  missing saved marker is reported, never guessed. */
+  getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
 }
 
 export class RestoreOrchestrator {
@@ -269,6 +278,7 @@ export class RestoreOrchestrator {
   private freshLaunch: RestoreOrchestratorDeps["freshLaunch"];
   private freshLaunchAvailable: RestoreOrchestratorDeps["freshLaunchAvailable"];
   private routerLineSettings: Pick<SettingsStore, "resolveOne"> | undefined;
+  private getDesiredClaudeActivityHooks: RestoreOrchestratorDeps["getDesiredClaudeActivityHooks"];
   private appliedLaunchStore: AppliedLaunchObservationStore;
 
   constructor(deps: RestoreOrchestratorDeps) {
@@ -311,6 +321,7 @@ export class RestoreOrchestrator {
     this.listProcesses = deps.listProcesses;
     this.freshLaunch = deps.freshLaunch;
     this.freshLaunchAvailable = deps.freshLaunchAvailable;
+    this.getDesiredClaudeActivityHooks = deps.getDesiredClaudeActivityHooks;
     this.routerLineSettings = deps.routerLineSettings;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
@@ -1066,6 +1077,9 @@ export class RestoreOrchestrator {
   ): Promise<RestoreNodeResult> {
     // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
+    // Activity-hook restore gaps (#1530) are collected out-of-band: postLaunchRestore
+    // has many return points, so they ride alongside `warnings` and are attached below.
+    const activityHookGaps: string[] = [];
     const liveNode = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
       && (!opts?.selectedHistory || current.id === node.id));
     const nodeId = node.id;
@@ -1362,8 +1376,9 @@ export class RestoreOrchestrator {
     }
 
     const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
-      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession);
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession, activityHookGaps);
     const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
+      ...(activityHookGaps.length > 0 ? { restoreGaps: activityHookGaps } : {}),
       ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
   }
@@ -1380,6 +1395,86 @@ export class RestoreOrchestrator {
       accessSync(executable, constants.X_OK);
       return statSync(executable).isFile() ? realpathSync(executable) : undefined;
     } catch { return undefined; }
+  }
+
+  /** #1530 — the saved startup context has no `claude_activity_hooks` entry.
+   *  Re-apply the CURRENT selection as a marker when the current spec selects
+   *  it. A healed re-apply and an unknown selection are warnings only; a
+   *  restore gap is recorded only when a known-selected re-apply was skipped,
+   *  failed, or threw. The marker is presence-only: the adapter reconciles
+   *  hooks off the entry's existence and reads none of its paths, so no
+   *  install path is fabricated and the saved context is never rewritten.
+   *  Unknown selections are warned about, never guessed at. Never blocks
+   *  the resume. Only absolute `path:` agent refs resolve here; `local:` and
+   *  `builtin:` refs resolve to unknown (warn, no gap) because no
+   *  authoritative launch root is retained at restore time. A known selection
+   *  with no Claude runtime adapter is a gap: the hooks were skipped, not
+   *  re-applied, and the skip must be reported rather than silent. */
+  private async restoreCurrentActivityHooks(
+    node: PlanEntry["node"],
+    activityAdapter: import("./runtime-adapter.js").RuntimeAdapter | undefined,
+    launchResult: { session: import("./types.js").Session; binding: import("./types.js").Binding },
+    warnings: string[] | undefined,
+    activityHookGaps: string[] | undefined,
+  ): Promise<void> {
+    let desired: DesiredClaudeActivityHooks;
+    try {
+      desired = this.getDesiredClaudeActivityHooks
+        ? this.getDesiredClaudeActivityHooks(node.id)
+        : { status: "unknown", evidence: "Current desired selection metadata is unavailable" };
+    } catch (err) {
+      desired = { status: "unknown", evidence: `Current desired selection metadata could not be read: ${(err as Error).message}` };
+    }
+    if (desired.status === "unknown") {
+      const detail = `the current Claude activity-hook selection could not be determined (${desired.evidence}); no hooks were re-applied.`;
+      warnings?.push(`Restore activity hooks: ${node.logicalId}: ${detail}`);
+      // Unknown is a warning only: nothing is known to be missing, so it
+      // must not downgrade the rig to partially_restored.
+      return;
+    }
+    if (!desired.selected) return;
+    if (!activityAdapter) {
+      // The selection was resolved before requiring the adapter: a known
+      // selection with no adapter to project it is a skipped re-apply.
+      const gap = `claude_activity_hooks: the current selection could not be re-applied: no Claude runtime adapter was available.`;
+      warnings?.push(`Restore activity hooks: ${node.logicalId}: the current selection could not be re-applied: no Claude runtime adapter was available.`);
+      activityHookGaps?.push(gap);
+      return;
+    }
+    // Marker-only entry, reconstructed from the current selection: the
+    // adapter ignores every path field for this resource type.
+    const marker: import("./projection-planner.js").ProjectionEntry = {
+      category: "runtime_resource", resourceType: "claude_activity_hooks", effectiveId: "claude_activity_hooks",
+      sourceSpec: "current-selection", sourcePath: "", resourcePath: "", absolutePath: "",
+      classification: "safe_projection",
+    };
+    try {
+      const result = await activityAdapter.project({
+        runtime: "claude-code", cwd: node.cwd ?? ".", entries: [marker],
+        startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+      }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+      warnings?.push(...(result.warnings ?? []));
+      if (result.projected.includes(marker.effectiveId)) {
+        const detail = "saved startup context had no Claude activity-hook selection; the current seat specification selects it, so the current marker was re-applied without replaying startup content.";
+        warnings?.push(`Restore activity hooks: ${detail}`);
+        // A healed re-apply is a warning only: the agent now has its hooks,
+        // so it must not downgrade the rig to partially_restored. A restore
+        // gap is recorded only when the re-apply was skipped, failed, or threw.
+        return;
+      }
+      const detail = [
+        ...result.skipped.map((skipped) => `skipped ${skipped}`),
+        ...result.failed.map((failure) => failure.error),
+      ].join("; ") || "the projection was not reported";
+      const gap = `claude_activity_hooks: the current selection could not be re-applied: ${detail}.`;
+      warnings?.push(`Restore activity hooks: the current selection could not be re-applied: ${detail}.`);
+      activityHookGaps?.push(gap);
+    } catch (error) {
+      // Activity delivery remains best-effort, as on an ordinary fresh launch.
+      const gap = `claude_activity_hooks: the current selection could not be re-applied: ${(error as Error).message}.`;
+      warnings?.push(`Restore activity hooks: the current selection could not be re-applied: ${(error as Error).message}.`);
+      activityHookGaps?.push(gap);
+    }
   }
 
   /** A seat that came back running should also have its role, culture and SOP guidance. If its
@@ -1500,6 +1595,9 @@ export class RestoreOrchestrator {
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
     resumeSource?: import("./types.js").Session | null,
+    /** Collected out-of-band (this method has many return points): activity-hook
+     *  restore gaps the caller attaches to the node result as `restoreGaps`. */
+    activityHookGaps?: string[],
   ): Promise<RestoreNodeResult> {
     const node = entry.node;
     // OPR.0.7.0.7: what this restore launches with when the seat has a saved effort choice is decided by the one
@@ -1586,12 +1684,18 @@ export class RestoreOrchestrator {
     // Restore only the saved activity selection before either native resume path.
     // This also heals settings stripped by older restores. The entry is a marker:
     // the adapter uses its current relay/manifest, not the old install's path.
-    // No current profile resolution, guidance, skills or startup replay belongs here.
+    // #1530: when the saved context has NO hooks entry, the seat may still
+    // select them now — a context saved before the selection existed says
+    // nothing about the current spec. In that case only, consult the current
+    // selection (the restore-check reader, injected; unknown when absent) and
+    // re-apply the CURRENT marker, marker-only: no profile-wide resolution,
+    // no guidance, skills or startup replay, and the saved context is never
+    // rewritten. A seat whose current spec does not select hooks stays silent.
     const activityAdapter = opts?.adapters?.["claude-code"];
-    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code" && activityAdapter) {
+    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code") {
       const entries = startupCtx.projectionEntries.filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
-      if (entries.length > 0) try {
+      if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
           runtime: "claude-code", cwd: node.cwd ?? ".",
           entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
@@ -1604,6 +1708,8 @@ export class RestoreOrchestrator {
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+      } else if (entries.length === 0) {
+        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
       }
     }
 

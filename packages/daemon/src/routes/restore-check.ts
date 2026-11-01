@@ -1,11 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry, type StartupContextProbeResult } from "../domain/restore-check-service.js";
-import { resolveAgentRef } from "../domain/agent-resolver.js";
-import { resolveProfileRuntimeResources } from "../domain/profile-resolver.js";
+import { createDesiredClaudeActivityHooksReader } from "../domain/desired-claude-activity-hooks.js";
 import { deriveRelayEvents } from "../domain/claude-activity-hooks.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
 import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
@@ -170,22 +169,9 @@ export function createRestoreCheckService(
         };
       }
     },
-    getDesiredClaudeActivityHooks: (nodeId) => {
-      const node = rigRepo.db.prepare("SELECT agent_ref, profile FROM nodes WHERE id = ?").get(nodeId) as
-        { agent_ref: string | null; profile: string | null } | undefined;
-      // Relative agent refs have no retained authoritative launch root here. Do not guess from cwd or rig name.
-      if (!node?.agent_ref?.startsWith("path:") || !isAbsolute(node.agent_ref.slice(5)) || !node.profile) {
-        return { status: "unknown", evidence: "Current agent reference/profile has no established absolute source location" };
-      }
-      const resolved = resolveAgentRef(node.agent_ref, dirname(node.agent_ref.slice(5)), {
-        exists: existsSync, readFile: (path) => readFileSync(path, "utf8"),
-      });
-      if (!resolved.ok) return { status: "unknown", evidence: "Current agent specification could not be resolved" };
-      const selected = resolveProfileRuntimeResources(resolved.resolved, resolved.imports, node.profile);
-      if (!selected.ok) return { status: "unknown", evidence: selected.errors.join("; ") };
-      return { status: "known", selected: selected.resources.some(({ resource }) =>
-        "type" in resource && resource.type === "claude_activity_hooks" && "runtime" in resource && resource.runtime === "claude-code") };
-    },
+    getDesiredClaudeActivityHooks: createDesiredClaudeActivityHooksReader(rigRepo.db, {
+      exists: existsSync, readFile: (path) => readFileSync(path, "utf8"),
+    }),
     getClaudeActivityHookEvents: () => deriveRelayEvents(
       { exists: existsSync, readFile: (path) => readFileSync(path, "utf-8") },
       resolve(import.meta.dirname, "../../assets/plugins/openrig-core/hooks/claude.json"),
