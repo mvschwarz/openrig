@@ -18,6 +18,7 @@ import {
   ensureWorkspaceScaffold,
   daemonNotRunningError,
   printDaemonNotRunning,
+  daemonStatusGuard,
   STATE_FILE,
   LOG_FILE,
   OPENRIG_DIR,
@@ -1945,7 +1946,7 @@ describe("T2 — start-pending status (daemon-start.lock)", () => {
     if (savedUrl !== undefined) process.env["OPENRIG_URL"] = savedUrl;
   });
 
-  function pendingDeps(opts: { lock?: string; alive: number[]; liveness?: "unknown" }): LifecycleDeps {
+  function pendingDeps(opts: { lock?: string; alive: number[]; liveness?: "unknown"; refusal?: Error }): LifecycleDeps {
     const underHome = (p: string) => p.startsWith(home + path.sep) && fs.existsSync(p);
     if (opts.lock !== undefined) fs.writeFileSync(path.join(home, "daemon-start.lock"), opts.lock);
     return mockDeps({
@@ -1957,7 +1958,7 @@ describe("T2 — start-pending status (daemon-start.lock)", () => {
         ? vi.fn((pid: number) => (opts.alive.includes(pid) ? "unknown" : "dead"))
         : undefined,
       sleep: async () => {},
-      fetch: vi.fn(async () => { throw new Error("ECONNREFUSED"); }), // listener refused
+      fetch: vi.fn(async () => { throw opts.refusal ?? new Error("ECONNREFUSED"); }), // listener refused
     });
   }
 
@@ -2020,5 +2021,47 @@ describe("T2 — start-pending status (daemon-start.lock)", () => {
     const status = await getDaemonStatus(deps, {});
     expect(status.state).toBe("stopped");
     expect(status.startPending).toBeUndefined();
+  });
+
+  // A guarded command must not send its request into a refusing port while a start is pending: it stops with
+  // guidance, as it did when this read "stopped". Node's fetch carries the refusal as cause.code; a refusal named
+  // only in the message is the other shape the probe already reads as refused.
+  const LIVE_LOCK = `{"launcherPid":${LAUNCHER_PID},"startedAt":"${STARTED_AT}"}\n`;
+  const refusals: Array<[string, Error | undefined]> = [
+    ["cause.code ECONNREFUSED", Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } })],
+    ["a refusal named in the message", undefined],
+  ];
+  it.each(refusals)("a guarded command stops with the starting guidance under a live reservation (%s)", async (_shape, refusal) => {
+    const status = await getDaemonStatus(pendingDeps({ lock: LIVE_LOCK, alive: [LAUNCHER_PID], refusal }), {});
+    if (refusal) expect(status.probeErrorCode).toBe("ECONNREFUSED");
+    const errors: string[] = [];
+    const origError = console.error;
+    const origExit = process.exitCode;
+    console.error = (...args: unknown[]) => errors.push(args.join(" "));
+    try {
+      expect(daemonStatusGuard(status)).toBe(false);
+    } finally {
+      console.error = origError;
+      process.exitCode = origExit;
+    }
+    expect(errors[0]).toBe(`Error: Daemon is starting (launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}); it isn't listening yet.`);
+    expect(errors.join("\n")).toContain("Wait, then re-check with 'rig daemon status'.");
+  });
+
+  it("`rig daemon status` during a pending start doesn't call the refused probe inconclusive", async () => {
+    const { daemonCommand } = await import("../src/commands/daemon.js");
+    const { Command } = await import("commander");
+    const program = new Command();
+    program.addCommand(daemonCommand(pendingDeps({ lock: LIVE_LOCK, alive: [LAUNCHER_PID] })));
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    try {
+      await program.parseAsync(["node", "rig", "daemon", "status"]);
+    } finally {
+      console.log = origLog;
+    }
+    expect(logs[0]).toBe(`Daemon starting: launch reserved by pid ${LAUNCHER_PID} since ${STARTED_AT}; not listening yet`);
+    expect(logs.join("\n")).not.toMatch(/timed out or was inconclusive/);
   });
 });
