@@ -869,7 +869,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // F3 — per-destination aggregation: ONE escalation carrying the row list, refreshed
     // not duplicated (the S02 idempotency shape), and rung markers on every member baton.
     for (const [dest, members] of escalating) {
-      const orch = openEscalationOwner(deps.db, escalationDedupTag(dest)) ?? resolveOrch(dest);
+      const orch = openEscalationOwner(deps, escalationDedupTag(dest)) ?? resolveOrch(dest);
       const route = !deps.resolveOrchestrator
         ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
       const routeReason = route && route.outcome !== "none" && route.outcome !== "parent" ? route.reason : "";
