@@ -2098,3 +2098,33 @@ delivery paths. It does not establish a combined Docker checkpoint restore,
 other providers' full lifecycle, cross-user access, ACP companion cleanup or
 SSH/SFTP. The deployed main instance retains the local policies and protected
 paused-seat state; no original team was resumed for these checks.
+
+### Combined service restore, WinGet and compiler scratch (2026-11-01)
+
+A second independent one-seat Pi rig declared a real Compose service with a
+loopback HTTP wait target and a named volume. After an actual provider reply,
+snapshot/down/restore attempt 183 completed `fully_restored`. The HTTP marker
+returned 200 with the retained volume contents, the same Pi session resumed,
+and a new model reply recalled the pre-snapshot marker. The owned rig, container,
+volume and temporary credential were then stopped/removed. This establishes the
+configured service restart plus Pi recovery combination, not arbitrary service
+checkpoint export/import or crash/power-loss durability.
+
+WinGet's actual user-scope portable installer installed a previously absent
+`BurntSushi.ripgrep.MSVC` package into an owned location with a unique command
+name. The installed binary reported ripgrep 15.2.0; exact-package uninstall
+succeeded. Existing jq was detected and left intact. This does not cover every
+package architecture, machine-scope installer, agreement state or reboot.
+
+The fresh package Gate at `d40ce0e` failed with unchanged tracked source when
+PowerShell Add-Type reported a missing C# scratch file under the shared Windows
+TEMP root. Both helper compilers now set child TEMP/TMP to their own already
+private staging directory, without changing the parent environment. Focused
+compile-failure and native ACL checks pass 27/27. A real helper compilation and
+private write then succeeded while the caller still used the same shared TEMP.
+The underlying host behavior is not attributed beyond those observations.
+
+File/directory symlinks still return EPERM on this host. No developer-mode or
+account configuration was changed. A distinct-user synthetic-file check is
+prepared, but remains unverified without a user-owned second ordinary account.
+ACP companion cleanup retains its separately documented unresolved boundary.
