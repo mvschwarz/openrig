@@ -51,8 +51,9 @@ seatRoutes.post("/set-typing-guard/:seatRef", async c => {
     || body.holdSeconds !== undefined || body.maxAttempts !== undefined) {
     return c.json({ error: "Supply exactly one enabled boolean or mode, and a reason" }, 400);
   }
-  const actor = transportSenderSession(c);
-  if (!actor) return c.json({ error: "Sender identity required for preference audit" }, 400);
+  // #2350: a seat's transport identity is the recorded actor. An ordinary terminal has none; the change still applies and
+  // the guard records it as unattributed. The body never names the actor.
+  const actor = transportSenderSession(c) ?? null;
   try {
     const target = guard.target(c.req.param("seatRef"));
     const preference = await guard.set(target.nodeId, { mode: body.mode ?? (body.enabled ? "hold" : "off") }, actor, body.reason);

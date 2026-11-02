@@ -57,6 +57,9 @@ export interface TypingGuardConfig extends TypingGuardSettings { revision: strin
 const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" };
 /** A terminal member with nothing set holds OpenRig's own notices and takes deliberate sends. */
 const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
+/** The actor a guard change records when its request carries no seat identity, as from an ordinary terminal (#2350).
+ *  An explicit value, never a seat name: nothing derives an identity in its place. */
+export const UNATTRIBUTED_GUARD_ACTOR = "unattributed (no seat identity)";
 
 /** What automatic input is, for the level: OpenRig's own (a watchdog, a scheduler wake, a notice) or anyone else's. */
 export interface AdmissionInput { source: "openrig" | "agent"; urgent: boolean; override?: boolean }
@@ -206,8 +209,11 @@ export class SeatDeliveryGuard {
     finally { release(); if (this.tails.get(nodeId) === tail) this.tails.delete(nodeId); }
   }
 
-  async set(nodeId: string, value: unknown, actor: string, reason: string, timeoutMs = 2000): Promise<GuardPreference> {
-    if (!actor.trim() || !reason.trim()) throw new DeliveryGuardError("guard_reason_required", "Actor and reason are required.");
+  /** `actor` is the requesting seat, or null for a request without a seat identity: that change applies the same way and
+   *  the preference and its audit row record UNATTRIBUTED_GUARD_ACTOR. */
+  async set(nodeId: string, value: unknown, actor: string | null, reason: string, timeoutMs = 2000): Promise<GuardPreference> {
+    const recordedActor = actor ?? UNATTRIBUTED_GUARD_ACTOR;
+    if (!recordedActor.trim() || !reason.trim()) throw new DeliveryGuardError("guard_reason_required", "Actor and reason are required.");
     const at = new Date().toISOString();
     const { change, desired } = this.db.transaction(() => {
       const old = this.configuration(nodeId);
@@ -216,7 +222,7 @@ export class SeatDeliveryGuard {
       const unchanged = settings.mode === old.desired.mode && settings.level === old.desired.level;
       const desired = { ...settings, revision: unchanged ? old.desired.revision : randomUUID() };
       // The legacy bits deliberately fail safe to hold when a daemon without modes opens this DB.
-      const args = [nodeId, Number(desired.mode !== "off"), Number(old.effective.mode !== "off"), actor, reason, at];
+      const args = [nodeId, Number(desired.mode !== "off"), Number(old.effective.mode !== "off"), recordedActor, reason, at];
       if (this.hasModeConfig) {
         this.db.prepare(`INSERT INTO seat_delivery_guards(node_id,desired,effective,actor,reason,changed_at,desired_config,effective_config)
           VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET desired=excluded.desired,actor=excluded.actor,
@@ -227,7 +233,7 @@ export class SeatDeliveryGuard {
           VALUES (?,?,?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET desired=excluded.desired,actor=excluded.actor,
           reason=excluded.reason,changed_at=excluded.changed_at`).run(...args);
       }
-      const audit = [nodeId, Number(desired.mode !== "off"), Number(old.desired.mode !== "off"), Number(old.effective.mode !== "off"), actor, reason, at];
+      const audit = [nodeId, Number(desired.mode !== "off"), Number(old.desired.mode !== "off"), Number(old.effective.mode !== "off"), recordedActor, reason, at];
       const change = this.hasModeConfig
         ? this.db.prepare(`INSERT INTO seat_delivery_guard_changes(node_id,desired,previous_desired,previous_effective,actor,reason,requested_at,desired_config)
             VALUES (?,?,?,?,?,?,?,?)`).run(...audit, JSON.stringify(desired)).lastInsertRowid

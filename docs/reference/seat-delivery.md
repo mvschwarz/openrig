@@ -111,8 +111,18 @@ their existing behaviour.
 
 ### Terminal delivery
 
-Run from a seat shell with `OPENRIG_SESSION_NAME` set; the daemon derives the
-audit actor from transport identity.
+`rig seat set-typing-guard` works from an ordinary terminal as well as from a
+seat's shell. The daemon takes the recorded actor from transport identity only:
+
+- From a managed seat's shell (`OPENRIG_SESSION_NAME` set), the preference and
+  its audit entry name that seat.
+- From a terminal with no seat identity, the change applies the same way, and
+  the preference and its audit entry record the actor as
+  `unattributed (no seat identity)`.
+
+Neither case takes an actor from the request body or from the target seat's name.
+`rig seat retire-held-message` still records the seat that retired a message, so
+run it from a seat's shell.
 
 ~~~sh
 rig seat set-typing-guard dev-impl@my-rig --mode draft-aware \
@@ -230,7 +240,9 @@ refuses Enter and is not replayed. Unsupported provider layouts remain held.
 Use off when that tradeoff is unsuitable.
 
 HTTP configuration uses `POST /api/seat/set-typing-guard/:seatRef` with
-`{mode, reason}` or `{enabled, reason}`. Status and held-message routes are
+`{mode, reason}` or `{enabled, reason}`. The `X-OpenRig-Session` header, when
+present, is the recorded actor; without it the change is recorded as
+`unattributed (no seat identity)`. Status and held-message routes are
 unchanged; no RigSpec field is required.
 
 ## Verification scope

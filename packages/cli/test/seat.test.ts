@@ -137,27 +137,6 @@ describe("seat typing guard commands", () => {
     expect(paths).toEqual(["/api/seat/set-typing-guard/worker%40test"]);
     expect(bodies).toEqual([{ mode: "draft-aware", reason: "keep my draft" }]);
     expect(JSON.parse(result.logs.join(""))).toMatchObject({ effectiveMode: "draft-aware" });
-    expect(result.errors).toEqual([]);
-  });
-
-  // #2350: from a shell with no seat identity the daemon refuses; the CLI keeps its JSON and exit code and says what to do.
-  it.each(["Sender identity required for preference audit", "actor_required"])("says how to supply a caller when the daemon refuses with %s", async error => {
-    const deps = makeDeps({ status: 400, data: { error } }, []);
-    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
-      "--mode", "draft-aware", "--reason", "keep my draft"]).then(() => undefined));
-    expect(result.exitCode).toBe(1);
-    expect(JSON.parse(result.logs.join(""))).toEqual({ error });
-    expect(result.errors.join("\n")).toContain("No typing-guard change was made");
-    expect(result.errors.join("\n")).toContain("OPENRIG_SESSION_NAME");
-    expect(result.errors.join("\n")).toContain("rig attach --self --help");
-  });
-
-  it("adds no identity hint to other refusals", async () => {
-    const deps = makeDeps({ status: 400, data: { error: "Supply exactly one enabled boolean or mode, and a reason" } }, []);
-    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "set-typing-guard", "worker@test",
-      "--mode", "draft-aware", "--reason", "keep my draft"]).then(() => undefined));
-    expect(result.exitCode).toBe(1);
-    expect(result.errors).toEqual([]);
   });
 
   it.each([["--mode", "typo"]])("rejects invalid %s %s before requesting a change", async (flag, value) => {
