@@ -55,7 +55,7 @@ describe("Windows desktop terminal view", () => {
     f.deps.env = { systemroot: "D:\\Windows", Path: "C:\\owned-tools" };
     expect(await openTerminalWindow(f.client, "saved", "tmux", f.deps)).toMatchObject({ ok: true });
     expect(f.deps.exec).toHaveBeenCalledWith("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", expect.any(Array), 1000);
-    expect(f.deps.exec).toHaveBeenCalledWith("D:\\Windows\\System32\\where.exe", ["wt.exe"]);
+    expect(f.deps.exec).toHaveBeenCalledWith("D:\\Windows\\System32\\where.exe", ["wt.exe"], undefined);
     const [, args] = f.launch.mock.calls[0]! as unknown as [string, string[]];
     expect(args).toContain("D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   });

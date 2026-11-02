@@ -27,6 +27,35 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Full CLI/TUI and permission comparison at a03de2d (2026-11-02)
+
+The complete Windows CLI/TUI directory run (no file exclusions) finished in
+572 seconds: 7,421 passed, two failed, 95 pending, 7,518 counted. HEAD and empty
+tracked diff were identical before/after. One failure was the ACP companion
+fixture's final directory removal (EPERM), after its exit checks; this remains
+unresolved, not a provider failure or a successful teardown. Its repeated cleanup
+workaround budget is exhausted: the doubtful assumption is that observing the
+companion PID exit proves every directory-holding descendant/console handle has
+been released. No further blind cleanup retries are counted as validation.
+
+The other failure was an obsolete two-argument discovery spy assertion: the
+shared native-tool executor now passes an explicit optional deadline argument.
+The test now checks the same selected absolute where.exe and wt.exe operand with
+that undefined deadline. All 19 native discovery/preview tests passed afterward.
+
+The initial WSL root run retained stable source hashes but was prepared with only
+the daemon build: missing CLI dist caused multiple failures. Its 7,273 passes,
+55 failures and 189 pending are retained as diagnostic evidence, not accepted
+full comparison. A fresh ordinary-user (codexqa, uid 1000) snapshot with daemon,
+CLI and TUI builds is running the full directories separately.
+
+Six permission-focused files at the same commit produced 25 passed/three pending
+under uid 1000, versus 23 passed/five failures on Windows. The five failures assert
+POSIX 0755/0644 values on NTFS; they do not alone establish whether a helper can
+run. The existing native hook projection uses explicit Node invocation; its 14
+real manifest/refresh tests passed, including all shipped hook events, Unicode
+stdin and exit codes. General executable-bit/archive semantics remain open.
+
 ### Local readonly replacement (2026-11-02)
 
 Changed regular local files now copy into an exclusive sibling staging entry
