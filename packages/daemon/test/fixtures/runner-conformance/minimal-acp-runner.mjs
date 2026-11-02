@@ -3,6 +3,8 @@
 // catches it.
 //   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none] [--withdraw-after-stop]
 // --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
+// --read-retries <n> keeps it another way too: a read OpenRig answers with a status other than 200 is retried n times, 1.5 s apart, before the
+// runner acts on it; section 7 sets no time limit for that.
 // --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
 // posted, not before; the contract doesn't order the two posts.
 import { spawn } from "node:child_process";
@@ -15,6 +17,7 @@ const breaks = new Set(argv.flatMap((a, i) => (a === "--break" ? [argv[i + 1]] :
 const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait") + 1] : "25";
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
+const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
 // --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
 // every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
 // first. Breaks: beat-after-stop, beat-during-ask, no-resolve.
@@ -175,7 +178,11 @@ async function onPermission(msg) {
   if (agent.exitCode !== null || agent.signalCode !== null) { await withdrawLive("exited"); return; }
   if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
   for (;;) {
-    const read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    let read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    for (let tries = 0; read.status >= 300 && tries < readRetries && !ask.done; tries++) {
+      await new Promise((done) => setTimeout(done, 1500));
+      read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
+    }
     if (ask.done && !breaks.has("late-deliver")) return;
     const state = read.status === 200 ? read.body?.state : undefined;
     if (state === "pending") { if (readWait !== "25") await new Promise((done) => setTimeout(done, 200)); continue; }

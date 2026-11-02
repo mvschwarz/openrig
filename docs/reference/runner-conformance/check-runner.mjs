@@ -557,8 +557,9 @@ const cases = {
     await Promise.all(outcomes.map(async ([label, asks, optionId]) => {
       const h = await open(label.replace(/[^a-z0-9]+/g, "-"), asks, [{ permission: true, holdMs: scale(800) }, {}]);
       if (!h) return;
-      // A runner may retry a read that got no answer a few times before it permits.
-      const got = await waitFor(() => outcome(h), scale(label === "unreachable read" ? 10000 : 4000));
+      // Section 7 sets no time limit for what follows a read, so the check waits its ordinary per-step bound (--wait-ms),
+      // and longer when the read got no answer, which a runner may retry a few times before it permits.
+      const got = await waitFor(() => outcome(h), label === "unreachable read" ? scale(10000) : opts.waitMs);
       if (!optionId) {
         r.check(`${label}: the agent gets cancelled`, got?.outcome === "cancelled", `got ${JSON.stringify(got)}`);
         r.check(`${label}: nothing is held`, await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(3000))
