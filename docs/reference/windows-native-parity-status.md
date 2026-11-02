@@ -1,5 +1,23 @@
 # Native Windows parity: implementation and evidence
 
+## Recovery diagnostic geometry has explicit target identity (2026-11-03)
+
+All production resume-evidence callers now declare whether geometry belongs to
+a pure session name or an exact pane. Claude session observations use named
+session pane lookup, including colon-bearing names and a literal session named
+`%1`. Restore reconciliation uses exact pane identity, including native scoped
+pane IDs; another sole pane cannot provide its geometry. The compatibility auto
+mode still accepts older callers, while production no longer infers a session
+name's type from its punctuation.
+
+Three complete probe/evidence/restore files passed 614/614 on Windows. Daemon
+TypeScript/assets build and whitespace checks passed. Existing bounded timeout,
+late-settlement, ambiguous geometry and capture hashing checks remain included.
+The read is still diagnostic-only: failures leave dimensions null without
+changing the original probe status/code or storing capture text. This does not
+prove actual provider recovery, real psmux geometry or current cross-platform
+full-suite acceptance. No deployment, user-team operation or public push occurred.
+
 ## Explicit session windows and indexed pane discovery (2026-11-03)
 
 The production adapter now exposes explicit session-window lookup and a separate

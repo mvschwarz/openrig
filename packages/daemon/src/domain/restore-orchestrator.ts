@@ -2760,7 +2760,7 @@ export class RestoreOrchestrator {
     // Precondition #4: pane is at a usable/idle state — explicitly NOT a
     // resume-selection prompt and not the "returned to shell" failure mode.
     if (probe.status !== "resumed") {
-      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane);
+      const evidence = await resumeProbeEvidence(probe, paneContent, this.tmuxAdapter, identity.pane, "pane");
       // The label reads as a shell, but the runtime's lineage was just proven in this pane: name a shell only for a proven idle one.
       if (probe.code === "returned_to_shell" && !await verifyPaneIdleShell({ target: identity.pane, tmux: this.tmuxAdapter,
         ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) })) {

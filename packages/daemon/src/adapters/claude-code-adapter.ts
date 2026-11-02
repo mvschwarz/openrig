@@ -706,7 +706,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (probe.code === "no_conversation_found") {
         return {
           ok: false,
-          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
+          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession, "session"),
           error: "Claude resume failed: no conversation found for the requested session",
           recovery: "retry_fresh",
           missingConversation: true,
@@ -723,7 +723,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (probe.status === "attention_required") {
         return {
           ok: false,
-          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession),
+          probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession, "session"),
           error: probe.detail,
           recovery: "attention_required",
           evidence: paneContent.split("\n").slice(-12).join("\n"),
@@ -740,7 +740,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
         if (!enterResult.ok) {
           return { ok: false, error: `Claude trust prompt auto-drive failed: ${enterResult.message}`,
-            probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession) };
+            probe: await resumeProbeEvidence(probe, paneContent, this.tmux, tmuxSession, "session") };
         }
         await this.sleep(200);
         continue;
@@ -793,7 +793,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
-    const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession);
+    const probeEvidence = await resumeProbeEvidence(finalProbe, finalContent, this.tmux, tmuxSession, "session");
 
     if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
       return {
