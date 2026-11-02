@@ -1,5 +1,23 @@
 # Native Windows parity: implementation and evidence
 
+## Current native tile server routing (2026-11-02)
+
+The Windows reattachment asset now sends the original exact session name as
+psmux's first target on every snapshot, identity and attach command. The later
+immutable `$N` remains scoped to that session server rather than selecting a
+default server, where the same numeric ID may identify another seat. Exact
+server options, literal argv, read-only/ignore-size flags and bounded following
+remain in use.
+
+The actual asset was launched in an owned hidden console against stock psmux
+3.4.0 with two live session servers and an intentionally conflicting inherited
+default. Its new client appeared only on the intended server, in read-only mode;
+the other server's client inventory was unchanged, and owned cleanup passed.
+This proves that initial routing case, not an atomic server-identity guarantee
+during a concurrent registry/name exchange. Three focused daemon files passed
+45 native tests (1 POSIX-only skip) and 43 ordinary-user WSL tests (3 Windows-only
+skips). Neither the main deployment nor any existing team was changed.
+
 ## Current native multi-server attachment proof (2026-11-02)
 
 Herdr workspace reuse now queries each distinct local psmux target session with

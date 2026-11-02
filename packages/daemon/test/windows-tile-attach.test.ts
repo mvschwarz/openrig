@@ -14,13 +14,13 @@ test.skipIf(process.platform !== 'win32')('native tile returns an attach refusal
  const root=fs.mkdtempSync(join(tmpdir(),'native tile refusal-'));
  try {
   const log=join(root,'calls.jsonl');
-  const tmux=writeWindowsNodeFixture(root,'tmux',"import fs from 'node:fs';const a=process.argv.slice(2);fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]==='display-message')console.log('500 $1:owned');else if(a[2]==='show-environment')console.log('OPENRIG_NODE_ID=owned-node');else if(a[2]==='attach')process.exit(7);else process.exit(8);");
+  const tmux=writeWindowsNodeFixture(root,'tmux',"import fs from 'node:fs';const a=process.argv.slice(2);fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]!=='-t'||a[3]!=='=owned')process.exit(9);if(a[4]==='display-message')console.log('500 $1:owned');else if(a[4]==='show-environment')console.log('OPENRIG_NODE_ID=owned-node');else if(a[4]==='attach')process.exit(7);else process.exit(8);");
   const argv=windowsTileAttachArgv(tmux,['-L','owned-server'],'owned',true,2);
   const run=spawnSync(argv[0],argv.slice(1),{env:{...process.env,TEST_TILE_LOG:log},encoding:'utf8',windowsHide:true,timeout:10000});
   assert.equal(run.status,7,run.stderr);
   assert.match(run.stderr,/Viewer attach failed \(exit 7\)/);
   const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls.map(a=>a[2]),['display-message','show-environment','attach']);
+  assert.deepEqual(calls.map(a=>a[4]),['display-message','show-environment','attach']);
  } finally {fs.rmSync(root,{recursive:true,force:true});}
 },15000);
 
@@ -79,7 +79,7 @@ test.skipIf(process.platform !== 'win32')('native SSH tile forwards the exact re
 test.skipIf(process.platform !== 'win32')('native tile preserves identity, argv and bounded replacement following', () => {
  const root=fs.mkdtempSync(join(tmpdir(),'native tile [owned]-'));
  try {
-  const source = "import fs from 'node:fs';const a=process.argv.slice(2),mode=process.env.TEST_TILE_MODE;fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');let s=JSON.parse(fs.readFileSync(process.env.TEST_TILE_STATE));const cmd=a[2];if(cmd==='display-message'){if(mode==='initial-missing'||mode==='missing'&&s.attaches.length)process.exit(1);console.log('500 '+(mode==='replacement'&&s.attaches.length?'$2':'$1')+':'+process.env.TEST_TILE_SESSION);}else if(cmd==='show-environment'){if(mode==='unmanaged')process.exit(1);console.log('OPENRIG_NODE_ID='+(mode==='foreign'&&s.attaches.length?'different-node':'original-node'));}else if(cmd==='attach'){s.attaches.push(a.at(-1));fs.writeFileSync(process.env.TEST_TILE_STATE,JSON.stringify(s));}else process.exit(8);";
+  const source = "import fs from 'node:fs';const a=process.argv.slice(2),mode=process.env.TEST_TILE_MODE;fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]!=='-t'||a[3]!=='='+process.env.TEST_TILE_SESSION)process.exit(9);let s=JSON.parse(fs.readFileSync(process.env.TEST_TILE_STATE));const cmd=a[4];if(cmd==='display-message'){if(mode==='initial-missing'||mode==='missing'&&s.attaches.length)process.exit(1);console.log('500 '+(mode==='replacement'&&s.attaches.length?'$2':'$1')+':'+process.env.TEST_TILE_SESSION);}else if(cmd==='show-environment'){if(mode==='unmanaged')process.exit(1);console.log('OPENRIG_NODE_ID='+(mode==='foreign'&&s.attaches.length?'different-node':'original-node'));}else if(cmd==='attach'){s.attaches.push(a.at(-1));fs.writeFileSync(process.env.TEST_TILE_STATE,JSON.stringify(s));}else process.exit(8);";
   const tmux=writeWindowsNodeFixture(root,'tmux',source);
   const session="seat 'quote' \"double\" 中文 %PATH%",server='owned server;# "quote" \\slash\\ 中文\\';
   for(const mode of ['detach','replacement','foreign','missing','unmanaged','initial-missing']) {
@@ -90,10 +90,10 @@ test.skipIf(process.platform !== 'win32')('native tile preserves identity, argv 
    const attaches=JSON.parse(fs.readFileSync(state,'utf8')).attaches;
    assert.deepEqual(attaches,mode==='replacement'?['$1','$2']:mode==='initial-missing'?['='+session]:['$1'],mode);
    const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
-   for(const call of calls)assert.deepEqual(call.slice(0,2),['-L',server],mode);
-   for(const call of calls.filter(a=>a[2]==='attach')) {
-    if(mode==='detach')assert.deepEqual(call.slice(3,5),['-r','-t']);
-    else assert.deepEqual(call.slice(3,6),['-f','ignore-size','-t']);
+   for(const call of calls)assert.deepEqual(call.slice(0,4),['-L',server,'-t','='+session],mode);
+   for(const call of calls.filter(a=>a[4]==='attach')) {
+    if(mode==='detach')assert.deepEqual(call.slice(5,7),['-r','-t']);
+    else assert.deepEqual(call.slice(5,8),['-f','ignore-size','-t']);
    }
    if(mode==='foreign')assert.match(run.stdout,/Seat identity changed/);
    if(mode==='missing')assert.match(run.stdout,/No replacement/);

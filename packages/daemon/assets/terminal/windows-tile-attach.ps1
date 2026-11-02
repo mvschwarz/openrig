@@ -15,9 +15,12 @@ function Quote-Argument([string]$value) {
 function Join-Arguments([object[]]$values) {
   $quoted=@(); foreach($value in $values){$quoted+=Quote-Argument ([string]$value)}; return $quoted -join " "
 }
-$attach=@($server)+@('attach'); if($config.readOnly){$attach+='-r'}else{$attach+=@('-f','ignore-size')}; $attach+='-t'
-$snapshotLine=Join-Arguments (@($server)+@('display-message','-p','-t',('='+$target+':'),'#{pid} #{session_id}:#{session_name}'))
-$identityPrefix=Join-Arguments (@($server)+@('show-environment','-t'))
+# The first -t selects psmux's session server. A later bare $N only selects
+# an immutable session within that server; it must never choose the default.
+$route=@($server)+@('-t',('='+$target))
+$attach=$route+@('attach'); if($config.readOnly){$attach+='-r'}else{$attach+=@('-f','ignore-size')}; $attach+='-t'
+$snapshotLine=Join-Arguments ($route+@('display-message','-p','-t',('='+$target+':'),'#{pid} #{session_id}:#{session_name}'))
+$identityPrefix=Join-Arguments ($route+@('show-environment','-t'))
 $attachPrefix=Join-Arguments $attach
 $fallbackLine=Join-Arguments ($attach+@('='+$target))
 function Invoke-Tmux([string]$line,[bool]$capture) {
