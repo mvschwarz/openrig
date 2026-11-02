@@ -52,9 +52,8 @@ import { isHumanSeatSessionRef } from "../session-name.js";
 import { humanAnswerText, formatHumanAnswers, unansweredQuestions, type HumanAnswers } from "../human-questions.js";
 import { runnerPermissionOrigin } from "../runner-permissions.js";
 
-/** The terminal's act when it names no responder: with anyone registered, or with no one registered when the claimed
- *  actor is a shared channel. The generic human seat the web UI also records, read as explicitly unattributed, never a
- *  person. */
+/** The terminal's act, which names no responder: the generic human seat the web UI also records, read as explicitly
+ *  unattributed, never a person. */
 export const UNNAMED_PRIMARY_USER = UNATTRIBUTED_ACTOR;
 /** Verbs that settle what a person was asked. */
 const SETTLING_VERBS = new Set<MissionControlVerb>(["approve", "deny", "resolve", "answer"]);
@@ -97,9 +96,9 @@ export interface MissionControlActionInput {
   /** Operator-supplied audit context. */
   auditNotes?: Record<string, unknown>;
   /** `primary-user`: the person at the terminal acts (the TUI), whoever was asked. The terminal's claimed actor is the
-   *  Feed's recipient-derived value, not who typed, so with anyone registered the act is recorded as human@host,
-   *  explicitly unattributed, never the default person or the claim; the audit notes say whose ask it was. Only a
-   *  request with no transport identity carries it. A surface that knows its person sends them without it. */
+   *  Feed's recipient-derived value, not who typed, so the act is recorded as human@host, explicitly unattributed, never
+   *  the default person or the claim; the audit notes say whose ask it was. Only a request with no transport identity
+   *  carries it. A surface that knows its person sends them without it. */
   authority?: "primary-user";
   /**
    * For handoff: opt-in best-effort wake. Default true (PL-004 Phase A R1
@@ -558,6 +557,10 @@ export class MissionControlWriteContract {
       return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [],
         message: `Already answered; the original answer went to ${existing.destinationSession} as ${existing.qitemId}. No new reply was sent.` }, existing.qitemId);
     }
+    // One answer per ask: another person's committed return is the answer. Before anything of this person's is recorded,
+    // finish settling the ask with it and say who answered; nothing of theirs is recorded or sent.
+    const other = this.queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession);
+    if (other) this.answeredByAnother(input, other, primaryUser);
     if (ask.state !== "pending") {
       throw new MissionControlWriteContractError("qitem_already_terminal",
         `qitem ${input.qitemId} is ${ask.state}, not waiting on an answer (it may already be answered), so nothing was recorded or sent.`,
@@ -615,12 +618,8 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId });
     }
     const replyId = returned.qitemId;
-    // Two people answering at once: one answer returns, and the other is told whose it was. Nothing of theirs is recorded.
-    if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) {
-      throw new MissionControlWriteContractError("qitem_already_terminal",
-        `${returned.sourceSession} already answered qitem ${input.qitemId}; their answer went to ${returned.destinationSession} as ${replyId}. ${input.actorSession}'s answer wasn't recorded or sent.`,
-        { qitemId: input.qitemId, answeredBy: returned.sourceSession, replyQitemId: replyId });
-    }
+    // Two people answering at once: one answer returns, and the other is told whose it was.
+    if (replyId !== input.qitemId && returned.sourceSession !== input.actorSession) this.answeredByAnother(input, returned, primaryUser);
     // A runner's permission ask is its own answer record (no reply row comes back), so typed words are the person's own.
     const decision = chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
@@ -632,6 +631,16 @@ export class MissionControlWriteContract {
         { qitemId: input.qitemId, replyQitemId: replyId });
     }
     return this.recordAnswer(input, before, decision, { outcome: "answered", unanswered: [] }, replyId);
+  }
+
+  /** Another person's committed return already answers the ask: settle the ask with it if it's still pending (the
+   *  repository closes it as theirs), then tell this person who answered and where it went. */
+  private answeredByAnother(input: MissionControlActionInput, other: QueueItem, primaryUser: boolean): never {
+    const ask = this.queueRepo.getById(input.qitemId);
+    if (ask?.state === "pending") this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser });
+    throw new MissionControlWriteContractError("qitem_already_terminal",
+      `${other.sourceSession} already answered qitem ${input.qitemId}; their answer went to ${other.destinationSession} as ${other.qitemId}. ${input.actorSession}'s answer wasn't recorded or sent.`,
+      { qitemId: input.qitemId, answeredBy: other.sourceSession, replyQitemId: other.qitemId });
   }
 
   /** The audit row and event for one answer (its queue writes are the repository's own). */
@@ -656,9 +665,9 @@ export class MissionControlWriteContract {
   /**
    * Who acts, and on whose ask. One trusted workspace, equal authority: any registered person settles an ask that went to
    * another, recorded as themselves, and the transition and audit notes name the person asked. With primary-user
-   * authority the terminal names no responder (its claimed actor is the Feed's recipient-derived value), so once anyone
-   * is registered the act is human@host, explicitly unattributed, never the default person. With no one registered it's
-   * the claimed actor, as before, unless that's a shared channel. A shared channel never acts on a row, for any verb: its
+   * authority the terminal names no responder (its claimed actor is the Feed's recipient-derived value), so the act is
+   * human@host, explicitly unattributed, never the default person or the claim, whether or not anyone is registered. A
+   * shared channel never acts on a row, for any verb: its
    * messages are correspondence, so the asking seat or the person at the terminal acts on a channel's row.
    */
   private asActor(input: MissionControlActionInput, asked: string | null): { input: MissionControlActionInput; note: string } {
@@ -674,9 +683,8 @@ export class MissionControlWriteContract {
       return { input: { ...input, auditNotes: { ...input.auditNotes, asked: someoneElse } },
         note: `; by ${input.actorSession}, a registered person, on ${someoneElse}'s ask` };
     }
-    const registry = this.queueRepo.humanRegistry();
-    const anyoneRegistered = registry.ok && registry.entities.length > 0;
-    const actor = anyoneRegistered || channel ? UNNAMED_PRIMARY_USER : input.actorSession;
+    // The terminal names no responder, whatever it claims and whoever is registered: the act is unattributed.
+    const actor = UNNAMED_PRIMARY_USER;
     const auditNotes = { ...input.auditNotes, authority: "primary-user", asked };
     const note = !asked || asked === actor ? ""
       : actor === UNNAMED_PRIMARY_USER ? `; by someone at the terminal OpenRig can't name (${UNNAMED_PRIMARY_USER}), unattributed, on ${asked}'s ask`

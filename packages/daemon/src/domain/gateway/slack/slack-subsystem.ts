@@ -41,6 +41,7 @@ import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./soc
 import { HUMAN_ALERT_TAG, loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
 import { sharedChannelAddresses, sharedChannelFor } from "../participants.js";
 import { hasLiveHumanGate, isBlockerLive, type QueueRepository } from "../../queue-repository.js";
+import { humanAnswerText } from "../../human-questions.js";
 import { formatReplyToChoice, formatReplyToThreadMissing, REPLY_TO_CHOICE_ACTOR, REPLY_TO_CHAIN_LIMIT, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
@@ -105,11 +106,14 @@ export function makeHumanReplyResolver(
     // An acknowledgement retry must not resolve again. Match this reply's durable
     // context, not an older episode's generic resolved marker.
     if (slackMicros(input.messageTs) !== null && queueRepo.transitionLog.listForQitem(input.qitemId)
-      .some((transition) => transition.ownerNotificationKind === "human-decision-resolved" && transition.transitionNote === uncertainDecision)) {
+      // A different person's resume carries their attribution after the timing context, so match that too.
+      .some((transition) => transition.ownerNotificationKind === "human-decision-resolved"
+        && (transition.transitionNote === uncertainDecision || transition.transitionNote?.startsWith(`${uncertainDecision}; by `) === true))) {
       return "resolved-uncertain";
     }
     let uncertain = false;
     let parkedOnAsked = false;
+    let episodeKey: string | undefined;
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
@@ -117,6 +121,7 @@ export function makeHumanReplyResolver(
       const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
       const { key, receipt } = episode;
+      episodeKey = key;
       // A final receipt attests delivery even when reconciliation lost its timestamp.
       // Without one, ONLY a unique exact current-episode primary proves anything.
       const primary = !receipt && home ? pendingPrimaryReceipt(home, input.qitemId, key) : null;
@@ -128,6 +133,13 @@ export function makeHumanReplyResolver(
     }
 
     try {
+      // One answer per question: another person's committed return for this question is the answer. Resume with it, as
+      // theirs; this reply stays the conversation it already became.
+      const winner = episodeKey ? queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession, episodeKey) : null;
+      if (winner) {
+        await contract.act({ verb: "resolve", qitemId: input.qitemId, actorSession: winner.sourceSession, decision: humanAnswerText(winner.body) });
+        return "not-applicable";
+      }
       // A question parked on the person it asked takes their typed reply as its answer, stored in the resume's own
       // transaction. A click's return stores nothing here, and a reply whose order is uncertain stays words in context.
       await contract.act({ verb: "resolve", ...input, decision: uncertain ? uncertainDecision : input.decision,

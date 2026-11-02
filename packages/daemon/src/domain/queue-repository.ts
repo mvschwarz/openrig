@@ -39,7 +39,7 @@ import {
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
-import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
+import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
@@ -3799,33 +3799,56 @@ export class QueueRepository {
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
   resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+    let mine = true;
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
         || (!this.answersAsk(item, input.actorSession) && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
-
-      const asked = item.destinationSession;
-      let transitionNote = asked === input.actorSession ? "direct human reply received"
-        : input.primaryUser && input.actorSession === UNATTRIBUTED_ACTOR
-          ? `reply from someone at the terminal OpenRig can't name (${UNATTRIBUTED_ACTOR}), unattributed, on ${asked}'s ask; not answered by ${asked}`
-        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${asked}'s ask; not answered by ${asked}`
-        : runnerPermissionOrigin(item) ? `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${asked}`
-        : `reply from ${input.actorSession}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
-      const placed = this.placeTypedReply(item, input.decision);
-      if (placed) transitionNote += `; ${placed}`;
-      return this.updateInTransactionalContext({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: "done",
-        closureReason: "no-follow-on",
-        transitionNote,
-        ownerNotificationKind: "human-decision-resolved",
-      });
+      // One answer per ask: another person's committed return is the answer, so the ask closes as theirs, with their words,
+      // and this caller's don't settle it (false tells the caller so).
+      const winner = this.committedAnswerFromAnother(item.qitemId, input.actorSession);
+      if (winner) {
+        mine = false;
+        const questions = item.humanQuestions ?? [];
+        const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
+          ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : humanAnswerText(winner.body);
+        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession));
+      }
+      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
     })();
     if (!result) return false;
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
-    return true;
+    return mine;
+  }
+
+  /** Another person's committed return to this ask: its shared reply (for a park's question, `episodeKey`'s). It's the
+   *  answer, so a different person's later attempt settles with it rather than their own. Null when there's none, or it's
+   *  this actor's. */
+  committedAnswerFromAnother(qitemId: string, actorSession: string, episodeKey?: string): QueueItem | null {
+    const row = this.getById(humanAnswerId(qitemId, episodeKey));
+    return row && row.replyTo === qitemId && row.sourceSession !== actorSession ? row : null;
+  }
+
+  /** Close a pending direct ask as `actor`, its typed words under the first unanswered question. Inside a transaction. */
+  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean) {
+    const asked = item.destinationSession;
+    let transitionNote = asked === actor ? "direct human reply received"
+      : primaryUser && actor === UNATTRIBUTED_ACTOR
+        ? `reply from someone at the terminal OpenRig can't name (${UNATTRIBUTED_ACTOR}), unattributed, on ${asked}'s ask; not answered by ${asked}`
+      : primaryUser ? `reply from ${actor}, the primary user at the terminal, on ${asked}'s ask; not answered by ${asked}`
+      : runnerPermissionOrigin(item) ? `reply from ${actor}, a registered person, on the runner permission request asked of ${asked}`
+      : `reply from ${actor}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
+    const placed = this.placeTypedReply(item, decision);
+    if (placed) transitionNote += `; ${placed}`;
+    return this.updateInTransactionalContext({
+      qitemId: item.qitemId,
+      actorSession: actor,
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote,
+      ownerNotificationKind: "human-decision-resolved",
+    });
   }
 
   /** Store a typed reply under the first unanswered question, keeping earlier clicks; the placement note, or null. */

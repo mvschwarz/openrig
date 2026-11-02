@@ -123,13 +123,13 @@ export function answerRequest(action: Extract<Action, { type: "act"; act: "answe
   return { ...input, authority: "primary-user" as const };
 }
 
-/** What a terminal act is recorded as once anyone is registered: the terminal names no responder, so it's unattributed. */
+/** What a terminal act is recorded as: the terminal names no responder, so it's unattributed. */
 const UNATTRIBUTED_AT_TERMINAL = "human@host (unattributed)";
 
-/** Who an act on the Feed is recorded as: unattributed once anyone is registered (the terminal names no responder), else
- *  the served actor, as before. */
-export function actingAs(read: AttentionRead | null | undefined, served: string): string {
-  return read?.perspective ? UNATTRIBUTED_AT_TERMINAL : served;
+/** Who an act on the Feed is recorded as: unattributed, since the terminal names no responder (the served actor is the
+ *  asked person's address, not who typed), whoever is registered. */
+export function actingAs(_read: AttentionRead | null | undefined, _served: string): string {
+  return UNATTRIBUTED_AT_TERMINAL;
 }
 
 /** The TUI opens on the default person's Feed only when the participants file chose one, and only while the person hasn't

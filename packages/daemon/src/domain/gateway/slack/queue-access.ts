@@ -245,8 +245,9 @@ export function makeQueuePorts(
     listHumanAnswers: (qitemId, actorSession) => queueRepo.listHumanAnswers(qitemId, actorSession),
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
-      const directAnswer = input.humanAnswer && ask && ask.destinationSession === input.source && ask.humanIntent !== "update"
-        && queueRepo.isPersonAddress(input.source);
+      // The asked person's answer, or another registered person's: either takes the ask's one shared answer identity.
+      const directAnswer = input.humanAnswer && ask && ask.humanIntent !== "update" && queueRepo.isPersonAddress(ask.destinationSession)
+        && queueRepo.answersAsk(ask, input.source) && queueRepo.isPersonAddress(input.source);
       const createInput = {
         qitemId: input.qitemId,
         sourceSession: input.source,
