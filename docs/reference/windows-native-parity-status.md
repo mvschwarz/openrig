@@ -43,8 +43,12 @@ directory's better-sqlite3 entry with task-local 12.11.1. The same nine-file set
 completes 1,670 tests with six pending, and both altered dependency entries are
 restored by SHA256. Native Rollup versus same-version WASM still crashes with
 0xC0000005, so native Rollup alone is not sufficient to explain the failure.
-An original-13.0.3 reverse control is in progress; no production dependency or
-live daemon is changed and a version downgrade is not yet a concluded fix.
+The original-13.0.3 reverse control also completes 1,670 tests/six pending and
+restores the observer hash. The crash is therefore intermittent under this
+comparison; neither a deterministic version regression nor a downgrade fix is
+established. No production dependency or live daemon is changed. Further
+diagnosis will capture the exact owned worker's native exception rather than
+repeat whole-suite version/worker parameter changes.
 
 ### Local directory case-collision refusal (2026-11-02)
 
