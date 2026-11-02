@@ -8,6 +8,8 @@ import { writeWindowsNodeFixture } from "./windows-node-fixture.mjs";
 
 const [installed] = process.argv.slice(2);
 if (!installed) throw new Error("An isolated installed CLI root is required");
+const watcherEntry = await readFile(join(installed, "dist", "chatroom-watch-child.js"), "utf8");
+assert.ok(watcherEntry.includes("OPENRIG_HOME") && watcherEntry.includes("OPENRIG_URL"));
 const { defaultWindowDeps } = await import(pathToFileURL(join(installed, "dist", "terminal-window.js")).href);
 const values = ["", 'embedded"quote', "end\\", "中文", "%PATH%!&|"];
 const stdout = await defaultWindowDeps().exec(process.execPath,
@@ -56,6 +58,27 @@ if (process.platform === "win32") {
   } finally {
     if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
     await rm(attachRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+
+  const { createTerminalCommandSession, stopTerminalSessionForCleanup } = await import(pathToFileURL(join(installed, "daemon", "dist", "terminal-cleanup-surface.js")).href);
+  const commandRoot = await mkdtemp(join(tmpdir(), "openrig-installed-command-")), oldPath = process.env.PATH;
+  try {
+    const state = join(commandRoot, "state.json"), log = join(commandRoot, "calls.jsonl"), logical = "owned|installed-command";
+    const physical = "openrig-native-v1-" + createHash("sha256").update(logical).digest("hex"), marker = Buffer.from(logical).toString("base64url");
+    const backend = `import fs from 'node:fs';const raw=process.argv.slice(2);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(raw)+'\\n');const a=raw[0]==='--owned-prefix'?raw.slice(1):raw;if(a[0]!=='-L'||a[1]!=='owned-command')process.exit(9);const s=fs.existsSync(${JSON.stringify(state)})?JSON.parse(fs.readFileSync(${JSON.stringify(state)},'utf8')):{present:false,marker:''};const c=a[2]==='-t'?a[4]:a[2];if(c==='has-session')process.exit(s.present?0:1);if(c==='new-session'){if(s.present||a[a.indexOf('-s')+1]!==${JSON.stringify(physical)})process.exit(8);s.present=true;console.log('$7 123');}else if(c==='show-options')console.log(s.marker);else if(c==='display-message')console.log('$7');else if(c==='if-shell'){if(a.some(v=>v.startsWith('set-option ')))s.marker=${JSON.stringify(marker)};else if(a.includes('kill-session'))s.present=false;else process.exit(7);}else process.exit(6);fs.writeFileSync(${JSON.stringify(state)},JSON.stringify(s));`;
+    const pinned = writeWindowsNodeFixture(commandRoot, "ownedmux", backend);
+    writeWindowsNodeFixture(commandRoot, "tmux", backend);
+    process.env.PATH = commandRoot + ";" + (oldPath ?? "");
+    const literalChild = [process.execPath, join(installed, "dist", "chatroom-watch-child.js"), "owned home", "http://127.0.0.1:17439", "用户|rig"];
+    assert.equal(await createTerminalCommandSession(logical, literalChild, ["-L", "owned-command"], [pinned, "--owned-prefix"]), "$7");
+    const calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
+    const creation = calls.find(argv => argv.includes("new-session"));
+    assert.equal(creation[0], "--owned-prefix"); assert.deepEqual(creation.slice(creation.indexOf("--") + 1), literalChild);
+    assert.equal(await stopTerminalSessionForCleanup(logical, ["-L", "owned-command"]), "stopped");
+    assert.equal(await stopTerminalSessionForCleanup(logical, ["-L", "owned-command"]), "missing");
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    await rm(commandRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 console.log(JSON.stringify({ nativeControl: process.platform === "win32", literalArgv: true, sftpControl: true, mappedSingleAttach: process.platform === "win32" }));
