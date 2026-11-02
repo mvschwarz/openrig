@@ -1,5 +1,24 @@
 # Native Windows parity: implementation and evidence
 
+## Current native terminal activity (2026-11-02)
+
+A native terminal seat no longer reports running merely because its pane
+command names PowerShell, pwsh, cmd or another known shell host. Such a host
+needs the existing stable, own-console receiver/lineage proof before that
+activity fallback can report running. An absent, ambiguous or unreadable
+receiver remains unknown, never an invented idle observation. POSIX command
+classification and direct non-shell foreground commands retain their behavior.
+
+An isolated stock psmux 3.4.0 pane actually returned unknown for its empty
+PowerShell prompt and running after an owned Node command started. The direct
+busy observation named node; the shell-host-with-child proof path is separately
+covered with controlled receiver inventories. The test command uses a script
+file after two inline fixture attempts produced no startup receipt; their cause
+was not established. Owned child/session/console cleanup passed. Four focused
+daemon files passed 69 tests on Windows and the ordinary-user WSL mirror, and
+daemon TypeScript passed. This is scoped activity evidence, not a complete
+provider/foreground-job-control or same-head platform acceptance claim.
+
 ## Current native tile server routing (2026-11-02)
 
 The Windows reattachment asset now sends the original exact session name as
@@ -126,8 +145,9 @@ mutation. The ordinary common-path suite covers create/reuse/focus, while a new
 explicit-tmux fixture covers the Windows override. The two files pass 64 checks
 on Windows and 63 on the ordinary WSL mirror, with the real native tool lookup
 skipped on WSL. CLI TypeScript checking passes. This is route/guard qualification,
-not a new real Herdr desktop or shared-TUI client-context acceptance result.
-Windows last-active-client marker recovery remains open.
+not a new real Herdr desktop acceptance result. Windows last-active-client
+marker recovery was subsequently implemented and tested in the current shared
+native TUI viewer recovery receipt above.
 
 ### TUI native window preview/launch selection (2026-11-02)
 
@@ -143,8 +163,8 @@ on Windows, with nine real POSIX viewer cases skipped. The exact changed TUI
 source/test in the ordinary WSL mirror pass all 47 opener checks, including
 those POSIX cases. TUI TypeScript checking passes. Child CLI fixtures record
 literal argv and selected endpoint; no actual desktop window is opened by these
-tests. Windows last-active-client marker recovery remains unimplemented by
-viewerTerminalEnv, which still reads /proc only on Linux.
+tests. The subsequent shared native TUI viewer recovery receipt above supersedes
+the former Linux-only viewerTerminalEnv implementation limitation.
 
 ### Native local type-exchange recovery and no-clobber moves (2026-11-02)
 

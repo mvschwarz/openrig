@@ -46,6 +46,7 @@ import { isBoundTerminalSeat } from "./terminal-seat.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground, isWindowsShellHost } from "./shell-classifier.js";
+import { verifyWindowsPaneReceiver } from "./windows-pane-receiver.js";
 import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type ClaudeResumeRotation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
@@ -896,7 +897,12 @@ export async function probeSessionActivity(input: {
   if (runtime === "terminal") {
     try {
       const paneCommand = await tmuxAdapter.getPaneCommand(readTarget);
-      if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
+      // A native pane reports its hosting shell even when no command is
+      // running. Its name alone proves neither an active receiver nor idle.
+      const nativeShell = tmuxAdapter.isNativeWindows && isWindowsShellHost(paneCommand ?? "");
+      const active = nativeShell ? await verifyWindowsPaneReceiver({ target: readTarget, getPanePid: target => tmuxAdapter.getPanePid(target) })
+        : paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand);
+      if (active) {
         return {
           state: "running",
           reason: "foreground_command",
