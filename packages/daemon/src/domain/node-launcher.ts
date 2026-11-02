@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { SessionAddressConflict, type SessionRegistry } from "./session-registry.js";
@@ -374,7 +375,7 @@ export class NodeLauncher {
   private async takeOverPane(sessionName: string, pane: string, cwd: string | undefined, env: Record<string, string>, nodeId: string):
     Promise<{ ok: true; warnings?: string[] } | { ok: false; code: string; message: string }> {
     let panes: Array<{ id: string }> = [];
-    try { panes = await this.tmuxAdapter.listPanes(sessionName); } catch { /* an unreadable session holds no pane to keep */ }
+    try { panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName); } catch { /* an unreadable session holds no pane to keep */ }
     if (!panes.some((candidate) => candidate.id === pane)) {
       return { ok: false, code: "pane_not_found", message: `Pane ${pane} isn't in tmux session "${sessionName}", so nothing was stopped.` };
     }

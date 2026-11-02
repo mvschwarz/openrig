@@ -494,7 +494,7 @@ export class TmuxAdapter {
       const probe = await this.probeSession(target.session);
       if (probe.state === "absent") return true;
       if (probe.state !== "present") return false;
-      const panes = await this.listPanes(target.session);
+      const panes = await this.listSessionPanes(target.session);
       return panes.length === 1 && panes[0]!.id === target.pane && await this.isPaneDead(target.pane);
     });
   }
@@ -568,7 +568,7 @@ export class TmuxAdapter {
     try {
       const probePane = this.freshProbes.get(target);
       if (probePane && !guard.maybeTarget(target)) {
-        const panes = await this.listPanes(target);
+        const panes = target === probePane ? await this.listPanes(target) : await this.listSessionPanes(target);
         if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
         // Awaited so a refusal inside the write (#188: the probe kill) returns as a result, not a throw.
         return await write(probePane, () => {});
@@ -579,7 +579,7 @@ export class TmuxAdapter {
         const bound = guard.target(identity);
         const fresh = created?.nodeId === bound.nodeId && guard.ownsLifecycle(bound.nodeId);
         let panes: TmuxPane[];
-        try { panes = await this.listPanes(fresh ? target : bound.session); }
+        try { panes = await this.listSessionPanes(fresh ? target : bound.session); }
         catch (error) {
           guard.checkInput(identity);
           const result = classifyWriteError(error);
@@ -1123,7 +1123,7 @@ export class TmuxAdapter {
         if((await this.probeSession(identity.staging)).state!=="present"
           || await this.getSessionEnv(identity.staging,"OPENRIG_NODE_ID")!==nodeId
           || await this.getSessionEnv(identity.staging,"OPENRIG_OCCUPANT_GENERATION")!==identity.predecessorGeneration
-          || (await this.listPanes(identity.staging)).length!==1 || (await this.listWindows(identity.staging)).length!==1) {
+          || (await this.listSessionPanes(identity.staging)).length!==1 || (await this.listWindows(identity.staging)).length!==1) {
           throw new Error("Native exchange predecessor identity is not established");
         }
       }
@@ -1175,7 +1175,7 @@ export class TmuxAdapter {
         const probe = await this.probeSession(session);
         if (probe.state === "absent") return {state:"absent"};
         if (probe.state !== "present") return {state:"unknown"};
-        const panes = await this.listPanes(session), windows = await this.listWindows(session);
+        const panes = await this.listSessionPanes(session), windows = await this.listWindows(session);
         if (panes.length !== 1 || windows.length !== 1 || await this.getSessionEnv(session,"OPENRIG_NODE_ID") !== nodeId) return {state:"unknown"};
         const generation = await this.getSessionEnv(session,"OPENRIG_OCCUPANT_GENERATION");
         const dead = (await this.run(["tmux","display-message","-p","-t",panes[0]!.id,"#{pane_dead}"])).trim();
@@ -1216,8 +1216,8 @@ export class TmuxAdapter {
         throw new Error("A runtime switch exchange requires the seat's lifecycle lease and its own staging pane.");
       }
       if (!/^%\d+$/.test(input.canonicalPane) || !/^%\d+$/.test(input.stagedPane)) throw new Error("Exact pane ids are required.");
-      const canonical = await this.listPanes(input.canonicalSession);
-      const staged = await this.listPanes(input.stagingSession);
+      const canonical = await this.listSessionPanes(input.canonicalSession);
+      const staged = await this.listSessionPanes(input.stagingSession);
       if (canonical.length !== 1 || canonical[0]!.id !== input.canonicalPane || staged.length !== 1 || staged[0]!.id !== input.stagedPane) {
         throw new Error("The seat's or the staging session's pane changed; nothing was exchanged.");
       }
@@ -1250,7 +1250,7 @@ export class TmuxAdapter {
     try {
       if (this.deliveryGuard && !this.deliveryGuard.ownsLifecycle(input.nodeId)) throw new Error("Runtime switch recovery requires the seat's lifecycle lease.");
       if (this.deliveryGuard?.maybeTarget(input.stagingSession)) throw new Error("The staging session is now another seat's; nothing was touched.");
-      const panes = await this.listPanes(input.stagingSession);
+      const panes = await this.listSessionPanes(input.stagingSession);
       const generation = await this.getSessionEnv(input.stagingSession, "OPENRIG_OCCUPANT_GENERATION");
       if ((await this.listWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
         || await this.getSessionEnv(input.stagingSession, "OPENRIG_NODE_ID") !== input.nodeId

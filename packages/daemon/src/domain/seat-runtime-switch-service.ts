@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
@@ -264,7 +265,7 @@ export class SeatRuntimeSwitchService {
     if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
       unsupported === NO_PANE ? NO_PANE_GUIDANCE : undefined);
     try {
-      const [panes, windows] = await Promise.all([tmux.listPanes(sessionName!), tmux.listWindows(sessionName!)]);
+      const [panes, windows] = await Promise.all([listNamedSessionPanes(tmux, sessionName!), tmux.listWindows(sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
         return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: only a single-window, single-pane seat can, and its session has ${windows.length} window(s) and ${panes.length} pane(s).`);
       }
@@ -481,7 +482,7 @@ export class SeatRuntimeSwitchService {
     if(nativeIdentity){
       const exchanged=await executeNativeRuntimeExchange(new NativeRuntimeSwitchJournal(db,id,node.id),tmux.nativeRuntimeExchangeTerminal(node.id,nativeIdentity),nativeIdentity,"forward");
       if(!exchanged.ok)return nativePending(`The native exchange needs recovery: ${exchanged.message}`);
-      const canonical=await tmux.listPanes(sessionName);
+      const canonical=await listNamedSessionPanes(tmux, sessionName);
       if(canonical.length!==1)return nativePending("The native successor pane couldn't be established after exchange.");
       successorPane=canonical[0]!.id;
     }else{
@@ -503,7 +504,7 @@ export class SeatRuntimeSwitchService {
           `The ${node.runtime} occupant still holds ${ctx.seatRef} by record. Recover with rig seat set-runtime ${ctx.seatRef} --recover.`), switchId: id, recoveryPending: true };
       }
       if(nativeIdentity){
-        const staged=await tmux.listPanes(row.staging_session);
+        const staged=await listNamedSessionPanes(tmux, row.staging_session);
         if(staged.length!==1)return nativePending("The restored staging pane couldn't be established after native rollback.");
         const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId:node.id,stagingSession:row.staging_session,pane:staged[0]!.id,generations:[successorGeneration]});
         if(!adopted.ok)return nativePending(`Native rollback staging custody needs recovery: ${adopted.message}`);
@@ -637,7 +638,7 @@ export class SeatRuntimeSwitchService {
     if(native){
       const followed=await tmux.followNativeRuntimeExchangeClients(row.node_id,native.identity);
       if(!followed.ok)return nativePending(`native client following needs recovery (${followed.message}); predecessor retained`);
-      const panes=await tmux.listPanes(row.staging_session);
+      const panes=await listNamedSessionPanes(tmux, row.staging_session);
       if(panes.length){
         const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId:row.node_id,stagingSession:row.staging_session,pane:panes[0]!.id,generations:[native.identity.predecessorGeneration]});
         if(!adopted.ok)return nativePending(`native predecessor custody needs recovery (${adopted.message})`);
@@ -718,7 +719,7 @@ export class SeatRuntimeSwitchService {
         const exchanged=await executeNativeRuntimeExchange(new NativeRuntimeSwitchJournal(db,row.id,nodeId),backend,native.identity,row.committed_at?"forward":"rollback");
         if(!exchanged.ok)return stuck(`Native exchange recovery is pending: ${exchanged.message}`);
       }
-      const canonical=await tmux.listPanes(row.canonical_session);
+      const canonical=await listNamedSessionPanes(tmux, row.canonical_session);
       if(canonical.length!==1)return stuck("The native canonical pane couldn't be established after recovery.");
       if(row.committed_at){
         if(canonical[0]!.id!==row.successor_pane)return stuck("The native successor binding changed after commit; nothing was retired.");
@@ -727,7 +728,7 @@ export class SeatRuntimeSwitchService {
       }
       if(canonical[0]!.id!==row.predecessor_pane)return stuck("The native predecessor binding changed after rollback; nothing was retired.");
       if(!alreadyRolledBack){
-        const staged=await tmux.listPanes(row.staging_session);
+        const staged=await listNamedSessionPanes(tmux, row.staging_session);
         if(staged.length!==1)return stuck("The native uncommitted successor pane couldn't be established.");
         const adopted=await tmux.adoptRuntimeSwitchStaging({nodeId,stagingSession:row.staging_session,pane:staged[0]!.id,generations:[row.successor_generation]});
         if(!adopted.ok)return stuck(`Native staging custody couldn't be restored: ${adopted.message}`);
@@ -741,14 +742,14 @@ export class SeatRuntimeSwitchService {
     }
     let canonicalPane: string | null = null;
     try {
-      const panes = await tmux.listPanes(row.canonical_session);
+      const panes = await listNamedSessionPanes(tmux, row.canonical_session);
       canonicalPane = panes.length === 1 ? panes[0]!.id : null;
     } catch { /* absent or unreadable: decided below */ }
     const staging = await tmux.probeSession(row.staging_session).catch(() => ({ state: "unknown" as const }));
     if (staging.state === "unknown") return stuck("The staging session's presence couldn't be established; nothing was touched.");
     let stagingPane: string | null = null;
     if (staging.state === "present") {
-      const panes = await tmux.listPanes(row.staging_session).catch(() => []);
+      const panes = await listNamedSessionPanes(tmux, row.staging_session).catch(() => []);
       stagingPane = panes.length === 1 ? panes[0]!.id : null;
       const adopted = stagingPane ? await tmux.adoptRuntimeSwitchStaging({ nodeId, stagingSession: row.staging_session, pane: stagingPane, generations: [row.successor_generation] })
         : { ok: false as const, message: "it doesn't have exactly one pane" };

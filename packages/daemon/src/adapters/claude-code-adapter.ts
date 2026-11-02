@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "./session-pane-lookup.js";
 import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
@@ -588,7 +589,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       || launch.binding.tmuxSession !== binding.tmuxSession
       || launch.binding.launchGeneration !== binding.launchGeneration) return probe;
     try {
-      const panes = await this.tmux.listPanes(binding.tmuxSession);
+      const panes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
       const observation = { target: binding.tmuxPane, tmux: this.tmux,
         listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable,
@@ -607,7 +608,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (launch.fingerprint !== undefined && first.fingerprint !== launch.fingerprint) return probe;
       const native = await observeClaudePaneProcess(observation);
       if (native?.fingerprint !== first.fingerprint) return probe;
-      const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
+      const currentPanes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
@@ -625,12 +626,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const token = options?.resumeToken?.trim();
     if (!token || !binding.tmuxPane || !binding.tmuxSession) return false;
     try {
-      const panes = await this.tmux.listPanes(binding.tmuxSession);
+      const panes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return false;
       const native = await verifyClaudePaneProcess({ target: binding.tmuxPane, tmux: this.tmux,
         listProcesses: this.listProcesses, expectedToken: token, rotation: options?.resumeRotation ?? null });
       if (!native) return false;
-      const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
+      const currentPanes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       return currentPanes.length === 1 && currentPanes[0]?.id === binding.tmuxPane
         && await this.tmux.getPanePid(binding.tmuxSession) === native.panePid;
     } catch { return false; }

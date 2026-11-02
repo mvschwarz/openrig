@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
 import { restoreSessionUserHome } from "./managed-restore-read-access.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
@@ -3751,7 +3752,7 @@ export class SessionTransport {
   private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null, rotation: ClaudeResumeRotation | null = null): Promise<ClaudeDeliveryObservation> {
     const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
     try {
-      const panes = await this.tmuxAdapter.listPanes(sessionName);
+      const panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName);
       if (!pane && panes.length > 1) {
         return { state: "conflict", detail: "The session has several panes but no recorded bound pane" };
       }
@@ -3773,7 +3774,7 @@ export class SessionTransport {
       const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken, rotation });
       // Refusal already has positive evidence; a later failed read cannot erase it.
       if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
-      const after = await this.tmuxAdapter.listPanes(sessionName);
+      const after = await listNamedSessionPanes(this.tmuxAdapter, sessionName);
       if (after.length > 0 && !after.some(candidate => candidate.id === pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
       const currentPid = await this.tmuxAdapter.getPanePid(pane);
       if (panePid && currentPid && panePid !== currentPid) return { state: "conflict", detail: "The bound pane process changed during delivery verification" };
@@ -4309,7 +4310,7 @@ export class SessionTransport {
   private async capturePromptPane(sessionName: string, content: string, runtime: string | null | undefined): Promise<CaptureResult["promptPane"]> {
     const prompt = classifyPaneActivity(content, { runtime });
     if (prompt.reason !== "permission_prompt" && prompt.reason !== "selection_prompt") return undefined;
-    const panes = await this.tmuxAdapter.listPanes(sessionName).catch(() => []);
+    const panes = await listNamedSessionPanes(this.tmuxAdapter, sessionName).catch(() => []);
     const pane = panes.find(entry => entry.active) ?? panes[0];
     if (!pane || (pane.width >= 80 && pane.height >= 24)) return undefined;
     return { width: pane.width, height: pane.height,

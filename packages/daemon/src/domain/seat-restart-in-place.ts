@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -404,7 +405,7 @@ export class CodexInPlaceRestart {
 
     const pane = binding.tmuxPane;
     let panes: Awaited<ReturnType<InPlaceRestartTmux["listPanes"]>>;
-    try { panes = await this.deps.tmux.listPanes(sessionName); } catch (error) {
+    try { panes = await listNamedSessionPanes(this.deps.tmux, sessionName); } catch (error) {
       return { ok: false, code: "tmux_probe_failed", message: `tmux pane lookup failed: ${(error as Error).message}; nothing was stopped.` };
     }
     if (!pane || panes.length !== 1 || panes[0]?.id !== pane) {
@@ -720,7 +721,7 @@ export class CodexInPlaceRestart {
     Promise<{ pane: "present" | "gone" | "unknown"; process: "running" | "exited" | "unknown" }> {
     let paneState: "present" | "gone" | "unknown";
     try {
-      paneState = (await this.deps.tmux.listPanes(sessionName)).some((candidate) => candidate.id === pane) ? "present" : "gone";
+      paneState = (await listNamedSessionPanes(this.deps.tmux, sessionName)).some((candidate) => candidate.id === pane) ? "present" : "gone";
     } catch (error) {
       paneState = /can't find|not found|no such/i.test((error as Error).message) ? "gone" : "unknown";
     }

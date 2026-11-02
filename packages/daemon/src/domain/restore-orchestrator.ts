@@ -1,3 +1,4 @@
+import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { automaticRestoreOverrides, type AutomaticSeatReplacement } from "./existing-rig-restore.js";
 import { restoreRuntimeCompatibilityError } from "./restore-runtime-compatibility.js";
@@ -729,7 +730,7 @@ export class RestoreOrchestrator {
             // bound pane still in this session (a recycled pane id could name another session's shell).
             if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
               && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))
-              && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
+              && (await listNamedSessionPanes(this.tmuxAdapter, session.sessionName)).some(candidate => candidate.id === pane)
               && (this.tmuxAdapter.isNativeWindows ? await this.nativeIdleShell(pane)
                 : (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell")
               && (this.tmuxAdapter.isNativeWindows ? isWindowsShellHost(await this.tmuxAdapter.getPaneCommand(pane) ?? "") : isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? ""))) {

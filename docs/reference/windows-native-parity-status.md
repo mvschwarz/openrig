@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Session-name pane observation across lifecycle callers (2026-11-03)
+
+Known pure-session callers in launch, restore, binding observation, attention
+reconciliation, restart, runtime switch, Claude attachment and session transport
+now use explicit session pane lookup. Adapter input-guard observations likewise
+use the bound session name while preserving an already-known probe pane target.
+The shared caller helper retains the established listPanes contract for older
+injected adapters; the production adapter exposes the explicit session method.
+General pane/window expressions still use their existing target API.
+
+The native batch capture implementation already resolved each complete logical
+name before assembling physical targets. A new colon-name regression confirms
+that behavior, including exact captured text and its trailing newline; no new
+batch target heuristic was added. The first new expectation omitted that
+newline and was corrected to the actual capture contract, not trimmed.
+
+Eleven complete lifecycle/mapping/creation/stop/exchange/transport test files
+passed 959 with six skips on Windows, with no failures. Daemon TypeScript/assets
+build and whitespace checks passed. These controlled checks do not qualify real
+provider continuity or stock psmux. Remaining optional harness, kernel-review
+and general window-target callers still require individual contract review;
+this migration is not an exhaustive arbitrary-name acceptance claim. Installed
+and paired full-directory receipts predate this change. No deployment, user-team
+operation or public push occurred.
+
 ## Colon-name creation persistence and explicit session pane lookup (2026-11-03)
 
 Both native creation-environment persistence branches now address the complete

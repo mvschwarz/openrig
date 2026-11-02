@@ -2,8 +2,8 @@ import { expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
 
-function fixture(present = false, confirmed = true) {
-  const logical = "owned|logical", binding = bindNativeSessionName(logical), calls: string[][] = [];
+function fixture(present = false, confirmed = true, logical = "owned|logical") {
+  const binding = bindNativeSessionName(logical), calls: string[][] = [];
   let marker = "";
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, undefined, async argv => {
     calls.push(argv);
@@ -29,6 +29,12 @@ function fixture(present = false, confirmed = true) {
 it("maps new probe creation and installs its binding only after a confirmed receipt", async () => {
   const f = fixture(); expect(await f.adapter.createProbeSession(f.logical)).toEqual({ ok: true });
   expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "present" });
+});
+it("batch captures a complete colon-bearing logical name through its verified physical binding", async () => {
+  const f = fixture(false, true, "owned:logical");
+  expect(await f.adapter.createProbeSession(f.logical)).toEqual({ ok: true });
+  expect((await f.adapter.capturePanesContent([f.logical]))?.get(f.logical)?.text).toBe("owned content\n");
+  expect(f.calls.flat()).not.toContain("=owned:");
 });
 it("maps a detached CLI command only after its creation receipt and keeps child argv literal", async () => {
   const f = fixture(), child = ["C:/owned tools/node.exe", "C:/owned child.js", "-t", "owned|logical", "$(literal)"];
