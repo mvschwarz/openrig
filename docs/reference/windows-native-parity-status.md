@@ -5207,6 +5207,24 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Usable-environment presence now agrees with exact value reads. Native psmux
+uses deduplicated selected-key queries instead of splitting an ambiguous raw
+multiline listing, fixing case-alias false absence and assignment-looking
+continuation lines being treated as distinct variables. Unknown/unreadable
+results remain `null`; missing/empty/whitespace-only values remain false.
+POSIX retains its one-listing fast path and performs selected lossless reads
+only for backslash-ambiguous values, fixing escaped whitespace misclassification.
+Native batches now make per-key queries (plus selector qualification where
+needed); they do not promise one atomic listing snapshot.
+
+Real stock psmux direct-process fixture passed these presence cases with exact
+cleanup. Real isolated WSL tmux additionally verified usable-presence and batch
+results for empty/whitespace controls, CR/LF, Unicode and literal escapes. WSL
+four selected files: 22 passed; Windows three related files: 221 passed; daemon
+build passed. Five explicit public file hashes matched the scoped WSL overlay
+before/after. These results do not refresh full-workspace or interactive/warm
+startup acceptance.
+
 Real stock psmux 3.4.0 cross-home global-environment acceptance passed using
 two `selectTmuxServer(mode: isolated)` homes and equal session names. After
 setting distinct synthetic global values in both namespaces, each home read

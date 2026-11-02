@@ -25,3 +25,13 @@ it("matches native selected and removed response keys using Windows environment 
   output = "-Mixed_Name\n";
   expect(await adapter.getSessionEnv("owned", "mixed_name")).toBeUndefined();
 });
+
+it("uses exact native selectors for usable presence without treating continuation lines as variables", async () => {
+  const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, undefined, async argv => {
+    const key = argv.at(-1)!;
+    if (key.toUpperCase() === "VALUE") return "VALUE=\nOTHER=literal continuation\n";
+    throw new Error("unknown variable: " + key);
+  }, [], "psmux");
+  expect(await adapter.hasSessionEnv("owned", "value")).toBe(true);
+  expect(await adapter.hasSessionEnvBatch("owned", ["value", "OTHER", "value"])).toEqual({ value: true, OTHER: false });
+});

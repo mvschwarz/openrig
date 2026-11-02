@@ -15,9 +15,11 @@ it.runIf(available)("reads exact environment values from a real isolated POSIX t
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell transport"); }, undefined, argv => invoke(argv.slice(1)));
   try {
     await invoke(["new-session", "-d", "-s", "owned", "--", process.execPath, "-e", "setInterval(()=>{},1000)"]);
-    for (const value of ["", "synthetic trailing CR\r", "synthetic trailing LF\n", "synthetic trailing CRLF\r\n", "日本語🙂\nVALUE=literal line\n", String.raw`literal\r\n\033\$`, 'quotes " $ ` \\ and controls\x01\t\x1b']) {
+    for (const value of ["", " \t\r\n", "synthetic trailing CR\r", "synthetic trailing LF\n", "synthetic trailing CRLF\r\n", "日本語🙂\nVALUE=literal line\n", String.raw`literal\r\n\033\$`, 'quotes " $ ` \\ and controls\x01\t\x1b']) {
       await adapter.setSessionEnv("owned", "VALUE", value);
       expect(await adapter.getSessionEnv("owned", "VALUE")).toBe(value);
+      expect(await adapter.hasSessionEnv("owned", "VALUE")).toBe(value.trim().length > 0);
+      expect(await adapter.hasSessionEnvBatch("owned", ["VALUE", "OPENRIG_ABSENT_SYNTHETIC"])).toEqual({ VALUE: value.trim().length > 0, OPENRIG_ABSENT_SYNTHETIC: false });
     }
     expect(await adapter.getSessionEnv("owned", "OPENRIG_ABSENT_SYNTHETIC")).toBeUndefined();
   } finally {

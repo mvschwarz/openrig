@@ -28,10 +28,14 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("deli
     expect(await adapter.getSessionEnv(names[0]!, key)).toBe(value);
     expect(await adapter.getSessionEnv(names[1]!, key)).toBeUndefined();
     expect(await adapter.getSessionEnv(names[0]!, key.toLowerCase())).toBe(value);
+    expect(await adapter.hasSessionEnv(names[0]!, key.toLowerCase())).toBe(true);
     for (const updated of ["", "synthetic trailing CR\r", "synthetic trailing LF\n", "synthetic trailing CRLF\r\n", "synthetic first\n" + key + "=literal value line\n"]) {
       await adapter.setSessionEnv(names[0]!, key, updated);
       expect(await adapter.getSessionEnv(names[0]!, key)).toBe(updated);
     }
+    const absentLine = "OPENRIG_SYNTHETIC_ABSENT_LINE";
+    await adapter.setSessionEnv(names[0]!, key, "\n" + absentLine + "=literal continuation");
+    expect(await adapter.hasSessionEnvBatch(names[0]!, [key.toLowerCase(), absentLine])).toEqual({ [key.toLowerCase()]: true, [absentLine]: false });
     await adapter.unsetSessionEnv(names[0]!, key.toLowerCase());
     expect(await adapter.getSessionEnv(names[0]!, key)).toBeUndefined();
     expect(JSON.parse(await readFile(outputs[1]!, "utf8"))).toEqual({});

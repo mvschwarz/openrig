@@ -2026,16 +2026,29 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    if (this.terminalKind === "psmux") return this.selectedEnvPresence(sessionName, varName);
     const lines = await this.sessionEnvLines(sessionName);
+    if (lines?.some(line => line.startsWith(`${varName}=`) && line.includes("\\"))) return this.selectedEnvPresence(sessionName, varName);
     return lines === null ? null : usableEnvLine(lines, varName);
   }
 
-  /** The same usable-presence reading for several variables from ONE fresh listing of the session environment.
+  /** The same usable-presence reading for several variables. POSIX shares one
+   *  listing except values needing lossless decoding; native multiline listings
+   *  are ambiguous and require exact selectors, deduplicated by requested key.
    *  Each requested name maps to true/false; every one maps to null when the environment cannot be inspected. Only
    *  the requested names are returned, and no value, listing or error text leaves this method. */
   async hasSessionEnvBatch(sessionName: string, varNames: readonly string[]): Promise<Record<string, boolean | null>> {
+    if (this.terminalKind === "psmux") {
+      return Object.fromEntries(await Promise.all([...new Set(varNames)].map(async name => [name, await this.selectedEnvPresence(sessionName, name)] as const)));
+    }
     const lines = await this.sessionEnvLines(sessionName);
-    return Object.fromEntries(varNames.map((name) => [name, lines === null ? null : usableEnvLine(lines, name)]));
+    return Object.fromEntries(await Promise.all(varNames.map(async name => [name, lines === null ? null
+      : lines.some(line => line.startsWith(`${name}=`) && line.includes("\\")) ? await this.selectedEnvPresence(sessionName, name) : usableEnvLine(lines, name)] as const)));
+  }
+
+  private async selectedEnvPresence(session: string, name: string): Promise<boolean | null> {
+    try { return ((await this.getSessionEnv(session, name)) ?? "").trim().length > 0; }
+    catch { return null; }
   }
 
   private async sessionEnvLines(sessionName: string): Promise<string[] | null> {
