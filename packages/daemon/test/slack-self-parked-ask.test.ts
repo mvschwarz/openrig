@@ -143,8 +143,8 @@ describe("an ask its asker parked on the person asked", () => {
     // It isn't owed a Slack post (its body carries OpenRig's routing lines); it's on Steering and the TUI.
     expect(await f.alertFor(reply!.qitemId)).toBeNull();
     expect(f.repo.listAttention({ limit: 100 }).map((item) => item.qitemId)).toContain(reply!.qitemId);
-    // A registered person's reply settles the ask, as theirs.
-    expect(f.state()).toMatchObject({ state: "done", answers: null, resolvedBy: [MIKE] });
+    // It reached another person, not the asker, so it doesn't settle the ask.
+    expect(f.state()).toMatchObject({ state: "pending", answers: null, resolvedBy: [] });
   });
 
   it("control: an agent that later parks a Slack message on a person asks that person, and the park is posted", async () => {

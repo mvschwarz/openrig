@@ -75,7 +75,7 @@ async function fixture(kind: "pending" | "parked") {
       replies: replies.map((item) => ({ source: item.sourceSession, destination: item.destinationSession, humanAnswer: (item.tags ?? []).includes("human-answer") })),
     };
   };
-  return { typed, clicked, state };
+  return { repo, ask, typed, clicked, state };
 }
 
 describe("a reply from a registered person who wasn't asked", () => {
@@ -95,6 +95,16 @@ describe("a reply from a registered person who wasn't asked", () => {
     await f.clicked("UANA", "2.3");
     expect(f.state()).toMatchObject({ state: "done", answers: { choice: "yes" }, resolvedBy: [MIKE] });
     expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: MIKE, destination: ASKER, humanAnswer: true }]);
+  });
+
+  it("clicked after the asked person's typed answer committed but before it closed: records nothing, and settles as theirs", async () => {
+    const f = await fixture("pending");
+    // Ana's typed answer is committed under the ask's answer identity, then execution stops before the close.
+    await f.repo.createHumanAnswer({ sourceSession: ANA, destinationSession: ASKER, body: "Do not ship", summary: "Do not ship",
+      inboundReplyTo: f.ask.qitemId, nudge: false } as never);
+    await f.clicked("UMIKE", "2.2");
+    expect(f.state()).toMatchObject({ state: "done", answers: { choice: { kind: "typed-reply", text: "Do not ship" } }, resolvedBy: [ANA] });
+    expect(f.state().replies.filter((reply) => reply.humanAnswer)).toEqual([{ source: ANA, destination: ASKER, humanAnswer: true }]);
   });
 
   it("typed on a question parked on someone else: resumes it as theirs, and reaches the agent", async () => {
