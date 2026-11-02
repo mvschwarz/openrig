@@ -4197,3 +4197,10 @@ At clean tracked source 99677854999966ddba8836532b8dbd4af3a6adf6, the complete W
 The subsequent path audit found Pi/OMP resume-token validation treated Unicode/space UNC paths differently for forward, backslash and mixed separators. It also admitted a forward-slash device alias that the backslash form rejected. Windows UNC recognition now accepts the equivalent separator forms and rejects device aliases through either separator. Raw traversal and alternate-stream refusal and token redaction remain. Four new cases failed before the repair; complete format tests pass on Windows and WSL, and daemon TypeScript noEmit passes. These are synthetic format checks and do not access an actual SMB share or establish provider continuity.
 
 A separate owned-directory capability probe could not enable Windows per-directory case sensitivity: fsutil returned Access is denied. Its exact scratch directory was removed, with no elevation or retry. Thus actual case-sensitive-directory viewer attribution remains host-unverified, not accepted. Receipt: viewer-case-sensitive-20261103.json. The owned remote SSH endpoint also remained unreachable before authentication; no real remote native-command pass is added.
+
+
+### 2026-11-03: renewed native installed-package gate
+
+At exact c96371a3ed069ac3258ad4e5843edb9796952d4f, the native target GATE passed in 70 seconds (16:15:28-16:16:38 UTC on 2026-11-02). Source HEAD and tracked-diff SHA256 matched before and after, with the tracked tree clean. The real source build, tarball, isolated-prefix npm installation, SQLite ABI, installed context/spec resource operations, exact native terminal helper files and installed following entry behavior, and rig.cmd daemon-subpath load passed. Node test result: one gate passed, zero failures and zero skips. Receipt: pack-terminal-assets-c96371a.json and its log in the task resource directory.
+
+This is installed-package acceptance for that source, not publication, actual deployment replacement, full daemon-suite acceptance, GUI qualification, remote SSH continuity or a clean-release claim over protected untracked material.
