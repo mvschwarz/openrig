@@ -2339,8 +2339,11 @@ shell-inert path grammar, preventing a wider SFTP plan from reaching that shell
 transport through an injected executor or other caller.
 
 The path/planner, file-transfer, SFTP-copy and protocol set passes 60 tests with
-three skips. Local sftp-server integration is unavailable on this host and is
-not counted as passed. The existing real remote transport receipt predates
+three skips. Per-file reconciliation confirms both local SFTP-copy tests and
+all three protocol tests passed against the installed Windows SFTP server;
+the three skips belong to separate file-transfer tests. An earlier report
+incorrectly inferred missing SFTP coverage from the aggregate skip count.
+The existing real remote transport receipt predates
 this planner change and exercised the executor directly; it does not renew the
 ordinary CLI end-to-end acceptance. Archive metadata equivalence remains open.
 
@@ -2371,3 +2374,23 @@ Cross-user pipe refusal and actual guest engine deletion/recovery remain unteste
 
 The Windows pipe route follows Podman's documented [Windows API pipe](https://github.com/containers/podman/blob/main/docs/tutorials/podman-for-windows.md)
 and [rootless info fields](https://docs.podman.io/en/latest/markdown/podman-info.1.html).
+
+### SFTP representable permission metadata (2026-11-02)
+
+Native SFTP downloads now apply the source permission mode after timestamps,
+preserving the Windows read-only/writeable attribute without replacing the
+destination DACL. The file quick check also detects permission-only drift;
+preview reports it, and execution repairs it without retransferring file bytes.
+POSIX endpoints compare permission bits, while a Windows local destination
+compares the owner-write bit that native chmod can actually represent. This
+does not claim Windows enforces POSIX group/owner/execute permissions.
+
+The four-file set passes 61 tests with three unrelated skips, including real
+SFTP subsystem upload/download using the normal planner for drive/Unicode/space
+paths, readonly retention, metadata-only preview/repair, safe readonly-replace
+refusal, malformed framing and handshake timeout. This run explicitly uses a
+task-local official Win32-OpenSSH 10.4.0.0p1 Preview portable server with a valid
+Authenticode signature; nothing was installed as a service or added to PATH.
+The earlier installed-server five-case SFTP receipt remains independently valid.
+CLI type checking passes. Full archive owner/group/execute, ACL and special-file
+semantics, and renewed cross-host ordinary-command acceptance remain open.

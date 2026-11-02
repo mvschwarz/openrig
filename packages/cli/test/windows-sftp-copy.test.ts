@@ -1,15 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
 import type { CopyPlan } from "../src/lib/file-transfer.js";
 import { planFileCopy } from "../src/lib/file-transfer.js";
 
-const server = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
+const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("preserves remote readonly state and repairs metadata-only drift without retransferring bytes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "openrig-sftp-mode-"));
+    const source = path.join(root, "source.txt"), destination = path.join(root, "destination.txt");
+    const start = () => spawn(server, [], { stdio: "pipe", windowsHide: true });
+    try {
+      await writeFile(source, "owned readonly bytes\n"); await chmod(source, 0o444);
+      const plan: CopyPlan = { src: { kind: "remote", path: "/" + source.replaceAll("\\", "/"), host: { id: "fixture", target: "fixture", transport: "ssh" } }, dst: { kind: "local", path: destination }, dryRun: false };
+      const first = await runNativeSftpCopy(plan, start);
+      expect(first.ok, first.stderr).toBe(true);
+      expect((await lstat(destination)).mode & 0o200).toBe(0);
+      await chmod(destination, 0o666);
+      const preview = await runNativeSftpCopy({ ...plan, dryRun: true }, start);
+      expect(preview.stdout).toContain(".f...p");
+      expect((await lstat(destination)).mode & 0o200).not.toBe(0);
+      const repaired = await runNativeSftpCopy(plan, start);
+      expect(repaired.ok, repaired.stderr).toBe(true);
+      expect(repaired.filesTransferred).toBe(0);
+      expect(repaired.bytesTransferred).toBe(0);
+      expect((await lstat(destination)).mode & 0o200).toBe(0);
+      expect(await readFile(destination, "utf8")).toBe("owned readonly bytes\n");
+    } finally {
+      await chmod(source, 0o666).catch(() => {}); await chmod(destination, 0o666).catch(() => {});
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
   it("retains the local original and reports staging when Windows refuses readonly replacement", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-sftp-readonly-"));
     const source = path.join(root, "source.txt"), destination = path.join(root, "destination.txt");

@@ -6,7 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import { SftpClient } from "../src/lib/sftp-protocol.js";
 
-const server = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
+const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native OpenSSH SFTP protocol", () => {
   it("rejects malformed framing and terminates its owned transport", async () => {
     const child = spawn(process.execPath, ["-e", "process.stdout.write(Buffer.from([255,255,255,255]));setInterval(()=>{},1000)"], { stdio: "pipe" });

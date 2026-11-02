@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -42,7 +42,12 @@ const local: Endpoint = {
       }
     } finally { await handle.close(); }
   },
-  async times(file, attrs) { if (attrs.atime !== undefined && attrs.mtime !== undefined) await utimes(file, attrs.atime, attrs.mtime); },
+  async times(file, attrs) {
+    if (attrs.atime !== undefined && attrs.mtime !== undefined) await utimes(file, attrs.atime, attrs.mtime);
+    // Windows chmod preserves the representable read-only/writeable attribute;
+    // it cannot install POSIX owner/group/execute permissions or replace a DACL.
+    if (attrs.mode !== undefined) await chmod(file, attrs.mode & 0o7777);
+  },
   async rename(src, dst) { await rename(src, dst); },
 };
 const kind = (attrs: SftpAttrs | undefined) => (attrs?.mode ?? 0) & 0o170000;
@@ -101,8 +106,15 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       if (!isLink && kind(attrs) !== 0o100000) throw new Error(`Unsupported special file: ${src}`);
       if (existing && kind(existing) === 0o040000) throw new Error(`Cannot replace directory with file: ${dst}`);
       const target = isLink ? await source.link(src) : undefined;
-      if (isLink ? kind(existing) === 0o120000 && target === await destination.link(dst)
-        : kind(existing) === 0o100000 && attrs.size === existing?.size && attrs.mtime === existing?.mtime) return;
+      if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) return;
+      if (!isLink && kind(existing) === 0o100000 && attrs.size === existing?.size && attrs.mtime === existing?.mtime) {
+        const mask = destination === local && process.platform === "win32" ? 0o200 : 0o7777;
+        if (attrs.mode !== undefined && existing?.mode !== undefined && (attrs.mode & mask) !== (existing.mode & mask)) {
+          changes.push(`.f...p ${dst}`);
+          if (!plan.dryRun) await destination.times(dst, attrs);
+        }
+        return;
+      }
       changes.push(`${isLink ? "cL" : ">f"} ${dst}`);
       if (!isLink) { filesTransferred++; bytesTransferred += attrs.size ?? 0; }
       if (plan.dryRun) return;
