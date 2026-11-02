@@ -53,7 +53,8 @@ export function createHerdrViewerRun(endpoint: { socketPath: string }, sourceEnv
 export function resolveHerdrBinary(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
   const search = readPlatformEnv(env, "PATH", platform);
   if (platform !== "win32") return resolveOnPath("herdr", search);
-  for (const directory of (search ?? "").split(";")) {
+  for (const entry of (search ?? "").split(";")) {
+    const directory = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
     if (!path.win32.isAbsolute(directory)) return null;
     const file = path.win32.join(directory, "herdr.exe");
     try { if (statSync(file).isFile()) return file; } catch { /* next PATH entry */ }

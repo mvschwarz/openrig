@@ -4396,3 +4396,14 @@ viewer-native-qualified-20261103.json and viewer-wsl-qualified-20261103.json.
 These process fixtures do not qualify actual Herdr foreground attribution,
 in-pane attachment or GUI reattachment. Those earlier acceptance gaps remain.
 No deployment, team restart or public push was performed.
+
+### Quoted native Herdr PATH entries (2026-11-03)
+
+An owned filesystem fixture reproduced failure to discover herdr.exe in a
+double-quoted absolute Windows PATH directory containing spaces and Unicode.
+The resolver now removes the matching surrounding quotes before its existing
+absolute-directory and regular-file checks. Relative PATH entries remain
+refused; no shell lookup or batch shim execution was added. The regression and
+related viewer tests passed on Windows (herdr-path-before-20261103.json and
+herdr-path-after-20261103.json). This qualifies discovery only, not actual
+Herdr GUI attachment. No installed application or runtime was changed.

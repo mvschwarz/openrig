@@ -1,10 +1,20 @@
 import { test, expect } from "vitest";
 import { nativeViewerCommand, nativeViewerShellCommand } from "../src/domain/terminal/native-viewer-command.js";
 import { windowsTileAttachArgv, readWindowsTileAttachArgv } from "../src/domain/terminal/windows-tile-attach.js";
-import { sameViewerCwd } from "../src/domain/terminal/herdr-viewer.js";
+import { sameViewerCwd, resolveHerdrBinary } from "../src/domain/terminal/herdr-viewer.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+test.runIf(process.platform === "win32")("Herdr discovery accepts a quoted absolute PATH directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "herdr path # 中文-"));
+  const executable = path.join(root, "herdr.exe");
+  fs.writeFileSync(executable, "owned lookup fixture");
+  try {
+    expect(resolveHerdrBinary({ Path: '"' + root + '"' }, "win32")).toBe(executable);
+    expect(resolveHerdrBinary({ Path: "relative;" + root }, "win32")).toBeNull();
+  } finally { fs.unlinkSync(executable); fs.rmdirSync(root); }
+});
 
 test.skipIf(process.platform !== "win32")("native cwd attribution accepts a live alias but rejects siblings and missing paths", () => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),"viewer-cwd-"));
