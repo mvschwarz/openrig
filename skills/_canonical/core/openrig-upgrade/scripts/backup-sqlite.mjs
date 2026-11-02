@@ -24,6 +24,14 @@ try {
   DatabaseSync = undefined;
 }
 
+let BetterSqlite3;
+try {
+  const betterModule = await import("better-sqlite3");
+  BetterSqlite3 = betterModule.default || betterModule;
+} catch {
+  BetterSqlite3 = undefined;
+}
+
 function argument(name) {
   const index = process.argv.indexOf(name);
   return index === -1 ? undefined : process.argv[index + 1];
@@ -56,33 +64,72 @@ fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
 
 let integrity;
 
-if (DatabaseSync && !process.env.OPENRIG_SQLITE_BIN) {
-  try {
-    const srcDb = new DatabaseSync(sourcePath, { readOnly: true });
+if (!process.env.OPENRIG_SQLITE_BIN && (DatabaseSync || BetterSqlite3)) {
+  if (DatabaseSync) {
     try {
-      srcDb.exec(`VACUUM INTO '${destinationPath}';`);
-    } finally {
-      srcDb.close();
+      const srcDb = new DatabaseSync(sourcePath, { readOnly: true });
+      try {
+        srcDb.exec(`VACUUM INTO '${destinationPath}';`);
+      } finally {
+        srcDb.close();
+      }
+    } catch (err) {
+      fs.rmSync(destinationPath, { force: true });
+      fail(
+        err?.message || "sqlite backup failed via node:sqlite",
+        "resolve locking/path/tooling errors, then choose a fresh destination",
+      );
     }
-  } catch (err) {
-    fs.rmSync(destinationPath, { force: true });
-    fail(
-      err?.message || "sqlite backup failed via node:sqlite",
-      "resolve locking/path/tooling errors, then choose a fresh destination",
-    );
+
+    try {
+      const backupDb = new DatabaseSync(destinationPath, { readOnly: true });
+      try {
+        const rows = backupDb.prepare("PRAGMA integrity_check;").all();
+        integrity = rows[0]?.integrity_check;
+      } finally {
+        backupDb.close();
+      }
+    } catch (err) {
+      fail(
+        err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
+        "preserve the failed backup for diagnosis only; do not use it for rollback",
+      );
+    }
+  } else {
+    try {
+      const srcDb = new BetterSqlite3(sourcePath, { readonly: true });
+      try {
+        srcDb.exec(`VACUUM INTO '${destinationPath}';`);
+      } finally {
+        srcDb.close();
+      }
+    } catch (err) {
+      fs.rmSync(destinationPath, { force: true });
+      fail(
+        err?.message || "sqlite backup failed via better-sqlite3",
+        "resolve locking/path/tooling errors, then choose a fresh destination",
+      );
+    }
+
+    try {
+      const backupDb = new BetterSqlite3(destinationPath, { readonly: true });
+      try {
+        const rows = backupDb.prepare("PRAGMA integrity_check;").all();
+        integrity = rows[0]?.integrity_check;
+      } finally {
+        backupDb.close();
+      }
+    } catch (err) {
+      fail(
+        err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
+        "preserve the failed backup for diagnosis only; do not use it for rollback",
+      );
+    }
   }
 
-  try {
-    const backupDb = new DatabaseSync(destinationPath, { readOnly: true });
-    try {
-      const rows = backupDb.prepare("PRAGMA integrity_check;").all();
-      integrity = rows[0]?.integrity_check;
-    } finally {
-      backupDb.close();
-    }
-  } catch (err) {
+  if (integrity !== "ok") {
     fail(
-      err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
+      `backup integrity result was ${JSON.stringify(integrity)}`,
       "preserve the failed backup for diagnosis only; do not use it for rollback",
     );
   }
@@ -99,13 +146,12 @@ if (DatabaseSync && !process.env.OPENRIG_SQLITE_BIN) {
 
   const check = spawnSync(sqlite, [destinationPath, "PRAGMA integrity_check;"], { encoding: "utf8" });
   integrity = check.stdout?.trim();
-}
-
-if (integrity !== "ok") {
-  fail(
-    `backup integrity result was ${JSON.stringify(integrity)}`,
-    "preserve the failed backup for diagnosis only; do not use it for rollback",
-  );
+  if (check.status !== 0 || integrity !== "ok") {
+    fail(
+      check.stderr?.trim() || `backup integrity result was ${JSON.stringify(integrity)}`,
+      "preserve the failed backup for diagnosis only; do not use it for rollback",
+    );
+  }
 }
 
 process.stdout.write(`${JSON.stringify({
