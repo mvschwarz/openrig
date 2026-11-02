@@ -18,15 +18,28 @@ export function terminalWindowNotice(view: string, result: TerminalOpenResult): 
 
 const MARKER_KEYS = ["TERM_PROGRAM", "HERDR_ENV", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_SESSION", "REX_SESSION", "REX_BLOCK", "REX_SERVER", "REX_BIN_DIR"];
 
+/** Windows environment names are case insensitive, including inherited terminal markers. */
+export function terminalMarkerEnvironment(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  if (platform !== "win32") return env;
+  const normalized = { ...env };
+  for (const key of Object.keys(env)) {
+    const canonical = key.toUpperCase();
+    if (MARKER_KEYS.includes(canonical) || canonical.startsWith("CMUX_")) normalized[canonical] = env[key];
+  }
+  return normalized;
+}
+
 const inHerdrPane = (env: NodeJS.ProcessEnv): boolean => env["HERDR_ENV"] === "1" && !!env["HERDR_PANE_ID"] && !!env["HERDR_SOCKET_PATH"];
 
 /** Herdr's own markers, as the CLI's launcher reads them. */
 function inHerdr(env: NodeJS.ProcessEnv): boolean {
+  env = terminalMarkerEnvironment(env);
   return env["TERM_PROGRAM"] === "herdr" || inHerdrPane(env);
 }
 
 /** Rex's markers, as the CLI's launcher reads them; inside a Herdr pane, Herdr keeps the view. */
 export function inRex(env: NodeJS.ProcessEnv): boolean {
+  env = terminalMarkerEnvironment(env);
   return !inHerdrPane(env) && (env["TERM_PROGRAM"] === "rex"
     || (env["TERM_PROGRAM"] !== "herdr" && !!env["REX_SESSION"] && !!env["REX_BLOCK"] && !!env["REX_SERVER"]));
 }
@@ -35,6 +48,7 @@ export function inRex(env: NodeJS.ProcessEnv): boolean {
  *  TUI is never read as running in cmux. A Herdr or Rex inside cmux keeps the view. A tmux server started inside cmux keeps
  *  the markers too, so a TUI in that tmux opens in cmux even when the tmux is attached from another terminal. */
 export function inCmux(env: NodeJS.ProcessEnv): boolean {
+  env = terminalMarkerEnvironment(env);
   return !!env["CMUX_SOCKET_PATH"] && !!env["CMUX_SURFACE_ID"] && !inHerdr(env) && !inRex(env);
 }
 
@@ -96,7 +110,9 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
   // Already in a Herdr, Rex or cmux itself: nothing to carry. Otherwise hand the child the one this TUI is being viewed from.
   const viewed = await viewedFrom(viewer);
   const base = { ...process.env };
-  if (viewed) for (const key of MARKER_KEYS) delete base[key];
+  if (viewed) for (const key of Object.keys(base)) {
+    if (MARKER_KEYS.includes(platform === "win32" ? key.toUpperCase() : key)) delete base[key];
+  }
   const cmux = platform !== "win32" && inCmux(process.env);
   const placement = cmux ? ["--provider", "cmux"] : ["--window"];
   const args = ["terminal", "open", ...placement, "--json", ...(expectedPlan !== undefined ? ["--expected-plan", expectedPlan] : []), "--", view];

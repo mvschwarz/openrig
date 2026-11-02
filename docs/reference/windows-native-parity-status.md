@@ -1,5 +1,16 @@
 # Native Windows parity: implementation and evidence
 
+## Current native TUI marker casing (2026-11-02)
+
+The TUI now interprets inherited terminal marker names case-insensitively on
+Windows, matching the CLI. Mixed-case Herdr pane markers retain precedence over
+Rex/cmux, and forwarding viewer markers removes inherited marker aliases before
+overlaying the selected viewer. POSIX environment-name semantics are unchanged.
+Native `open-window.test.ts`: 40 passed, 9 POSIX-only skipped; TUI TypeScript check
+passed. This does not qualify recovery of a shared psmux client's environment:
+that remains unimplemented on Windows. Remote real Pi OAuth continuity is deferred
+by the user pending login on the second host; it is not counted as passed.
+
 ## Current reading guide (2026-11-02)
 
 The tables below are the historical initial map, not the current remaining-work
