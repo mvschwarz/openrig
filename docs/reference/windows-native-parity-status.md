@@ -4181,3 +4181,10 @@ The Windows complete-run provider failures all targeted ephemeral port 6566. An 
 The earlier MCP/provider/kernel three-file follow-up passed 62/62, but does not replace the complete-run 25-failure result. The port evidence explains the provider sample; MCP and kernel full-run failures remain unclassified, and the previously bounded terminal discovery investigation is not reopened. No complete suite rerun, real provider invocation, runtime deployment or push is claimed by this fixture change.
 
 The final provider/helper verification retains the existing unbound-server and unrelated-target refusal regressions alongside the new allocator cases: 38/38 passed on Windows and WSL. These replace the intermediate 36-case helper receipts for this scoped change.
+
+
+### 2026-11-03: MCP and kernel fixture listener follow-up
+
+The MCP operation and kernel-start evidence fixtures now use the same bounded high-port owned listener as the provider fixture. MCP still uses the real Hono Node adapter and daemon routes; kernel retains its real waiter, HTTP path and existing 100ms fixture deadline. Failure assertions now include the owned endpoint and received observations so a later complete-run failure can distinguish missing HTTP delivery from returned kernel state. Three complete helper/MCP/kernel files pass on Windows and WSL with two workers.
+
+This removes the same low-port allocation risk, but the old MCP and kernel failures lack enough detail to attribute their causes retrospectively. Their complete-run status remains unresolved until fresh evidence; no timeout increase, production change or broad acceptance claim is made.
