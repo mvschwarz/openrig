@@ -168,6 +168,14 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     tgzPath = join(CLI_DIR, tgz);
     execFileSync(...npmCommand(["install", "-g", "--prefix", prefix, tgzPath]), { cwd: REPO_ROOT, stdio: "inherit" });
     const installed = installedCliRoot(prefix);
+    for (const helper of ["windows-tile-attach.ps1", "follow-events.mjs"]) {
+      const delivered = join(installed,"daemon/assets/terminal",helper);
+      assert.equal(lstatSync(delivered).isFile(),true);
+      assert.equal(lstatSync(delivered).isSymbolicLink(),false);
+      assert.deepEqual(readFileSync(delivered),readFileSync(join(REPO_ROOT,"packages/daemon/assets/terminal",helper)),`installed terminal helper ${helper} must match source`);
+    }
+    assert.throws(()=>execFileSync(process.execPath,[join(installed,"daemon/assets/terminal/follow-events.mjs")],{cwd:home,encoding:"utf8",stdio:"pipe"}),
+      error=>error.status===1 && String(error.stderr).includes("An explanation log path is required"),"installed following helper must load and reject a missing path");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     const entry = join(installed, manifest.bin.rig);
     assert.ok(existsSync(entry), "installed bin entry must exist");

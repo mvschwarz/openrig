@@ -6,7 +6,7 @@ import {execFile} from "node:child_process";
 import {promisify} from "node:util";
 import {TmuxAdapter,type ArgvExecFn} from "../src/adapters/tmux.js";
 
-it.runIf(process.platform==="win32" && !!process.env.OPENRIG_TEST_PSMUX)("creation hooks see private client environment without replacing personal config or changing siblings",async()=>{
+it.runIf(process.platform==="win32" && !!process.env.OPENRIG_TEST_PSMUX)("held warm claim and cold sibling hooks see private client environment without replacing personal config",async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),"stock-creation-env-")),registry=path.join(root,"registry"),config=path.join(root,"personal.conf");fs.mkdirSync(registry);
  const shell=path.join(process.env.SystemRoot!,"System32/WindowsPowerShell/v1.0/powershell.exe");
  const output=path.join(root,"hook.json");
@@ -25,11 +25,18 @@ it.runIf(process.platform==="win32" && !!process.env.OPENRIG_TEST_PSMUX)("creati
  const adapter=new TmuxAdapter(async()=>{throw Error("No shell transport");},undefined,invoke,"psmux");
  try{
    const value="synthetic private creation value";
+   await invoke(["tmux","start-server",";","set-option","-g","exit-empty","off"]);
+   const warmPidFile=path.join(registry,"__warm__.pid");
+   await expect.poll(()=>fs.existsSync(warmPidFile),{timeout:5000}).toBe(true);
+   const warmPid=fs.readFileSync(warmPidFile,"utf8").trim().split(":")[0];
+   expect(warmPid).toMatch(/^\d+$/);expect(fs.existsSync(output)).toBe(false);
    expect(await adapter.createSession("first",root,{SELECTED:value})).toEqual({ok:true});
+   expect((await invoke(["tmux","display-message","-p","-t","=first:","#{pid}"])).trim()).toBe(warmPid);
    expect(JSON.parse(fs.readFileSync(output,"utf8"))).toEqual({value});
    expect((await invoke(["tmux","show-options","-t","=first","-gv","status-left"])).trim()).toBe("personal-marker");
    fs.unlinkSync(output);
    expect(await adapter.createSession("second",root,{SELECTED:"different sibling"})).toEqual({ok:true});
+   expect((await invoke(["tmux","display-message","-p","-t","=second:","#{pid}"])).trim()).not.toBe(warmPid);
    expect(await invoke(["tmux","show-environment","-t","=first","SELECTED"])).toBe(`SELECTED=${value}\n`);
    expect(JSON.parse(fs.readFileSync(output,"utf8"))).toEqual({value:"different sibling"});
    expect(calls.flat().some(word=>word.includes(value))).toBe(false);
