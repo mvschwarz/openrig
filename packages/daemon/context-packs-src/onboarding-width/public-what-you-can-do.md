@@ -1452,6 +1452,6 @@ deliberate writing.
 
 **`rig --help`**, then `rig <verb> --help`.
 
-Ninety verbs ship, and this page named most of them once. **You will not remember which — you
+Ninety-one verbs ship, and this page named most of them once. **You will not remember which — you
 are meant to remember only that the list is long enough to be worth reading before you build
 anything.** The question is never *how do I write this*; it is **does this already exist**.

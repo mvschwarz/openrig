@@ -3,17 +3,20 @@
 > **Status.** This is a draft for contributors.
 > - **Released in 0.7.6:** the `runner` field and OpenRig's side of declaration, identity and activity
 >   (sections 2-4).
-> - **Proposed runner-author behavior:** the input, cancellation and permission recipe in sections 5-7, and the
->   runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
+> - **Released in 0.7.8:** seat activity grants (section 4), and OpenRig's side of the answered permission path
+>   (section 7).
+> - **Runner-author behavior, not yet qualified:** the input, cancellation and permission recipe in sections 5-7, and
+>   the runner-side shutdown obligation in section 9. A dsh port implementing this recipe is not qualified.
 > - **Existing interfaces with author obligations:** launch-result identity, exact resume, first input and model
 >   handoff. These interfaces do not establish that a particular runner implements them correctly.
 > - **Unchanged:** plain community presets and the built-in runtimes (Claude Code, Codex, Pi, OMP, terminal).
 >
-> No harness has been run end to end under this contract yet. The first candidate is dsh over ACP.
+> No harness has been run end to end under this contract yet, and the native verdict is pending. The first candidate
+> is dsh over ACP.
 >
 > Release status and pinned references are in the [joined author guide](author-contracts.md). The
-> [community presets reference](https://github.com/mvschwarz/openrig/blob/b6bd4633fbd94634a2b4bdef2574a6880f97be63/docs/reference/community-harness-presets.md)
-> describes the implemented fields at that base; this chapter also labels proposed author behavior.
+> [community presets reference](community-harness-presets.md) describes the implemented fields, including the runner
+> preset's exception for approvals; this chapter also labels runner-author behavior that isn't qualified.
 
 This chapter covers **which agent runs in a seat and how OpenRig talks to it**. *Where* that agent runs (a host, a
 sandbox, another machine) is the [execution platform chapter](execution-platform-contract.md). The two are separate on purpose:
@@ -173,13 +176,17 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
   A refused post records nothing, so the seat's activity stays as it was, or unknown.
 
   **The guest's boundary is its listener, not the grant.** A guest reaches OpenRig only through a guest-only listener that
-  serves this one route and accepts only a grant. It must never reach the daemon's main port. The grant scopes activity
-  posts only, and the main port's other routes don't check it.
+  serves this route and section 7's three permission-request routes, and accepts only a grant. It must never reach the
+  daemon's main port. The grant scopes activity posts and permission requests, and the main port's other routes don't
+  check it.
+  - The listener is off by default. Turn it on with `OPENRIG_GUEST_ACTIVITY_PORT`, which must differ from the daemon's
+    main port or the daemon refuses to start.
+  - It binds `OPENRIG_GUEST_ACTIVITY_HOST`, default `127.0.0.1`: set it to an address the guest can reach.
 
 ## 5. Input: one submitted message is one prompt
 
-Sections 5-7 specify the proposed first dsh/ACP runner recipe. They do not change permission or input handling in
-existing built-in runtimes or require every possible runner protocol to use ACP.
+Sections 5-7 specify the first dsh/ACP runner recipe; no runner has been qualified against it yet. They do not change
+permission or input handling in existing built-in runtimes or require every possible runner protocol to use ACP.
 
 - **Set up the pane:** put your TTY in raw mode and turn on bracketed paste (`\e[?2004h`).
 - **What arrives:** `rig send` and queue reminders paste the whole message, then press Enter. Everything up to that Enter
@@ -199,6 +206,8 @@ existing built-in runtimes or require every possible runner protocol to use ACP.
 
 - **On `/abort` or Ctrl-C:** send the agent's cancel (for ACP, the `session/cancel` notification, which has no reply),
   and record when you sent it.
+  - A person cancels by typing `/abort` in the seat's pane. A `/abort` sent with `rig send` arrives inside a From/To
+    envelope, so it's an ordinary prompt.
 - **Report "cancelled" only when the agent says so:** for ACP, when `session/prompt` returns `stopReason: "cancelled"`.
   Then post `Stop` / `cancelled`.
 - **Whether the provider stopped work or spend is unknown.** Don't claim it.
