@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Native compaction instruction paths and per-seat restore maps (2026-11-02)
+
+The shipped PreCompact hook now expands Windows backslash forms of `~`, `${OPENRIG_HOME}` and `$OPENRIG_HOME` prefixes. POSIX retains literal backslash semantics. Actual hook subprocess tests reproduced all three native failures before the change and now verify restored instruction bytes without launching a provider.
+
+The same audit found two explicitly quarantined restore-map cases: the existing bridge reads an optional restoreMapPath, but the hook never wrote it. The hook now records an existing readable per-seat map only after its declared-seat check; absent, unreadable or foreign-seat maps yield null. Global configured paths are not promoted to per-seat maps. The generated packet and instruction fields remain intact. Enabled regressions verify both old cases, wrong-seat refusal, and actual bridge delivery of the selected path.
+
+The complete PreCompact hook file passed 25/25 on native Windows and 25/25 on ordinary-user WSL, with no skips. Fixtures use owned synthetic transcripts, homes, map files and packet directories and remove them afterward. The public home-prefix inventory checked 1,512 production/resource JS/TS files with the private exclusion applied before reads; it is a syntax inventory rather than proof that every path form is portable. Real provider compaction continuity, active runtime deployment and the complete daemon suite remain unqualified.
+
 ## Home-relative plugin plan through real adapter projection (2026-11-02)
 
 The real-filesystem plugin projection fixture now starts from an authored home-relative reference, passes it through the production planner, and gives that resulting plan to both Claude and Codex adapters. Windows uses the native backslash spelling; POSIX uses slash spelling. It checks every nested manifest, hook, skill and README byte in both runtime-specific destinations and the unchanged source tree. The case now runs on both platforms instead of being Windows-only.

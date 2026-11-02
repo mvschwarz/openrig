@@ -244,6 +244,18 @@ describe("precompact-hook.mjs (slice 27 custom message append)", () => {
     expect(payload.systemMessage).toContain("Read from OPENRIG_HOME-relative path.");
   });
 
+  it.each(["~\\instructions\\restore.md", "${OPENRIG_HOME}\\instructions\\restore.md", "$OPENRIG_HOME\\instructions\\restore.md"])("HG-7: native instruction prefix %s follows host path syntax", filePath => {
+    const base = filePath.startsWith("~") ? tmpDir : openrigHome;
+    mkdirSync(join(base, "instructions"), { recursive: true });
+    writeFileSync(join(base, "instructions", "restore.md"), "Owned native-prefix restore witness.");
+    writePolicyConfig(openrigHome, { messageInline: "", messageFilePath: filePath });
+    const { stdout, status } = runHook(openrigHome, true, process.platform === "win32" ? { USERPROFILE: tmpDir } : {});
+    expect(status).toBe(0);
+    const payload = JSON.parse(stdout.trim());
+    if (process.platform === "win32") expect(payload.systemMessage).toContain("Owned native-prefix restore witness.");
+    else expect(payload.systemMessage).not.toContain("Owned native-prefix restore witness.");
+  });
+
   it("HG-8: neither inline nor file-path set → no custom append (existing restore-instructions preserved)", () => {
     writePolicyConfig(openrigHome, { messageInline: "", messageFilePath: "" });
 
@@ -359,26 +371,29 @@ describe("OPR.0.4.1.09 — PreCompact writer generates a real packet + records r
     expect(existsSync(marker["outputDir"] as string)).toBe(true);
   });
 
-  // QUARANTINED (D12 base-health, finding D12-F2) — NOT a test bug: the precompact
-  // hook marker does not emit a `restoreMapPath` field at all (marker has only
-  // outputDir), so the per-seat post-compact-extra/<seat>.md pointer these two
-  // assert is unimplemented. Routed as a feature-gap finding; skipped with the
-  // named cause until it lands (no marker-format change is in scope for P1).
-  it.skip("records restoreMapPath = the per-seat post-compact-extra/<seat>.md when it EXISTS", () => {
+  it("records restoreMapPath = the per-seat post-compact-extra/<seat>.md when it EXISTS", () => {
     const extra = join(openrigHome, "compaction", "post-compact-extra", "test-seat@kernel.md");
     mkdirSync(dirname(extra), { recursive: true });
     writeFileSync(extra, "my per-seat restore map");
     const { status } = runHook(openrigHome);
     expect(status).toBe(0);
     expect(readMarker()["restoreMapPath"]).toBe(extra);
+    const bridge = runBridge(openrigHome);
+    expect(bridge.status).toBe(0);
+    expect(JSON.parse(bridge.stdout).hookSpecificOutput.additionalContext).toContain(`Per-seat restore map: ${extra}`);
   });
 
-  // QUARANTINED (D12 base-health, finding D12-F2) — companion to the pin above:
-  // the hook emits no restoreMapPath field, so the "= null when absent" contract
-  // is unimplemented too. Skipped with the named cause until the field lands.
-  it.skip("records restoreMapPath = null when no per-seat extra exists (never an unresolvable pointer)", () => {
+  it("records restoreMapPath = null when no per-seat extra exists (never an unresolvable pointer)", () => {
     const { status } = runHook(openrigHome);
     expect(status).toBe(0);
+    expect(readMarker()["restoreMapPath"]).toBeNull();
+  });
+
+  it("does not publish a per-seat restore-map pointer whose contents declare another seat", () => {
+    const extra = join(openrigHome, "compaction", "post-compact-extra", "test-seat@kernel.md");
+    mkdirSync(dirname(extra), { recursive: true });
+    writeFileSync(extra, "---\nseat: different-seat@kernel\n---\nForeign owned test witness.");
+    expect(runHook(openrigHome).status).toBe(0);
     expect(readMarker()["restoreMapPath"]).toBeNull();
   });
 });
