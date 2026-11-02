@@ -24,9 +24,16 @@ import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../src/domain/se
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { NativeExchangeIdentity, NativeExchangeSlot } from "../src/domain/native-runtime-switch-exchange.js";
+import { ownedWindowsTerminalInvoker } from "./helpers/windows-terminal-owned.js";
+import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
+import { typingGuardModesSchema } from "../src/db/migrations/100_typing_guard_modes.js";
 
 const SEAT = "dev-impl@seat-rig";
 
@@ -205,6 +212,81 @@ describe("live seat runtime switch", () => {
     expect(await service().recover(nodeId)).toMatchObject({ok:true});
     expect(panes.size).toBe(1);expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%0"));expect(native.renames()).toBe(6);
   });
+
+  it.skipIf(process.platform!=="win32" || !process.env.OPENRIG_TEST_PSMUX).each([false,true])("runs the complete switch service through real native terminals and its lifecycle guard with controlled receivers (reject commit=%s)",async rejectCommit=>{
+    db.exec(outboxEntriesSchema.sql);db.exec(seatDeliveryGuardSchema.sql);db.exec(typingGuardModesSchema.sql);
+    const invoke=ownedWindowsTerminalInvoker(home);
+    const live=new TmuxAdapter(invoke.hostExec,undefined,invoke,"psmux");
+    const receiver=path.join(home,"controlled-receiver.cjs");
+    const readyOld=path.join(home,"old-ready.json"),readyNew=path.join(home,"new-ready.json"),inputOld=path.join(home,"old-input.txt"),inputNew=path.join(home,"new-input.txt");
+    fs.writeFileSync(receiver,"const fs=require('fs');const [ready,input]=process.argv.slice(2);if(process.stdin.isTTY)process.stdin.setRawMode(true);process.stdin.on('data',chunk=>fs.appendFileSync(input,chunk));process.stdin.resume();fs.writeFileSync(ready,JSON.stringify({pid:process.pid,generation:process.env.OPENRIG_OCCUPANT_GENERATION}));console.log('owned receiver ready');setInterval(()=>{},1000);");
+    const launch=async(pane:string,ready:string,input:string)=>{
+      const sent=await live.sendShellCommand(pane,renderWindowsLaunch([process.execPath,receiver,ready,input].map(shellQuote).join(" ")));
+      expect(sent.ok,sent.message).toBe(true);
+      await expect.poll(()=>fs.existsSync(ready),{timeout:5000}).toBe(true);
+    };
+    try{
+      db.prepare("UPDATE nodes SET cwd=? WHERE id=?").run(home,nodeId);
+      const created=await live.createSession(SEAT,home,{OPENRIG_NODE_ID:nodeId,OPENRIG_SESSION_NAME:SEAT,OPENRIG_RUNTIME:"codex",OPENRIG_OCCUPANT_GENERATION:predecessorGeneration});
+      expect(created.ok,created.message).toBe(true);
+      const original=(await live.listPanes(SEAT))[0]!;sessionRegistry.updateBinding(nodeId,{tmuxSession:SEAT,tmuxPane:original.id});
+      await launch(SEAT,readyOld,inputOld);
+      const predecessor=JSON.parse(fs.readFileSync(readyOld,"utf8")) as {pid:number;generation:string};
+      live.deliveryGuard=new SeatDeliveryGuard(db,target=>{
+        const binding=sessionRegistry.getBindingForNode(nodeId);
+        if(!binding?.tmuxSession || ![nodeId,binding.tmuxSession,binding.tmuxPane].includes(target))return null;
+        return {nodeId,session:binding.tmuxSession,pane:binding.tmuxPane,occupant:sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid??null};
+      });
+      const work=await queueRepo.create({sourceSession:"owned-source@seat-rig",destinationSession:SEAT,body:"owned native switch acceptance"});
+      queueRepo.claim({qitemId:work.qitemId,destinationSession:SEAT});
+      const targetAdapter:RuntimeAdapter={...adapter("claude-code"),
+        launchHarness:async binding=>{await launch(binding.tmuxSession!,readyNew,inputNew);return {ok:true};},
+        checkReady:async()=>({ready:fs.existsSync(readyNew)}),
+      };
+      let svc:SeatRuntimeSwitchService;
+      svc=service({tmuxAdapter:live,runtimeAdapters:{"claude-code":targetAdapter},readinessTimeoutMs:10000,now:()=>new Date(),sleep:async ms=>{
+        await new Promise(resolve=>setTimeout(resolve,ms));
+        const row=openSwitch();
+        if(row?.phase==="preparing" && fs.existsSync(inputNew) && fs.readFileSync(inputNew,"utf8").includes("--confirm")){
+          const successor=JSON.parse(fs.readFileSync(readyNew,"utf8")) as {pid:number;generation:string};
+          expect(successor.generation).toBe(row.successor_generation);
+          expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(predecessor.generation);
+          expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxPane).toBe(original.id);
+          expect(()=>process.kill(predecessor.pid,0)).not.toThrow();
+          expect(svc.confirm({seatRef:SEAT,switchId:row.id,note:"Controlled receiver observed the handover",actorSession:SEAT,generation:successor.generation}).ok).toBe(true);
+        }
+      }});
+      if(rejectCommit)db.exec("CREATE TRIGGER reject_real_native_switch BEFORE UPDATE OF runtime ON nodes BEGIN SELECT RAISE(ABORT,'controlled native commit failure'); END");
+      const result=await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"Controlled real-terminal acceptance",confirmTimeoutMs:10000});
+      if(rejectCommit){
+        expect(result,JSON.stringify(result)).toMatchObject({ok:false,committed:false});
+        expect(result).not.toHaveProperty("recoveryPending",true);expect(openSwitch()?.phase).toBe("abandoned");
+        expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(predecessor.generation);
+        expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxPane).toBe(original.id);
+        expect((db.prepare("SELECT claimed_by_generation_uuid g FROM queue_items WHERE qitem_id=?").get(work.qitemId) as {g:string}).g).toBe(predecessor.generation);
+        expect((await live.listSessions()).map(session=>session.name)).toEqual([SEAT]);
+        const successor=JSON.parse(fs.readFileSync(readyNew,"utf8")) as {pid:number};
+        expect(()=>process.kill(predecessor.pid,0)).not.toThrow();expect(()=>process.kill(successor.pid,0)).toThrow();
+        expect(fs.readFileSync(inputNew,"utf8")).not.toContain("You now hold");
+        return;
+      }
+      expect(result,JSON.stringify(result)).toMatchObject({ok:true,recoveryPending:false,claimsMoved:1});
+      expect(openSwitch()?.phase).toBe("finished");
+      const successor=JSON.parse(fs.readFileSync(readyNew,"utf8")) as {pid:number;generation:string};
+      expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(successor.generation);
+      const binding=sessionRegistry.getBindingForNode(nodeId)!;
+      expect(binding.tmuxPane).toBe((await live.listPanes(SEAT))[0]!.id);
+      expect(await live.getSessionEnv(SEAT,"OPENRIG_RUNTIME")).toBe("claude-code");
+      expect((db.prepare("SELECT claimed_by_generation_uuid g FROM queue_items WHERE qitem_id=?").get(work.qitemId) as {g:string}).g).toBe(successor.generation);
+      await expect.poll(()=>fs.readFileSync(inputNew,"utf8"),{timeout:5000}).toContain("You now hold");
+      expect((await live.listSessions()).map(session=>session.name)).toEqual([SEAT]);
+      expect(()=>process.kill(predecessor.pid,0)).toThrow();expect(()=>process.kill(successor.pid,0)).not.toThrow();
+    }finally{
+      live.deliveryGuard=undefined;
+      for(const session of await live.listSessions())await invoke(["tmux","kill-session","-t",`=${session.name}`]).catch(()=>{});
+      await invoke(["tmux","kill-server"]).catch(()=>{});
+    }
+  },60000);
 
   it("switches a Codex seat to another account home on the same runtime, committing only after confirmation", async () => {
     const accountHome = path.join(home, "api-account");

@@ -1,6 +1,5 @@
-import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -11,32 +10,9 @@ import { pathToFileURL } from "node:url";
 import { verifyPaneIdleShell, verifyCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 import { verifyWindowsPaneReceiver } from "../src/domain/windows-pane-receiver.js";
 import { nextNativeRuntimeExchangeStep } from "../src/domain/native-runtime-switch-exchange.js";
+import { ownedWindowsTerminalInvoker as ownedInvoker } from "./helpers/windows-terminal-owned.js";
 
-const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
-
-function ownedInvoker(dir: string) {
-  const registry = path.join(dir, "registry");
-  mkdirSync(registry);
-  const windows = process.env.SystemRoot ?? "C:\\Windows";
-  const powershell = path.join(windows, "System32/WindowsPowerShell/v1.0/powershell.exe");
-  const config=path.join(dir,"owned-psmux.conf");
-  writeFileSync(config,`set -g default-shell '"${powershell.replaceAll("\\","/")}" -NoLogo -NoProfile -NoExit'\n`);
-  const namespace = `owned-${randomUUID()}`;
-  const env: NodeJS.ProcessEnv = {
-    SystemRoot: windows, WINDIR: windows, ComSpec: path.join(windows, "System32/cmd.exe"),
-    PATH: [path.dirname(process.execPath), path.dirname(powershell), path.join(windows, "System32")].join(path.delimiter),
-    HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir,
-    PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: config,
-  };
-  const invoke = async (argv: string[]) => {
-    const args = ["-L", namespace, ...argv.slice(1)];
-    // The owned config selects a real profile-free shell. Do not append a
-    // second -- command over the adapter's private production bootstrap.
-    return (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, args, { env, cwd: dir, windowsHide: true, timeout: 10000 })).stdout;
-  };
-  return Object.assign(invoke,{environment:env,namespace});
-}
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
   it.each([0,1,2])("exchanges owned session names without moving or killing either ConPTY (attached clients=%i)",async clientCount=>{

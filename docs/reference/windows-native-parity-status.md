@@ -27,6 +27,38 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Complete service on real native terminals with controlled receivers (2026-11-02)
+
+Two new opt-in cases exercise the complete runtime-switch service with stock
+psmux, real PowerShell/Node processes, a real lifecycle delivery guard, SQLite
+repositories and a real queue claim. A controlled input receiver stands in for
+each model harness; no model/provider request is made. Its actual received input
+must contain the handover before the reserved successor generation confirms.
+The predecessor is still alive and bound at that confirmation boundary.
+
+On successful commit, the actual successor generation takes the binding and
+queue claim, receives the activation text, and keeps running after the predecessor
+process exits. On injected database commit failure, real native session names
+roll back, the original binding/generation/claim and predecessor process survive,
+and the uncommitted successor exits without receiving activation. No parking or
+staging session remains in either completed case.
+
+Both real-terminal service cases pass with the guard enabled. Their initial
+fixture failures were corrected by applying the real outbox/guard migrations,
+launching through `tmuxSession` as the production runtime adapters do, and
+allowing only host-native taskkill commands after checking the PID's owned home.
+The shared owned-terminal fixture was extracted so these tests and the terminal
+tests use the same isolated home, registry, namespace and explicit executable.
+All seven opt-in native terminal cases then pass. Six complete non-opt-in
+service/custody/route/adapter/planner/journal files pass 292 tests, with the two
+real-terminal service cases separately selected and passed; daemon TypeScript
+checking passes.
+
+This is real terminal/service/guard acceptance with controlled harnesses. It does
+not establish actual Claude/Codex model behavior, real provider conversation
+continuity or the deferred remote Pi OAuth acceptance. Same-head full platform
+validation also remains required.
+
 ### Real native attached-client following and retirement (2026-11-02)
 
 The owned stock psmux exchange test now covers zero, one and two real attached
