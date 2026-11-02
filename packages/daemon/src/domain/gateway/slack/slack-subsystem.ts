@@ -114,6 +114,7 @@ export function makeHumanReplyResolver(
     let uncertain = false;
     let parkedOnAsked = false;
     let episodeKey: string | undefined;
+    let digestReceipt = false;
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
@@ -130,6 +131,7 @@ export function makeHumanReplyResolver(
       const replied = slackMicros(input.messageTs);
       if (posted !== null && replied !== null && replied <= posted) return "not-applicable";
       uncertain = Boolean(receipt?.digest) || posted === null || replied === null;
+      digestReceipt = Boolean(receipt?.digest);
     }
 
     try {
@@ -137,7 +139,12 @@ export function makeHumanReplyResolver(
       // theirs; this reply stays the conversation it already became.
       const winner = episodeKey ? queueRepo.committedAnswerFromAnother(input.qitemId, input.actorSession, episodeKey) : null;
       if (winner) {
-        await contract.act({ verb: "resolve", qitemId: input.qitemId, actorSession: winner.sourceSession, decision: humanAnswerText(winner.body) });
+        // Its typed words are the question's answer, stored as its own resume would: it was taken as the answer only after
+        // the question posted, so only a digest receipt leaves its order uncertain.
+        const words = humanAnswerText(winner.body);
+        const stores = queueRepo.isPersonAddress(source!.destinationSession) && queueRepo.answersAsk(source!, winner.sourceSession) && !digestReceipt;
+        await contract.act({ verb: "resolve", qitemId: input.qitemId, actorSession: winner.sourceSession, decision: words,
+          ...(stores ? { answerText: words } : {}) });
         return "not-applicable";
       }
       // A question parked on the person it asked takes their typed reply as its answer, stored in the resume's own

@@ -81,6 +81,9 @@ export interface InboundQueuePort {
   getEpisodeAnswer?(qitemId: string, actorSession: string): { qitemId: string; body: string } | null;
   /** Every answer this person returned to the ask, oldest first, so a replay after close can find its own. */
   listHumanAnswers?(qitemId: string, actorSession: string): Array<{ qitemId: string; body: string }>;
+  /** Whether a reply routed to `destination` can answer the row: routed to a person, only when that person is the row's
+   *  asking seat (the sender of an ask to a person). A root recorded with a person as its seat routes to someone else. */
+  routesToAsker?(qitemId: string, destination: string): boolean;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -243,6 +246,10 @@ export function makeQueuePorts(
     },
     getEpisodeAnswer: (qitemId, actorSession) => queueRepo.currentEpisodeAnswer(qitemId, actorSession),
     listHumanAnswers: (qitemId, actorSession) => queueRepo.listHumanAnswers(qitemId, actorSession),
+    routesToAsker: (qitemId, destination) => {
+      const item = queueRepo.getById(qitemId);
+      return !queueRepo.isPersonAddress(destination) || (item !== null && destination === item.sourceSession);
+    },
     async createQitem(input: CreateQitemInput): Promise<string> {
       const ask = input.inReplyTo ? queueRepo.getById(input.inReplyTo) : null;
       // The asked person's answer, or another registered person's: either takes the ask's one shared answer identity.
@@ -265,7 +272,9 @@ export function makeQueuePorts(
           ...(input.typedReply && ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
       // Another registered person's answer already settled the ask: these words still reach the agent, as correspondence.
-      if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) created = await queueRepo.create(createInput);
+      if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) {
+        created = await queueRepo.create({ ...createInput, tags: createInput.tags.filter((tag) => tag !== "human-answer") });
+      }
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {
