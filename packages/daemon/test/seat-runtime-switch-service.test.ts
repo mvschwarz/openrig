@@ -570,6 +570,12 @@ describe("live seat runtime switch", () => {
       expect(result).toMatchObject({ ok: false, code: "runtime_switch_unsupported" });
       expect((result as { message: string }).message).toMatch(/only a single-window, single-pane seat can/);
     });
+    it("a seat with no bound pane says how to get it on the other runtime, and what that route doesn't carry", async () => {
+      db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = ?").run(nodeId);
+      expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true })).toMatchObject({ ok: false, code: "runtime_switch_unsupported",
+        message: expect.stringMatching(/it has no bound tmux pane/),
+        guidance: expect.stringMatching(/start it first.*never started.*declare the other runtime.*rig spec.*doesn't carry this seat's edges, settings or queued work/s) });
+    });
     it("a seat on another runtime", async () => {
       db.prepare("UPDATE nodes SET runtime = 'pi' WHERE id = ?").run(nodeId);
       expect(await service().setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "x", dryRun: true }))
