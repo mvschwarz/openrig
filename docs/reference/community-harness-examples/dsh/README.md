@@ -22,13 +22,17 @@ own. [bpamiri/dsh-seat](https://github.com/bpamiri/dsh-seat) is a fuller dsh run
    `$OPENRIG_HOME/community-harnesses/`. Then declare a member with `runtime: dsh`.
 3. **Give the seat credentials.** Each seat gets its own dsh home, at `$OPENRIG_HOME/state/dsh/<node>/home`, because dsh
    rewrites its profile there on every start. Put a `.credentials.yaml` there, or put a provider key in the seat's
-   `env:`. To use a home you prepared yourself, set `OPENRIG_DSH_HOME`. `OPENRIG_DSH` names another `dsh` binary.
+   `env:`. To use a home you prepared yourself, set `DSH_HOME` in the member's `env:`; `DSH_BIN` there names another
+   `dsh` binary. A member's `env:` can't set `OPENRIG_*` names, which OpenRig reserves, but the runner still reads
+   `OPENRIG_DSH_HOME` and `OPENRIG_DSH` when something exports them to it, such as a preset `command` wrapper.
 
 The runner's own defaults for dsh:
 - **Uploads:** the seat home gets a `cordis.patch.yml` that turns off dsh's session-log and plugin-list uploads to
   DeepSeek, and the runner starts dsh with `DSH_TELEMETRY_DISABLED=1`.
 - **Permission mode:** `DSH_PERMISSION_MODE` is `workspace-write` unless you set it.
 - **The hook token:** OpenRig's activity token isn't passed to dsh, whose shell tool inherits the runner's environment.
+- **Its version:** the launch record names dsh's version from `dsh --version`. If that fails, it names the version dsh's
+  ACP handshake reports, marked as such: dsh 0.2.1-rc.2 reports 0.0.1 there.
 
 ## Permissions
 

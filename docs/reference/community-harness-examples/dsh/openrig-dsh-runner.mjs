@@ -9,7 +9,7 @@
 // can't answer (refusing and holding needs input only when the seat opted in to refusal). Copy it and maintain it as your
 // own.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -207,16 +207,27 @@ const UPLOADS_OFF = [
   "",
 ].join("\n");
 
-/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). OPENRIG_DSH_HOME names
- *  one you prepared yourself, which is used as it is. */
+/** Each seat gets its own writable dsh home (dsh rewrites its profile there on every start). DSH_HOME, which a rig
+ *  spec's env: can set, or OPENRIG_DSH_HOME names one you prepared yourself, which is used as it is. */
 function seatHome() {
-  if (process.env.OPENRIG_DSH_HOME) return process.env.OPENRIG_DSH_HOME;
+  const prepared = process.env.OPENRIG_DSH_HOME || process.env.DSH_HOME;
+  if (prepared) return prepared;
   const seat = process.env.OPENRIG_NODE_ID || process.env.OPENRIG_SESSION_NAME || "default";
   const home = join(openrigHome(), "state", "dsh", seat, "home");
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const patch = join(home, "cordis.patch.yml");
   if (!existsSync(patch)) writeFileSync(patch, UPLOADS_OFF, { mode: 0o600 });
   return home;
+}
+
+/** dsh's version as its CLI reports it, or null when it can't say. dsh 0.2.1-rc.2's ACP handshake reports 0.0.1. */
+function cliVersion(bin, env) {
+  try {
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", env, timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] });
+    return out.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function writeLaunchRecord(fields) {
@@ -254,7 +265,10 @@ async function main() {
   agentEnv.DSH_PERMISSION_MODE ??= "workspace-write";
   if (agentEnv.DSH_TELEMETRY_DISABLED === undefined && agentEnv.DSH_TELEMETRY_MODE === undefined) agentEnv.DSH_TELEMETRY_DISABLED = "1";
 
-  const child = spawn(env.OPENRIG_DSH || "dsh", ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
+  // DSH_BIN, which a rig spec's env: can set, or OPENRIG_DSH names another dsh binary.
+  const bin = env.OPENRIG_DSH || env.DSH_BIN || "dsh";
+  const version = cliVersion(bin, agentEnv);
+  const child = spawn(bin, ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
   const peer = new AgentPeer(child, (line) => say(`[dsh] ${line}`));
   const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0, asking: 0, waiting: 0, resolvedAsk: null };
@@ -510,7 +524,8 @@ async function main() {
     return fatal(`dsh didn't complete the ACP handshake (${error.message})`, 1);
   }
   const capabilities = init?.agentCapabilities ?? {};
-  const producer = `${RUNNER}; dsh ${init?.agentInfo?.version ?? "(version not reported)"}; ACP ${init?.protocolVersion ?? "?"}`;
+  const reported = init?.agentInfo?.version ? `${init.agentInfo.version} (as its ACP handshake reports it)` : "(version not reported)";
+  const producer = `${RUNNER}; dsh ${version ?? reported}; ACP ${init?.protocolVersion ?? "?"}`;
   const resumeRef = env.OPENRIG_RESUME_REF;
   // Whether dsh's own session list names a conversation, following its pages: true, false when every page was read and
   // none names it, or undefined when the list fails, answers in another shape, or runs past LIST_PAGES pages. An ACP
