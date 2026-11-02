@@ -10,7 +10,8 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
-import { readPlatformEnv, renderWindowsLaunch } from "@openrig/daemon/windows-launch";
+import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv } from "@openrig/daemon/windows-launch";
+import { windowsHerdrEnvironmentCommand } from "./windows-herdr-command.js";
 import { detachedTerminalEnvironment } from "./terminal-environment.js";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
@@ -51,7 +52,12 @@ export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): W
     sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     id: () => randomUUID().slice(0, 12),
     notice: message => process.stderr.write(`${message}\n`),
-    herdrConfig: (socketPath, columns) => prepareHerdrLaunchConfig(env, socketPath, columns),
+    herdrConfig: (socketPath, columns) => prepareHerdrLaunchConfig(process.platform !== "win32" ? env : {
+      ...env,
+      HERDR_CONFIG_PATH: readPlatformEnv(env,"HERDR_CONFIG_PATH","win32"),
+      XDG_CONFIG_HOME: readPlatformEnv(env,"XDG_CONFIG_HOME","win32") ?? readPlatformEnv(env,"APPDATA","win32")
+        ?? path.win32.join(readPlatformEnv(env,"USERPROFILE","win32") ?? homedir(),"AppData","Roaming"),
+    }, socketPath, columns),
     columns: async () => {
       if (process.stdout.isTTY && process.stdout.columns > 0) return process.stdout.columns;
       if (process.platform === "win32") return undefined;
@@ -98,6 +104,16 @@ export function inRex(env: NodeJS.ProcessEnv): boolean {
 }
 
 async function herdrBinary(deps: WindowDeps): Promise<string | null> {
+  if (deps.platform === "win32") {
+    const system = path.win32.join(readPlatformEnv(deps.env,"SystemRoot","win32") ?? "C:\\Windows","System32");
+    const found = (await deps.exec(path.win32.join(system,"where.exe"),["herdr.exe"]).catch(()=>"")).trim().split(/\r?\n/);
+    const install = readPlatformEnv(deps.env,"HERDR_INSTALL_DIR","win32");
+    for (const binary of [...found,...(install?[path.win32.join(install,"herdr.exe")]:[])]) {
+      if (!path.win32.isAbsolute(binary)) continue;
+      try { await deps.exec(binary,["--version"]); return binary; } catch { /* next explicit installation */ }
+    }
+    return null;
+  }
   const dir = deps.env["HERDR_INSTALL_DIR"] ?? path.join(deps.env["HOME"] ?? homedir(), ".local", "bin");
   for (const candidate of ["herdr", path.join(dir, "herdr")]) {
     try {
@@ -120,6 +136,18 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((comm
   if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return "This is a CI run.";
   if (host === "herdr" || inHerdrPane(deps.env)) return { currentHerdr: true };
   if (deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]) return "This is an SSH session; no desktop window is opened over SSH.";
+  if (deps.platform === "win32") {
+    const system=path.win32.join(deps.env.SystemRoot ?? "C:\\Windows","System32");
+    const powershell=path.win32.join(system,"WindowsPowerShell/v1.0/powershell.exe");
+    const desktop=(await deps.exec(powershell,["-NoProfile","-NonInteractive","-Command","[System.Diagnostics.Process]::GetCurrentProcess().SessionId"],1000).catch(()=>"")).trim();
+    if (!/^\d+$/.test(desktop) || Number(desktop)===0) return "No interactive Windows desktop session could be confirmed.";
+    const terminal=(await deps.exec(path.win32.join(system,"where.exe"),["wt.exe"]).catch(()=>"")).trim().split(/\r?\n/)[0];
+    if (!terminal || !path.win32.isAbsolute(terminal)) return "Windows Terminal is unavailable.";
+    return async command => {
+      await deps.launch(terminal,["--window","new","new-tab",powershell,"-NoLogo","-NoProfile","-EncodedCommand",Buffer.from(command,"utf16le").toString("base64")]);
+      return {app:"Windows Terminal",surface:"window-requested"};
+    };
+  }
   if (deps.platform === "darwin") {
     const inGhostty = host === "ghostty" || host === "com.mitchellh.ghostty";
     const inTerminal = host === "Apple_Terminal" || host === "com.apple.Terminal";
@@ -294,7 +322,9 @@ function failure(provider: string, error: string): OpenViewResult {
 /** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
 async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps, serverArgs: readonly string[]): Promise<boolean> {
   try {
-    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    const nativeTargets = pages.flat().map(pane => ({pane,target:pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv)}));
+    const native = deps.platform === "win32";
+    const tmux = native ? nativeTargets.find(item=>item.target)?.target?.tmux ?? "" : (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
     if (!path.isAbsolute(tmux)) return false;
     const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "list", "--workspace", existing.workspace_id]));
     const panes = listed?.result?.panes as Array<{ workspace_id: string; tab_id: string; pane_id: string }> | undefined;
@@ -307,6 +337,12 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
     for (const line of inventory.trim().split("\n")) {
       const [pid, session, readOnly] = line.split("\t");
       if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
+      if (native) {
+        clients.set(pid,nativeTargets.filter(({target})=>target && target.tmux===tmux && target.session===session
+          && target.readOnly===(readOnly==="1") && JSON.stringify(target.server)===JSON.stringify(serverArgs))
+          .map(({pane})=>pane.recoveryCommand ?? pane.paneCommand));
+        continue;
+      }
       // Compare the composer's exact command, including session aliases and read-only mode.
       // SSH/custom commands cannot be confirmed from this local client inventory.
       const flags = readOnly === "1" ? ["-r "] : ["", "-f ignore-size "];
@@ -344,6 +380,14 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
 
 /** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
 export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps(), expectedPlan?: string, requestedSession?: string, following?: FollowControls): Promise<OpenViewResult> {
+  if (deps.platform === "win32") {
+    const source=deps;
+    const env={...source.env};
+    for (const key of ["SystemRoot","HOME","APPDATA","USERPROFILE","XDG_CONFIG_HOME","HERDR_INSTALL_DIR","HERDR_SESSION","HERDR_SOCKET_PATH","HERDR_ENV","HERDR_PANE_ID","TERM_PROGRAM","CI","SSH_CONNECTION","SSH_CLIENT","SSH_TTY"]) {
+      const value=readPlatformEnv(source.env,key,"win32"); if(value!==undefined)env[key]=value;
+    }
+    deps={...source,env,exec:(file,args,timeout)=>file!=="/usr/bin/env"?source.exec(file,args,timeout):source.exec(path.win32.join(env.SystemRoot??"C:\\Windows","System32/WindowsPowerShell/v1.0/powershell.exe"),["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(windowsHerdrEnvironmentCommand(args),"utf16le").toString("base64")],timeout)};
+  }
   const session = requestedSession?.trim();
   if (deps.platform === "win32" && requestedProvider === "rex") {
     return { ...failure("rex", "Rex is unavailable on Windows; use --provider tmux --window."), windowAttempted: false };
@@ -372,7 +416,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (following && selectedProvider !== "herdr") throw new Error("Following requires the qualified Herdr provider.");
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
     if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
-    if (deps.platform === "win32") return await openWindowsTerminalView(client, view, selectedProvider, deps, expectedPlan);
+    if (deps.platform === "win32" && selectedProvider !== "herdr") return await openWindowsTerminalView(client, view, selectedProvider, deps, expectedPlan);
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;
@@ -422,7 +466,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (typeof launchWindow === "object") {
       provider = "herdr";
       if (selectedProvider === "tmux") return failed("The current Herdr view requires provider herdr; no extra window was opened.");
-      const base = path.join(deps.env["HOME"] ?? homedir(), ".config", "herdr");
+      const base = deps.platform === "win32" ? path.win32.join(deps.env.XDG_CONFIG_HOME ?? deps.env.APPDATA ?? path.win32.join(deps.env.USERPROFILE ?? homedir(),"AppData","Roaming"),"herdr") : path.join(deps.env["HOME"] ?? homedir(), ".config", "herdr");
       const callerSocket = deps.env["HERDR_SOCKET_PATH"] ?? (deps.env["HERDR_SESSION"]
         ? path.join(base, "sessions", deps.env["HERDR_SESSION"], "herdr.sock") : path.join(base, "herdr.sock"));
       if (!socket || path.resolve(socket) !== path.resolve(callerSocket)) {
@@ -440,10 +484,12 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     }
     let configEnv = "";
     let configPrefix = "";
+    let nativeConfig: string | undefined;
     if (herdr && socket && !currentHerdr) {
       try {
         const narrow = deps.herdrConfig(socket);
-        const wide = typeof launchWindow === "function" ? deps.herdrConfig(socket, 160) : narrow;
+        if (deps.platform === "win32") nativeConfig = narrow;
+        const wide = typeof launchWindow === "function" && deps.platform !== "win32" ? deps.herdrConfig(socket, 160) : narrow;
         if (narrow === wide) configEnv = ` HERDR_CONFIG_PATH=${shellQuote(narrow)}`;
         else configPrefix = `set -- $(stty size 2>/dev/null); if [ "${'${2:-0}'}" -ge 160 ]; then export HERDR_CONFIG_PATH=${shellQuote(wide)}; else export HERDR_CONFIG_PATH=${shellQuote(narrow)}; fi; exec `;
         windowNotes.push("Your Herdr config is kept when present; otherwise the sidebar starts open at 160 columns and collapsed below.");
@@ -451,7 +497,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         windowNotes.push(`Could not prepare OpenRig's private Herdr settings (${error instanceof Error ? error.message : String(error)}); Herdr starts with its usual sidebar.`);
       }
     }
-    const directCommand = herdr && socket
+    const directCommand = herdr && socket && deps.platform === "win32"
+      ? renderWindowsLaunchArgv([herdr],{HERDR_SOCKET_PATH:socket,...(nativeConfig?{HERDR_CONFIG_PATH:nativeConfig}:{})},{remove:["TMUX","HERDR_SESSION","HERDR_SOCKET_PATH"]})
+      : herdr && socket
       ? `${configPrefix}env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)}${configEnv} ${shellQuote(herdr)}`
       : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh (?!-t(?:\s|$))/, "ssh -t ")}`;
     manualCommand = herdr && socket ? directCommand
