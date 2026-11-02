@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### OpenShell real-engine qualification boundary (2026-11-02)
+
+Live PATH checks find neither openshell.exe nor podman.exe on this host. The
+official v0.1.6 release asset list contains no Windows native binary. Its
+[installation documentation](https://docs.nvidia.com/openshell/v0.1.6/about/installation/)
+directs Windows users to build the separate windows branch; Podman is listed
+as a Linux runtime. The Windows branch's
+[runtime guide](https://github.com/NVIDIA/OpenShell/blob/windows/WINDOWS.md)
+explicitly excludes native Docker/Podman/Kubernetes/MicroVM compute backends
+and records missing foreground attachment, ConPTY resize and live-generation
+gateway-restart recovery for its development-only MXC backend.
+
+The current OpenRig driver uses a Linux Python guest contract. A passing native
+CLI fixture or Windows pipe observer therefore does not prove that MXC can
+provide that contract. A native client controlling a qualified Linux gateway
+and its rootless engine is a separate path requiring real qualification.
+An isolated source snapshot of windows commit
+e451bb390a3b463724ccf5547b46b9432428690d is retained locally (archive SHA-256
+83e13f426240b9f45fb7b75c950e823a97b4126c35c2767fd95207ed8349b049).
+The official native build task is being evaluated with existing MSVC/Rust and
+task-owned outputs; no build, gateway, sandbox or engine acceptance is claimed.
+
 ### OpenShell finite native CLI custody (2026-11-02)
 
 The default OpenShell driver now runs finite native CLI clients through the
@@ -840,7 +862,7 @@ entire row. This is a current work list, not proof that discovery is exhaustive.
 
 | Requirement group | Current missing or unverified scope | Evidence needed to close |
 | --- | --- | --- |
-| Terminal and engine behavior | Real Herdr/stock psmux in-pane attachment remains failed/unconfirmed; Git Bash managed command delivery has a scoped real pass, while other shell/legacy-pane combinations remain unqualified; native Rex mapping is incomplete and its Windows builds are not in public testing; real rootless Podman/OpenShell is unverified. | Actual identity-bound attach/input/follow/reuse/stop and engine lifecycle effects on owned native instances, preserving source sessions and drafts. |
+| Terminal and engine behavior | Real Herdr/stock psmux in-pane attachment remains failed/unconfirmed; Git Bash managed command delivery has a scoped real pass, while other shell/legacy-pane combinations remain unqualified; Rex native launch/control mapping now has scoped fixtures but real GUI acceptance remains unqualified; real rootless Podman/OpenShell is unverified, with the native MXC/Linux guest-contract distinction above. | Actual identity-bound attach/input/follow/reuse/stop and engine lifecycle effects on owned native instances, preserving source sessions and drafts. |
 | File and metadata behavior | POSIX owner/group/execute, directory ACL semantics and special-file equivalence remain incomplete. Readonly replacement and directory-time repair are scoped passes. | Explicit cross-platform metadata semantics plus bidirectional real transfer and failure/retention evidence; no unsupported field counted as preserved. |
 | Discovery and same-head verification | The latest safe static inventory at 51708ce inspected 1,638 production text files and selected 544 candidates: 137 unchanged against its older ledger, 73 changed, 334 outside that ledger; one private row was excluded before reads. Those classifications are not semantic reviews. Current complete Windows/Linux suites have not passed at a common frozen head. | Reconcile changed/outside-ledger behavior, run applicable complete suites on the same source, and retain exact failures/skips/coverage limits. |
 | Real harness and remote continuity | Remote Pi OAuth renewal is deferred by the operator; the owned SSH host is currently unreachable. The new Windows SSH front door, other harness lifecycles and current installed-runtime continuity remain unverified. | Owned real provider, SSH front-door, reconnect/restore and installed-runtime receipts after the external prerequisites return. |
