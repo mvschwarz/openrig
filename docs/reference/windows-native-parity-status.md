@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Legacy Pi/OMP restore selection forwarding (2026-11-02)
+
+The legacy Pi resume API now accepts a trailing selection guard, shared by OMP. It checks before preparation and after asynchronous staging, passes the guard to the write boundary, and rechecks before the no-input path-length fallback. Refusal remains attention-required; missing conversation files retain their existing retry-fresh/stop-and-ask handling. RestoreOrchestrator now forwards its selected-history guard to both legacy adapters and refuses a known-invalid selection before calling them, preserving old argument layouts when no guard exists.
+
+Six adapter cancellation cases cover Pi initial/staging/write/fallback and OMP initial/write behavior. Four database-backed orchestrator cases verify no resume call for an invalid selection and exact callback forwarding for a valid selection. The complete Pi adapter file passed 75 tests and the new orchestrator file four on Windows; the same two complete files passed 79/79 on ordinary-user WSL; daemon typecheck passed. Sidecars, readiness and native dispatch are controlled in these tests. Real provider continuity, late-cancellation metadata preservation and full current-head restore acceptance are not established by this result.
+
 ## Contained launch selection and uncertain native custody (2026-11-02)
 
 Contained startup now refuses an initially invalid selection before issuing grants or writing a launch intent. After the native preparation request, it rechecks selection before viewer dispatch and passes the same guard to the viewer's transport write boundary. A late refusal reports viewer-unconfirmed and retains the original requested operation; it does not claim that native execution never started or try to undo/relaunch an uncertain effect.

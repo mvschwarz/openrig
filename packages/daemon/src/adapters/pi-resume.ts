@@ -70,10 +70,16 @@ export class PiResumeAdapter {
     resolvedPosture?: "floor" | "full_bypass" | "auto",
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
+    beforeNativeDispatch?: () => boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
     }
+    const selectionChanged = () => ({ ok: false as const, code: "attention_required", message: "Selected history changed; no further runner resume input is authorized." });
+    if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
+    const beforeInput = beforeNativeDispatch ? () => {
+      if (!beforeNativeDispatch()) throw new Error("Selected history changed before runner resume input");
+    } : undefined;
     const sessionFile = resumeToken!;
 
     if (!this.fs.exists(sessionFile)) {
@@ -128,12 +134,15 @@ export class PiResumeAdapter {
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, runnerCommand, { runtime: this.runtime })
       : bareCommand;
     // Short commands retain the direct path; long commands exec from a private script.
-    let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
+    let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
     if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {
-      textResult = await this.tmux.sendShellCommand(tmuxSessionName, bareCommand, undefined, { stageIfLong: true, execInScript: true });
+      if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
+      textResult = await this.tmux.sendShellCommand(tmuxSessionName, bareCommand, beforeInput, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
+      if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
     const result = await this.verifyResume(tmuxSessionName, sessionFile, launchId);

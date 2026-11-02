@@ -125,6 +125,35 @@ it.each(["pi", "omp"].flatMap(runtime => ["fresh", "fork", "resume"].flatMap(kin
   expect(tmux.sendKeys).not.toHaveBeenCalled();
 });
 
+it.each(["pi", "omp"].flatMap(runtime => (runtime === "pi" ? ["initial", "staging", "before-write", "fallback"] : ["initial", "before-write"])
+  .map(phase => ({ runtime, phase }))))("legacy $runtime resume refuses changed selection at $phase", async ({ runtime, phase }) => {
+  const stateRoot = nodePath.resolve("owned-resume-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
+  const files = memFs({ [sessionFile]: "owned synthetic session" });
+  let selected = phase !== "initial", calls = 0;
+  let release!: () => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  const staging = new Promise<void>(resolve => { release = resolve; });
+  const effects: string[] = [];
+  const tmux = mockTmux();
+  tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    calls++;
+    if (phase === "fallback" && calls === 1) { selected = false; return { ok: false, code: "launch_path_too_long", message: "Owned refusal before input" }; }
+    if (phase === "before-write") selected = false;
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    effects.push(command); return { ok: true };
+  });
+  const environment = { command: async () => { observed(); if (phase === "staging") await staging; return "owned-wrapped-resume"; } } as unknown as SeatLaunchEnvironment;
+  const Adapter = runtime === "pi" ? PiResumeAdapter : OmpResumeAdapter;
+  const adapter = new Adapter(tmux, files, { stateRoot, runnerEntryPath: nodePath.resolve("owned-runner.js") }, { seatLaunchEnvironment: environment, sleep: async () => {} });
+  vi.spyOn(adapter as any, "verifyResume").mockResolvedValue({ ok: true });
+  const pending = adapter.resume(SESSION, `${runtime}_session_file`, sessionFile, nodePath.resolve("owned-work"), undefined, undefined, undefined, () => selected);
+  if (phase === "staging") { await started; selected = false; release(); }
+  expect(await pending).toMatchObject({ ok: false, code: "attention_required" });
+  expect(effects).toEqual([]);
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+});
+
 // ── protocol builders ─────────────────────────────────────────────────────────
 
 describe("pi-runner-protocol", () => {

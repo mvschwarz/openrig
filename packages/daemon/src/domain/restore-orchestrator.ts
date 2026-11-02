@@ -2569,7 +2569,8 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
+      if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort, ...(beforeNative ? [beforeNative] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -2585,7 +2586,10 @@ export class RestoreOrchestrator {
       return { kind: "failed", message: result.message };
     }
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
-      const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      const result = beforeNative
+        ? await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, undefined, beforeNative)
+        : await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
