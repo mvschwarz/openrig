@@ -51,7 +51,9 @@ describe("StoryGraph", () => {
     expect(within(childRow).getByText("In progress")).toBeTruthy();
     // date cell shows the calendar date (month + day) + time, never a
     // time-only / relative "Today"/"Yesterday" label (tz-robust shape check)
-    expect(rootRow.textContent).toMatch(/[A-Za-z]{3}\s+\d{1,2}/);
+    for (const part of new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).formatToParts(new Date("2026-06-23T02:00:00.000Z"))) {
+      if (part.type === "month" || part.type === "day") expect(rootRow.textContent).toContain(part.value);
+    }
     expect(rootRow.textContent).toMatch(/\d{1,2}:\d{2}/);
     expect(rootRow.textContent).not.toMatch(/today|yesterday/i);
   });

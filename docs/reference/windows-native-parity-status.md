@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Complete UI directory regression follow-up (2026-11-02)
+
+The complete UI directory at `319eb4e` reported 1,822 passed, ten failed and one pending natively, and 1,826 passed, six failed and one pending on WSL. All 545 tracked UI files matched across the two runs; the WSL source hashes stayed unchanged. Failures exposed current-directory assumptions in source/asset tests, an LF-only route assertion, direct execution of the extensionless tsx shim on Windows, and English-only calendar assertions on a Chinese-locale host.
+
+Tests now anchor source/asset paths at their test directory, accept CRLF route source, and execute the real tsx JS entry through Node with the existing bounded child-render guard. Date assertions require localized month/day fields instead of forcing English; production formatting is unchanged. Seven complete follow-up files passed 84/84 on both Windows and WSL. This does not substitute for the final complete UI directory rerun or deployed-browser acceptance.
+
 ## Native workspace mission discovery (2026-11-02)
 
 Filesystem mission discovery now reuses the scope allowlist resolver instead of a separate POSIX-only prefix implementation. A Windows workspace below an allowlist root, including UNC and mixed-separator/exact-root spellings, requests the correct relative missions directory. Workspace labels use the daemon path syntax for their basename and preserve literal backslashes in POSIX names. The existing remote-selection gate still disables local filesystem requests.
