@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Real POSIX command creation and offline stop at 4335017 (2026-11-03)
+
+Ordinary-user WSL compiled the paired daemon at
+`4335017d2274511f2ba42864ddfc53b804469c63` after matching 4,730 public tracked
+regular files. Public hashes and the existing private dependency's normalized
+Git identity matched before/after compilation; private source was not viewed
+or copied. Six documentation links and other mirror files remain outside
+complete checkout equivalence.
+
+The real tmux fixture created the same pipe/Unicode/hash-bearing logical name
+on two independently owned socket paths, using the new production command
+creation surface and literal Node child arguments. Both children independently
+wrote the expected arguments. Stopping the first session through the new
+offline cleanup surface left the second server's session present; querying the
+first afterward returned missing, and stopping the second final session returned
+stopped. Both owned sockets/processes and temporary files were cleaned. This
+qualifies this POSIX creation/isolation/final-session-stop case, not the actual
+watcher SSE path, Windows stock psmux, desktop attachment or provider continuity.
+No deployment, original-team operation or public push occurred.
+
 ## Installed command/cleanup gate and final-session classification (2026-11-03)
 
 The native build/pack/isolated-prefix install gate passed at
