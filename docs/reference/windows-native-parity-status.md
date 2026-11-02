@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Colon-name creation persistence and explicit session pane lookup (2026-11-03)
+
+Both native creation-environment persistence branches now address the complete
+logical session through its verified physical binding: stock private-config
+persistence and the supplemental file used for nonidentifier environment names
+with an advertised file protocol. They no longer interpret a logical colon as
+a window delimiter after successful creation. A new explicit listSessionPanes
+entry distinguishes a pure session name from listPanes' session/window target
+expression. Probe and managed creation use it for fresh-pane proof; native probe
+rollback selects its already-verified physical server directly.
+
+Five complete creation/environment/mapping/stop/format files passed 34/34 on
+Windows. Four additional exact-target/argv/parent-environment/exchange files
+passed 68 with two skips, and daemon TypeScript/assets build passed. Controlled
+creation fixtures cover both the advertised file protocol and stock fallback,
+marker registration, persistence target, pane readback and no prefix-session
+selection. A colon-bearing unusable probe is rolled back only on its verified
+server. The tests do not run an actual stock psmux instance.
+
+Other callers that already hold a pure session name still need migration to the
+explicit pane lookup, and general session/window target expressions and batched
+capture need their own ambiguity audit. Installed/full-directory and real
+psmux receipts predate this repair. No deployment, user-team operation or public
+push occurred.
+
 ## Colon-bearing native names in session-specific operations (2026-11-03)
 
 Native session probe, stop and session-environment read/write/remove now resolve

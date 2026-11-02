@@ -51,3 +51,8 @@ it.each(["rollback", "rollback-changed"] as const)("uses the original creation r
   const f = fixture(mode); expect(await f.adapter.createProbeSession(f.logical)).toMatchObject({ ok: false, code: "guard_target_unknown" });
   expect(f.present()).toBe(mode === "rollback-changed");
 });
+it("rolls back only the verified physical server for a colon-bearing probe name", async () => {
+  const f = fixture("rollback", "owned:probe");
+  expect(await f.adapter.createProbeSession(f.logical)).toMatchObject({ ok: false, code: "guard_target_unknown" });
+  expect(f.present()).toBe(false);
+});

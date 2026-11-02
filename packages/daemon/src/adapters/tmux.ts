@@ -523,7 +523,7 @@ export class TmuxAdapter {
     let message = "New probe pane could not be established; no input written.";
     let pane: string | null = null;
     try {
-      const panes = await this.listPanes(name);
+      const panes = await this.listSessionPanes(name);
       pane = panes.length === 1 ? panes[0]!.id : null;
       // #188: a fresh tmux server reuses pane ids, so a stale seat binding can name the new pane. That
       // probe could not be cleaned up safely later, so it is not used.
@@ -552,7 +552,7 @@ export class TmuxAdapter {
       // selectors. Select its physical server, check the full create receipt,
       // then kill SELF inside that conditional, as the native stop path does.
       const out = this.terminalKind === "psmux"
-        ? await this.run(["tmux", "if-shell", "-F", `#{&&:${same},#{==:#{session_id},${created.id}}}`, "kill-session", "display-message -p kept"], undefined, name)
+        ? await this.nativeRaw(["tmux", "-t", "=" + physical, "if-shell", "-F", `#{&&:${same},#{==:#{session_id},${created.id}}}`, "kill-session", "display-message -p kept"])
         : await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
           `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
@@ -846,7 +846,8 @@ export class TmuxAdapter {
         const creating = argv[1] === "new-session", targetIndex = argv.indexOf(creating ? "-s" : "-t"), target = argv[targetIndex+1];
         if (targetIndex < 0 || !target) throw new Error("Native environment command lacks its exact target");
         const supplement = await this.fileOps.privateConfig(extra.map(([key,value]) => psmuxPrivateEnvironmentLine(key,value)).join(""));
-        await this.run(["tmux","source-file","-t",creating ? exactTarget(target,"session") : target,supplement.path]);
+        const supplementArgv = ["tmux","source-file","-t",creating ? exactTarget(target,"session") : target,supplement.path];
+        if (creating) await this.runNamedSession(supplementArgv, target); else await this.run(supplementArgv);
         await supplement.dispose().catch(()=>{});
       }
       await file.dispose().catch(() => {});
@@ -908,7 +909,8 @@ export class TmuxAdapter {
         !/^(?:PSMUX_.*|TMUX(?:_.*)?|TERM(?:_.*)?|SHELL|PATH|PATHEXT|SYSTEMROOT|WINDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)$/i.test(key)));
       const output = await this.run([...rewritten, ...command], undefined, undefined,
         creating && this.argvExec?.supportsEnvironment ? creationEnv : undefined);
-      await this.run(["tmux", "source-file", "-t", creating ? exactTarget(target, "session") : target, config.path]);
+      const persistArgv = ["tmux", "source-file", "-t", creating ? exactTarget(target, "session") : target, config.path];
+      if (creating) await this.runNamedSession(persistArgv, target); else await this.run(persistArgv);
       await config.dispose().catch(() => {});
       return output;
     } catch (error) {
@@ -975,7 +977,12 @@ export class TmuxAdapter {
     }
   }
 
-  async listPanes(target: string, allWindows = false): Promise<TmuxPane[]> {
+  /** Session identity is explicit, including native names containing target punctuation. */
+  async listSessionPanes(name: string, allWindows = false): Promise<TmuxPane[]> {
+    return this.listPanes(name, allWindows, true);
+  }
+
+  async listPanes(target: string, allWindows = false, literalSessionName = false): Promise<TmuxPane[]> {
     // Callers name a session (optionally with a window), or an immutable tmux
     // id. Exact session matching prevents observing a prefix neighbor's pane.
     // A bare leading '=' belongs to the literal session name. Only qualified
@@ -985,8 +992,9 @@ export class TmuxAdapter {
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
       const format = this.terminalKind === "psmux" ? `#{session_name}|${PANE_FORMAT}` : PANE_FORMAT;
-      const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format],
-        `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`);
+      const argv = ["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format];
+      const legacy = `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, target, legacy, true) : await this.run(argv, legacy);
       if (this.terminalKind === "psmux") {
         const rows = parseLines(output, line => {
           const separator = line.indexOf("|");
@@ -1084,7 +1092,7 @@ export class TmuxAdapter {
     const result = await this.createSessionUnchecked(name, cwd, launchEnv);
     if (result.ok && this.deliveryGuard && nodeId) {
       try {
-        const panes = await this.listPanes(name);
+        const panes = await this.listSessionPanes(name);
         if (panes.length === 1) {
           this.deliveryGuard.noteFreshLifecyclePane(nodeId, panes[0]!.id);
           this.freshManaged.set(name, {nodeId, pane: panes[0]!.id});
