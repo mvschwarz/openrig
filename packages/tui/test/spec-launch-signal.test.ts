@@ -33,8 +33,8 @@ else if (process.argv[2] === 'up') {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("fixture did not bind");
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_)/.test(key)) delete env[key];
-  Object.assign(env, { HOME: root, OPENRIG_HOME: root, OPENRIG_TUI_CLI_ENTRY: cli, OPENRIG_TUI_SOCKET: path.join(root, "t.sock") });
+  for (const key of Object.keys(env)) if (/^(OPENRIG_|RIGGED_)/.test(key) || /^(TEMP|TMP)$/i.test(key)) delete env[key];
+  Object.assign(env, { HOME: root, TEMP: root, TMP: root, OPENRIG_HOME: root, OPENRIG_TUI_CLI_ENTRY: cli, OPENRIG_TUI_SOCKET: path.join(root, "t.sock") });
   const nodeArgs = [
     fileURLToPath(new URL("../../../node_modules/vite-node/vite-node.mjs", import.meta.url)), "--script",
     fileURLToPath(new URL("../src/main.ts", import.meta.url)), "--instance", "launch-signal", "--no-color",
@@ -45,7 +45,7 @@ else if (process.argv[2] === 'up') {
     launcher = path.join(root, "console-node.exe");
     const compiler = ["Framework64", "Framework"].map(folder => path.join(process.env.SystemRoot ?? "C:\\Windows", "Microsoft.NET", folder, "v4.0.30319/csc.exe")).find(existsSync);
     if (!compiler) throw new Error("Native console fixture needs the .NET Framework compiler");
-    execFileSync(compiler, ["/nologo", "/target:exe", "/out:" + launcher, fileURLToPath(new URL("./fixtures/windows-console-node.cs", import.meta.url))], { windowsHide: true, stdio: "pipe" });
+    execFileSync(compiler, ["/nologo", "/target:exe", "/out:" + launcher, fileURLToPath(new URL("./fixtures/windows-console-node.cs", import.meta.url))], { env, windowsHide: true, stdio: "pipe" });
   }
   const child = spawn(launcher, process.platform === "win32" ? [process.execPath, ...nodeArgs] : nodeArgs,
     { env, detached: process.platform !== "win32", windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
@@ -58,7 +58,7 @@ else if (process.argv[2] === 'up') {
     execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"), [
       "-NoProfile", "-NonInteractive", "-File", fileURLToPath(new URL("./fixtures/windows-console-interrupt.ps1", import.meta.url)),
       "-Target", String(expected[0]), "-RootStartedAt", startedOverride ?? /FIXTURE_TUI_PID:\d+:(\d+)/.exec(output)?.[1] ?? "missing", "-ExpectedJson", JSON.stringify(expected),
-    ], { windowsHide: true, timeout: 10000, stdio: "pipe" });
+    ], { env, windowsHide: true, timeout: 10000, stdio: "pipe" });
   }
   async function until(check: () => boolean): Promise<void> {
     const deadline = Date.now() + 8_000;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync as fsRealpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../../daemon/src/routes/files.js";
@@ -14,6 +14,7 @@ import type { Action, FleetSnapshot, ViewStateStore } from "../src/types.js";
 import { fileSymlinksSupported } from "./file-symlink-capability.js";
 
 let home: string, root: string, snap: FleetSnapshot, view: ViewStateStore, client: DaemonClient;
+const realpathSync = process.platform === "win32" ? fsRealpathSync.native : fsRealpathSync;
 let requests: string[], failRead: boolean;
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), "s02-reading-")));

@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Windows exposes no GetEnvironmentStrings API for another process. Read the
 // same-bitness PEB/RTL_USER_PROCESS_PARAMETERS layout used by x86/x64 Windows.
@@ -83,11 +86,15 @@ public static class OpenRigViewerEnvironment {
 export async function windowsViewerEnvironment(pid: number): Promise<NodeJS.ProcessEnv | undefined> {
   if (process.platform !== "win32" || !Number.isSafeInteger(pid) || pid <= 0 || pid > 0x7fffffff) return undefined;
   const script = `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -TypeDefinition @'\n${SOURCE}\n'@; [OpenRigViewerEnvironment]::ReadMarkers(${pid}) | ConvertTo-Json -Compress`;
+  let compilerTemp: string | undefined;
   try {
+    compilerTemp = await mkdtemp(join(tmpdir(), "openrig-viewer-compiler-"));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:TEMP|TMP)$/i.test(key)));
     const { stdout } = await promisify(execFile)("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-      { windowsHide: true, encoding: "utf8", timeout: 5000, maxBuffer: 128 * 1024 });
+      { env: { ...env, TEMP: compilerTemp, TMP: compilerTemp }, windowsHide: true, encoding: "utf8", timeout: 5000, maxBuffer: 128 * 1024 });
     const value: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ""));
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.values(value).some(v => typeof v !== "string")) return undefined;
     return value as NodeJS.ProcessEnv;
   } catch { return undefined; }
+  finally { if (compilerTemp) await rm(compilerTemp, { recursive: true, force: true }).catch(() => {}); }
 }

@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## TUI directory regression follow-up (2026-11-02)
+
+The complete native TUI directory at `a9d2e39` reported 1,212 passed, 11 failed and 19 pending tests. Reading-journey and literal-argument fixtures supplied non-native TEMP spelling to the canonical file allowlist; they now use native realpath on Windows. The actual viewer C# source was separately compiled with inherited versus owned compiler temp: inherited global TEMP failed to supply its transient source, while the owned directory compiled successfully. Viewer environment reads now create and remove a unique compiler directory and pass its TEMP/TMP explicitly, excluding inherited case variants. The real signal fixture likewise uses its owned root for compiler temporary files. The cause of the host's global TEMP behaviour remains unknown.
+
+After these changes the four failing test files passed 24/24 natively, including real launch-group SIGINT/return/normal SIGINT and allowlisted environment reads from a live own-user client, followed by refusal after exit. WSL passed 18 with six Windows-only viewer cases skipped. TUI typecheck passed. This follow-up does not replace a complete directory run on the final changed version.
+
 ## TUI long native source labels (2026-11-02)
 
 Long Windows source paths now shorten by native or mixed path segments instead of collapsing to an empty ellipsis label. A single oversized filename retains its suffix. POSIX literal backslashes remain filename content. The original full path stays in the file-open action; display shortening never rewrites the target.
