@@ -5207,6 +5207,17 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Physical session-name mapping implementation has started with a deterministic
+binding module: constrained logical names map to bounded SHA-256 native names,
+and canonical UTF-8/base64url metadata binds the original logical name to that
+exact physical name. Ordinary names remain unchanged; the reserved encoding
+prefix is itself escaped for new bindings. A physical name alone never grants
+adoption authority. Fourteen module checks passed, including distinct-name
+separation, marker mismatch, invalid UTF-8 and noncanonical metadata; daemon
+build passed. This module is not yet wired into creation, target resolution,
+listings, recovery, or attach guidance. Literal-pipe session support therefore
+remains incomplete and no real stock-psmux name acceptance is claimed.
+
 Presence-callsite review found only the producer-link diagnostic in
 `session-transport.ts` using these APIs outside the adapter. It preserves null
 and absent map entries as UNKNOWN, allows a positively present alias to win, and
