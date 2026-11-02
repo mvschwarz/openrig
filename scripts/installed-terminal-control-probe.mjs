@@ -4,12 +4,45 @@ import { pathToFileURL } from "node:url";
 import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { writeWindowsNodeFixture } from "./windows-node-fixture.mjs";
 
 const [installed] = process.argv.slice(2);
 if (!installed) throw new Error("An isolated installed CLI root is required");
 const watcherEntry = await readFile(join(installed, "dist", "chatroom-watch-child.js"), "utf8");
 assert.ok(watcherEntry.includes("OPENRIG_HOME") && watcherEntry.includes("OPENRIG_URL"));
+const watchHome = await mkdtemp(join(tmpdir(), "openrig-installed-watch-")), watchTrace = [];
+const watchRig = "owned|用户 O'Brien", watchText = "installed SSE selected instance";
+const watchServer = createServer((req, res) => {
+  watchTrace.push({ method: req.method, url: req.url });
+  if (req.url === "/healthz") { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ status: "ok" })); }
+  else if (req.url === "/api/rigs/summary") { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify([{ id: "owned-watch-rig", name: watchRig, nodeCount: 0 }])); }
+  else if (req.url === "/api/rigs/owned-watch-rig/chat/watch") { res.setHeader("Content-Type", "text/event-stream"); res.end("data: " + JSON.stringify({ sender: "owned-fixture", body: watchText, kind: "message" }) + "\n\n"); }
+  else { res.statusCode = 404; res.end("not an owned route"); }
+});
+try {
+  await new Promise((resolve, reject) => { watchServer.once("error", reject); watchServer.listen(0, "127.0.0.1", resolve); });
+  const watchUrl = `http://127.0.0.1:${watchServer.address().port}`;
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENRIG|RIGGED|PSMUX)_/i.test(key)));
+  Object.assign(env, { OPENRIG_HOME: join(watchHome, "wrong"), OPENRIG_URL: "http://127.0.0.1:1", RIGGED_HOME: join(watchHome, "legacy-wrong"), RIGGED_URL: "http://127.0.0.1:2" });
+  const child = spawn(process.execPath, [join(installed, "dist", "chatroom-watch-child.js"), watchHome, watchUrl, watchRig], { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const output = [], errors = []; child.stdout.on("data", bytes => output.push(bytes)); child.stderr.on("data", bytes => errors.push(bytes));
+  const exit = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { child.kill(); reject(new Error("Installed watcher SSE timed out")); }, 15000);
+    child.once("error", error => { clearTimeout(timeout); reject(error); });
+    child.once("close", status => { clearTimeout(timeout); resolve(status); });
+  });
+  assert.equal(exit, 0, Buffer.concat(errors).toString("utf8"));
+  assert.ok(Buffer.concat(output).toString("utf8").includes(`[owned-fixture] ${watchText}`));
+  assert.ok(watchTrace.some(req => req.url === "/healthz"));
+  assert.ok(watchTrace.some(req => req.url === "/api/rigs/summary"));
+  assert.ok(watchTrace.some(req => req.url === "/api/rigs/owned-watch-rig/chat/watch"));
+  assert.ok(watchTrace.every(req => req.method === "GET"));
+} finally {
+  await new Promise(resolve => { watchServer.close(resolve); watchServer.closeAllConnections(); });
+  await rm(watchHome, { recursive: true, force: true });
+}
 const { defaultWindowDeps } = await import(pathToFileURL(join(installed, "dist", "terminal-window.js")).href);
 const values = ["", 'embedded"quote', "end\\", "中文", "%PATH%!&|"];
 const stdout = await defaultWindowDeps().exec(process.execPath,
