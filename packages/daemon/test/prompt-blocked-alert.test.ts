@@ -568,7 +568,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     const destination = "operator@kernel";
     const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
     sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
-    let screen = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
+    const hookScreen = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
+    let screen = hookScreen;
     let panePid = 123, nativePid = 126;
     const processes = (): NativeProcessRow[] => [
       { pid: panePid, ppid: 1, pgid: panePid, tpgid: 124, executableName: "zsh", command: "-zsh", startedAt: "start" },
@@ -585,7 +586,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     };
     const listProcesses = vi.fn(async () => processes()); const now = new Date("2030-01-01T00:00:00Z");
     const deps = { db, tmux, listProcesses, now: () => now };
-    return { tmux, listProcesses, processes, now, destination, read: makeKernelHookReviewReader(deps),
+    return { tmux, listProcesses, processes, now, destination, hookScreen, read: makeKernelHookReviewReader(deps),
       screen: (value: string) => { screen = value; }, changeNative: () => { nativePid++; },
       changePanePid: () => { panePid += 1000; }, changeBinding: () => sessions.updateBinding(node.id, { tmuxPane: "%18" }) };
   }
@@ -615,9 +616,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       if (kind === "missing") f.listProcesses.mockResolvedValue([]);
       if (kind === "unavailable") f.listProcesses.mockRejectedValue(new Error("unavailable process table"));
       if (kind === "changing") f.listProcesses.mockImplementation(async () => { f.changeNative(); return f.processes(); });
-      if (kind === "capture-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeNative(); return "Hooks need review"; });
-      if (kind === "pane-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changePanePid(); return "Hooks need review"; });
-      if (kind === "binding-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeBinding(); return "Hooks need review"; });
+      if (kind === "capture-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeNative(); return f.hookScreen; });
+      if (kind === "pane-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changePanePid(); return f.hookScreen; });
+      if (kind === "binding-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeBinding(); return f.hookScreen; });
       expect((await f.read())[0]?.state).toBe("unknown");
       const posts: unknown[] = [];
       await tick(engine(posts), { now: f.now, readHookReviews: f.read });
