@@ -43,7 +43,7 @@ export function renderWindowsArgvForwarder(executable: string, prefix: readonly 
     + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n`;
 }
 
-export function renderWindowsLaunch(command: string, env: Readonly<Record<string, string>> = {}, options: { remove?: readonly string[]; beforeStart?: string } = {}): string {
+export function renderWindowsLaunch(command: string, env: Readonly<Record<string, string>> = {}, options: { remove?: readonly string[]; beforeStart?: string; prependPath?: string } = {}): string {
   const [executable, ...args] = parseLiteralLaunchWords(command);
   const assignments = Object.entries(env).map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
@@ -56,6 +56,7 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
     + `$openrigStart.UseShellExecute = $false\n$openrigStart.FileName = ${powershellQuote(executable!)}\n`
     + `$openrigStart.Arguments = ${powershellQuote(windowsArguments(args))}\n`
     + `${(options.remove ?? []).map(name => `$openrigStart.EnvironmentVariables.Remove(${powershellQuote(name)})\n`).join("")}${assignments}`
+    + (options.prependPath === undefined ? "" : `$openrigStart.EnvironmentVariables['PATH']=${powershellQuote(options.prependPath)}+';'+[Environment]::GetEnvironmentVariable('PATH','Process')\n`)
     + `${options.beforeStart ?? ""}\n`
     + `$openrigChild = [Diagnostics.Process]::Start($openrigStart)\ntry { $openrigChild.WaitForExit(); $global:LASTEXITCODE = $openrigChild.ExitCode } finally { $openrigChild.Dispose() }\n}`;
 }

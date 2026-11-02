@@ -2428,3 +2428,29 @@ requiring them before launch have not been qualified. Additional user panes,
 external respawn commands, other shell implementations, existing live fleets
 and the rebased installed runtime still require acceptance. No running instance
 or stock psmux binary was changed by this source repair.
+
+### Native child-tool PATH parity (2026-11-02)
+
+Three actual Windows launch witnesses reproduced a behavioral difference: the
+runtime/interpreter were pinned correctly, but child tools received the daemon
+PATH instead of the pane's post-startup PATH. Native seat commands now resolve
+the runtime against the selected daemon PATH first, then prepend only the paired
+rig directory to the pane's runtime PATH. The separate managed-environment
+renderer retains its explicit managed PATH contract.
+
+Actual fresh/resume/fork Codex-adapter witnesses use a synthetic recognized npm
+entry, a separately located Node interpreter, a pane PATH with neither, and an
+owned paired CLI. The real capability probe and generated PowerShell launch
+execute; the child sees exactly paired-rig plus the pane tool PATH, and a second
+PowerShell process executes that paired rig successfully. Interpreter identity
+is checked through the actual filesystem target. Combined with the existing
+native argument/home tests, all five native cases pass.
+
+The six-file environment set passes 35 checks with 42 explicit platform skips.
+The five original failures were POSIX runtime fixtures; their shell/shebang
+checks remain enabled on POSIX, with native pin/PATH/rig behavior exercised by
+the Windows witnesses instead of classifying those skips as passes. The newly
+supported Bash private loader also supersedes four old null-plan expectations;
+their no-credential-in-argv assertions remain. Daemon type checking passes.
+This closes the observed native PATH difference, not full same-head platform
+validation or real provider acceptance.

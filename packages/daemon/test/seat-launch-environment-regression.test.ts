@@ -49,7 +49,9 @@ it.each(["not-a-url", "http://user:synthetic-secret@localhost:1234", "http://loc
   expect(publicSeatEnvironment({ OPENRIG_HOME: f.env.OPENRIG_HOME, OPENRIG_URL: value })).toEqual({ OPENRIG_HOME: f.env.OPENRIG_HOME });
   expect(f.warn).toHaveBeenCalledTimes(1); expect(JSON.stringify(f.warn.mock.calls)).not.toContain(value);
 });
-it("A/B: rig need not be on the daemon PATH; the linked CLI belongs to this install", async () => {
+// These execute POSIX shebangs and shell PATH semantics. Windows exercises the
+// same pin/paired-rig/child-PATH contract in seat-launch-native-path.test.ts.
+it.runIf(process.platform !== "win32")("A/B: rig need not be on the daemon PATH; the linked CLI belongs to this install", async () => {
   const f = fixture(); f.env.PATH = "/usr/bin:/bin";
   const command = await f.launch.command("seat@rig", "/bin/sh -c 'command -v rig'");
   const rig = (await f.run(command)).stdout.trim();
@@ -61,7 +63,7 @@ it("A: a missing paired CLI does not introduce a launch refusal", async () => {
   const launch = new (SeatLaunchEnvironment as any)(f.tmux, f.env, f.root, path.join(f.root, "missing-cli")) as SeatLaunchEnvironment;
   expect(await launch.command("seat@rig", "claude")).toBe("claude"); expect(f.warn).toHaveBeenCalledTimes(1);
 });
-it("B: the owned rig-only directory leaves node/python/git/claude order intact", async () => {
+it.runIf(process.platform !== "win32")("B: the owned rig-only directory leaves node/python/git/claude order intact", async () => {
   const f = fixture();
   const cmd = "/bin/sh -c 'for tool in rig node python git claude; do command -v \"$tool\"; done'";
   const paths = (await f.run(await f.launch.command("seat@rig", cmd))).stdout.trim().split("\n");
@@ -73,7 +75,7 @@ it.each(["claude", "codex"])("D: nushell retains the previous literal %s command
   expect(command).toBe(runtime === "codex" ? `env PATH=${shellQuote(f.env.PATH)} codex --resume 'old'` : "claude --resume 'old'");
   expect(command).not.toContain('"$PATH"'); expect(f.warn).toHaveBeenCalledTimes(1);
 });
-it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate Node interpreter while preserving user PATH", async kind => {
+it.runIf(process.platform !== "win32").each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate Node interpreter while preserving user PATH", async kind => {
   const f = fixture(), nodeBin = path.join(f.root, "node interpreter");
   mkdirSync(nodeBin); symlinkSync(process.execPath, path.join(nodeBin, "node"));
   expect(["/usr/bin", "/bin", f.shared, f.runtime]).not.toContain(nodeBin);

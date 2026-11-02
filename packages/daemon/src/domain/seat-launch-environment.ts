@@ -253,7 +253,11 @@ export class SeatLaunchEnvironment {
           command = words.map(shellQuote).join(" ");
         }
         if (clearing && homeVar && configuredHome !== undefined) env[homeVar] = configuredHome;
+        // Resolution above pins the selected runtime/interpreter. Its child tools
+        // retain the pane's post-startup PATH, as on POSIX; expose only paired rig.
+        delete env.PATH;
         return renderWindowsLaunch(command, env, {
+          prependPath: binDir,
           remove: [...(accountHome ? ACCOUNT_HOME_PROVIDER_ENV : []), ...(clearing && homeVar ? [homeVar] : []), ...(community?.remove ?? [])],
           ...(target.claudeTokenStep ? { beforeStart: target.claudeTokenStep } : {}),
         });
