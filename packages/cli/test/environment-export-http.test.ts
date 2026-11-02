@@ -2,6 +2,7 @@ import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { afterEach, expect, it, vi } from "vitest";
+import { allowFetchTarget } from "./fetch-guard.js";
 import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,10 +55,12 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   });
   cleanup.push(() => new Promise<void>(resolve => daemon.close(() => resolve())));
   const daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
+  allowFetchTarget(daemonUrl);
   const tokenFile = join(root, "tokens.json");
   const token = await addGrant(tokenFile, { name: "worker-grant", seat: "worker@team", rigs: ["team"], roots: [join(root, "artifacts")], workspace: false, owner: false });
   const wrongToken = await addGrant(tokenFile, { name: "other-grant", seat: "other@team", rigs: ["team"], roots: [], workspace: false, owner: false });
   const mcp = await startMcpHttpServer({ daemonUrl, host: "127.0.0.1", port: 0, tokenFile }); cleanup.push(() => mcp.close());
+  allowFetchTarget(mcp.url);
   const connect = async (credential: string) => {
     const client = new Client({ name: "environment-proof", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL(mcp.url), { requestInit: { headers: { Authorization: `Bearer ${credential}`, "X-OpenRig-Principal": JSON.stringify({ source: "file", id: "forged" }) } } }));

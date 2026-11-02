@@ -26,6 +26,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="seal-private") { using(var file=Open(args[1],true,false,true))SealPrivate(file); }
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else if(args[0]=="directory-write-access")DirectoryWriteAccess(args[1]);
+      else if(args[0]=="flush-file" || args[0]=="flush-directory")FlushOwnedPath(args[1],args[0]=="flush-directory");
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
@@ -46,6 +47,7 @@ public static class OpenRigOwnedText {
   static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SecurityAttributes security,uint disposition,uint flags,IntPtr template);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
   [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
@@ -57,6 +59,20 @@ public static class OpenRigOwnedText {
   [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle file,int type,uint requested,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
+  static void FlushOwnedPath(string path,bool directory) {
+    var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+    using(var file=CreateFile(path,0x40020000u,7,ref security,3,0x02200000u,IntPtr.Zero)) {
+      if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+      FileInformation info;
+      if(GetFileType(file)!=1 || !GetFileInformationByHandle(file,out info) || (info.attributes&0x400u)!=0
+        || ((info.attributes&0x10u)!=0)!=directory)throw new InvalidOperationException("Flush requires the selected ordinary file or directory");
+      IntPtr owner,group,dacl,sacl,descriptor;uint error=GetSecurityInfo(file,1,1,out owner,out group,out dacl,out sacl,out descriptor);
+      if(error!=0)throw new Win32Exception((int)error);
+      try { using(var identity=WindowsIdentity.GetCurrent()) { if(new SecurityIdentifier(owner).Value!=identity.User.Value)throw new InvalidOperationException("Flush path must be owned"); } }
+      finally { LocalFree(descriptor); }
+      if(!FlushFileBuffers(file))throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+  }
   static SafeFileHandle Open(string path,bool write,bool fresh=false,bool seal=false) {
     byte[] descriptor=null; GCHandle pinned=default(GCHandle);
     var security=new SecurityAttributes(); security.length=Marshal.SizeOf(security);
@@ -397,6 +413,20 @@ export function windowsPrivateAppendHelper(): string { return nativeHelper(); }
  * a child or changing its metadata. The OS evaluates the actual process token. */
 export function checkWindowsDirectoryWriteAccess(directory: string): void {
   execFileSync(nativeHelper(), ["directory-write-access", toNamespacedPath(directory)], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** Native file data/metadata barrier; directories require a writable backup-semantics handle. */
+export function flushWindowsOwnedPath(file: string, directory = false): void {
+  execFileSync(nativeHelper(), [directory ? "flush-directory" : "flush-file", toNamespacedPath(file)], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** Apply the native owner-only inherited directory ACL before writing private state. */
+export function ensureWindowsPrivateDirectory(directory: string): void {
+  execFileSync(nativeHelper(), ["auth-directory", toNamespacedPath(directory)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }
