@@ -99,7 +99,7 @@ describe("contained Claude restore activity resources", () => {
     return Object.values(s.hooks ?? {}).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks ?? []))
       .map((h: any) => h.command as string).filter(c => c.includes("state/claude-activity-hooks/activity-relay.cjs"));
   }
-  function seed(pod: boolean, selected = true, runtime = "claude-code") {
+  function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true) {
     const rig = rigs.createRig("restore");
     if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "P");
     const node = rigs.addNode(rig.id, pod ? "p.seat" : "seat", { runtime, cwd, ...(pod ? { podId: "pod" } : {}) });
@@ -112,8 +112,10 @@ describe("contained Claude restore activity resources", () => {
     ];
     const files = [{ path: "missing.md", absolutePath: path.join(root, "missing.md"), required: true, appliesOn: ["restore"] }];
     const actions = [{ type: "send_text", value: "DO NOT REPLAY", phase: "after_ready", appliesOn: ["restore"], idempotent: true }];
-    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
-      .run(node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify(actions), runtime);
+    if (withStartupContext) {
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify(actions), runtime);
+    }
     const saved = db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(node.id);
     const snap = capture.captureSnapshot(rig.id, "manual");
     registry.updateStatus(session.id, "exited");
@@ -283,6 +285,55 @@ describe("contained Claude restore activity resources", () => {
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(f.node.id)).toEqual(f.saved);
     expect(tmux.sendText).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(cwd, "CLAUDE.md"))).toBe(false);
+  });
+
+  // Follow-up to #2338 (CodeRabbit Major 4436149570): an older snapshot with
+  // NO nodeStartupContext row at all must not leave a known-selected legacy
+  // Claude seat hookless with no restore gap. The runtime falls back to the
+  // node's saved runtime and absent projection entries count as an empty list.
+  // Legacy (non-pod) shape: pod-aware seats with no context stop earlier at
+  // the "Harness not started" gate, so the fully_restored-without-hooks
+  // outcome only arises on the legacy resume path.
+  it("re-applies the current selection when the saved startup context is absent (legacy seat)", async () => {
+    const f = seed(false, false, "claude-code", false);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recoveryCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(recoveryCall).toBeDefined();
+    expect(recoveryCall![0].entries).toHaveLength(1);
+    expect(recoveryCall![0].entries[0]).toMatchObject({
+      category: "runtime_resource", resourceType: "claude_activity_hooks", sourceSpec: "current-selection",
+    });
+    expect(owned().length).toBeGreaterThan(0);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:") && w.includes("current"))).toBe(true);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, "CLAUDE.md"))).toBe(false);
+  });
+
+  it("does not consult current selection or project claude hooks for legacy codex seat with absent startup context", async () => {
+    const runtime = "codex";
+    const f = seed(false, false, runtime, false);
+    const project = vi.fn(CodexRuntimeAdapter.prototype.project);
+    const launch = vi.fn(async (_b, opts) => ({ ok: true as const, resumeToken: opts.resumeToken, resumeType: "codex_id" }));
+    const other = { runtime, project, listInstalled: async () => [], deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: async () => ({ ready: true }), launchHarness: launch } as RuntimeAdapter;
+    const claudeProject = vi.spyOn(adapter, "project");
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, other, () => {}, desired, { "claude-code": adapter, codex: other });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(desired).not.toHaveBeenCalled();
+    const claudeRecovery = claudeProject.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(claudeRecovery).toBeUndefined();
+    const otherRecovery = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(otherRecovery).toBeUndefined();
+    expect(owned()).toEqual([]);
+    expect(writes).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
   // The recovery projection must be awaited: an adapter whose project()

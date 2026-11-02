@@ -1705,8 +1705,9 @@ export class RestoreOrchestrator {
     // no guidance, skills or startup replay, and the saved context is never
     // rewritten. A seat whose current spec does not select hooks stays silent.
     const activityAdapter = opts?.adapters?.["claude-code"];
-    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code") {
-      const entries = startupCtx.projectionEntries.filter(e =>
+    const recoveryRuntime = startupCtx?.runtime ?? node.runtime;
+    if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
+      const entries = (startupCtx?.projectionEntries ?? []).filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
       if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
