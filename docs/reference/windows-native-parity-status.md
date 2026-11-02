@@ -4407,3 +4407,21 @@ refused; no shell lookup or batch shim execution was added. The regression and
 related viewer tests passed on Windows (herdr-path-before-20261103.json and
 herdr-path-after-20261103.json). This qualifies discovery only, not actual
 Herdr GUI attachment. No installed application or runtime was changed.
+
+### Installed native gate at 3952477 (2026-11-03)
+
+The target-native installed-package gate passed at exact source commit
+39524779d75901f18e968ee9ee0021716b03abc5, with clean tracked source before
+and after (2026-11-02 17:45:13 through 17:46:22 UTC). This includes the newer
+host-doctor port options and viewer shell/PATH fixes in the source build and
+tarball. The gate built, packed and installed into an isolated prefix, checked
+terminal helper bytes/execution, native SQLite ABI, installed resource/file
+operations and the rig.cmd daemon-subpath load. Receipt:
+pack-terminal-assets-3952477.json and its log. No global installation,
+deployment or publication was performed. Installed gate success does not
+establish real Herdr GUI attachment or full engine parity.
+
+The latest scoped WSL viewer run passed 27 tests with nine native-only skips
+(viewer-wsl-3952477-20261103.json). The additional skip is the real Windows
+quoted-PATH filesystem regression; Windows passed it. Complete current-head
+Windows/WSL suites remain outstanding.
