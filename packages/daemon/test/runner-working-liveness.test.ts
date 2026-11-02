@@ -8,6 +8,7 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { SeatActivityService, HOOK_AUTHORITY_WINDOW_MS } from "../src/domain/seat-activity-service.js";
 import { activityRoutes, restoredRunnerHookEvidence } from "../src/routes/activity.js";
 import { runtimeRungInventory } from "../src/domain/activity-taxonomy.js";
+import { RunnerCore, type RunnerIo } from "../src/adapters/pi-runner.js";
 
 // The runner contract's working beat (section 4): `active` / `liveness` keeps a long, quiet turn reading working while
 // the runner says its prompt is outstanding and its agent alive. A beat counts only for the live generation's latest
@@ -88,7 +89,8 @@ function fixture() {
     generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
     return { previous, current: generation };
   };
-  return { post, accepted, beat, next, state, later, at, restart, clearAttention, replaceOccupant, oldGeneration, runtime };
+  return { post, accepted, beat, next, state, later, at, restart, clearAttention, replaceOccupant, oldGeneration, runtime,
+    sessionName: session.sessionName, nodeId: node.id, generation: () => generation };
 }
 
 describe("the runner's working beat", () => {
@@ -249,6 +251,31 @@ describe("the runner's working beat", () => {
     const f = fixture();
     await f.post("UserPromptSubmit", "accepted", { turnId: "1", sequence: f.next(), generation: undefined });
     expect(await f.beat("1")).toMatchObject({ ignored: "stale_generation" });
+  });
+
+  // Pi's stream beat (#2336) on the contract's beat: the real Pi runner core, its posts sent through the real route.
+  it("keeps a real Pi runner's long, quiet run reading working, until its agent_end", async () => {
+    const f = fixture();
+    const sent: Array<Promise<unknown>> = [];
+    const io: RunnerIo = {
+      sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, writeSidecar: () => {}, now: () => f.at(),
+      // Activity posts only: the session-identity post goes to a recorder this fixture doesn't have.
+      postActivity: (payload) => { if (!payload.eventFamily) sent.push(f.post(String(payload.hookEvent), payload.subtype as string | null, payload)); },
+    };
+    const core = new RunnerCore(io, { sessionName: f.sessionName, nodeId: f.nodeId, launchId: "launch-1", generation: f.generation() });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: "/pi/session.jsonl", sessionId: "pi-1" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    await Promise.all(sent);
+    for (let i = 0; i < 12; i++) { // a minute with nothing from the model, the runner's 5 s tick beating
+      f.later(5_000);
+      core.heartbeat();
+      await Promise.all(sent);
+      expect(f.state(), `${(i + 1) * 5} s in`).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
+    }
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await Promise.all(sent);
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt" });
   });
 
   it("leaves a runner that sends no beats as before: a quiet turn falls to unknown after 15 s", async () => {
