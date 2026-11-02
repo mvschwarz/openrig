@@ -109,7 +109,17 @@ describe("an ask its asker parked on the person asked", () => {
     // The person asked writing afterwards, in the same thread, is words for the agent: the answer stays the colleague's.
     await f.typed("UANA", "morning", "1.1", "4.4");
     expect(f.state()).toMatchObject({ state: "in-progress", resolvedBy: [MIKE] });
-    // The resolution's notice is the asker's, and posts in the ask's thread.
+    // The resolution's notice goes to the person who resolved it, as any resolve's does.
+    expect(await f.alertFor(f.ask.qitemId)).toMatchObject({ destinationSession: MIKE, sourceSession: ASKER, ownerNotificationKind: "human-decision-resolved" });
+  });
+
+  it("control: the person asked answers the park, and the resolution's notice posts in the ask's thread", async () => {
+    const f = await fixture();
+    f.post((await f.alertFor(f.ask.qitemId))!);
+    f.repo.update({ qitemId: f.ask.qitemId, actorSession: ASKER, state: "blocked", blockedOn: ANA, transitionNote: "parked on Ana" });
+    expect(f.post((await f.alertFor(f.ask.qitemId))!)).toEqual({ threadTs: "1.1", newRoot: false });
+    await f.typed("UANA", "morning", "1.1", "4.4");
+    expect(f.state()).toMatchObject({ state: "in-progress", resolvedBy: [ANA] });
     const resolved = (await f.alertFor(f.ask.qitemId))!;
     expect(resolved).toMatchObject({ destinationSession: ANA, sourceSession: ASKER, ownerNotificationKind: "human-decision-resolved" });
     expect(f.post(resolved)).toEqual({ threadTs: "1.1", newRoot: false });
