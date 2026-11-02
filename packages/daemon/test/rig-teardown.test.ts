@@ -900,6 +900,46 @@ describe("RigTeardownOrchestrator", () => {
         expect(fs.existsSync(s.collector)).toBe(false);
       }
     });
+
+    // A link below the cwd shares a file between two directories: the stopping seat's cwd A and a live seat's cwd B. Whichever
+    // way the link points, the shared target stays and is named; A's own, unshared targets still go.
+    it.each(["B's .claude and .openrig link to A's", "A's .claude and .openrig link to B's", "settings.local.json is hardlinked"] as const)(
+      "keeps a Claude target a seat in another directory still uses when %s", async (shape) => {
+        const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+        const real = claudeCwd(own);
+        addHooks(real.settings, { Stop: [{ hooks: [{ type: "command", command: real.relay }] }] });
+        const other = fs.mkdtempSync(path.join(tmpDir, "claude-other-"));
+        let a = real.cwd, b = other;
+        if (shape === "A's .claude and .openrig link to B's") { a = other; b = real.cwd; }
+        if (shape === "settings.local.json is hardlinked") {
+          fs.mkdirSync(path.join(other, ".claude"));
+          fs.linkSync(real.settings, path.join(other, ".claude", "settings.local.json"));
+        } else {
+          fs.symlinkSync(path.join(real.cwd, ".claude"), path.join(other, ".claude"));
+          fs.symlinkSync(path.join(real.cwd, ".openrig"), path.join(other, ".openrig"));
+        }
+        const before = fs.readFileSync(real.settings, "utf-8");
+        const rigId = claudeRig("claude-rig", a);
+        claudeRig("other-rig", b);
+
+        const result = await teardownWith(real.asset).teardown(rigId);
+
+        expect(fs.readFileSync(real.settings, "utf-8")).toBe(before);
+        const aSettings = path.join(a, ".claude", "settings.local.json");
+        const aCollector = path.join(a, ".openrig", "context-collector.cjs");
+        if (shape === "settings.local.json is hardlinked") {
+          // A's collector isn't shared, so it still goes.
+          expect(fs.existsSync(real.collector)).toBe(false);
+          expect(result.keptFiles).toEqual([`${aSettings}: another seat's directory still uses it through a link, so it was kept`]);
+        } else {
+          expect(fs.readFileSync(real.collector, "utf-8")).toBe(COLLECTOR);
+          expect(result.keptFiles).toEqual([
+            `${aSettings}: another seat's directory still uses it through a link, so it was kept`,
+            `${aCollector}: another seat's directory still uses it through a link, so it was kept`,
+          ]);
+        }
+        expect(result.errors).toEqual([]);
+      });
   });
 
   // T12: Kill failure + --delete -> blocked
