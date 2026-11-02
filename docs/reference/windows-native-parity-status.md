@@ -4645,3 +4645,34 @@ Owned receiver files/directories were removed. No real provider, seat, daemon
 or team was stopped or restarted. Executable path pinning is not a file-hash
 or atomic replacement guarantee, and these fixtures do not qualify interactive
 console behavior or authenticated provider continuity.
+
+### Guidance-path interpolation review and remote auth check (2026-11-03)
+
+A new public-only scan at daa70f5 inspected 1,516 production JS/TS files after
+excluding the one private file before content reads. Its selected literal
+cd/home/file/dir/path interpolation pattern yielded 19 lines in 12 files.
+Every selected candidate was reviewed: one remote-auth check instruction
+needed quoting; the others were diagnostics, directory-created itemization
+markers, already quoted operands, existing fixes, or the structured native
+Compose path. The Compose production startup supplies execArgvCommand on
+Windows; this inspection is not real Docker/Podman engine qualification.
+Inventory and dispositions: guidance-paths-daa70f5-20261103.json and
+guidance-path-review-daa70f5-20261103.json. This narrow pattern is not an
+exhaustive command-surface or parity audit.
+
+When a remote rig auth switch loses its connection, its unknown-outcome check
+now quotes the host and Codex home for the invoking platform shell. Actual
+PowerShell and /bin/sh witnesses preserve a remote home containing spaces,
+an apostrophe and Unicode. The SSH runner is injected, and the test confirms
+exactly one attempted operation with no automatic check or retry. No real
+SSH connection or credential switch was performed. The two complete CLI files
+passed 20/20 on Windows and 20/20 on WSL; daemon build and CLI TypeScript
+checking passed. Receipts: auth-host-check-before-20261103.json,
+auth-host-check-native-final-20261103.json and auth-host-check-wsl-final-20261103.json.
+
+The shared guidance-word function is exposed through the existing paired
+windows-launch package surface. The scoped WSL run copied its matching public
+compiled surface and quote module; it is not a fresh complete-source WSL build.
+These witnesses prove shell parsing, not arbitrary native shim behavior for
+every quote-bearing remote POSIX filename. The installed package gate at
+176f9cd predates this additional export/import and does not qualify this change.
