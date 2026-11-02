@@ -34,7 +34,8 @@ export function nextNativeRuntimeExchangeStep(
   const blocked = (reason: string): NativeExchangeStep => ({ state: "blocked", reason });
   if ([canonical, staging, parking].some(name => !name || /[\x00-\x1f<>:"/\\|?*]/.test(name) || /[. ]$/.test(name))
     || new Set([canonical, staging, parking]).size !== 3
-    || !predecessor || !successor || predecessor === successor) return blocked("Native exchange identities are missing or ambiguous");
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(predecessor) || !/^[A-Za-z0-9_-]{1,128}$/.test(successor)
+    || predecessor === successor) return blocked("Native exchange identities are missing or ambiguous");
   const role = (slot: NativeExchangeSlot): string => slot.state === "absent" ? "-"
     : slot.state === "unknown" ? "?" : slot.generation === predecessor ? "p" : slot.generation === successor ? "s" : "?";
   const observed = [slots.canonical, slots.staging, slots.parking].map(role).join("");

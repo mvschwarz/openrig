@@ -66,10 +66,19 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
           const step=nextNativeRuntimeExchangeStep(identity,{canonical:await observe(canonical),staging:await observe(staging),parking:await observe(parked)},direction);
           if(step.state==="complete")return;
           if(step.state!=="rename")throw Error(step.reason);
-          await invoke(["tmux","rename-session","-t",`=${step.from}`,step.to]);
+          const source=await observe(step.from);if(source.state!=="present")throw Error("Owned source identity changed");
+          const result=await invoke(["tmux","if-shell","-F","-t",`=${step.from}`,
+            `#{==:#{OPENRIG_OCCUPANT_GENERATION},${source.generation}}`,
+            `rename-session -t =${step.from} ${step.to}`,"display-message -p owned-exchange-generation-mismatch"]);
+          expect(result).not.toContain("owned-exchange-generation-mismatch");
         }
         throw Error("Owned exchange did not reach its observed terminal state");
       };
+      expect(await invoke(["tmux","if-shell","-F","-t",`=${canonical}`,
+        "#{==:#{OPENRIG_OCCUPANT_GENERATION},wrong-generation}",
+        `rename-session -t =${canonical} ${parked}`,"display-message -p owned-exchange-generation-mismatch"]))
+        .toContain("owned-exchange-generation-mismatch");
+      expect(await before(canonical)).toEqual(predecessor);
       await exchange("forward");
       const active=await before(canonical),retired=await before(staging);
       expect(active.pid).toBe(successor.pid);expect(retired.pid).toBe(predecessor.pid);

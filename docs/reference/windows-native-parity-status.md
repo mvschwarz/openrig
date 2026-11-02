@@ -27,6 +27,33 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native exchange custody journal and uncertain-result recovery (2026-11-02)
+
+The native exchange coordinator now persists its schema, three session names,
+both occupant generations and intended direction in the existing switch row's
+plan JSON before any rename. Existing plan fields are retained. Custody must
+match the switch's node, canonical/staging names, generations and commit state;
+rollback after commit is refused. A new coordinator reads the persisted record
+after its SQLite connection closes and reopens.
+
+Fault tests model each of the three renames being applied by the server while
+the client reports an unknown result. The invocation stops; recovery reobserves
+the slots and finishes without replaying the applied rename. Lease loss before
+work or during observation prevents the next rename. Foreign custody and
+malformed identities are refused. The two complete planner/journal files pass
+25 tests; daemon TypeScript checking passes.
+
+The owned stock psmux exchange test also verifies server-side conditional rename:
+a wrong occupant generation selects the refusal branch and leaves the source
+unchanged; the correct generations complete both forward and reverse exchanges
+without changing either PID. This native case passes, with four unrelated native
+tests unselected. The coordinator requires its eventual backend rename operation
+to perform that identity check at the write boundary.
+
+These components still require runtime-switch service and native adapter wiring,
+binding remapping, attached-client following and retirement acceptance. They do
+not make `set-runtime` complete on Windows yet.
+
 ### Native exchange primitive and observed rollback (2026-11-02)
 
 A generation-based native exchange planner now maps fresh observations of the
