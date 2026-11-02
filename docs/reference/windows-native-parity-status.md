@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Standalone Windows Node 24.14.1 time probe (outside Vitest) reproduced the
+out-of-range readback discrepancy: setting -1 Unix seconds was read by Node
+`lstat` as 4294967295, and setting 4294967296 was read as zero. Bigint stat had
+the same discrepancy. Independent Windows PowerShell/.NET UTC reads returned
+the requested 1969-12-31 and 2106-02-07 timestamps. In-range 0, 2147483648 and
+4294967295 agreed. This local readback defect occurs before SFTP encoding;
+the encoder guard alone cannot establish source-time integrity. A native
+handle-based time reader and its use by native copy remain implementation work.
+The probe used owned temporary files, removed afterward; no runtime deployment.
+
 SFTP v3 timestamp encoding now reports its unsigned 32-bit seconds limit
 explicitly for regular and no-follow link metadata rather than exposing a
 generic Buffer range error. Direct real-subsystem tests reject -1 and 2^32
