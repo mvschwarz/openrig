@@ -405,7 +405,7 @@ export class TmuxAdapter {
    * before env -i. Generated pane metadata must come from this spawn, never daemon TMUX values.
    * Keep the configured default-command and default-shell lookup, including rc functions.
    */
-  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = [], staged?: (file: string) => void): Promise<string[] | null> {
+  private async scopedLaunchCommand(seatEnv: Record<string, string>, command?: string, warnings: string[] = [], staged?: (file: string, recoveryEnv?: Record<string,string>) => void): Promise<string[] | null> {
     if (!this.launchEnvironment || !seatEnv.OPENRIG_NODE_ID) return null;
     try {
       const policy = this.launchEnvironment();
@@ -440,9 +440,12 @@ export class TmuxAdapter {
       addSeatRuntimeDir(selected, policy.runtimeDir);
       if (process.platform === "win32") {
         const file = this.fileOps.tmpName();
-        const launch = windowsScopedLaunch(shell, command ?? "", selected, file);
+        const key = `OPENRIG_LAUNCH_RECOVERY_${randomUUID().replace(/-/g, "")}`;
+        const launch = windowsScopedLaunch(shell, command ?? "", selected, file, false, key);
         await this.fileOps.writeFile(file, launch.content, { mode: 0o600, flag: "wx" });
-        staged?.(file);
+        const recoveryEnv = Object.fromEntries(Object.entries(selected).filter((entry): entry is [string,string] => entry[1] !== undefined));
+        if (launch.recovery) recoveryEnv[launch.recovery.key] = launch.recovery.value;
+        staged?.(file, recoveryEnv);
         return ["--", ...launch.argv];
       }
       const values = Object.entries(selected)
@@ -695,11 +698,14 @@ export class TmuxAdapter {
         const assignment = argv[++index] ?? "";
         const separator = assignment.indexOf("=");
         const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
-        if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+        if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_()]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
         entries.push([key, value]);
         if (referenceIndex < 0) { rewritten.push("-e", ""); referenceIndex = rewritten.length - 1; }
       }
-      const content = JSON.stringify({ schema: "openrig.psmux.environment/v1", entries });
+      // The advertised v1 -e protocol keeps identifier names; Windows names
+      // outside that grammar use the established private source-file API.
+      const extra = entries.filter(([key]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+      const content = JSON.stringify({ schema: "openrig.psmux.environment/v1", entries: entries.filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) });
       if (referenceIndex < 0) return this.run(argv, legacy);
       if (Buffer.byteLength(content, "utf8") > 1024 * 1024) throw new Error("Native environment file exceeds protocol limit");
       const file = await this.fileOps.privateConfig(content);
@@ -707,6 +713,13 @@ export class TmuxAdapter {
       // Retain on an uncertain/failed command: a server may still be reading it.
       // No fallback containing values is attempted after protocol selection.
       const output = await this.run(rewritten);
+      if (extra.length) {
+        const creating = argv[1] === "new-session", targetIndex = argv.indexOf(creating ? "-s" : "-t"), target = argv[targetIndex+1];
+        if (targetIndex < 0 || !target) throw new Error("Native environment command lacks its exact target");
+        const supplement = await this.fileOps.privateConfig(extra.map(([key,value]) => psmuxPrivateEnvironmentLine(key,value)).join(""));
+        await this.run(["tmux","source-file","-t",creating ? exactTarget(target,"session") : target,supplement.path]);
+        await supplement.dispose().catch(()=>{});
+      }
       await file.dispose().catch(() => {});
       return output;
     }
@@ -728,7 +741,7 @@ export class TmuxAdapter {
       if (arg !== "-e") { rewritten.push(arg); continue; }
       const assignment = argv[++index] ?? "", separator = assignment.indexOf("=");
       const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
-      if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+      if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_()]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
       entries[key] = value;
     }
     if (!Object.keys(entries).length) return this.run(argv);
@@ -1005,19 +1018,19 @@ export class TmuxAdapter {
     // An empty per-session value prevents the tmux server's inherited values
     // from pinning an old policy over config.json inside a newly launched seat.
     // Explicit seat settings remain authoritative.
-    const seatEnv = {
+    const seatEnv: Record<string,string> = {
       OPENRIG_TRANSCRIPTS_LINES: "",
       OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
       ...env,
     };
     const warnings: string[] = [];
     let bootstrap: string | undefined;
-    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, file => { bootstrap = file; });
-    // Stock psmux only accepts identifier-shaped -e names. The private native
-    // bootstrap supports Windows names such as ProgramFiles(x86) and already
-    // carries them into the actual child; don't reject them at the transport.
+    const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, (file, recoveryEnv) => { bootstrap = file; Object.assign(seatEnv,recoveryEnv); });
+    // These assignments enter our private transport, not literal psmux -e.
+    // Identifier names use its versioned protocol; parenthesized Windows names
+    // use private source-file persistence and are available to later recovery.
     const transportEnv = Object.entries(seatEnv).filter(([key]) =>
-      !(this.isNativeWindows && scopedCommand) || /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
+      !(this.isNativeWindows && scopedCommand) || /^[A-Za-z_][A-Za-z0-9_()]*$/.test(key));
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of transportEnv) argv.push("-e", `${k}=${v}`);
@@ -1559,29 +1572,30 @@ export class TmuxAdapter {
     const exact = exactTarget(paneTarget, "pane");
     const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
+    const launchEnv = {...opts?.env};
     const warnings: string[] = [];
     let bootstrap: string | undefined;
-    const scopedCommand = await this.scopedLaunchCommand(opts?.env ?? {}, command, warnings, file => { bootstrap = file; });
+    const scopedCommand = await this.scopedLaunchCommand(launchEnv, command, warnings, (file, recoveryEnv) => { bootstrap = file; Object.assign(launchEnv,recoveryEnv); });
+    for (const [k,v] of Object.entries(launchEnv)) argv.push("-e",`${k}=${v}`);
     // Legacy commands remain one argument; the scoped wrapper executes directly before the user shell.
     if (scopedCommand) argv.push(...scopedCommand);
     else if (command != null && command.length > 0) argv.push(command);
-    const quote = opts?.env && Object.keys(opts.env).length ? tmuxConfigQuote : shellQuote;
+    const quote = Object.keys(launchEnv).length ? tmuxConfigQuote : shellQuote;
     const legacyRespawn = ["tmux", "respawn-pane", "-t", quote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", quote(opts.cwd));
-    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", quote(`${k}=${v}`));
+    for (const [k,v] of Object.entries(launchEnv)) legacyRespawn.push("-e",quote(`${k}=${v}`));
     if (scopedCommand) legacyRespawn.push(...scopedCommand.map(quote));
     else if (command != null && command.length > 0) legacyRespawn.push(quote(command));
     // The successor starts from the session environment: exclude inherited
     // parent-session identity there first (sessions made before this existed).
     // A failure here is a warning; the respawn goes ahead as it did before.
     try {
-      await this.excludeParentSessionEnv(exact, Object.keys(opts?.env ?? {}));
+      await this.excludeParentSessionEnv(exact, Object.keys(launchEnv));
     } catch (err) {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "), false, !!scopedCommand);
+      if (Object.keys(launchEnv).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "), false, !!scopedCommand);
       else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {
@@ -1812,7 +1826,7 @@ export class TmuxAdapter {
 
   /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? /^[A-Za-z_][A-Za-z0-9_()]*$/ : /^[A-Z_][A-Z0-9_]*$/).test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     if (this.terminalKind === "psmux") {
       if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
@@ -1831,9 +1845,9 @@ export class TmuxAdapter {
    *  identity in the server's environment (see parent-session-env) is marked removed instead, as a
    *  launch does, so the server's value does not come back. */
   async unsetSessionEnv(session: string, key: string): Promise<void> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? /^[A-Za-z_][A-Za-z0-9_()]*$/ : /^[A-Z_][A-Z0-9_]*$/).test(key)) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
-    const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key : name === key);
+    const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key.toUpperCase() : name === key);
     const flag = parents.length ? "-r" : "-u";
     for (const name of new Set([key, ...parents])) {
       await this.run(["tmux", "set-environment", "-t", target, flag, name],
