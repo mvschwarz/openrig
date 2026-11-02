@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+SFTP v3 timestamp encoding now reports its unsigned 32-bit seconds limit
+explicitly for regular and no-follow link metadata rather than exposing a
+generic Buffer range error. Direct real-subsystem tests reject -1 and 2^32
+seconds while preserving the destination's complete observed attributes and
+bytes; protocol tests: six passed. This improves failure diagnosis, not time
+range parity with rsync or NTFS. An attempted filesystem-to-SFTP range fixture
+observed local timestamps already wrapped before transfer (-1 read as 2^32-1,
+2^32 read as zero); its cause is unqualified and that fixture is not counted as
+passing copy acceptance. A direct protocol fixture avoids that assumption.
+
 Matching public-source WSL transfer checkpoint at `620a213`: the same ten
 explicit files selected on Windows ran with the isolated Linux SFTP subsystem
 enabled. WSL: 146 tests, 107 passed, zero failed, 39 skipped. Windows at the same

@@ -11,6 +11,10 @@ export class SftpStatusError extends Error {
 }
 const u32 = (value: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(value); return b; };
 const u64 = (value: number) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(value)); return b; };
+function timestamp(value: number): Buffer {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error("SFTP v3 timestamps require integer seconds from 0 to 4294967295; this server protocol cannot preserve the source time");
+  return u32(value);
+}
 const str = (value: string | Buffer) => {
   const b = typeof value === "string" ? Buffer.from(value) : value;
   if (typeof value === "string" && b.toString("utf8") !== value) throw new Error("SFTP text cannot be encoded losslessly as UTF-8");
@@ -173,7 +177,7 @@ export class SftpClient {
   }
   async setTimes(file: string, attrs: SftpAttrs): Promise<void> {
     const mode = attrs.mode === undefined ? [] : [u32(attrs.mode & 0o7777)];
-    const times = attrs.atime === undefined || attrs.mtime === undefined ? [] : [u32(attrs.atime), u32(attrs.mtime)];
+    const times = attrs.atime === undefined || attrs.mtime === undefined ? [] : [timestamp(attrs.atime), timestamp(attrs.mtime)];
     const flags = (mode.length ? 4 : 0) | (times.length ? 8 : 0);
     if (flags) await this.request(9, Buffer.concat([str(file), u32(flags), ...mode, ...times]), 101);
   }
@@ -195,7 +199,7 @@ export class SftpClient {
     // Timestamp attributes only: chmod on symlinks is not portable and must not
     // leak the synthetic Windows permissions onto a POSIX referent.
     if (attrs.atime !== undefined && attrs.mtime !== undefined) {
-      await this.request(200, Buffer.concat([str("lsetstat@openssh.com"), str(file), u32(8), u32(attrs.atime), u32(attrs.mtime)]), 101);
+      await this.request(200, Buffer.concat([str("lsetstat@openssh.com"), str(file), u32(8), timestamp(attrs.atime), timestamp(attrs.mtime)]), 101);
     }
   }
   private async qualifyLinkTimes(directory: string): Promise<void> {
