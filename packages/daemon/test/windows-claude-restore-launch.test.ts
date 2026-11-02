@@ -21,31 +21,42 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("carr
   const session = `owned-restore-${process.pid}-${Date.now()}`;
   try {
     const home = path.join(root, "instance"), cwd = path.join(root, "seat's workspace");
-    fs.mkdirSync(home); fs.mkdirSync(cwd);
+    const userHome = path.join(root, "user home"), accountHome = path.join(root, "provider account");
+    for (const dir of [home, cwd, userHome, accountHome]) fs.mkdirSync(dir);
+    vi.stubEnv("HOME", userHome); vi.stubEnv("USERPROFILE", userHome);
     const output = path.join(root, "received.json"), script = path.join(root, "owned receiver.mjs"), cli = path.join(root, "rig.mjs");
-    fs.writeFileSync(script, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(output)},JSON.stringify(process.argv.slice(2)));`);
+    fs.writeFileSync(script, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(output)},JSON.stringify({args:process.argv.slice(2),home:process.env.HOME,userProfile:process.env.USERPROFILE,accountHome:process.env.CLAUDE_CONFIG_DIR}));`);
     fs.writeFileSync(cli, "// inert CLI alias target");
-    expect((await tmux.createSession(session, cwd, { OPENRIG_NODE_ID: "owned-node", OPENRIG_SESSION_NAME: session, OPENRIG_HOME: home })).ok).toBe(true);
-    const environment = new SeatLaunchEnvironment(tmux, { ...invoke.environment, OPENRIG_HOME: home }, root, cli, undefined, "win32");
+    expect((await tmux.createSession(session, cwd, { OPENRIG_NODE_ID: "owned-node", OPENRIG_SESSION_NAME: session, OPENRIG_HOME: home,
+      HOME: userHome, USERPROFILE: userHome })).ok).toBe(true);
+    const environment = new SeatLaunchEnvironment(tmux, { ...invoke.environment, HOME: userHome, USERPROFILE: userHome, OPENRIG_HOME: home }, root, cli, undefined, "win32",
+      (_node, runtime) => runtime === "claude-code" ? accountHome : undefined);
     const adapter = new ClaudeCodeAdapter({ tmux, stateDir: home, seatLaunchEnvironment: environment, sessionIdFactory: () => child,
-      restoreReadPolicy: () => ({ extraInstructionFile: "${OPENRIG_HOME}\\extra [owned].md" }),
+      restoreReadPolicy: () => ({ extraInstructionFile: "~\\extra [owned].md" }),
       fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
     const binding = { nodeId: "owned-node", cwd, tmuxSession: session, claudeExecutable: process.execPath, claudeScript: script,
       claudePermissions: { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] }, launchPosture: "floor", teamPermissionDefault: true } as NodeBinding;
     expect((await adapter.launchHarness(binding, { name: session })).ok).toBe(true);
     await expect.poll(() => fs.existsSync(output), { timeout: 8000 }).toBe(true);
-    const argv: string[] = JSON.parse(fs.readFileSync(output, "utf8"));
+    const received = JSON.parse(fs.readFileSync(output, "utf8"));
+    expect(received).toMatchObject({ home: userHome, userProfile: userHome, accountHome });
+    const argv: string[] = received.args;
     expect(argv.filter(value => value === "--settings")).toHaveLength(1);
     const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]!);
     expect(settings.permissions.deny).toEqual(["Read(./private/**)"]);
     expect(settings.permissions.allow).toContain("Read(./work/**)");
-    const custom = path.join(home, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
+    const custom = path.join(userHome, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
     expect(settings.permissions.allow).toContain(`Read(/${custom})`);
+    for (const otherHome of [home, accountHome]) {
+      const wrong = path.join(otherHome, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
+      expect(settings.permissions.allow).not.toContain(`Read(/${wrong})`);
+    }
     expect(argv[argv.indexOf("--session-id") + 1]).toBe(child);
     expect((await tmux.probeSession(session)).state).toBe("present");
     expect(await tmux.killSession(session)).toEqual({ ok: true });
     expect((await tmux.probeSession(session)).state).toBe("absent");
   } finally {
+    vi.unstubAllEnvs();
     await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
     await invoke(["tmux", "kill-server"]).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

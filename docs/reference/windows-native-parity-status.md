@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Provider account directory versus user-home restore paths (2026-11-02)
+
+The actual stock-pane fixture now separates three owned locations: the daemon instance home, the pane user's HOME/USERPROFILE, and the selected provider account directory. SeatLaunchEnvironment receives an explicit synthetic account selector. Its Node receiver proves that CLAUDE_CONFIG_DIR selects that account while HOME/USERPROFILE retain the pane's user home. The `~\extra [owned].md` read rule names the user-home file and does not grant same-named files beneath the instance or provider account directories.
+
+The complete native restore-launch file passed 7/7 with stock psmux enabled and verified owned-session disappearance. The initial fixture changed only daemon-side environment, leaving the already created pane on its original home; its failure is superseded by setting the intended user home at actual pane creation. No production HOME override was added. This is synthetic account-directory selection and parameter transport, not account authentication, different Windows users or a deliberately different daemon-versus-pane user-home configuration.
+
 ## Restore settings through native PowerShell and a stock pane (2026-11-02)
 
 Six existing native pinned-launch scenarios now distribute the three Windows home-prefix forms across fresh, fork, resume, legacy-resume and JS-script launches. Actual PowerShell execution into synthetic Node receivers preserves one parseable settings JSON, exact custom-file grants (including bracket escaping), member deny/allow rules and conversation arguments. The daemon and receiver user-home fixtures are deliberately aligned; differing account-home semantics are not qualified by these cases.
