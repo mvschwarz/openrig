@@ -209,6 +209,44 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
+it.each([false, true].flatMap(managed => ["fresh", "fork", "resume", "legacy-resume"].map(kind => ({ kind, managed }))))("does not dispatch $kind (managed=$managed) after selection changes during restore-home lookup", async ({ kind, managed }) => {
+  const f = fixture(managed);
+  // The actual transport invokes this guard at its write boundary. Model that
+  // contract without recording an effect when the selected-history guard refuses.
+  f.tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    f.commands.push(command); return { ok: true };
+  });
+  let release!: (home: string) => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  Object.assign(f.tmux, { getSessionEnv: vi.fn(() => {
+    observed(); return new Promise<string>(resolve => { release = resolve; });
+  }) });
+  const restoreReadPolicy = () => ({ extraInstructionFile: "~/owned-restore.md" });
+  const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, restoreReadPolicy,
+    ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}),
+    fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+  vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+  const legacy = new ClaudeResumeAdapter(f.tmux, { openrigHome: f.home, restoreReadPolicy,
+    ...(managed ? { claudeManagedLaunch: f.claudeManagedLaunch } : {}) });
+  vi.spyOn(legacy as any, "verifyResume").mockResolvedValue({ ok: true });
+  let selected = true;
+  const beforeNativeDispatch = () => selected;
+  const pending = kind === "legacy-resume"
+    ? legacy.resume("owner@rig", "claude_id", CHILD, f.cwd, "floor", undefined, managed ? "acceptEdits" : undefined, "node", undefined, undefined, false, true,
+      undefined, undefined, undefined, beforeNativeDispatch)
+    : adapter.launchHarness(f.binding, { name: "owner@rig", beforeNativeDispatch,
+      ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: PARENT } } : {}),
+      ...(kind === "resume" ? { resumeToken: CHILD } : {}) });
+  await started;
+  selected = false;
+  release(path.join(f.root, "selected-user-home"));
+  expect(await pending).toMatchObject({ ok: false });
+  expect(f.commands).toEqual([]);
+  expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+});
+
 it.each([false, true])("both Claude launch paths grant the configured extra file the restore will name (session tilde=%s)", async tilde => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");

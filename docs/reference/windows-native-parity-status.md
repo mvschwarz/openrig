@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Selected-history changes during restore-home lookup (2026-11-02)
+
+Eight deferred-lookup regressions now cover fresh, fork, resume and legacy-resume in classic and explicit managed-permission modes. When history selection changes before the lookup returns, no launch text or Enter is emitted. The transport fixture invokes the actual before-write callback contract rather than pretending a recorded command is a completed effect.
+
+This found a managed-fork discrepancy on both platforms: that branch supplied only the prepared-launch assertion and omitted the combined selected-history guard used by the other managed entry points. It now passes the same combined guard. The complete managed-read file passed 28/28 on Windows; five complete related files passed 133/133 on ordinary-user WSL; daemon typecheck passed. Existing positive fresh/fork/resume cases also remain active. These are controlled selection/dispatch tests, not actual provider launches or stock-pane qualification of managed forks.
+
 ## Restore-home observation and occupant/Stop races (2026-11-02)
 
 The asynchronous session-home lookup is now covered by explicit cancellation, generation-change and policy-disable races. The new generation-change regression initially reproduced an old restore prompt being sent after its captured occupant changed during the lookup. The current-stage check now revalidates both the known generation and the policy/operator exemption after asynchronous waits and at the existing before-write boundary, while retaining the existing unknown-generation semantics and operator-initiated manual exemption.
