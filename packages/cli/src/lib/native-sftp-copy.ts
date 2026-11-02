@@ -47,7 +47,9 @@ const local: Endpoint = {
     if (attrs.atime !== undefined && attrs.mtime !== undefined) await utimes(file, attrs.atime, attrs.mtime);
     // Windows chmod preserves the representable read-only/writeable attribute;
     // it cannot install POSIX owner/group/execute permissions or replace a DACL.
-    if (attrs.mode !== undefined) await chmod(file, attrs.mode & 0o7777);
+    // A Windows directory readonly attribute is Explorer customization state,
+    // not directory write permission. Do not pretend chmod can enforce it.
+    if (attrs.mode !== undefined && !(process.platform === "win32" && kind(attrs) === 0o040000)) await chmod(file, attrs.mode & 0o7777);
   },
   async rename(src, dst, replacing) {
     if (process.platform === "win32" && replacing && kind(await local.stat(src)) === 0o100000 && kind(await local.stat(dst)) === 0o100000) {
@@ -94,6 +96,12 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       if (kind(attrs) === 0o040000) {
         if (existing && kind(existing) !== 0o040000) throw new Error(`Destination is not an ordinary directory: ${dst}`);
         if (!existing) { changes.push(`cd ${dst}`); if (!plan.dryRun) await destination.mkdir(dst); }
+        else {
+          const timeChanged = attrs.mtime !== undefined && attrs.mtime !== existing.mtime;
+          const mask = destination === local && process.platform === "win32" ? 0 : 0o7777;
+          const modeChanged = attrs.mode !== undefined && existing.mode !== undefined && (attrs.mode & mask) !== (existing.mode & mask);
+          if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
+        }
         const names = await source.names(src);
         if (destination === local && process.platform === "win32" && new Set(names.map(name => name.toLowerCase())).size !== names.length) {
           throw new Error(`Directory contains names that collide on Windows: ${src}`);

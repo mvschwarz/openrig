@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
@@ -10,6 +10,29 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("previews directory time drift and restores parent times after copying children", async () => {
+    const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-directory-"));
+    const source=path.join(root,"source"), destination=path.join(root,"destination");
+    const start=()=>spawn(server,[],{stdio:"pipe",windowsHide:true});
+    try {
+      for(const base of [source,destination])await mkdir(path.join(base,"nested"),{recursive:true});
+      await writeFile(path.join(source,"nested","new.txt"),"directory metadata acceptance\n");
+      for(const [base,time] of [[source,1400000000],[destination,1500000000]] as const){
+        await utimes(path.join(base,"nested"),time,time);await utimes(base,time,time);
+      }
+      const plan:CopyPlan={src:{kind:"remote",path:"/"+source.replaceAll("\\","/")+"/",host:{id:"fixture",target:"fixture",transport:"ssh"}},dst:{kind:"local",path:destination},dryRun:true};
+      const preview=await runNativeSftpCopy(plan,start);
+      expect(preview.ok,preview.stderr).toBe(true);
+      expect(preview.stdout.split("\n").filter(line=>line.startsWith(".d..t"))).toHaveLength(2);
+      expect(Math.floor((await lstat(destination)).mtimeMs/1000)).toBe(1500000000);
+      expect(await readdir(path.join(destination,"nested"))).toEqual([]);
+      const copied=await runNativeSftpCopy({...plan,dryRun:false},start);
+      expect(copied.ok,copied.stderr).toBe(true);expect(copied.filesTransferred).toBe(1);
+      for(const directory of [destination,path.join(destination,"nested")])expect(Math.floor((await lstat(directory)).mtimeMs/1000)).toBe(1400000000);
+      const repeated=await runNativeSftpCopy(plan,start);
+      expect(repeated.ok,repeated.stderr).toBe(true);expect(repeated.stdout).toBe("");expect(repeated.filesTransferred).toBe(0);
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("preserves remote readonly state and repairs metadata-only drift without retransferring bytes", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-sftp-mode-"));
     const source = path.join(root, "source.txt"), destination = path.join(root, "destination.txt");
