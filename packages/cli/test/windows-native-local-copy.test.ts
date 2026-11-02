@@ -142,12 +142,14 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await readdir(root)).toEqual(["source"]);
   }));
 
-  it("refuses merging through a destination junction and preserves its target", () => fixture(async root => {
+  it("replaces a destination junction without merging through or changing its target", () => fixture(async root => {
     const src = path.join(root, "source"), dst = path.join(root, "destination"), other = path.join(root, "other");
     await mkdir(src); await mkdir(dst); await mkdir(other); await mkdir(path.join(src, "nested"));
     await writeFile(path.join(src, "nested", "file"), "new");
     await symlink(other, path.join(dst, "nested"), "junction");
-    expect(await copy(src + path.sep, dst)).toMatchObject({ ok: false, failedStep: "local-copy-failed" });
+    expect(await copy(src + path.sep, dst)).toMatchObject({ ok: true });
+    expect((await lstat(path.join(dst,"nested"))).isSymbolicLink()).toBe(false);
+    expect(await readFile(path.join(dst,"nested","file"),"utf8")).toBe("new");
     expect(await readdir(other)).toEqual([]);
   }));
 

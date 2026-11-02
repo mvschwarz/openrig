@@ -27,6 +27,29 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Staged source-directory replacement of files and links (2026-11-02)
+
+Local and SFTP copies now stage a complete source directory before replacing
+a conflicting ordinary file or link. The original entry is moved to a unique
+recovery name for the final exchange, then removed after the staged directory
+is installed. Failed final exchange attempts restore the original; unresolved
+exchange/cleanup exposes retained paths and remains a failed result. The final
+rename/recovery branches still need real fault-injection qualification. A failed
+source staging pass leaves the original file unchanged and retains the partial
+stage. Successful itemized output uses logical destination paths, not stage names.
+
+Windows local checks cover ordinary/readonly files and file/directory links,
+including unchanged bytes and readonly mode on a retained hardlink. A former
+junction-refusal assertion now verifies replacement of the link itself, with
+the referent unchanged. Six real Windows SFTP upload/download checks cover
+ordinary files and both link types. Windows OpenSSH needs nonrecursive RMDIR
+to remove directory links; nonempty referent witnesses remain unchanged.
+The three Windows files passed 51 checks. Current focused WSL tests pass 25,
+including bidirectional OpenSSH replacement and source-staging failure retention.
+CLI TypeScript checking passes. Independent rsync 3.2.7 checks confirm both
+directory-over-file replacement and no-follow directory-link replacement.
+Special files, ownership and broader archive equivalence remain open.
+
 ### File/link replacement of empty conflicting directories (2026-11-02)
 
 Local and SFTP copies now replace an empty conflicting directory with a source
@@ -44,8 +67,8 @@ child after staging begins: the new child and complete staged bytes survive the
 refused removal. The three final Windows files pass 27 tests; the preceding
 four-file run passed 39 before those six new cases. The current three focused
 WSL files pass 16 tests against an ordinary-user OpenSSH subsystem. CLI
-TypeScript checking passes. Directory-over-file replacement and broader special
-file/archive semantics remain separate requirements.
+TypeScript checking passes. The directory-over-file follow-up is recorded above;
+broader special-file/archive semantics remain separate requirements.
 
 ### Existing readonly-directory merge permissions (2026-11-02)
 

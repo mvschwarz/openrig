@@ -11,6 +11,29 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
   it.each([
+    ['upload','file'],['upload','file-link'],['upload','directory-link'],
+    ['download','file'],['download','file-link'],['download','directory-link'],
+  ] as const)('replaces a %s destination %s with a staged directory',async(direction,type)=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),'sftp-directory-over-file-'));
+    const source=path.join(root,'source'),destination=path.join(root,'destination'),entry=path.join(destination,'directory'),referent=path.join(root,'referent');
+    try{
+      await mkdir(source);await mkdir(destination);await mkdir(path.join(source,'directory'));await writeFile(path.join(source,'directory','child'),'new bytes');
+      if(type==='directory-link'){await mkdir(referent);await writeFile(path.join(referent,'retained'),'retain referent');await symlink(referent,entry,'dir');}
+      else if(type==='file-link'){await writeFile(referent,'retain referent');await symlink(referent,entry,'file');}
+      else await writeFile(entry,'old bytes');
+      const remote=(file:string)=>({kind:'remote' as const,path:'/'+file.replaceAll('\\','/'),host:{id:'owned',target:'owned',transport:'ssh' as const}});
+      const local=(file:string)=>({kind:'local' as const,path:file});
+      const plan:CopyPlan={src:direction==='upload'?local(source+path.sep):remote(source+'/'),dst:direction==='upload'?remote(destination):local(destination),dryRun:true};
+      const start=()=>spawn(server,[],{stdio:'pipe',windowsHide:true});
+      const preview=await runNativeSftpCopy(plan,start);expect(preview.ok,preview.stderr).toBe(true);expect((await lstat(entry)).isDirectory()).toBe(false);
+      const result=await runNativeSftpCopy({...plan,dryRun:false},start);expect(result.ok,result.stderr).toBe(true);
+      expect(await readFile(path.join(entry,'child'),'utf8')).toBe('new bytes');expect((await lstat(entry)).isSymbolicLink()).toBe(false);
+      expect(result.stdout).not.toContain('.openrig-copy-');expect((await readdir(destination)).some(name=>name.startsWith('.openrig-'))).toBe(false);
+      if(type==='directory-link')expect(await readFile(path.join(referent,'retained'),'utf8')).toBe('retain referent');
+      if(type==='file-link')expect(await readFile(referent,'utf8')).toBe('retain referent');
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
+  it.each([
     ['upload','empty'],['upload','nonempty'],['upload','race'],
     ['download','empty'],['download','nonempty'],['download','race'],
   ] as const)('replaces only an empty destination directory (%s, %s)',async(direction,mode)=>{

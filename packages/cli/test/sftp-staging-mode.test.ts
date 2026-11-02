@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, lstatSync } from "node:fs";
-import { mkdtemp, rm, mkdir, chmod, writeFile, readFile, lstat } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, chmod, writeFile, readFile, lstat, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SftpClient } from "../src/lib/sftp-protocol.js";
@@ -9,6 +9,21 @@ import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
 import type { CopyPlan } from "../src/lib/file-transfer.js";
 
 const server=process.env.OPENRIG_TEST_SFTP_SERVER ?? '/usr/lib/openssh/sftp-server';
+it.skipIf(process.platform==='win32'||!existsSync(server)).each([['upload',false],['upload',true],['download',false],['download',true]] as const)('replaces a file only after directory staging succeeds (%s, failure=%s)',async(direction,fail)=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-directory-stage-failure-'));
+  const source=path.join(root,'source'),destination=path.join(root,'destination'),entry=destination+'/directory';
+  try{
+    await mkdir(source);await mkdir(destination);await mkdir(source+'/directory');await writeFile(source+'/directory/a-file','new bytes');
+    if(fail)expect(spawnSync('mkfifo',[source+'/directory/z-pipe']).status).toBe(0);await writeFile(entry,'retained original bytes');
+    const local=(file:string)=>({kind:'local' as const,path:file});
+    const remote=(file:string)=>({kind:'remote' as const,path:file,host:{id:'owned',target:'owned',transport:'ssh' as const}});
+    const plan:CopyPlan={src:direction==='upload'?local(source+'/'):remote(source+'/'),dst:direction==='upload'?remote(destination):local(destination),dryRun:false};
+    const result=await runNativeSftpCopy(plan,()=>spawn(server,[],{stdio:'pipe'}));expect(result.ok,result.stderr).toBe(!fail);
+    if(fail){expect(result.stderr).toContain('Unsupported special file');expect(await readFile(entry,'utf8')).toBe('retained original bytes');expect(result.hint).toContain('Staging path');}
+    else expect(await readFile(entry+'/a-file','utf8')).toBe('new bytes');
+    expect((await readdir(destination)).some(name=>name.startsWith('.openrig-replaced-'))).toBe(false);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
 it.skipIf(process.platform==='win32'||!existsSync(server)).each(['upload','download'] as const)('replaces an empty conflicting directory over SFTP (%s)',async direction=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-empty-directory-'));
   const source=path.join(root,'source'),destination=path.join(root,'destination');
