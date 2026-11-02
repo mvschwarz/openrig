@@ -544,8 +544,13 @@ export class TmuxAdapter {
     try {
       const physical = this.terminalKind === "psmux" ? await this.nativeBoundName(name) : name;
       const same = `#{&&:#{==:#{session_name},${physical}},#{==:#{session_created},${created.at}}}`;
-      const out = await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
-        `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
+      // Native session ids are local to one server and are not psmux client
+      // selectors. Select its physical server, check the full create receipt,
+      // then kill SELF inside that conditional, as the native stop path does.
+      const out = this.terminalKind === "psmux"
+        ? await this.run(["tmux", "if-shell", "-F", `#{&&:${same},#{==:#{session_id},${created.id}}}`, "kill-session", "display-message -p kept"], undefined, name)
+        : await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
+          `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
       return { ok: true };
     } catch (err) {

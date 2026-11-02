@@ -1,5 +1,22 @@
 # Native Windows parity: implementation and evidence
 
+## Mapped native session stop and probe rollback (2026-11-03)
+
+Native probe rollback now selects the verified physical psmux server and uses
+kill SELF only when the original session name, ID and creation time still
+match. The previous rollback used an explicit `$N` kill target, which the
+native stop implementation already avoids. POSIX keeps its existing target
+semantics. A changed identity is retained; losing the logical binding prevents
+the kill conditional from being sent.
+
+The complete mapped-stop, mapped-adapter and exact-target test files passed
+60/60 on Windows, and the daemon TypeScript/assets build passed. Five new
+controlled cases cover successful stop with observed absence, identity change,
+marker loss and both probe rollback outcomes. These controlled transports do
+not qualify actual stock psmux cleanup or desktop attachment. The earlier real
+mapped-name fixture cleanup EBUSY failures remain unresolved; it was not rerun.
+No deployment, team restart or public push occurred.
+
 ## Scope moves compare mission directory identity (2026-11-03)
 
 Slice move/ship previously identified a same-mission destination by folder
