@@ -57,8 +57,7 @@ describe("RigStatusCard — consumes the backend verdict in the render (19/21 le
       isKernel={isKernel} status="untracked" seatsRunning={0} seatsTotal={0}
       recoverable={false} src={["boot skipped"]} primaryLabel="Restore" />);
     const card = screen.getByTestId("rig-status-card-theme");
-    expect(card.className).toContain("bg-white");
-    expect(card.className).toContain("dark:bg-surface-lowest");
+    expect(card.className).toContain("bg-surface-lowest");
     expect(card.className).toContain("dark:border-outline");
   });
 

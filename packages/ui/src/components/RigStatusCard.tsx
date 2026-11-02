@@ -88,7 +88,7 @@ export function RigStatusCard({
     <div
       data-testid={testId ?? `rig-status-card-${rigId}`}
       data-status={status}
-      className="bg-white dark:bg-surface-lowest border border-stone-900 dark:border-outline hard-shadow relative"
+      className="bg-surface-lowest border border-stone-900 dark:border-outline hard-shadow relative"
     >
       {/* Dark header stripe — vellum grammar (matches RigCard). */}
       <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
