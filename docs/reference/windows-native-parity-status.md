@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Operating posture project boundary (2026-11-02)
+
+The operating posture reader now checks parent traversal using the native path separator. Previously its POSIX-only `../` comparison missed Windows `..\` relative paths when an authored mission root pointed outside its selected project. A filesystem regression selects the neighbouring project's mission directory and requires an unknown posture with the explicit escape reason. Test roots and canonical expectations use native realpath on Windows to preserve actual disk spelling.
+
+Validation: the complete operating-posture test file passed 22/22 on native Windows and 22/22 under the ordinary WSL test user; daemon TypeScript checking passed. This is scoped validation, not whole-suite parity or deployment acceptance.
+
 ## Current native progress scanning and path classification (2026-11-02)
 
 Progress scanning now matches its filenames and excluded dependency/build

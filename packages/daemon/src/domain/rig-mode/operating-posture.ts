@@ -1,6 +1,6 @@
 import { physicalSessionName } from "../session-registry.js";
 import { readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { resolveWorkNodeDirs } from "../current-work.js";
@@ -57,7 +57,7 @@ function yamlFile(path: string, optional = false): Record<string, any> | null {
 }
 function inside(root: string, path: string): string {
   const actual = realpathSync(path), rel = relative(realpathSync(root), actual);
-  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new Error("scope escapes its project: " + path);
+  if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) throw new Error("scope escapes its project: " + path);
   return actual;
 }
 function unknown(reason: string, context: OperatingContext | null = null): OperatingPosture {
