@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Community harness selection and dispatch receipts (2026-11-02)
+
+Ordinary and named-conversation community launches now check the existing selection callback before preparation and at their transport write boundary. Selection is checked before marking first input/model typing, so a refused launch does not report either as passed or confirmed. Twelve initial/staging/before-write regressions, with and without first-input/model metadata, reproduced the ignored callback and now pass. Unexpected errors and genuinely uncertain post-typing outcomes retain their existing handling.
+
+The complete community-harness file passed 72 with one opt-in native case skipped on Windows, and 72 with one Windows-only filename case skipped on ordinary-user WSL; daemon typecheck passed. An old shell-readiness assertion now expects the existing native-lineage-unverified result on Windows while still requiring not-ready. Skips remain unqualified. This covers controlled dispatch/receipt behavior, not real community providers, contained native execution or a complete runtime suite; contained post-prepare viewer dispatch remains a separate audit item.
+
 ## Pi/OMP selected-history dispatch and fallback (2026-11-02)
 
 The shared Pi/OMP runner adapter now accepts the existing beforeNativeDispatch contract. It refuses an already changed selection before launch preparation, rechecks after Pi environment staging, passes the guard to the transport write boundary, and rechecks before a no-input path-length fallback. Previously the option was ignored by this implementation. Eighteen controlled fresh/fork/resume cases reproduced the omission and now require no typed command or Enter on refusal, including a selection change after the wrapped launch was refused as too long.

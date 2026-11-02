@@ -90,6 +90,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   }
 
   async launchHarness(binding: NodeBinding, opts: { name: string; resumeToken?: string; resumeType?: string; forkSource?: ForkSource; firstInputText?: string; beforeNativeDispatch?: () => boolean }): Promise<HarnessLaunchResult> {
+    const selectionChanged = () => ({ ok: false as const, recovery: "attention_required" as const, error: "Selected history changed before community harness input; no command was sent." });
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return selectionChanged();
     const contained = this.contained();
     if (contained) return contained.launch(binding, opts, this.deps.tmux);
     if (opts.forkSource) {
@@ -134,13 +136,19 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     // a launch that failed before typing passed nothing.
     let typed = false;
     let sent = false;
+    const selectionError = new Error("Selected history changed before community harness input");
+    const beforeInput = opts.beforeNativeDispatch || firstInput || model ? () => {
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) throw selectionError;
+      if (firstInput || model) typed = true;
+    } : undefined;
     const handed = () => ({ ...(firstInput ? { firstInput } : {}),
       ...(model ? { modelInput: { model, dispatch: sent ? "confirmed" as const : "uncertain" as const } } : {}) });
     try {
-      const result = await this.launchPreset(session, preset, resumeRef, firstInput || model ? () => { typed = true; } : undefined,
+      const result = await this.launchPreset(session, preset, resumeRef, beforeInput,
         model ? () => { sent = true; } : undefined, binding.cwd);
       return { ...result, ...(typed ? handed() : {}) };
     } catch (error) {
+      if (error === selectionError) return selectionChanged();
       if (!typed) throw error;
       return { ok: false, ...handed(), error: `Community harness "${this.runtime}" launch is uncertain: ${(error as Error).message}` };
     }

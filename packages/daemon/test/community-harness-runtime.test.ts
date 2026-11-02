@@ -143,6 +143,32 @@ describe("the community harness adapter", () => {
   }
   const binding = { tmuxSession: "w@r" } as NodeBinding;
 
+  it.each([false, true].flatMap(named => [false, true].flatMap(metadata => ["initial", "staging", "before-write"].map(phase => ({ named, metadata, phase })))))("refuses changed selection for named=$named metadata=$metadata at $phase without reporting input/model dispatch", async ({ named, metadata, phase }) => {
+    const dir = presets({ "synth.yaml": GOOD + `${named ? "names_conversation: true\n" : ""}${metadata ? "first_input: true\npasses_model: true\n" : ""}` });
+    let selected = phase !== "initial";
+    let observed!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { observed = resolve; });
+    const staging = new Promise<void>(resolve => { release = resolve; });
+    const effects: string[] = [];
+    const tmux = { hasSession: async () => true, getPaneCommand: async () => "node",
+      sendShellCommand: vi.fn(async (_session: string, command: string, beforeInput?: () => void) => {
+        if (phase === "before-write") selected = false;
+        try { beforeInput?.(); } catch { return { ok: false as const, code: "selection_changed", message: "Selected history changed" }; }
+        effects.push(command); return { ok: true as const };
+      }) };
+    const app = new CommunityHarnessRuntimeAdapter("synth", { tmux, presetsDir: () => dir,
+      launchResultRoot: () => join(dir, "state", "launch-results"),
+      seatLaunchEnvironment: { command: async () => { observed(); if (phase === "staging") await staging; return "owned-staged-command"; } } });
+    const pending = app.launchHarness({ ...binding, model: "owned-model" }, { name: "w@r", firstInputText: "owned first input", beforeNativeDispatch: () => selected });
+    if (phase === "staging") { await started; selected = false; release(); }
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.firstInput).toBeUndefined();
+    expect(result.modelInput).toBeUndefined();
+    expect(effects).toEqual([]);
+  });
+
   it("types the preset's command into the seat's pane", async () => {
     const { tmux, app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(await app.launchHarness(binding, { name: "w@r" })).toEqual({ ok: true });
@@ -225,7 +251,7 @@ describe("the community harness adapter", () => {
     const { tmux, app } = adapter(presets({ "synth.yaml": GOOD }));
     expect(await app.checkReady(binding)).toEqual({ ready: true });
     tmux.getPaneCommand.mockResolvedValue("bash");
-    expect(await app.checkReady(binding)).toMatchObject({ ready: false, code: "harness_not_running" });
+    expect(await app.checkReady(binding)).toMatchObject({ ready: false, code: process.platform === "win32" ? "native_lineage_unverified" : "harness_not_running" });
   });
 
   it.each(["powershell", "PowerShell.EXE", "C:\\Windows\\System32\\cmd.exe", "pwsh.exe"])("does not infer community readiness from Windows shell host %s", async command => {
