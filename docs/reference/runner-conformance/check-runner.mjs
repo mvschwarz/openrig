@@ -242,6 +242,19 @@ async function launch(label, { scenario = {}, env = {}, asks } = {}) {
 // An ordinary send arrives inside an envelope, so a line in it that reads /abort is still just text.
 const message = (h, body) => `From: checker@runner-check\nTo: ${h.session}\n---\n${body}`;
 const nonExitStops = (h, after = 0) => h.hooks("Stop").filter((p) => p.at >= after && !String(p.body?.subtype ?? "").endsWith("_exited"));
+// Whether post `a` comes before post `b` in the runner's own order, as OpenRig orders them: by `occurredAt` when it's a
+// non-blank string that reads as a time, otherwise by its arrival; then by `sequence`, when both carry a positive whole number.
+const postedAt = (p) => {
+  const value = p?.body?.occurredAt;
+  const t = typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  return Number.isFinite(t) ? t : p?.at ?? 0;
+};
+const sequenceOf = (p) => { const value = p?.body?.sequence; return Number.isSafeInteger(value) && value > 0 ? value : null; };
+const precedes = (a, b) => postedAt(a) !== postedAt(b) ? postedAt(a) < postedAt(b)
+  : sequenceOf(a) !== null && sequenceOf(b) !== null && sequenceOf(a) < sequenceOf(b);
+// Non-exit Stops the runner posted after `post` in that order. An idle report from before the turn began (a runner may report
+// idle at startup) is never one made during it, however late its POST arrives.
+const stopsAfter = (h, post) => nonExitStops(h).filter((p) => !post || !precedes(p, post));
 const ready = (h, ms) => waitFor(() => h.record()?.nativeRef && h.record(), ms);
 
 function result(id, title, { proposed = false } = {}) {
@@ -508,7 +521,8 @@ const cases = {
       const submitted = await waitFor(() => submits(h)[0], scale(3000));
       if (!r.check(`${label}: the request is submitted to /api/activity/permission-requests`, submitted, "no submit")) continue;
       const asked = h.sent("session/request_permission")[0];
-      const accepted = h.hooks("UserPromptSubmit", "accepted")[0];
+      // The submit isn't one of the runner's ordered activity posts, so it can arrive before the accepted prompt does.
+      const accepted = await waitFor(() => h.hooks("UserPromptSubmit", "accepted")[0], scale(3000));
       const sent = submitted.body ?? {};
       if (label === "allow") {
         r.check("the submit passes OpenRig's checks", h.asks.submitted[0]?.problems.length === 0, h.asks.submitted[0]?.problems.join("; "));
@@ -591,7 +605,8 @@ const cases = {
         await sleep(scale(1500));
         r.check("pending: the runner keeps reading the ask", h.permissionCalls("GET").length >= 1, "no read of the ask");
         r.check("pending: nothing is delivered while no one has answered", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
-        r.check("pending: no idle Stop while it waits", nonExitStops(h).length === 0, nonExitStops(h).map((p) => p.body.subtype).join(", "));
+        const turn = h.hooks("UserPromptSubmit", "accepted").at(-1);
+        r.check("pending: no idle Stop while it waits", stopsAfter(h, turn).length === 0, stopsAfter(h, turn).map((p) => p.body.subtype).join(", "));
         h.paste(message(h, "allow it"));
         await sleep(scale(800));
         r.check("pending: a pasted message isn't an answer", answers(h).length === 0, `got ${JSON.stringify(outcome(h))}`);
@@ -707,7 +722,10 @@ const cases = {
     if (!r.check("the agent exits mid-turn", died, "the agent didn't exit")) return r;
     const exited = await waitFor(() => h.hooks("Stop", `${opts.name}_exited`)[0], scale(4000));
     r.check(`Stop/${opts.name}_exited is posted`, exited, `posts: ${h.posts().map((p) => `${p.body?.hookEvent}/${p.body?.subtype}`).join(", ")}`);
-    r.check("no idle Stop after the exit", nonExitStops(h, died.at).length === 0, nonExitStops(h, died.at).map((p) => p.body.subtype).join(", "));
+    // Any idle report for the turn the agent died in counts, before or after the exit; one from before the turn doesn't.
+    const turn = h.hooks("UserPromptSubmit", "accepted")[0];
+    const idle = turn ? stopsAfter(h, turn) : nonExitStops(h, died.at);
+    r.check("no idle report for the turn it died in", idle.length === 0, idle.map((p) => p.body.subtype).join(", "));
     return r;
   },
 

@@ -5,7 +5,7 @@ It runs in the seat's pane, hosts `dsh --profile acp` over ACP on stdio, and doe
 section:
 - **identity:** the launch record, written once the conversation is open;
 - **one prompt per block:** each submitted block becomes one `session/prompt`, using bracketed paste in a TTY;
-- **turn boundaries:** reported as activity hooks;
+- **turn boundaries:** reported as activity hooks, with a working beat every 10 s through a long, quiet turn;
 - **cancel:** `/abort` or Ctrl-C sends `session/cancel`, and a turn reads cancelled only when dsh says so;
 - **permissions:** each request goes to a person through OpenRig;
 - **resume:** it reopens the exact conversation, or says honestly that it couldn't.

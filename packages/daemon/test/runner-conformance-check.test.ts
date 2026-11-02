@@ -100,6 +100,9 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["hold-on-cancel", "4b", "stale ask: nothing is held"],
     ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
     ["stop-before-end", "4b", "turn end: nothing is held once the ask is withdrawn"],
+    ["stop-low-sequence", "4b", "pending: no idle Stop while it waits"],
+    // An idle Stop whose occurredAt isn't a string: OpenRig dates it by its arrival, so it counts.
+    ["stop-numeric-time", "4b", "pending: no idle Stop while it waits"],
     ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
     ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
     ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
@@ -111,7 +114,11 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
-    ["idle-on-exit", "7", "no idle Stop after the exit"],
+    ["idle-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop numbered below the turn's accepted prompt but later in time: OpenRig orders by time first, so it counts.
+    ["idle-low-sequence-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop at the accepted prompt's time with a string sequence: OpenRig reads no sequence there, so it counts.
+    ["idle-string-sequence-on-exit", "7", "no idle report for the turn it died in"],
     ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],
@@ -172,6 +179,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
     expect(code).toBe(0);
   }, 120_000);
+
+  // A runner may report idle at startup, before any turn: that's neither an idle report while an ask waits (4b) nor one
+  // for a turn the agent died in (7), even when its POST arrives after the agent's exit.
+  it("passes 4b and 7 for a runner that reports idle at startup, even when that report arrives late", async () => {
+    const { code, report } = await check(["--cases", "4b,7"], " --startup-idle 1500");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"], ["7", "pass"]]);
+    expect(code).toBe(0);
+  }, 150_000);
 
   // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
   it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
