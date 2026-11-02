@@ -1,5 +1,34 @@
 # Native Windows parity: implementation and evidence
 
+## Paired full CLI/TUI/UI checkpoint at 0cfa4a8 (2026-11-03)
+
+Both platforms selected 758 test files at
+`0cfa4a8a351aaa0c9f550adf18b02eee8da95c41`. Windows completed in 11 minutes
+28 seconds: 9,632 tests, 9,512 passed, two failed and 118 pending. Ordinary-user
+WSL completed in 5 minutes 21 seconds: 9,631 tests, 9,401 passed, none failed
+and 230 pending. These durations are not a performance comparison: the Windows
+Node is 24.14.1 and WSL Node is 24.11.0, and platform skips differ.
+
+The native Windows Terminal discovery fixture with an owned PATH lacking system
+tools still failed. The other failure was the Usage across hosts disabled-view
+journey: its rendered screen did not contain the daemon's expected disabled
+message. The complete 12-test journey file passed when run alone afterward.
+The full-run failure remains unresolved; the passing follow-up neither explains
+the cause nor makes the full run green. No assertion or timeout was relaxed.
+
+All 4,723 public tracked regular files matched the snapshot before/after the
+paired work; native HEAD and tracked diff were also stable. WSL compiled the
+paired daemon and matched its existing private dependency's normalized Git blob
+before/after compilation and after the suite, without viewing or copying that
+source. Six documentation links and mirror untracked/generated files remain
+outside complete checkout equivalence. The private untracked diagnostic was
+excluded. Separate eight-file terminal checks passed 93 with three skips on
+Windows and 96 on WSL, covering mappings, guarded stop/rollback, exact targets,
+environment reads and client routing. Skips are not completed acceptance.
+
+This is not a full daemon-suite, real-provider, stock-psmux, deployed runtime or
+desktop acceptance receipt. No public push, deployment or team restart occurred.
+
 ## Direct attachment retains daemon executable metadata (2026-11-03)
 
 Terminal status and bound-node inventory now report the daemon's attach
