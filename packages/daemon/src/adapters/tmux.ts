@@ -44,7 +44,9 @@ interface TmuxShellCommandOptions {
  * Windows/psmux no POSIX quoting or `/dev/null` redirections to depend on.
  * When absent every method uses the legacy shell-string path unchanged.
  */
-export type ArgvExecFn = (argv: string[]) => Promise<string>;
+export type ArgvExecFn = ((argv: string[], options?: { env?: Readonly<Record<string,string|undefined>> }) => Promise<string>) & {
+  supportsEnvironment?: true;
+};
 
 /**
  * Injectable file/buffer operations for terminal payloads and launch environments.
@@ -647,7 +649,7 @@ export class TmuxAdapter {
    * differently (the `-F "..."` double-quoted formats); pass it ONLY to
    * preserve an exact legacy string, never to smuggle new semantics.
    */
-  private async run(argv: string[], legacy?: string, bufferScope?: string): Promise<string> {
+  private async run(argv: string[], legacy?: string, bufferScope?: string, env?: Readonly<Record<string,string|undefined>>): Promise<string> {
     if (this.terminalKind === "psmux") {
       const scopedArg = argv.find(a => /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(a));
       const scoped = scopedArg ?? bufferScope;
@@ -665,6 +667,10 @@ export class TmuxAdapter {
       }
     }
     const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    if (env) {
+      if (!this.argvExec?.supportsEnvironment) throw new Error("Native process environment transport unavailable");
+      return this.argvExec(targeted,{env});
+    }
     if (this.argvExec) return this.argvExec(targeted);
     return this.exec(legacy ? this.onServer(legacy) : posixJoinArgv(targeted));
   }
@@ -772,7 +778,13 @@ export class TmuxAdapter {
     }
     const config = await this.fileOps.privateConfig(Object.entries(entries).map(([key, value]) => psmuxPrivateEnvironmentLine(key, value)).join(""));
     try {
-      const output = await this.run([...rewritten, ...command]);
+      // Keep the control client's binary/config/registry selection pinned to
+      // the daemon. The private bootstrap separately supplies the child's full
+      // selected environment, including its own PATH and home settings.
+      const creationEnv = Object.fromEntries(Object.entries(entries).filter(([key]) =>
+        !/^(?:PSMUX_.*|TMUX(?:_.*)?|TERM(?:_.*)?|SHELL|PATH|PATHEXT|SYSTEMROOT|WINDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP)$/i.test(key)));
+      const output = await this.run([...rewritten, ...command], undefined, undefined,
+        creating && this.argvExec?.supportsEnvironment ? creationEnv : undefined);
       await this.run(["tmux", "source-file", "-t", creating ? exactTarget(target, "session") : target, config.path]);
       await config.dispose().catch(() => {});
       return output;
