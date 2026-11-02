@@ -182,6 +182,9 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     assert.ok(existsSync(process.platform === "win32" ? join(prefix, "rig.cmd") : join(prefix, "bin", "rig")), "npm must materialize the installed rig shim");
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENRIG|RIGGED)_/i.test(key)));
     Object.assign(env, { OPENRIG_HOME: home, HOME: home, USERPROFILE: home });
+    const hostDoctorHelp = execFileSync(process.execPath, [entry, "host", "doctor", "--help"],
+      { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });
+    assert.match(hostDoctorHelp, /product-factory-windows/, "installed host doctor must load its native posture module and paired argv parser export");
     const resourceResult = execFileSync(process.execPath,
       [join(HERE, "installed-resource-library-probe.mjs"), installed, home],
       { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });

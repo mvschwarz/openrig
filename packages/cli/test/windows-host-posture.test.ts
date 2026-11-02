@@ -11,7 +11,7 @@ import type { HostEntry } from "../src/host-registry.js";
 
 const host: HostEntry = { id: "owned", transport: "ssh", target: "owned", remoteShell: "powershell", rigPath: "C:/OpenRig/bin.js" };
 const green = () => ({ version: 1, account: { exists: true, enabled: true, administrator: false, indirectUnresolved: false },
-  ssh: { scope: "service-default-global", password: "no", keyboard: "no", publicKey: "yes", gssapi: "no", hostbased: "no", denyGroups: "administrators", administratorGroup: "administrators" },
+  ssh: { scope: "service-login-context", administratorContextQualified: true, methods: "any", password: "no", keyboard: "no", publicKey: "yes", gssapi: "no", hostbased: "no", denyGroups: "administrators", administratorGroup: "administrators" },
   firewall: ["Domain", "Private", "Public"].map(name => ({ name, enabled: "True", inbound: "Block" })),
   tailnetAllow: true, tailscale: { routes: 0, exitNode: false, runSsh: false }, listeners: ["127.0.0.1", "::1", "100.64.0.1", "100.127.255.254"] });
 const deps = (stdout: string): DoctorDeps => ({ run: vi.fn(async () => ({ ok: true, failedStep: "none", stdout, stderr: "", remoteExitCode: 0 })),
@@ -36,6 +36,24 @@ it("does not turn nested group uncertainty, unknown ssh settings or NotConfigure
   const facts = green(); facts.account.indirectUnresolved = true; facts.ssh.denyGroups = "other-group"; facts.ssh.password = "unknown"; facts.firewall[0]!.inbound = "NotConfigured";
   const rows = windowsPostureRows(facts);
   expect(rows.slice(0, 4).map(r => r.status)).toEqual(["unknown", "unknown", "unknown", "unknown"]);
+});
+
+it("does not certify global SSH settings without evaluated login contexts", () => {
+  const facts = green(); facts.ssh.scope = "service-global-unqualified"; facts.ssh.administratorContextQualified = false;
+  expect(windowsPostureRows(facts).slice(1, 3).map(r => r.status)).toEqual(["unknown", "unknown"]);
+});
+
+it.each(["administrators !administrators", "administrators,*", "administrators [a-z]*"])("leaves ambiguous administrator deny patterns unknown: %s", denyGroups => {
+  const facts = green(); facts.ssh.denyGroups = denyGroups;
+  expect(windowsPostureRows(facts)[1]?.status).toBe("unknown");
+});
+
+it("uses explicit public-key-only method lists without inventing omitted build-specific alternatives", () => {
+  const facts = green();
+  expect(windowsPostureRows({ ...facts, ssh: { ...facts.ssh, methods: "publickey,publickey publickey", gssapi: null } })[2]?.status).toBe("pass");
+  expect(windowsPostureRows({ ...facts, ssh: { ...facts.ssh, methods: "any", gssapi: null } })[2]?.status).toBe("unknown");
+  expect(windowsPostureRows({ ...facts, ssh: { ...facts.ssh, methods: "any", password: "yes", gssapi: null } })[2]?.status).toBe("fail");
+  expect(windowsPostureRows({ ...facts, ssh: { ...facts.ssh, methods: "publickey,password", gssapi: null } })[2]?.status).toBe("unknown");
 });
 
 it("reports observed insecure account, auth, firewall, tailnet, trust and listener facts", () => {

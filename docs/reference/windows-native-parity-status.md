@@ -4269,3 +4269,51 @@ group resolution, effective rule-overlap/port access, nonstandard daemon-port
 selection and a complete same-head suite/installed-package rerun remain open.
 This implementation does not close the overall parity goal or authorize changes
 to the actual host's security configuration.
+
+### 2026-11-03: service arguments and effective SSH Match contexts
+
+The native posture collector now decodes the registered sshd service command
+with the existing Windows argv parser, exposed through the paired daemon launch
+surface. The pure parser runs under the already-required Node executable with
+service data over stdin. It has a five-second child bound, uses UTF-8/BOM-aware
+base64 framing and avoids an Add-Type/compiler dependency. A real fixture
+exposed both PowerShell 5.1 JSON array wrapping and BOM corruption; neither is
+hidden by a successful independent source-only sample.
+
+Recognized configuration options (including an absolute `-f`, `-o` and `-p`)
+are retained, runtime flags removed, and `-E` consumed without creating the
+service log. Option case matters: `-e` and `-E` are distinct. Unknown switches,
+missing values and relative configuration paths remain unqualified. The query
+does not launch an SSH listener or replace the actual Windows service.
+
+The first sshd query now includes a complete connection tuple from SSH_CONNECTION
+and the intended user, using [sshd extended test mode](https://man.openbsd.org/sshd.8).
+A context-free preliminary `-T` read was rejected by the real Windows build for
+Match LocalPort and is no longer used. The dedicated openrig authentication
+context and built-in Administrator SID account context are queried separately.
+Missing connection data and UseDNS-enabled host resolution remain unknown.
+Global settings alone no longer qualify either SSH row. Ambiguous DenyGroups
+patterns are also unknown. Explicit public-key-only
+[AuthenticationMethods](https://man.openbsd.org/sshd_config#AuthenticationMethods)
+can establish that policy without inventing unreported build-specific methods;
+an observed password alternative under `any` fails even if another method is
+unreported. Other incomplete method combinations remain unknown.
+
+Validation: complete host/native-posture files plus the opted-in real sshd query
+fixture passed 56/56 on Windows. WSL passed 54 with two native-process skips,
+recorded separately. The fixture uses owned OpenSSH binaries, generated owned
+host keys, synthetic service/account inventory and the actual sshd `-T -C`
+program. Two user/port contexts change the authentication/administrator verdicts;
+unknown arguments, relative config, missing context and DNS-dependent context
+stay unknown. The same real fixture additionally passed with spaces, # and
+Unicode in the configuration filename. Its exact files/keys were removed and
+the requested service log was never created. No live service, remote host or
+operator key was used. Daemon build and CLI typecheck passed. Receipts:
+posture-context-native-final-20261103.json, posture-context-wsl-final-20261103.json
+and posture-context-native-unicode-20261103.json.
+
+The installed-package gate now loads `host doctor --help` from the installed
+entry and requires the Windows profile, covering its paired parser import.
+Execution of that strengthened gate is pending on the committed source. Real
+remote SSH authentication, all user/group/host combinations, DNS-based matches,
+custom service working directories and full same-head suites remain unaccepted.

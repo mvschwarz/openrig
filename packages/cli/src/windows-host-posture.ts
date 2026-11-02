@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { parseWindowsCommandLine } from "@openrig/daemon/windows-launch";
 import type { HostEntry } from "./host-registry.js";
 import type { CheckRow, DoctorDeps } from "./commands/host.js";
 
@@ -10,6 +11,8 @@ export const WINDOWS_POSTURE_ITEMS = ["nonadmin-openrig-user", "administrator-ss
 // avoiding both SSH/cmd length limits and PowerShell's interactive stdin parser.
 export const WINDOWS_POSTURE_ARGV = ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
   Buffer.from("$ErrorActionPreference='Stop'; & ([ScriptBlock]::Create([Console]::In.ReadToEnd()))", "utf16le").toString("base64")] as const;
+const serviceArgvProgram = `const parse=${parseWindowsCommandLine.toString()};let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',s=>input+=s);process.stdin.on('end',()=>process.stdout.write(JSON.stringify(parse(Buffer.from(input.replace(/^\uFEFF/,''),'base64').toString('utf8')))));`;
+const serviceArgvProgramBase64 = Buffer.from(serviceArgvProgram).toString("base64");
 
 /** Read-only, fixed collector. Never outputs keys, raw configuration, user SIDs or Tailscale account data. */
 export const WINDOWS_POSTURE_SCRIPT = String.raw`
@@ -28,17 +31,68 @@ try {
 } catch {}
 try {
   $service=Get-CimInstance Win32_Service -Filter "Name='sshd'" -ErrorAction Stop
-  $exe=$null
-  if ($service.PathName -match '^\s*"([^"]+\.exe)"\s*$') { $exe=$matches[1] }
-  elseif ($service.PathName -match '^\s*([^\s"]+\.exe)\s*$') { $exe=$matches[1] }
-  # Alternate service arguments/configuration need a separate qualified read.
-  if ($exe -and (Test-Path -LiteralPath $exe -PathType Leaf)) {
-    $config=@(& $exe -T 2>$null)
-    if ($LASTEXITCODE -eq 0) {
-      $settings=@{}
-      foreach ($line in $config) { if ($line -match '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|gssapiauthentication|hostbasedauthentication|denygroups)\s+(.+)$') { $settings[$matches[1]]=$matches[2].Trim().ToLowerInvariant() } }
-      $admin=Get-LocalGroup -SID 'S-1-5-32-544' -ErrorAction Stop
-      $facts.ssh=@{scope='service-default-global';password=$settings['passwordauthentication'];keyboard=$settings['kbdinteractiveauthentication'];publicKey=$settings['pubkeyauthentication'];gssapi=$settings['gssapiauthentication'];hostbased=$settings['hostbasedauthentication'];denyGroups=$settings['denygroups'];administratorGroup=$admin.Name.ToLowerInvariant()}
+  if (!$service.PathName -or $service.PathName.Length -gt 32767 -or $service.PathName.Contains([char]0)) { throw 'service command unavailable' }
+  # Node is already required by the paired rig entry. Reuse its shipped pure
+  # argv parser without an Add-Type/compiler or shell interpretation dependency.
+  $argvStart=New-Object Diagnostics.ProcessStartInfo
+  $argvStart.FileName=(Get-Command node.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $argvStart.Arguments='-e "eval(Buffer.from(''${serviceArgvProgramBase64}'',''base64'').toString(''utf8''))"'
+  $argvStart.UseShellExecute=$false;$argvStart.CreateNoWindow=$true
+  $argvStart.RedirectStandardInput=$true;$argvStart.RedirectStandardOutput=$true;$argvStart.RedirectStandardError=$true
+  $argvStart.StandardOutputEncoding=New-Object Text.UTF8Encoding($false)
+  $argvProcess=New-Object Diagnostics.Process
+  try {
+    $argvProcess.StartInfo=$argvStart;[void]$argvProcess.Start()
+    $argvOutput=$argvProcess.StandardOutput.ReadToEndAsync();$argvError=$argvProcess.StandardError.ReadToEndAsync()
+    $argvProcess.StandardInput.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($service.PathName)));$argvProcess.StandardInput.Close()
+    if (!$argvProcess.WaitForExit(5000)) { $argvProcess.Kill();throw 'service argv observation timeout' }
+    if ($argvProcess.ExitCode -ne 0 -or !$argvOutput.Wait(1000)) { throw 'service argv observation failed' }
+    $sshdWords=[string[]](ConvertFrom-Json -InputObject $argvOutput.Result)
+  } finally { if ($argvProcess.Id -and !$argvProcess.HasExited) { $argvProcess.Kill() };$argvProcess.Dispose() }
+  $exe=$sshdWords[0]
+  if ([IO.Path]::GetFileName($exe) -ine 'sshd.exe' -or ![IO.Path]::IsPathRooted($exe)) { throw 'service executable unqualified' }
+  $sshdProbeArgs=New-Object 'System.Collections.Generic.List[string]'
+  for ($index=1;$index -lt $sshdWords.Length;$index++) {
+    $word=$sshdWords[$index]
+    if ($word -cmatch '^-(D|e|q|i|d{1,3})$') { continue }
+    if ($word -eq '-4' -or $word -eq '-6') { $sshdProbeArgs.Add($word); continue }
+    if ($word -cmatch '^-[fophcguE]') {
+      $option=$word.Substring(0,2)
+      if ($word.Length -eq 2) { $index++; if ($index -ge $sshdWords.Length) { throw 'missing service option value' }; $optionValue=$sshdWords[$index] }
+      else { $optionValue=$word.Substring(2) }
+      if (!$optionValue) { throw 'empty service option value' }
+      if ($option -eq '-E') { continue } # Do not create the service's log file during a read.
+      if ($option -eq '-f' -and $optionValue -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/])') { throw 'relative service configuration is unqualified' }
+      $sshdProbeArgs.Add($option);$sshdProbeArgs.Add($optionValue);continue
+    }
+    throw 'unsupported service option'
+  }
+  function Read-OpenRigSshSettings($lines) {
+    $settings=@{}
+    foreach ($line in $lines) { if ($line -match '^(usedns|authenticationmethods|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|gssapiauthentication|hostbasedauthentication|denygroups)\s+(.+)$') { $settings[$matches[1]]=$matches[2].Trim().ToLowerInvariant() } }
+    return $settings
+  }
+  if (Test-Path -LiteralPath $exe -PathType Leaf) {
+    $connection=@($env:SSH_CONNECTION -split '\s+' | Where-Object { $_ })
+    $sourceIp=$null;$localIp=$null;$localPort=0
+    # Always supply the connection before the first query: Match LocalPort can
+    # reject even a nominal global -T read without it.
+    if ($connection.Count -eq 4 -and [Net.IPAddress]::TryParse($connection[0],[ref]$sourceIp) -and [Net.IPAddress]::TryParse($connection[2],[ref]$localIp) -and [int]::TryParse($connection[3],[ref]$localPort) -and $localPort -ge 1 -and $localPort -le 65535) {
+      $context=',host='+$connection[0]+',addr='+$connection[0]+',laddr='+$connection[2]+',lport='+$localPort
+      $effective=@(& $exe @sshdProbeArgs -T -C ('user=openrig'+$context) 2>$null)
+      if ($LASTEXITCODE -eq 0) {
+        $settings=Read-OpenRigSshSettings $effective
+        # With DNS enabled the resolved client host is not known here.
+        if ($settings['usedns'] -ne 'no') { throw 'resolved SSH client host unavailable' }
+        $scope='service-login-context';$adminSettings=@{};$adminQualified=$false
+        $builtin=@(Get-LocalUser -ErrorAction Stop | Where-Object { $_.SID.Value.EndsWith('-500') })
+        if ($builtin.Count -eq 1 -and $builtin[0].Name -notmatch '[,\x00-\x1f]') {
+          $adminEffective=@(& $exe @sshdProbeArgs -T -C ('user='+$builtin[0].Name.ToLowerInvariant()+$context) 2>$null)
+          if ($LASTEXITCODE -eq 0) { $adminSettings=Read-OpenRigSshSettings $adminEffective;$adminQualified=$true }
+        }
+        $admin=Get-LocalGroup -SID 'S-1-5-32-544' -ErrorAction Stop
+        $facts.ssh=@{scope=$scope;administratorContextQualified=$adminQualified;methods=$settings['authenticationmethods'];password=$settings['passwordauthentication'];keyboard=$settings['kbdinteractiveauthentication'];publicKey=$settings['pubkeyauthentication'];gssapi=$settings['gssapiauthentication'];hostbased=$settings['hostbasedauthentication'];denyGroups=$adminSettings['denygroups'];administratorGroup=$admin.Name.ToLowerInvariant()}
+      }
     }
   }
 } catch {}
@@ -103,16 +157,22 @@ export function windowsPostureRows(value: unknown): CheckRow[] {
   const denyGroups = typeof ssh.denyGroups === "string" ? ssh.denyGroups.split(/\s+/) : [];
   const group = typeof ssh.administratorGroup === "string" ? ssh.administratorGroup : "";
   // Names containing whitespace/pattern syntax require OpenSSH-aware matching; do not guess it here.
-  const denied = !!group && !/[\s*?!]/.test(group) && denyGroups.includes(group);
-  const sshQualified = ssh.scope === "service-default-global";
-  rows.push(row("administrator-ssh-disabled", sshQualified && denied ? "pass" : "unknown",
-    sshQualified && denied ? "default service-wide sshd configuration explicitly denies the Administrators group"
-      : "an explicit service-wide administrator SSH denial is not confirmed",
+  const simpleGroups = !!group && !/[\s,*?![\]]/.test(group) && denyGroups.every(value => !/[,*!?[\]]/.test(value));
+  const denied = simpleGroups && denyGroups.includes(group);
+  const sshQualified = ssh.scope === "service-login-context";
+  const administratorDenied = ssh.administratorContextQualified === true && denied;
+  rows.push(row("administrator-ssh-disabled", administratorDenied ? "pass" : "unknown",
+    administratorDenied ? "built-in administrator's effective SSH login context explicitly denies its Administrators group"
+      : "an explicit built-in administrator SSH denial for this connection context is not confirmed",
     "Inspect effective Windows OpenSSH DenyGroups for the Administrators SID group and any Match/user-specific overrides; retain console access before changing SSH policy."));
   const authKnown = sshQualified && [ssh.password, ssh.keyboard, ssh.publicKey, ssh.gssapi, ssh.hostbased].every(value => value === "yes" || value === "no");
-  const keyOnly = ssh.publicKey === "yes" && [ssh.password, ssh.keyboard, ssh.gssapi, ssh.hostbased].every(value => value === "no");
-  rows.push(row("key-only-ssh", authKnown ? keyOnly ? "pass" : "fail" : "unknown",
-    authKnown ? `default service-wide publickey=${ssh.publicKey}; password=${ssh.password}; keyboard-interactive=${ssh.keyboard}; gssapi=${ssh.gssapi}; hostbased=${ssh.hostbased}` : "default service-wide SSH authentication policy is incomplete",
+  const methods = typeof ssh.methods === "string" ? ssh.methods.trim() : "";
+  const explicitlyKeyOnly = !!methods && methods.split(/\s+/).every(sequence => /^publickey(?:,publickey)*$/.test(sequence));
+  const alternatives = [ssh.password, ssh.keyboard, ssh.gssapi, ssh.hostbased];
+  const keyOnly = sshQualified && ssh.publicKey === "yes" && (explicitlyKeyOnly || (authKnown && methods === "any" && alternatives.every(value => value === "no")));
+  const authFailure = sshQualified && (ssh.publicKey === "no" || (methods === "any" && alternatives.some(value => value === "yes")));
+  rows.push(row("key-only-ssh", keyOnly ? "pass" : authFailure ? "fail" : "unknown",
+    keyOnly || authFailure ? `openrig login context: methods=${methods}; publickey=${ssh.publicKey}; password=${ssh.password}; keyboard-interactive=${ssh.keyboard}; gssapi=${ssh.gssapi ?? "unreported"}; hostbased=${ssh.hostbased ?? "unreported"}` : "effective openrig SSH authentication policy or connection context is incomplete",
     "Inspect the actual sshd service configuration and Match overrides; confirm public-key authentication and disable alternative authentication methods for this baseline."));
   const profiles = valid && Array.isArray(facts.firewall) ? facts.firewall.map(record) : [];
   const complete = ["domain", "private", "public"].every(name => profiles.filter(p => String(p.name).toLowerCase() === name).length === 1);
