@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import type { DaemonClient } from "./client.js";
+import { bindNativeSessionName, windowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 
 export interface TmuxAttachment {
   session: string;
@@ -92,7 +93,10 @@ export function attachTmux(target: TmuxAttachment): Promise<number> {
     for (const key of Object.keys(env)) {
       if (["TMUX", "TMUX_PANE"].includes(process.platform === "win32" ? key.toUpperCase() : key)) delete env[key];
     }
-    const child = spawn("tmux", [...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`],
+    const argv = process.platform === "win32" && bindNativeSessionName(target.session).marker
+      ? windowsTileAttachArgv("tmux", server, target.session, target.readOnly ?? false, 30, true)
+      : ["tmux", ...server, "attach-session", ...(target.readOnly ? ["-r"] : []), "-t", `=${target.session}`];
+    const child = spawn(argv[0]!, argv.slice(1),
       { stdio: "inherit", env, windowsHide: true });
     child.once("error", reject);
     child.once("exit", code => resolve(code ?? 1));

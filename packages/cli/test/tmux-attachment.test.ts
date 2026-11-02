@@ -2,12 +2,21 @@ import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachTmux, readTmuxServerArgs } from "../src/tmux-attachment.js";
+import { readWindowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 
-vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
+vi.mock("node:child_process", async () => ({ ...await vi.importActual("node:child_process"), spawn: vi.fn() }));
 
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
 describe("tmux attachment", () => {
+  it.skipIf(process.platform !== "win32").each([false, true])("uses the verified single-attach wrapper for mapped native names (read-only=%s)", async readOnly => {
+    const child = new EventEmitter(); vi.mocked(spawn).mockReturnValue(child as ReturnType<typeof spawn>);
+    const result = attachTmux({ session: "owned|logical", serverArgs: ["-L", "owned-home"], readOnly });
+    const [file, args, options] = vi.mocked(spawn).mock.calls[0]!;
+    expect(readWindowsTileAttachArgv([String(file), ...args as string[]])).toMatchObject({ session: "owned|logical", server: ["-L", "owned-home"], readOnly, attachOnly: true });
+    expect(options).toMatchObject({ stdio: "inherit", windowsHide: true });
+    child.emit("exit", 7); await expect(result).resolves.toBe(7);
+  });
   it.each([false, true])("passes the exact server and session as argv and clears nesting markers (read-only=%s)", async readOnly => {
     vi.stubEnv("TMUX", "/other/server,7,0");
     vi.stubEnv("TMUX_PANE", "%1");

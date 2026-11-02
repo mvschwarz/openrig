@@ -26,17 +26,17 @@ export function isWindowsTileAttachArgv(argv: readonly string[]): boolean {
 }
 
 /** A short data-only tile command; the installed helper owns reattachment. */
-export function windowsTileAttachArgv(tmux: string, server: readonly string[], session: string, readOnly: boolean, retrySeconds = 30): string[] {
+export function windowsTileAttachArgv(tmux: string, server: readonly string[], session: string, readOnly: boolean, retrySeconds = 30, attachOnly = false): string[] {
   const helper=fileURLToPath(new URL('../../../assets/terminal/windows-tile-attach.ps1',import.meta.url));
   const binding = bindNativeSessionName(session);
-  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds,
+  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds,...(attachOnly ? { attachOnly: true } : {}),
     ...(binding.marker ? { nativeBinding: { physical: binding.physical, marker: binding.marker, legacy: nativeSessionNameMayBeLegacy(session) } } : {})}), 'utf8').toString('base64');
   const code="& ([ScriptBlock]::Create([IO.File]::ReadAllText("+powershellQuote(helper)+"))) "+powershellQuote(payload);
   return [win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),
     '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(code,'utf16le').toString('base64')];
 }
 
-export interface WindowsTileTarget { tmux: string; server: string[]; session: string; readOnly: boolean; retrySeconds: number }
+export interface WindowsTileTarget { tmux: string; server: string[]; session: string; readOnly: boolean; retrySeconds: number; attachOnly?: boolean }
 /** Decode only this build's exact generated data wrapper, never arbitrary PowerShell. */
 export function readWindowsTileAttachArgv(argv: readonly string[]): WindowsTileTarget | null {
   try {
@@ -48,8 +48,9 @@ export function readWindowsTileAttachArgv(argv: readonly string[]): WindowsTileT
     if (!value || typeof value.tmux !== 'string' || !value.tmux || value.tmux.includes('\0')
       || !Array.isArray(value.server) || value.server.some(v => typeof v !== 'string' || v.includes('\0'))
       || typeof value.session !== 'string' || !value.session || /[\x00-\x1f]/.test(value.session)
-      || typeof value.readOnly !== 'boolean' || !Number.isSafeInteger(value.retrySeconds) || value.retrySeconds < 0) return null;
-    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds)) === JSON.stringify(argv)
-      ? { tmux: value.tmux, server: value.server, session: value.session, readOnly: value.readOnly, retrySeconds: value.retrySeconds } : null;
+      || typeof value.readOnly !== 'boolean' || !Number.isSafeInteger(value.retrySeconds) || value.retrySeconds < 0
+      || (value.attachOnly !== undefined && typeof value.attachOnly !== 'boolean')) return null;
+    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds, value.attachOnly)) === JSON.stringify(argv)
+      ? { tmux: value.tmux, server: value.server, session: value.session, readOnly: value.readOnly, retrySeconds: value.retrySeconds, ...(value.attachOnly ? { attachOnly: true } : {}) } : null;
   } catch { return null; }
 }

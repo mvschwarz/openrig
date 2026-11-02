@@ -106,6 +106,7 @@ while($true){
     [Console]::Error.WriteLine("Viewer attach failed (exit "+$attached.Code+"); inspect the selected server before reopening this view.")
     exit $attached.Code
   }
+  if($config.attachOnly){exit $attached.Code}
   $left=$retrySeconds; $same=0
   while($left -gt 0){
     $next=Read-Snapshot

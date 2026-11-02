@@ -5207,6 +5207,20 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+`rig terminal attach` now uses the same verified binding wrapper for constrained
+Windows names. An explicit attach-only mode returns after the first attachment,
+preserving the manual command's semantics instead of following replacements.
+Ordinary names and POSIX execution retain their direct attach path. The CLI
+still clears nesting markers, inherits terminal stdio and propagates exit codes;
+the existing locality/instance checks remain before launch.
+
+Three related CLI/tile files passed all 32 checks, including native PowerShell
+execution proving attach-only performs one snapshot/attachment rather than a
+follow loop. Daemon build and CLI no-emit passed. The new shared exports and
+modified helper still require installed-package qualification. Direct CLI
+execution retains local `tmux` lookup rather than yet consuming the daemon's
+pinned executable metadata; real desktop attachment is still unverified.
+
 General native attach guidance now uses the canonical verified tile wrapper for
 mapped names, preserving executable prefix arguments and the selected server.
 The daemon records an absolute executable when startup's requirements probe

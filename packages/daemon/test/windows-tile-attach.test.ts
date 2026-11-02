@@ -102,14 +102,15 @@ test.skipIf(process.platform !== 'win32')('native tile preserves identity, argv 
   const tmux=writeWindowsNodeFixture(root,'tmux',source);
   const session="seat 'quote' \"double\" 中文 %PATH%",server='owned server;# "quote" \\slash\\ 中文\\';
   const binding=bindNativeSessionName(session);
-  for(const mode of ['detach','replacement','foreign','missing','binding-lost','unmanaged','initial-missing']) {
+  for(const mode of ['detach','single','replacement','foreign','missing','binding-lost','unmanaged','initial-missing']) {
    const state=join(root,mode+'.json'),log=join(root,mode+'.jsonl');fs.writeFileSync(state,JSON.stringify({attaches:[]}));
-   const argv=windowsTileAttachArgv(tmux,['-L',server],session,mode==='detach',mode==='detach'?4:2);
+   const argv=windowsTileAttachArgv(tmux,['-L',server],session,mode==='detach',mode==='detach'?4:2,mode==='single');
    const run=spawnSync(argv[0],argv.slice(1),{env:{...process.env,TEST_TILE_MODE:mode,TEST_TILE_STATE:state,TEST_TILE_LOG:log,TEST_TILE_SESSION:binding.physical,TEST_TILE_BINDING:binding.marker},encoding:'utf8',windowsHide:true,timeout:15000});
    assert.equal(run.status,mode==='foreign'||mode==='initial-missing'?1:0,mode+': '+run.stderr+' calls='+fs.readFileSync(log,'utf8'));
    const attaches=JSON.parse(fs.readFileSync(state,'utf8')).attaches;
    assert.deepEqual(attaches,mode==='replacement'?['$1','$2']:mode==='initial-missing'?[]:['$1'],mode);
    const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
+   if(mode==='single')assert.equal(calls.filter(a=>a[4]==='display-message').length,1);
    for(const call of calls) {
     if(call[2]==='has-session')assert.deepEqual(call,['-L',server,'has-session','-t','='+binding.physical],mode);
     else assert.deepEqual(call.slice(0,4),['-L',server,'-t','='+binding.physical],mode);
