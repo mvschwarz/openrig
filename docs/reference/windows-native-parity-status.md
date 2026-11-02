@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Rex native launch and control-process custody (2026-11-02)
+
+Rex grids now carry exact generated Windows local/SSH tile argv directly rather
+than putting it through local `sh -c`. Blank cells in a native grid use the same
+PowerShell executable. POSIX pane commands retain their existing shell path.
+The native grid fixture checks all three local tiles and the blank fourth cell;
+the owned SSH fixture executes Rex's emitted argv with exact data and exit 7.
+
+Rex control commands now use the existing atomic Windows Job launcher, retaining
+strict descendant cleanup after timeout and normal exit. Native tests confirm
+literal argv (including empty words), stdin, and acknowledged detached-child
+cleanup at timeout and root exit 0/7. Native discovery checks `rex.exe` under
+REX_BIN_DIR and semicolon-separated absolute PATH entries, avoiding the POSIX
+resolver's drive-colon split and the macOS app fallback.
+
+Four Rex/tile files pass 62 tests on Windows with four real POSIX shell cases
+skipped; those exact changed sources pass 59 tests in the ordinary WSL mirror,
+with seven Windows cases skipped. The separate daemon Rex-wiring case passed
+in the preceding combined run. Daemon TypeScript checking passes. These are
+process/transport/layout fixtures, not qualification of an installed Windows
+Rex GUI or actual provider-backed remote attachment.
+
 ### Native Herdr SSH tile launch (2026-11-02)
 
 Windows-composed SSH tiles now include an exact native PowerShell argv wrapper.

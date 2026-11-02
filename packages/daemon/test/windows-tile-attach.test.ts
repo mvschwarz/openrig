@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import { windowsTileAttachArgv, windowsSshTileAttachArgv, isWindowsTileAttachArgv } from '../src/domain/terminal/windows-tile-attach.js';
 import { buildGridRoot } from '../src/domain/terminal/herdr-adapter.js';
+import { buildRexGrid } from '../src/domain/terminal/rex-layout.js';
 import { composeView } from '../src/domain/terminal/view-composer.js';
 import {writeWindowsNodeFixture} from '../../../scripts/windows-node-fixture.mjs';
 
@@ -34,6 +35,21 @@ test('Windows local platform never changes a POSIX SSH remote tile command', () 
  const root=buildGridRoot(native.opened).root;
  assert.equal(root.type,'pane');
  if(root.type==='pane')assert.notEqual(root.command[0],'sh');
+ const rex=buildRexGrid(native.opened).root;
+ assert.ok('block' in rex);
+ if('block' in rex)assert.deepEqual(rex.block.options.command,native.opened[0].attachArgv);
+});
+
+test('Rex native grids preserve local argv and use native blank panes', () => {
+ const members=Array.from({length:3},(_,i)=>({seat:'local'+i,label:'local'+i,tmuxSession:'local'+i,host:null,readOnly:true,alive:true}));
+ const view=composeView('v',members,{resolveHost:()=>null,localPlatform:'win32',localTmux:'C:/owned/psmux.exe'});
+ const grid=buildRexGrid(view.opened);
+ const leaves:any[]=[];
+ const visit=(node:any)=>{if(node.block)leaves.push(node.block);else{visit(node.split.before);visit(node.split.after);}};
+ visit(grid.root);
+ assert.equal(leaves.length,4);
+ for(let i=0;i<3;i++)assert.deepEqual(leaves[i].options.command,view.opened[i].attachArgv);
+ assert.deepEqual(leaves[3].options.command,[view.opened[0].attachArgv![0],'-NoLogo','-NoProfile']);
 });
 
 test.skipIf(process.platform !== 'win32')('native SSH tile forwards the exact remote command and exit without a local POSIX shell', () => {
@@ -50,9 +66,13 @@ test.skipIf(process.platform !== 'win32')('native SSH tile forwards the exact re
   const view=composeView('v',[member],{resolveHost:()=>({id:'edge',transport:'ssh',target:'fixture'}),localPlatform:'win32'});
   const grid=buildGridRoot([{...view.opened[0]!,attachArgv:argv}]).root;
   assert.equal(grid.type,'pane'); if(grid.type!=='pane')throw new Error('Expected one tile');
-  const run=spawnSync(grid.command[0],grid.command.slice(1),{env:{...process.env,TEST_TILE_LOG:log},encoding:'utf8',windowsHide:true,timeout:10000});
-  assert.equal(run.status,7,run.stderr);
-  assert.deepEqual(JSON.parse(fs.readFileSync(log,'utf8')),['-t',destination,command]);
+  const rex=buildRexGrid([{...view.opened[0]!,attachArgv:argv}]).root;
+  assert.ok('block' in rex);if(!('block' in rex))throw new Error('Expected one Rex tile');
+  for(const launch of [grid.command,rex.block.options.command]) {
+   const run=spawnSync(launch[0],launch.slice(1),{env:{...process.env,TEST_TILE_LOG:log},encoding:'utf8',windowsHide:true,timeout:10000});
+   assert.equal(run.status,7,run.stderr);
+   assert.deepEqual(JSON.parse(fs.readFileSync(log,'utf8')),['-t',destination,command]);
+  }
  } finally {fs.rmSync(root,{recursive:true,force:true});}
 },15000);
 

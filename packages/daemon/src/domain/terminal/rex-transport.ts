@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import { stopGroup } from "../codex-network-default.js";
+import { spawnWindowsJobProcess } from "../windows-job-process.js";
 
 /** A `rex` run that did not exit 0; `exitCode` is null when it never started or was ended. */
 export class RexRunError extends Error {
@@ -58,8 +59,18 @@ function executable(file: string): boolean {
 /** `$REX_BIN_DIR/rex`, then `rex` on PATH, then the binary inside the macOS app bundle. */
 export function resolveRexBinary(env: NodeJS.ProcessEnv, isExecutable: (file: string) => boolean = executable): string | null {
   const bundled = path.join(homedir(), "Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex");
-  const fromDir = env["REX_BIN_DIR"] ? path.join(env["REX_BIN_DIR"], "rex") : null;
+  const fromDir = env["REX_BIN_DIR"] ? path.join(env["REX_BIN_DIR"], process.platform === "win32" ? "rex.exe" : "rex") : null;
   if (fromDir && isExecutable(fromDir)) return fromDir;
+  if (process.platform === "win32") {
+    // The shared POSIX resolver splits on ':', which splits a Windows drive.
+    // Rex control calls require a native executable, never a shell shim.
+    for (const directory of (env["PATH"] ?? "").split(path.delimiter)) {
+      if (!path.isAbsolute(directory)) return null;
+      const candidate = path.join(directory, "rex.exe");
+      if (executable(candidate)) return candidate;
+    }
+    return null;
+  }
   return resolveOnPath("rex", env["PATH"]) ?? (isExecutable(bundled) ? bundled : null);
 }
 
@@ -68,7 +79,9 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   const [file, ...args] = argv;
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn(file!, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    child = process.platform === "win32"
+      ? spawnWindowsJobProcess(file!, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+      : spawn(file!, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
   } catch (err) {
     reject(new RexRunError((err as Error).message, null, "", (err as NodeJS.ErrnoException).code));
     return;
@@ -86,7 +99,8 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
     if (settled) return;
     settled = true;
     // Past its deadline rex has nothing left to read, so end it now instead of after stopGroup's stdin grace.
-    try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+    if (process.platform === "win32") child.kill();
+    else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
     void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null, stderr)));
   }, timeoutMs);
   child.once("error", (err) => {
