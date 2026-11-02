@@ -344,7 +344,7 @@ export class StartupOrchestrator {
       if (!(error instanceof StartupAdmissionError)) throw error;
       return { ok: false, startupStatus: "attention_required", errors: [error.message] };
     }
-    return { ...result, ...(warnings.length ? { warnings: [...new Set(warnings)] } : {}) };
+    return { ...result, ...(warnings.length ? { warnings: [...new Set([...(result.warnings ?? []), ...warnings])] } : {}) };
   }
 
   private async startNodeWithWarnings(input: StartupInput, warnings: string[]): Promise<StartupResult> {

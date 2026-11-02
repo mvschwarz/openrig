@@ -100,6 +100,18 @@ describe("owning-daemon native startup admission", () => {
     ready.resolve(); await Promise.all([a, b]); expect(calls).toEqual(["a", "b"]);
   });
 
+  it("returns the protection-unavailable notice with ordinary startup results", async () => {
+    const { controller } = harness({ observe: async () => { throw new Error("missing"); } });
+    const result = await controller.run("seat", "startup", async () => ({ ok: true, warnings: ["existing warning"] }));
+    expect(result.warnings).toContain("existing warning");
+    expect(result.warnings.some(value => value.includes("memory protection unavailable"))).toBe(true);
+  });
+  it("caps even the minimum pacing at the configured settling bound", async () => {
+    const sleeps: number[] = [];
+    const { controller } = harness({ sleep: async ms => { sleeps.push(ms); } }, { settleMs: 100, settleLimitMs: 10 });
+    await controller.run("seat", "startup", async () => ({ ok: true }));
+    expect(sleeps).toEqual([10]);
+  });
   it("a stale pressure reading degrades instead of becoming an indefinite pressure refusal", async () => {
     const { controller } = harness({ observe: async () => ({ observedAt: 0, source: "stale", totalBytes: 1000, availableBytes: 0, pressure: "high" }) });
     await expect(controller.run("seat", "startup", async () => "kept history")).resolves.toBe("kept history");

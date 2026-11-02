@@ -280,7 +280,7 @@ export class StartupAdmission {
 
   private async execute(entry: Entry): Promise<void> {
     try {
-      const result = await this.scope.run(new Set([entry.snapshot.nodeId]), entry.work);
+      let result = await this.scope.run(new Set([entry.snapshot.nodeId]), entry.work);
       if (entry.cancelled && entry.snapshot.dispatchedAt === undefined) throw new StartupAdmissionError("startup_cancelled", "Cancelled before native dispatch; no session stopped.");
       this.record(entry, "settling", "Native operation returned; readiness alone does not prove memory settling");
       const started = this.now();
@@ -301,6 +301,11 @@ export class StartupAdmission {
           this.unresolved.set(entry.snapshot.nodeId, entry.snapshot);
         } else this.record(entry, "complete", "Startup returned a refusal; no unresolved native process observed", memory);
       } else this.record(entry, "complete", "Startup finished; bounded pacing completed, not a guarantee against a later memory peak", memory);
+      if (entry.snapshot.protectionUnavailable && result && typeof result === "object" && !Array.isArray(result)) {
+        const previous = (result as { warnings?: unknown }).warnings;
+        const warnings = Array.isArray(previous) ? previous.filter((value): value is string => typeof value === "string") : [];
+        result = { ...result, warnings: [...new Set([...warnings, "Startup memory protection unavailable; this daemon serialized starts and used bounded pacing. Inspect startup admission status before starting more seats."])] };
+      }
       entry.resolve(result);
     } catch (error) {
       const dispatched = entry.snapshot.dispatchedAt !== undefined;

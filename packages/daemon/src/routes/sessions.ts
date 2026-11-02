@@ -274,7 +274,7 @@ nodesRoutes.post("/:logicalId/startup-admission", async c => {
   const body = await c.req.json().catch(() => ({})) as { action?: string };
   if (!["status", "cancel", "continue"].includes(body.action ?? "")) return c.json({ error: "Use status, cancel or continue" }, 400);
   if (body.action !== "status" && !admission.control(node.id, body.action as "cancel" | "continue")) {
-    return c.json({ error: "No cancellable queued request. Native input is never cancelled or replayed here.", admission: admission.status(node.id) }, 409);
+    return c.json({ error: "No waiting request is eligible for this action. Native input is never cancelled or replayed here.", admission: admission.status(node.id) }, 409);
   }
   return c.json({ ok: true, admission: admission.status(node.id), requestActive: admission.pending(node.id), options: admission.options });
 });
