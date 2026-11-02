@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
-import { windowsTileAttachArgv } from '../src/domain/terminal/windows-tile-attach.js';
+import { windowsTileAttachArgv, windowsSshTileAttachArgv, isWindowsTileAttachArgv } from '../src/domain/terminal/windows-tile-attach.js';
+import { buildGridRoot } from '../src/domain/terminal/herdr-adapter.js';
 import { composeView } from '../src/domain/terminal/view-composer.js';
 import {writeWindowsNodeFixture} from '../../../scripts/windows-node-fixture.mjs';
 
@@ -29,7 +30,31 @@ test('Windows local platform never changes a POSIX SSH remote tile command', () 
  const posix=composeView('v',[member],{resolveHost,localPlatform:'linux'});
  assert.equal(native.opened[0].paneCommand,posix.opened[0].paneCommand);
  assert.ok(native.opened[0].paneCommand.includes('/bin/sh'));
+ assert.ok(isWindowsTileAttachArgv(native.opened[0].attachArgv!));
+ const root=buildGridRoot(native.opened).root;
+ assert.equal(root.type,'pane');
+ if(root.type==='pane')assert.notEqual(root.command[0],'sh');
 });
+
+test.skipIf(process.platform !== 'win32')('native SSH tile forwards the exact remote command and exit without a local POSIX shell', () => {
+ const root=fs.mkdtempSync(join(tmpdir(),'native ssh tile-'));
+ try {
+  const log=join(root,'argv.json');
+  const ssh=writeWindowsNodeFixture(root,'ssh',"import fs from 'node:fs';fs.writeFileSync(process.env.TEST_TILE_LOG,JSON.stringify(process.argv.slice(2)));process.exit(7);");
+  const destination="user@host 'quote'", command="/bin/sh -c 'printf \"remote $VALUE\"' # 中文 \\";
+  const argv=windowsSshTileAttachArgv(destination,command,ssh);
+  assert.ok(isWindowsTileAttachArgv(argv));
+  const modified=[...argv];modified[5]=Buffer.from(Buffer.from(argv[5]!, 'base64').toString('utf16le')+'\nWrite-Output forged','utf16le').toString('base64');
+  assert.equal(isWindowsTileAttachArgv(modified),false);
+  const member={seat:'remote',label:'remote',tmuxSession:'remote',host:'edge',readOnly:true,alive:true};
+  const view=composeView('v',[member],{resolveHost:()=>({id:'edge',transport:'ssh',target:'fixture'}),localPlatform:'win32'});
+  const grid=buildGridRoot([{...view.opened[0]!,attachArgv:argv}]).root;
+  assert.equal(grid.type,'pane'); if(grid.type!=='pane')throw new Error('Expected one tile');
+  const run=spawnSync(grid.command[0],grid.command.slice(1),{env:{...process.env,TEST_TILE_LOG:log},encoding:'utf8',windowsHide:true,timeout:10000});
+  assert.equal(run.status,7,run.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(log,'utf8')),['-t',destination,command]);
+ } finally {fs.rmSync(root,{recursive:true,force:true});}
+},15000);
 
 test.skipIf(process.platform !== 'win32')('native tile preserves identity, argv and bounded replacement following', () => {
  const root=fs.mkdtempSync(join(tmpdir(),'native tile [owned]-'));

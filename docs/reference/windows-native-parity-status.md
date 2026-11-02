@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native Herdr SSH tile launch (2026-11-02)
+
+Windows-composed SSH tiles now include an exact native PowerShell argv wrapper.
+Herdr uses that wrapper instead of requiring local `sh -c`; the remote POSIX
+command remains one unchanged SSH argument. Local tmux server arguments never
+cross into the remote command. Generated-wrapper admission checks the complete
+script and argv, so a modified script cannot enter this native rendering path.
+SSH tiles retain their existing no-resume-command contract.
+
+The three tile/resume/path files pass 44 tests on Windows, with the real POSIX
+shell case skipped. A real owned Windows SSH-executable fixture, invoked through
+Herdr's generated pane command, receives exact quoted/Unicode/backslash argv
+and returns exit 7. The exact changed sources in the ordinary WSL mirror pass
+42 tests, including that POSIX shell case; three Windows process cases are
+skipped there. Daemon TypeScript checking passes. This verifies launch behavior,
+not a real remote connection or Herdr's unresolved nested-console acceptance.
+
 ### Native local-copy directory permission finalization (2026-11-02)
 
 The local-copy implementation now previews and repairs POSIX directory-mode

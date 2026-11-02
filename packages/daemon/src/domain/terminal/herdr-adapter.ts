@@ -75,7 +75,7 @@ import type {
 } from "./herdr-transport.js";
 import { blankShellArgv } from "./login-shell.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
-import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
+import { readWindowsTileAttachArgv, isWindowsTileAttachArgv } from "./windows-tile-attach.js";
 import { renderWindowsLaunchArgv } from "../../adapters/windows-launch.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
@@ -220,6 +220,8 @@ function herdrResumeArgv(pane: ComposedPane, tile: string): string[] | null {
   const agent = herdrAgent(pane);
   if (!agent || !pane.attachArgv) return null;
   if (readWindowsTileAttachArgv(pane.attachArgv)) return nativeHerdrTileArgv(pane, tile);
+  // SSH tiles retain the existing no-resume contract, including native wrappers.
+  if (isWindowsTileAttachArgv(pane.attachArgv)) return null;
   const argv = ["env", `HERDR_AGENT=${agent}`, `OPENRIG_TILE=${tile}`, ...pane.attachArgv];
   return argv.some((arg) => /['\u0000-\u001f\u007f]/.test(arg)) ? null : argv;
 }
@@ -239,7 +241,7 @@ const RESUME_REPORT_INTERVAL_MS = 500;
 /** Herdr's spelling of the shared grid: `right`/`down` splits, and blanks running the person's login shell (cmux's blank-surface precedent). */
 const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {
   // `sh -c` keeps the composed quoting (read-only `-r`, ssh-wrap); a known runtime adds Herdr's detection hint.
-  tile: (pane) => ({ type: "pane", label: pane.label, command: pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv)
+  tile: (pane) => ({ type: "pane", label: pane.label, command: pane.attachArgv && isWindowsTileAttachArgv(pane.attachArgv)
     ? nativeHerdrTileArgv(pane) : ["sh", "-c", herdrPaneCommand(pane)] }),
   blank: () => ({ type: "pane", label: "", command: blankShellArgv() }),
   split: (direction, ratio, first, second) => ({ type: "split", direction: direction === "across" ? "right" : "down", ratio, first, second }),
@@ -247,7 +249,7 @@ const HERDR_TILE_NODES: TileNodes<HerdrLayoutNode> = {
 
 /** The equal grid for one page (see `buildTileGrid`): N=2 → 2×1, N=5 → 3×2, N=7 → 3×3 (cols×rows). */
 export function buildGridRoot(panes: ComposedPane[], columns?: number): TileGrid<HerdrLayoutNode> {
-  const native = panes.find(pane => pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv));
+  const native = panes.find(pane => pane.attachArgv && isWindowsTileAttachArgv(pane.attachArgv));
   return buildTileGrid(panes, columns, native ? { ...HERDR_TILE_NODES,
     blank: () => ({type:"pane",label:"",command:[native.attachArgv![0]!,"-NoLogo","-NoProfile"]}),
   } : HERDR_TILE_NODES);

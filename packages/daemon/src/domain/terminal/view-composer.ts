@@ -20,7 +20,7 @@
 // registry via the injected `resolveHost`.
 
 import { tileAttachArgv } from "./tile-attach.js";
-import { windowsTileAttachArgv } from "./windows-tile-attach.js";
+import { windowsTileAttachArgv, windowsSshTileAttachArgv } from "./windows-tile-attach.js";
 import { powershellQuote } from "../../adapters/windows-launch.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
@@ -189,6 +189,7 @@ export function composeView(
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh -t ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
+        ...(ctx.localPlatform === "win32" ? { attachArgv: windowsSshTileAttachArgv(dest, remoteCommand) } : {}),
         recoveryCommand: ctx.localPlatform === "win32"
           ? "& " + ["ssh", "-t", dest, recoveryCommand].map(powershellQuote).join(" ")
           : `ssh -t ${shellQuote(dest)} ${shellQuote(recoveryCommand)}`,
