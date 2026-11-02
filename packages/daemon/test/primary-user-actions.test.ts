@@ -183,7 +183,7 @@ describe("the primary user acts on anyone's ask, unattributed, on that person's 
     expect(audit(sarahs.qitemId)).toEqual({ verb: "approve", actor: "orch@rig", notes: null });
   });
 
-  it("with no one registered, acts are recorded as the claimed actor, as before", async () => {
+  it("with no one registered, a legacy ask's own seat is answered as human@host, unattributed, as the terminal always is", async () => {
     const legacy = await ask("human@host");
     expect((await act({ verb: "answer", qitemId: legacy.qitemId, actorSession: "human@host", authority: "primary-user", decision: "Yes" })).status).toBe(200);
     expect(audit(legacy.qitemId)).toEqual({ verb: "answer", actor: "human@host", notes: { authority: "primary-user", asked: "human@host" } });

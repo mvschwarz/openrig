@@ -63,6 +63,19 @@ describe("a Slack reply from someone other than the person a question is parked 
       .toEqual([[MIKE, `go ahead; by ${MIKE}, a registered person, on ${ANA}'s ask`]]);
   });
 
+  it("recognizes a replay of Mike's uncertain resume, so its timing notice is retried rather than dropped", async () => {
+    // Parked on Ana and posted to her in a digest, so a reply's order against the question can't be confirmed.
+    const parked = await repo.create({ sourceSession: "asker@r", destinationSession: "dev@r", body: "work", nudge: false });
+    repo.update({ qitemId: parked.qitemId, actorSession: "dev@r", state: "blocked", blockedOn: "human-ana@host", summary: "Parked",
+      evidenceRef: "/proof/parked.md", transitionNote: "parked on Ana" });
+    const episode = repo.listTransitions(parked.qitemId).filter((t) => t.ownerNotificationKind === "human-required").at(-1)!;
+    repo.update({ qitemId: parked.qitemId, actorSession: "openrig-slack",
+      transitionNote: `slack-owner-notification-posted notification_key=${parked.qitemId}:${episode.transitionId} kind=human-required thread_ts=1.1 message_ts=1.5 digest=d1` });
+    expect(await slackReply(parked.qitemId, MIKE)).toBe("resolved-uncertain");
+    expect(await slackReply(parked.qitemId, MIKE)).toBe("resolved-uncertain");
+    expect(repo.listTransitions(parked.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")).toHaveLength(1);
+  });
+
   it("the person it's parked on still resumes it from Slack", async () => {
     const parked = await parkOnAna();
     expect(await slackReply(parked.qitemId, ANA)).toBe("resolved");

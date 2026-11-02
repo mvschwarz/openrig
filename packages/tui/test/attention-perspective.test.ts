@@ -36,13 +36,13 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 
   view.dispatch(parseCommand("attention")); await refresh();
   expect(views.at(-1)).toBe("default");
-  expect(title()).toBe("FEED · Viewing mike@external · you act as mike@external · whose all shows everyone");
+  expect(title()).toBe("FEED · Viewing mike@external · you act as human@host (unattributed) · whose all shows everyone");
 
   view.dispatch(parseCommand("whose sarah")); await refresh();
   expect(view.get()).toMatchObject({ section: "needs", attentionView: "sarah" });
   expect(views.at(-1)).toBe("sarah");
   // Viewing Sarah is not acting as Sarah.
-  expect(title()).toBe("FEED · Viewing sarah@external · you act as mike@external · whose all shows everyone");
+  expect(title()).toBe("FEED · Viewing sarah@external · you act as human@host (unattributed) · whose all shows everyone");
 
   // Leaving the Feed and coming back keeps the chosen view.
   view.dispatch(parseCommand(":topology")); view.dispatch(parseCommand("attention")); await refresh();
@@ -50,7 +50,7 @@ it("the whose command chooses whose queue the Feed reads, and the Feed says who 
 
   view.dispatch(parseCommand("whose all")); await refresh();
   expect(views.at(-1)).toBe("all");
-  expect(title()).toBe("FEED · Viewing everyone · you act as mike@external");
+  expect(title()).toBe("FEED · Viewing everyone · you act as human@host (unattributed)");
 
   view.dispatch(parseCommand("whose default")); await refresh();
   expect(view.get().attentionView).toBeNull();
@@ -93,8 +93,8 @@ it("an act on someone else's ask says who acts and whose ask it is, and carries 
   expect(viewingSarah.text).toContain("Approve as human@host (unattributed) on sarah@external's ask");
   expect(answerRequest(viewingSarah.action as Extract<Action, { type: "act"; act: "answer" }>)).toEqual(
     { verb: "approve", qitemId: "sarahs", actorSession: "sarah@external", authority: "primary-user" });
-  // With no one registered, the label is as before.
-  expect(approve(served()).text).toContain("Approve as sarah@external (closes");
+  // With no one registered, the terminal still names no responder: unattributed too.
+  expect(approve(served()).text).toContain("Approve as human@host (unattributed) (closes");
 });
 
 it("a row parked on someone is resolved with reply, in words, as the primary user", () => {

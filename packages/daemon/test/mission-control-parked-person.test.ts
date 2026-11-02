@@ -119,7 +119,6 @@ describe("Steering resolves a registered person's park without changing its owne
   it("keeps direct answers repeat-safe and addressed to the asker", async () => {
     const ask = await repo.create({ sourceSession: "asker@fixture", destinationSession: "fixture-person@external",
       body: "Ship?", summary: "Ship?", humanIntent: "decision", evidenceRef: "fixture/ship", nudge: false });
-    expect(await act(ask.qitemId, "other-person@external", "answer")).toMatchObject({ status: 400 });
     const first = await act(ask.qitemId, "fixture-person@external", "answer", "Ship it");
     expect(first.status).toBe(200);
     const replay = await act(ask.qitemId, "fixture-person@external", "answer", "Different words");

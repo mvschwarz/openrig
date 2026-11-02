@@ -17,9 +17,10 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
-import { addHumanFragment, humansDir, loadHumanRegistry } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, humansDir, loadHumanRegistry, writeProjection } from "../src/domain/gateway/human-registry.js";
 import { resolveHumanDeliveryReadiness } from "../src/domain/gateway/human-readiness.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
+import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 
 const ASKER = "writer@rig";
 
@@ -28,6 +29,7 @@ describe("shared-workspace people", () => {
   let repo: QueueRepository;
   let home: string;
   let app: Hono;
+  let contract: MissionControlWriteContract;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "shared-workspace-humans-"));
@@ -36,7 +38,7 @@ describe("shared-workspace people", () => {
     migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db);
     repo = new QueueRepository(db, bus, { validateRig: () => true });
-    const contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
+    contract = new MissionControlWriteContract({ db, eventBus: bus, queueRepo: repo, actionLog: new MissionControlActionLog(db) });
     app = new Hono();
     app.use("*", async (c, next) => { c.set("queueRepo" as never, repo as never); c.set("eventBus" as never, bus as never); c.set("missionControlWriteContract" as never, contract as never); await next(); });
     app.route("/api/mission-control", missionControlRoutes());
@@ -114,6 +116,50 @@ describe("shared-workspace people", () => {
       expect(replies(sarahs.qitemId)).toHaveLength(1);
     });
 
+    // One answer per ask on every surface, including a process stopped between a committed answer and the close.
+    const ports = () => makeQueuePorts(repo, { loadHumanRegistry: () => loadHumanRegistry(home), sharedChannels: () => [] });
+    const slackAnswer = (askId: string, who: string, words: string) => ports().createQitem({ qitemId: `qitem-slack-inbound-${who.split("@")[0]}-${askId}`,
+      source: who, destination: ASKER, summary: words, body: words, inReplyTo: askId, humanAnswer: true, typedReply: true });
+
+    it("Bob's Slack answer committed before Sarah answers in the Feed: Sarah is told Bob answered, and it settles once, as Bob's", async () => {
+      register("sarah", "bob");
+      const sarahs = await ask("sarah@external");
+      await slackAnswer(sarahs.qitemId, "bob@external", "Hold it"); // the process stops before Slack's close runs
+      expect(await act({ verb: "answer", qitemId: sarahs.qitemId, actorSession: "sarah@external", decision: "Ship it" }))
+        .toMatchObject({ status: 409, body: { error: "qitem_already_terminal", answeredBy: "bob@external" } });
+      expect(transitions(sarahs.qitemId).at(-1)).toMatchObject({ state: "done", actor_session: "bob@external" });
+      expect(replies(sarahs.qitemId).map((r) => [r.sourceSession, r.body])).toEqual([["bob@external", "Hold it"]]);
+    });
+
+    it("Sarah's Feed answer committed before Bob's Slack reply: Bob's words stay conversation, and it settles once, as Sarah's", async () => {
+      register("sarah", "bob");
+      const sarahs = await ask("sarah@external");
+      // Sarah's return committed, then the process stopped before the close.
+      await repo.createHumanAnswer({ sourceSession: "sarah@external", destinationSession: ASKER, body: "Ship it", summary: "Ship it",
+        inboundReplyTo: sarahs.qitemId, nudge: false } as never);
+      const bobs = await slackAnswer(sarahs.qitemId, "bob@external", "Hold it");
+      expect(await makeHumanReplyResolver(repo, contract)({ qitemId: sarahs.qitemId, actorSession: "bob@external", decision: "Hold it",
+        messageTs: "2.2", typedReply: true } as never)).toBe("not-applicable");
+      expect(transitions(sarahs.qitemId).at(-1)).toMatchObject({ state: "done", actor_session: "sarah@external" });
+      const answers = replies(sarahs.qitemId).filter((r) => r.tags?.includes("human-answer"));
+      expect(answers.map((r) => r.sourceSession)).toEqual(["sarah@external"]);
+      expect(repo.getById(bobs)).toMatchObject({ sourceSession: "bob@external", body: "Hold it" });
+    });
+
+    it("Sarah's typed answer committed before Bob picks an option: Bob's choice isn't recorded, and it settles as Sarah's", async () => {
+      register("sarah", "bob");
+      const sarahs = await ask("sarah@external", { humanQuestions: [{ id: "go", question: "Ship?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] }] });
+      await repo.createHumanAnswer({ sourceSession: "sarah@external", destinationSession: ASKER, body: "Do not ship", summary: "Do not ship",
+        inboundReplyTo: sarahs.qitemId, nudge: false } as never);
+      expect(await act({ verb: "answer", qitemId: sarahs.qitemId, actorSession: "bob@external", questionId: "go", optionId: "yes" }))
+        .toMatchObject({ status: 409, body: { error: "qitem_already_terminal", answeredBy: "sarah@external" } });
+      const closed = repo.getById(sarahs.qitemId)!;
+      expect(closed.state).toBe("done");
+      expect(closed.humanAnswers?.go).not.toBe("yes");
+      expect(transitions(sarahs.qitemId).at(-1)).toMatchObject({ state: "done", actor_session: "sarah@external" });
+      expect(replies(sarahs.qitemId).map((r) => r.sourceSession)).toEqual(["sarah@external"]);
+    });
+
     it("a person answering their own ask through the same path is recorded as themselves", async () => {
       register("sarah");
       const sarahs = await ask("sarah@external");
@@ -141,6 +187,13 @@ describe("shared-workspace people", () => {
     });
   });
 
+  it("with no one registered, the terminal's act is still unattributed, whatever address it claims", async () => {
+    const legacy = await ask("human-review@kernel");
+    expect((await act({ verb: "approve", qitemId: legacy.qitemId, actorSession: "human-review@kernel", authority: "primary-user" })).status).toBe(200);
+    expect(transitions(legacy.qitemId).at(-1)).toMatchObject({ state: "done", actor_session: "human@host",
+      transition_note: "mission-control:approve; by someone at the terminal OpenRig can't name (human@host), unattributed, on human-review@kernel's ask" });
+  });
+
   describe("a person with no connector binding", () => {
     const dana = { entityId: "dana", class: "human" as const, displayName: "Dana", address: "dana@external", connectorBindings: [], prefs: { deliveryClass: "B" as const } };
 
@@ -149,6 +202,8 @@ describe("shared-workspace people", () => {
       expect(addHumanFragment(dana, home)).toMatchObject({ ok: true });
       mkdirSync(humansDir(home), { recursive: true });
       writeFileSync(join(humansDir(home), "eli.yaml"), "entityId: eli\nclass: human\ndisplayName: Eli\naddress: eli@external\nprefs:\n  deliveryClass: B\n");
+      // A hand-written fragment joins the registry through the supported re-projection.
+      expect(writeProjection(home)).toMatchObject({ ok: true });
       const loaded = loadHumanRegistry(home);
       expect(loaded.ok).toBe(true);
       if (!loaded.ok) return;
