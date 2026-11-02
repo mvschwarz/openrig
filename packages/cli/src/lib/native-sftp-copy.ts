@@ -9,6 +9,7 @@ import { looksLikePermissionGate } from "../cross-host-executor.js";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import { moveLocalEntryNoReplace } from './local-entry-move.js';
 import { spawnWindowsJobProcess } from "@openrig/daemon/windows-launch";
+import { readWindowsEntryTimes } from "@openrig/daemon/windows-owned-files";
 
 interface Endpoint {
   paths: typeof path.posix;
@@ -29,7 +30,7 @@ interface Endpoint {
 const local: Endpoint = {
   paths: path,
   async stat(file) {
-    try { const s = await lstat(file); return { size: s.size, mode: s.mode, atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) }; }
+    try { const s = await lstat(file); return { size: s.size, mode: s.mode, ...(process.platform === "win32" ? readWindowsEntryTimes(file, s) : { atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) }) }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   },
   names: readdir, link: readlink,

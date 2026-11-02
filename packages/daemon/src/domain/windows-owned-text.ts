@@ -34,6 +34,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="move-no-replace") { if(!MoveFileEx(args[1],args[2],8))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
+      else if(args[0]=="entry-times")EntryTimes(args[1]);
       else if(args[0]=="names-collide")NamesCollide();
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
@@ -96,6 +97,17 @@ public static class OpenRigOwnedText {
       try { using(var identity=WindowsIdentity.GetCurrent()) { if(new SecurityIdentifier(owner).Value!=identity.User.Value)throw new InvalidOperationException("Flush path must be owned"); } }
       finally { LocalFree(descriptor); }
       if(!FlushFileBuffers(file))throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+  }
+  static void EntryTimes(string path) {
+    var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+    using(var file=CreateFile(path,0x80u,7,ref security,3,0x02200000u,IntPtr.Zero)) {
+      if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+      FileInformation info;if(!GetFileInformationByHandle(file,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
+      long accessed=((long)info.accessed.dwHighDateTime<<32)|(uint)info.accessed.dwLowDateTime;
+      long written=((long)info.written.dwHighDateTime<<32)|(uint)info.written.dwLowDateTime;
+      ulong inode=((ulong)info.indexHigh<<32)|info.indexLow;
+      Console.Write(info.volume+" "+inode+" "+(accessed-116444736000000000L)+" "+(written-116444736000000000L));
     }
   }
   static void DirectoryCaseSensitive(string path) {
@@ -521,6 +533,17 @@ export function isWindowsDirectoryLink(file: string): boolean {
   return execFileSync(nativeHelper(), ["directory-link", toNamespacedPath(file)], {
     encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   }) === "true";
+}
+
+/** No-follow native timestamps, checked against the caller's lstat identity. */
+export function readWindowsEntryTimes(file: string, expected: { dev: number; ino: number }): { atime: number; mtime: number } {
+  const output = execFileSync(nativeHelper(), ["entry-times", toNamespacedPath(file)], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  }).trim().split(" ");
+  if (output.length !== 4 || output.some(value => !/^-?\d+$/.test(value))) throw new Error("Invalid native entry times");
+  if (Number(output[0]) !== expected.dev || Number(output[1]) !== expected.ino) throw new Error("File identity changed while reading native entry times");
+  const seconds = (value: string) => { const ticks = BigInt(value); return Number(ticks >= 0n ? ticks / 10_000_000n : (ticks - 9_999_999n) / 10_000_000n); };
+  return { atime: seconds(output[2]!), mtime: seconds(output[3]!) };
 }
 
 export function isWindowsDirectoryCaseSensitive(file: string): boolean {

@@ -5207,6 +5207,18 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+SFTP local-endpoint metadata now reads access/write times through a no-follow
+Windows file handle and checks its volume/file identity against the caller's
+`lstat`. Signed native 100ns values are converted with integer arithmetic before
+flooring to protocol seconds. Five dedicated checks passed, including accurate
+-1/0/2^31/(2^32-1)/2^32 readback, stale-identity refusal, and real-subsystem
+copy refusal that retains target bytes for out-of-v3-range source times.
+The recursive native SFTP file separately passed 27 checks with two skips;
+daemon build and CLI no-emit passed. This fixes accurate source capture for
+SFTP; it does not extend SFTP v3 time representation or yet repair native-local
+copy's separate timestamp read path. Handle comparison is not an atomic snapshot
+of every metadata field and does not prevent later concurrent source changes.
+
 Standalone Windows Node 24.14.1 time probe (outside Vitest) reproduced the
 out-of-range readback discrepancy: setting -1 Unix seconds was read by Node
 `lstat` as 4294967295, and setting 4294967296 was read as zero. Bigint stat had
