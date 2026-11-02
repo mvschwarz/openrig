@@ -1,5 +1,7 @@
 import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, utimes } from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 
 /** Resolve existing parents too: a destination need not exist yet, but its
@@ -17,6 +19,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
   let filesTransferred = 0;
   let bytesTransferred = 0;
   const changes: string[] = [];
+  let staged: string | undefined;
   const stat = async (p: string) => lstat(p).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined;
     throw error;
@@ -56,6 +59,13 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     changes.push(`${source.isSymbolicLink() ? "cL" : ">f"} ${dst}`);
     if (!source.isSymbolicLink()) { filesTransferred++; bytesTransferred += source.size; }
     if (!plan.dryRun) {
+      if (process.platform === "win32" && source.isFile() && destination?.isFile()) {
+        staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
+        await cp(src, staged, { force: false, errorOnExist: true, preserveTimestamps: true });
+        replaceWindowsCopiedFile(dst, staged);
+        staged = undefined;
+        return;
+      }
       // fs.cp overwrites the entry, preserving links rather than following their targets.
       await cp(src, dst, { force: true, preserveTimestamps: true, verbatimSymlinks: true });
     }
@@ -76,6 +86,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     await copy(src, target);
     return { ok: true, failedStep: "none", exitCode: 0, stdout: changes.join("\n"), stderr: "", filesTransferred, bytesTransferred, transport: "native-local" };
   } catch (error) {
-    return { ok: false, failedStep: "local-copy-failed", exitCode: 1, stdout: changes.join("\n"), stderr: error instanceof Error ? error.message : String(error), transport: "native-local" };
+    return { ok: false, failedStep: "local-copy-failed", exitCode: 1, stdout: changes.join("\n"), stderr: error instanceof Error ? error.message : String(error), transport: "native-local",
+      ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; existing destination was not removed.` } : {}) };
   }
 }

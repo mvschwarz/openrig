@@ -27,6 +27,19 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Local readonly replacement (2026-11-02)
+
+Changed regular local files now copy into an exclusive sibling staging entry
+before Windows native replacement. The same native operation used by SFTP keeps
+the destination DACL, applies the source readonly state, and restores the old
+inode's readonly state for retained hardlinks. Failed replacement reports the
+staging path rather than deleting the old destination. Real NTFS tests cover
+writable and readonly sources replacing a readonly destination, original alias
+content/attributes, nonmutating preview and no staging leftovers after success.
+The local/SFTP/transfer run passed 60 tests with three existing platform skips;
+CLI TypeScript checking passed. This does not qualify POSIX ownership or ACL
+translation, concurrent hostile mutation, or crash/power-loss recovery.
+
 ### Local copy metadata drift (2026-11-02)
 
 Native local copies now report and repair representable file-mode drift even

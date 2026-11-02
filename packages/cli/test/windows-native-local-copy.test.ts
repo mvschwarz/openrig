@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmod, lstat, utimes, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, link, lstat, utimes, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { planFileCopy, runFileCopy } from "../src/lib/file-transfer.js";
@@ -22,6 +22,24 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await copy(src, dst)).toMatchObject({ ok: true, transport: "native-local", bytesTransferred: data.length, filesTransferred: 1 });
     expect(await readFile(dst)).toEqual(data);
     expect(await copy(src, dst)).toMatchObject({ ok: true, filesTransferred: 0, bytesTransferred: 0 });
+  }));
+
+  it.each([false,true])("replaces a readonly destination without mutating its retained hardlink, source readonly=%s", readonly => fixture(async root => {
+    const src=path.join(root,"source.txt"),dst=path.join(root,"destination.txt"),alias=path.join(root,"old-alias.txt");
+    await writeFile(src,"owned new contents");await writeFile(dst,"old contents");
+    await link(dst,alias);await chmod(dst,0o444);
+    if(readonly)await chmod(src,0o444);
+    try {
+      expect(await copy(src,dst,true)).toMatchObject({ok:true,filesTransferred:1});
+      expect(await readFile(dst,"utf8")).toBe("old contents");
+      const result=await copy(src,dst);
+      expect(result.ok,result.stderr).toBe(true);
+      expect(await readFile(dst,"utf8")).toBe("owned new contents");
+      expect(await readFile(alias,"utf8")).toBe("old contents");
+      expect((await lstat(alias)).mode & 0o200).toBe(0);
+      expect(Boolean((await lstat(dst)).mode & 0o200)).toBe(!readonly);
+      expect((await readdir(root)).filter(name=>name.startsWith(".openrig-copy-"))).toEqual([]);
+    }finally{for(const file of [src,dst,alias])await chmod(file,0o666);}
   }));
 
   it("previews and repairs readonly drift without copying unchanged bytes", () => fixture(async root => {
