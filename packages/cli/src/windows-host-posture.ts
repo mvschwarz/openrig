@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { parseWindowsCommandLine } from "@openrig/daemon/windows-launch";
 import type { HostEntry } from "./host-registry.js";
 import type { CheckRow, DoctorDeps } from "./commands/host.js";
+import { resolvePosturePorts, type PostureOptions } from "./host-posture-options.js";
 
 export const WINDOWS_POSTURE_PROFILE_ID = "product-factory-windows";
 export const WINDOWS_POSTURE_ITEMS = ["nonadmin-openrig-user", "administrator-ssh-disabled", "key-only-ssh",
@@ -18,7 +19,8 @@ const serviceArgvProgramBase64 = Buffer.from(serviceArgvProgram).toString("base6
 export const WINDOWS_POSTURE_SCRIPT = String.raw`
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false)
-$facts=[ordered]@{version=1;account=$null;ssh=$null;firewall=$null;tailnetAllow=$null;tailscale=$null;listeners=$null}
+$postureDaemonPort=7433
+$facts=[ordered]@{version=1;daemonPort=$postureDaemonPort;account=$null;ssh=$null;firewall=$null;tailnetAllow=$null;tailscale=$null;listeners=$null}
 try {
   $users=@(Get-LocalUser -ErrorAction Stop | Where-Object Name -eq 'openrig')
   if ($users.Count -eq 0) { $facts.account=@{exists=$false} }
@@ -128,9 +130,14 @@ try {
   elseif ($prefs.CurrentProfile.RunSSH -is [bool]) { $runSsh=$prefs.CurrentProfile.RunSSH }
   $facts.tailscale=@{routes=@($status.Self.PrimaryRoutes | Where-Object { $null -ne $_ }).Count;exitNode=([bool]$status.ExitNodeStatus -or $status.Self.ExitNodeOption -eq $true);runSsh=$runSsh}
 } catch {}
-try { $facts.listeners=@(Get-NetTCPConnection -State Listen -LocalPort 7433 -ErrorAction Stop | ForEach-Object { [string]$_.LocalAddress }) } catch {}
+try { $facts.listeners=@(Get-NetTCPConnection -State Listen -LocalPort $postureDaemonPort -ErrorAction Stop | ForEach-Object { [string]$_.LocalAddress }) } catch {}
 $facts | ConvertTo-Json -Depth 6 -Compress
 `;
+
+export function windowsPostureScriptForPort(daemonPort?: number): string {
+  const selected = resolvePosturePorts({ daemonPort }).daemonPort;
+  return WINDOWS_POSTURE_SCRIPT.replace("$postureDaemonPort=7433", `$postureDaemonPort=${selected}`);
+}
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const row = (step: string, status: CheckRow["status"], detail: string, fix: string): CheckRow => ({ step, status, detail, ...(status !== "pass" ? { fix } : {}) });
@@ -142,7 +149,8 @@ const trustedBind = (address: string): boolean => {
 };
 
 /** Interpret only bounded native observations. Missing/ambiguous facts never become a pass. */
-export function windowsPostureRows(value: unknown): CheckRow[] {
+export function windowsPostureRows(value: unknown, opts: Pick<PostureOptions, "daemonPort"> = {}): CheckRow[] {
+  const { daemonPort } = resolvePosturePorts(opts);
   const parsed = record(value);
   const facts = parsed.version === 1 ? parsed : {};
   const valid = facts.version === 1;
@@ -190,23 +198,24 @@ export function windowsPostureRows(value: unknown): CheckRow[] {
   rows.push(row("tailscale-minimal-trust", tsUnsafe ? "fail" : tsKnown ? "pass" : "unknown",
     tsKnown ? `advertised routes=${ts.routes}; exit node=${ts.exitNode}; Tailscale SSH=${ts.runSsh}` : "Tailscale status/preferences are incomplete",
     "Inspect tailscale status --json and tailscale debug prefs --json; remove unneeded advertised routes/exit-node use and disable Tailscale SSH."));
-  const listeners = valid && Array.isArray(facts.listeners) && facts.listeners.every(address => typeof address === "string" && isIP(address)) ? facts.listeners as string[] : null;
+  const listeners = valid && facts.daemonPort === daemonPort && Array.isArray(facts.listeners) && facts.listeners.every(address => typeof address === "string" && isIP(address)) ? facts.listeners as string[] : null;
   rows.push(row("daemon-bind-not-public", listeners?.length ? listeners.every(trustedBind) ? "pass" : "fail" : "unknown",
-    listeners?.length ? listeners.every(trustedBind) ? "observed :7433 listeners use loopback/tailnet addresses" : "an observed :7433 listener uses a public or wildcard address" : "no complete :7433 listener observation",
-    "Inspect Get-NetTCPConnection -State Listen -LocalPort 7433 and the daemon host binding; verify the intended daemon port separately if it differs."));
+    listeners?.length ? listeners.every(trustedBind) ? `observed :${daemonPort} listeners use loopback/tailnet addresses` : `an observed :${daemonPort} listener uses a public or wildcard address` : `no complete :${daemonPort} listener observation for the selected port`,
+    `Inspect Get-NetTCPConnection -State Listen -LocalPort ${daemonPort} and the selected daemon host binding.`));
   return rows;
 }
 
-export async function windowsPostureCheck(host: HostEntry, deps: DoctorDeps, opts: { publicAddr?: string } = {}): Promise<CheckRow[]> {
+export async function windowsPostureCheck(host: HostEntry, deps: DoctorDeps, opts: PostureOptions = {}): Promise<CheckRow[]> {
+  const { daemonPort, sshPort } = resolvePosturePorts(opts);
   if (host.transport !== "ssh" || host.remoteShell !== "powershell") return WINDOWS_POSTURE_ITEMS.map(step => row(step, "unknown",
     "Windows native posture requires an explicitly selected PowerShell SSH entry", "Select the Windows host's SSH entry with remoteShell: powershell; HTTP/POSIX entries cannot supply these observations."));
   let facts: unknown = null;
   try {
-    const result = await deps.run(host, WINDOWS_POSTURE_ARGV, { stdin: WINDOWS_POSTURE_SCRIPT });
+    const result = await deps.run(host, WINDOWS_POSTURE_ARGV, { stdin: windowsPostureScriptForPort(daemonPort) });
     if (result.ok && Buffer.byteLength(result.stdout) <= 65536) facts = JSON.parse(result.stdout.replace(/^\uFEFF/, "").trim());
   } catch { /* Unreadable native facts stay unknown; no changing command is attempted. */ }
-  const rows = windowsPostureRows(facts);
-  for (const [step, port] of [["public-daemon-port-unreachable", 7433], ["public-ssh-unreachable-or-accepted", 22]] as const) {
+  const rows = windowsPostureRows(facts, { daemonPort });
+  for (const [step, port] of [["public-daemon-port-unreachable", daemonPort], ["public-ssh-unreachable-or-accepted", sshPort]] as const) {
     if (!opts.publicAddr || !isIP(opts.publicAddr)) { rows.push(row(step, "unknown", "no literal public probe address supplied", "Pass --public-addr <ip> for the owned host's outside-vantage probe.")); continue; }
     let probe: "open" | "closed" | "unknown" = "unknown";
     try { probe = await deps.tcpProbe(opts.publicAddr, port, 5000); } catch { /* unknown */ }

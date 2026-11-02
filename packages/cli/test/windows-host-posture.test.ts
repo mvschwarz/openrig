@@ -2,15 +2,17 @@ import { expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WINDOWS_POSTURE_SCRIPT, WINDOWS_POSTURE_ARGV, windowsPostureRows, windowsPostureCheck } from "../src/windows-host-posture.js";
+import net from "node:net";
+import { WINDOWS_POSTURE_SCRIPT, WINDOWS_POSTURE_ARGV, windowsPostureRows, windowsPostureCheck, windowsPostureScriptForPort } from "../src/windows-host-posture.js";
+import { resolvePosturePorts } from "../src/host-posture-options.js";
 import { windowsSshCommand } from "../src/windows-ssh-command.js";
 import { runCrossHostCommand, type SpawnFn } from "../src/cross-host-executor.js";
-import { hostCommand } from "../src/commands/host.js";
+import { hostCommand, probeHostTcp, postureCheck } from "../src/commands/host.js";
 import type { DoctorDeps } from "../src/commands/host.js";
 import type { HostEntry } from "../src/host-registry.js";
 
 const host: HostEntry = { id: "owned", transport: "ssh", target: "owned", remoteShell: "powershell", rigPath: "C:/OpenRig/bin.js" };
-const green = () => ({ version: 1, account: { exists: true, enabled: true, administrator: false, indirectUnresolved: false },
+const green = () => ({ version: 1, daemonPort: 7433, account: { exists: true, enabled: true, administrator: false, indirectUnresolved: false },
   ssh: { scope: "service-login-context", administratorContextQualified: true, methods: "any", password: "no", keyboard: "no", publicKey: "yes", gssapi: "no", hostbased: "no", denyGroups: "administrators", administratorGroup: "administrators" },
   firewall: ["Domain", "Private", "Public"].map(name => ({ name, enabled: "True", inbound: "Block" })),
   tailnetAllow: true, tailscale: { routes: 0, exitNode: false, runSsh: false }, listeners: ["127.0.0.1", "::1", "100.64.0.1", "100.127.255.254"] });
@@ -92,7 +94,20 @@ it("surfaces public connectivity and leaves failed probe observations unknown", 
   expect(rows.slice(-2).map(r => r.status)).toEqual(["fail", "unknown"]);
 });
 
-it("selects the Windows profile through the real host doctor CLI and registry", async () => {
+it("uses selected service ports for the native collector and outside probes", async () => {
+  const d = deps(JSON.stringify({ ...green(), daemonPort: 17433 }));
+  const rows = await windowsPostureCheck(host, d, { daemonPort: 17433, sshPort: 2222, publicAddr: "203.0.113.7" });
+  expect(rows.every(row => row.status === "pass")).toBe(true);
+  expect(d.run).toHaveBeenCalledWith(host, WINDOWS_POSTURE_ARGV, { stdin: expect.stringContaining("$postureDaemonPort=17433") });
+  expect(d.tcpProbe).toHaveBeenNthCalledWith(1, "203.0.113.7", 17433, 5000);
+  expect(d.tcpProbe).toHaveBeenNthCalledWith(2, "203.0.113.7", 2222, 5000);
+});
+
+it("does not attribute a different listener port to the selected daemon", () => {
+  expect(windowsPostureRows(green(), { daemonPort: 17433 }).at(-1)?.status).toBe("unknown");
+});
+
+it.each([false, true])("selects the Windows profile through the real host doctor CLI and registry (custom ports=%s)", async custom => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-posture-cli-"));
   const priorHome = process.env.OPENRIG_HOME, priorExit = process.exitCode;
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -100,16 +115,57 @@ it("selects the Windows profile through the real host doctor CLI and registry", 
   try {
     process.env.OPENRIG_HOME = root; process.exitCode = 0;
     fs.writeFileSync(path.join(root, "hosts.yaml"), JSON.stringify({ hosts: [host] }));
-    const d = deps(JSON.stringify(green()));
+    const facts = { ...green(), daemonPort: custom ? 17433 : 7433 };
+    const d = deps(JSON.stringify(facts));
     d.run = vi.fn(async (_host, argv) => ({ ok: true, failedStep: "none", remoteExitCode: 0, stderr: "",
-      stdout: argv[0] === "powershell.exe" ? JSON.stringify(green()) : argv[1] === "--version" ? "0.0.1" : argv[1] === "daemon" ? "Daemon running on port 7433" : "[]" }));
-    await hostCommand(d).parseAsync(["doctor", host.id, "--posture", "product-factory-windows", "--json"], { from: "user" });
+      stdout: argv[0] === "powershell.exe" ? JSON.stringify(facts) : argv[1] === "--version" ? "0.0.1" : argv[1] === "daemon" ? "Daemon running on port 7433" : "[]" }));
+    await hostCommand(d).parseAsync(["doctor", host.id, "--posture", "product-factory-windows", "--json",
+      ...(custom ? ["--daemon-port", "17433", "--ssh-port", "2222", "--public-addr", "203.0.113.7"] : [])], { from: "user" });
     expect(error).not.toHaveBeenCalled();
     const rows = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
     expect(rows).toHaveLength(13);
     expect(rows.find((r: { step: string }) => r.step === "nonadmin-openrig-user").status).toBe("pass");
-    expect(rows.slice(-2).every((r: { status: string }) => r.status === "unknown")).toBe(true);
-    expect(d.run).toHaveBeenCalledWith(host, WINDOWS_POSTURE_ARGV, { stdin: WINDOWS_POSTURE_SCRIPT });
+    expect(rows.find((r: { step: string }) => r.step === "daemon-bind-not-public").status).toBe("pass");
+    expect(rows.slice(-2).every((r: { status: string }) => r.status === (custom ? "pass" : "unknown"))).toBe(true);
+    expect(d.run).toHaveBeenCalledWith(host, WINDOWS_POSTURE_ARGV, { stdin: custom ? expect.stringContaining("$postureDaemonPort=17433") : WINDOWS_POSTURE_SCRIPT });
+    if (custom) expect(d.tcpProbe).toHaveBeenNthCalledWith(2, "203.0.113.7", 2222, 5000);
+  } finally {
+    log.mockRestore(); error.mockRestore(); process.exitCode = priorExit;
+    if (priorHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = priorHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it.each([0, -1, 65536, 1.5, NaN, Infinity, "", "22;exit", "17433junk", null])("refuses invalid service ports before native dispatch: %s", async value => {
+  expect(() => resolvePosturePorts({ daemonPort: value })).toThrow(/1 to 65535/);
+  expect(() => resolvePosturePorts({ sshPort: value })).toThrow(/1 to 65535/);
+  const d = deps(JSON.stringify(green()));
+  await expect(windowsPostureCheck(host, d, { daemonPort: value as number })).rejects.toThrow(/1 to 65535/);
+  await expect(postureCheck({ ...host, remoteShell: "posix" }, d, { daemonPort: value as number })).rejects.toThrow(/1 to 65535/);
+  expect(d.run).not.toHaveBeenCalled(); expect(d.tcpProbe).not.toHaveBeenCalled();
+});
+
+it("accepts bounded target ports without consulting this process's daemon environment", () => {
+  expect(resolvePosturePorts()).toEqual({ daemonPort: 7433, sshPort: 22 });
+  expect(resolvePosturePorts({ daemonPort: "1", sshPort: "65535" })).toEqual({ daemonPort: 1, sshPort: 65535 });
+});
+
+it.each([
+  { flag: "--daemon-port", value: "0", posture: true }, { flag: "--ssh-port", value: "65536", posture: true },
+  { flag: "--daemon-port", value: "1.5", posture: true }, { flag: "--ssh-port", value: "22;exit", posture: true },
+  { flag: "--daemon-port", value: "17433", posture: false },
+])("CLI rejects $flag=$value (posture=$posture) before any host probe", async ({ flag, value, posture }) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "invalid-posture-port-"));
+  const priorHome = process.env.OPENRIG_HOME, priorExit = process.exitCode;
+  const log = vi.spyOn(console, "log").mockImplementation(() => {}), error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    process.env.OPENRIG_HOME = root; process.exitCode = 0;
+    fs.writeFileSync(path.join(root, "hosts.yaml"), JSON.stringify({ hosts: [host] }));
+    const d = deps(JSON.stringify(green()));
+    await hostCommand(d).exitOverride().parseAsync(["doctor", host.id, ...(posture ? ["--posture", "product-factory-windows"] : []), flag, value], { from: "user" });
+    expect(process.exitCode).toBe(1);
+    expect(error.mock.calls.flat().join(" ")).toMatch(/1 to 65535|require --posture/);
+    expect(d.run).not.toHaveBeenCalled(); expect(d.tcpProbe).not.toHaveBeenCalled(); expect(d.httpGet).not.toHaveBeenCalled();
   } finally {
     log.mockRestore(); error.mockRestore(); process.exitCode = priorExit;
     if (priorHome === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = priorHome;
@@ -127,9 +183,17 @@ it.runIf(process.platform === "win32")("delivers the real read-only collector th
     const timer = setTimeout(() => child.kill("SIGKILL"), 25000); child.once("close", () => clearTimeout(timer));
     return child;
   };
-  const result = await runCrossHostCommand(host, WINDOWS_POSTURE_ARGV, { stdin: WINDOWS_POSTURE_SCRIPT, spawn: execute });
-  expect(result.ok, JSON.stringify(result)).toBe(true);
-  if (!("stdout" in result)) throw new Error("Native collector returned no response");
-  expect(JSON.parse(result.stdout)).toMatchObject({ version: 1 });
-  expect(windowsPostureRows(JSON.parse(result.stdout))).toHaveLength(7);
+  const listener = net.createServer(socket => socket.end());
+  await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.listen(0, "127.0.0.1", resolve); });
+  const daemonPort = (listener.address() as net.AddressInfo).port;
+  try {
+    expect(await probeHostTcp("127.0.0.1", daemonPort, 1000)).toBe("open");
+    const result = await runCrossHostCommand(host, WINDOWS_POSTURE_ARGV, { stdin: windowsPostureScriptForPort(daemonPort), spawn: execute });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!("stdout" in result)) throw new Error("Native collector returned no response");
+    const facts = JSON.parse(result.stdout);
+    expect(facts).toMatchObject({ version: 1, daemonPort });
+    expect(windowsPostureRows(facts, { daemonPort }).at(-1)?.status).toBe("pass");
+    expect(windowsPostureRows(facts, { daemonPort: daemonPort === 65535 ? 65534 : daemonPort + 1 }).at(-1)?.status).toBe("unknown");
+  } finally { await new Promise<void>(resolve => listener.close(() => resolve())); }
 }, 30000);

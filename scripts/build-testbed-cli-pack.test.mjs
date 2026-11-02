@@ -185,6 +185,8 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     const hostDoctorHelp = execFileSync(process.execPath, [entry, "host", "doctor", "--help"],
       { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });
     assert.match(hostDoctorHelp, /product-factory-windows/, "installed host doctor must load its native posture module and paired argv parser export");
+    assert.match(hostDoctorHelp, /--daemon-port/, "installed host doctor must expose selected daemon posture ports");
+    assert.match(hostDoctorHelp, /--ssh-port/, "installed host doctor must expose selected SSH posture probe ports");
     const resourceResult = execFileSync(process.execPath,
       [join(HERE, "installed-resource-library-probe.mjs"), installed, home],
       { cwd: home, env, encoding: "utf8", stdio: "pipe", windowsHide: true });

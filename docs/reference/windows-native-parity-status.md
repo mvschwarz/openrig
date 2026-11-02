@@ -4326,3 +4326,50 @@ rig.cmd checks, the installed `host doctor --help` loaded the new Windows postur
 module and its paired parser export. Receipt: pack-terminal-assets-c10a79b.json
 and its log. This is package loading acceptance, not remote-host or complete
 same-head test acceptance; no publication or deployment occurred.
+
+### 2026-11-03: explicit posture target ports and unknown observer failures
+
+Both posture profiles now accept explicit target ports, independently of the
+caller's daemon environment. For example, from a build containing this change:
+
+```sh
+rig host doctor windows-test --posture product-factory-windows --daemon-port 17433 --ssh-port 2222 --json
+```
+
+The defaults remain daemon 7433 and public SSH probe 22. The registered SSH
+alias/config still selects the SSH transport; these flags select posture
+observations. Ports must be integers from 1 through 65535. Malformed ports and
+port flags without a posture profile are rejected before doctor/SSH/HTTP/TCP
+probes. POSIX listener parsing and outside probes use the selected ports. The
+native collector queries the selected daemon port and returns its numeric port
+with the observation; a response for another port cannot certify the selected
+listener. Missing or mismatched port evidence remains unknown.
+
+The audit also found that POSIX outside probes treated unknown as pass, while
+the default TCP observer treated local permission/DNS errors as closed. Both
+now preserve unknown. A DNS timeout before a peer address is known is also
+unknown. An observed connection is open; a network refusal/unreachability or
+post-resolution timeout retains its limited failed-dial scope. Owned sockets
+are destroyed on every terminal observation, including an unclassified close.
+These observations do not identify a particular firewall rule or certify every
+network vantage.
+
+Three targeted regressions failed before this change and passed afterward
+(55 other tests were filtered in that red/green run). Final complete scoped
+host/native-posture files, with the owned real sshd fixture enabled, passed
+87/87 on Windows. WSL passed 85 with two native-process skips. CLI typecheck
+passed. A real owned loopback listener was reached by the default TCP observer
+and then identified through both production PowerShell launch layers and the
+actual Get-NetTCPConnection collector at its nondefault port. The same returned
+facts stayed unknown for another requested port. No actual daemon or team was
+used or restarted. CLI validation, neighboring decimal-port prefixes, observer
+permissions, DNS failure/timeout and socket cleanup are covered. Receipts:
+posture-ports-before-20261103.json, posture-ports-after-20261103.json,
+posture-ports-native-dns-qualified-20261103.json and
+posture-ports-wsl-dns-qualified-20261103.json.
+
+The installed gate now requires both port options in installed host doctor
+help. That updated gate and complete current-head suites remain pending; the
+earlier c10a79b installed receipt does not cover these newer changes. Real
+remote outside-vantage acceptance remains unverified while the owned SSH
+endpoint is unreachable. No security policy, publication or deployment changed.

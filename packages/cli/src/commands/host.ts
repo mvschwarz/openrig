@@ -25,7 +25,7 @@ import { Command } from "commander";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
-import { connect } from "node:net";
+import { connect, isIP, type Socket } from "node:net";
 import { execFile } from "node:child_process";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
@@ -35,6 +35,7 @@ import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
 import { WINDOWS_POSTURE_PROFILE_ID, windowsPostureCheck } from "../windows-host-posture.js";
+import { resolvePosturePorts, type PostureOptions } from "../host-posture-options.js";
 
 // ---------------------------------------------------------------------------
 // rig host pair — the approval wait is BOUNDED.
@@ -142,6 +143,28 @@ function tailscaleRunSshFromPrefs(text: string): boolean | undefined {
     ?? nestedBoolean(parsed, ["CurrentProfile", "RunSSH"]);
 }
 
+/** A local observer failure is not an outside-vantage closed-port observation. */
+export function probeHostTcp(target: string, port: number, timeoutMs: number, dial: typeof connect = connect): Promise<"open" | "closed" | "unknown"> {
+  return new Promise(resolve => {
+    let socket: Socket | undefined, settled = false, addressKnown = isIP(target) !== 0;
+    const finish = (result: "open" | "closed" | "unknown") => {
+      if (settled) return;
+      settled = true; socket?.destroy(); resolve(result);
+    };
+    try { socket = dial({ host: target, port, timeout: timeoutMs }); }
+    catch { finish("unknown"); return; }
+    socket.once("lookup", (error: Error | null, address: string) => {
+      if (error || !isIP(address ?? "")) finish("unknown");
+      else addressKnown = true;
+    });
+    socket.once("connect", () => finish("open"));
+    socket.once("timeout", () => finish(addressKnown ? "closed" : "unknown"));
+    socket.once("close", () => finish("unknown"));
+    socket.once("error", (error: NodeJS.ErrnoException) => finish(
+      ["ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ENETDOWN"].includes(error.code ?? "") ? "closed" : "unknown"));
+  });
+}
+
 function defaultDoctorDeps(): DoctorDeps {
   return {
     run: (host, argv, opts) => runCrossHostCommand(host, argv, opts),
@@ -158,13 +181,7 @@ function defaultDoctorDeps(): DoctorDeps {
       });
       return { status: res.status, body: await res.text() };
     },
-    tcpProbe: (target, port, timeoutMs) =>
-      new Promise((resolve) => {
-        const sock = connect({ host: target, port, timeout: timeoutMs });
-        sock.on("connect", () => { sock.destroy(); resolve("open"); });
-        sock.on("timeout", () => { sock.destroy(); resolve("closed"); });
-        sock.on("error", () => { sock.destroy(); resolve("closed"); });
-      }),
+    tcpProbe: probeHostTcp,
     learnHostBinding: (alias, observedHostId, observedUrl) => recordHostObservation({ alias, observedHostId, observedUrl }),
     replyRoute: replyRouteFromDisk,
     learnedHostId: (alias) => loadHostBindings().bindings[alias]?.hostId ?? null,
@@ -390,8 +407,9 @@ export const POSTURE_PROFILE_ID = "product-factory-vps";
 export async function postureCheck(
   host: HostEntry,
   deps: DoctorDeps,
-  opts: { publicAddr?: string } = {},
+  opts: PostureOptions = {},
 ): Promise<CheckRow[]> {
+  const { daemonPort, sshPort } = resolvePosturePorts(opts);
   if (host.transport !== "ssh") {
     // Posture needs a shell. Report every item unknown — honestly.
     return POSTURE_ITEM_IDS.map((id) => ({
@@ -506,14 +524,14 @@ export async function postureCheck(
   // public IP bind must fail exactly like a wildcard — pass is an
   // ALLOWLIST (loopback or the tailnet CGNAT range 100.64.0.0/10), never
   // "not wildcard".
-  const ss = await sh("ss -tln 2>/dev/null | grep ':7433' || true");
+  const ss = await sh(`ss -tln 2>/dev/null | grep ':${daemonPort}' || true`);
   const ssOut = ss.ok ? ss.stdout : "";
   const listenAddrs = ssOut
     .split("\n")
-    .map((line) => line.match(/(\S+):7433\b/)?.[1])
+    .map((line) => line.match(new RegExp(`(\\S+):${daemonPort}\\b`))?.[1])
     .filter((a): a is string => a !== undefined);
   if (listenAddrs.length === 0) {
-    rows.push({ step: "daemon-bind-not-public", status: "unknown", detail: "no listener on :7433 observed (daemon may be down)", fix: "start the daemon, then re-check: ss -tln | grep 7433" });
+    rows.push({ step: "daemon-bind-not-public", status: "unknown", detail: `no listener on :${daemonPort} observed (daemon may be down)`, fix: `verify the selected daemon, then re-check: ss -tln | grep ':${daemonPort}'` });
   } else {
     const isLoopbackOrTailnet = (addr: string): boolean => {
       const a = addr.replace(/^\[|\]$/g, "");
@@ -523,17 +541,19 @@ export async function postureCheck(
     };
     const offending = listenAddrs.filter((a) => !isLoopbackOrTailnet(a));
     rows.push(offending.length === 0
-      ? { step: "daemon-bind-not-public", status: "pass", detail: `listener(s) bound loopback/tailnet only: ${listenAddrs.join(", ")}` }
-      : { step: "daemon-bind-not-public", status: "fail", detail: `daemon listens on a non-loopback/non-tailnet address: ${offending.join(", ")}`, fix: "bind the daemon to loopback/tailnet only (OPENRIG daemon host config); never expose :7433 publicly" });
+      ? { step: "daemon-bind-not-public", status: "pass", detail: `listener(s) on :${daemonPort} bound loopback/tailnet only: ${listenAddrs.join(", ")}` }
+      : { step: "daemon-bind-not-public", status: "fail", detail: `daemon on :${daemonPort} listens on a non-loopback/non-tailnet address: ${offending.join(", ")}`, fix: `bind the daemon to loopback/tailnet only (OPENRIG daemon host config); never expose :${daemonPort} publicly` });
   }
 
   // 8+9. public reachability probes — only meaningful with a known PUBLIC address.
   if (opts.publicAddr) {
-    for (const [step, port] of [["public-daemon-port-unreachable", 7433], ["public-ssh-unreachable-or-accepted", 22]] as const) {
-      const probe = await deps.tcpProbe(opts.publicAddr, port, 5000);
+    for (const [step, port] of [["public-daemon-port-unreachable", daemonPort], ["public-ssh-unreachable-or-accepted", sshPort]] as const) {
+      let probe: "open" | "closed" | "unknown" = "unknown";
+      try { probe = await deps.tcpProbe(opts.publicAddr, port, 5000); } catch { /* unavailable stays unknown */ }
       rows.push(probe === "open"
-        ? { step, status: "fail", detail: `${opts.publicAddr}:${port} is publicly reachable`, fix: "remove the public allow rule / firewall the port (the smoke-test hardening bar: public :22/:7433 time out)" }
-        : { step, status: "pass", detail: `${opts.publicAddr}:${port} not reachable (${probe})` });
+        ? { step, status: "fail", detail: `${opts.publicAddr}:${port} is publicly reachable`, fix: `inspect public ingress for the selected :${port}; remove unintended public access` }
+        : probe === "closed" ? { step, status: "pass", detail: `${opts.publicAddr}:${port} not reachable (refusal/filter/timeout)` }
+        : { step, status: "unknown", detail: `${opts.publicAddr}:${port} probe unavailable`, fix: "repeat the outside-vantage probe when its connectivity and permissions are available" });
     }
   } else {
     const unknownProbe = (step: string, port: number): CheckRow => ({
@@ -541,8 +561,8 @@ export async function postureCheck(
       detail: `public reachability of :${port} not probed (no public address known — the registry target may be a tailnet alias)`,
       fix: `re-run with --public-addr <ip> to probe from this vantage`,
     });
-    rows.push(unknownProbe("public-daemon-port-unreachable", 7433));
-    rows.push(unknownProbe("public-ssh-unreachable-or-accepted", 22));
+    rows.push(unknownProbe("public-daemon-port-unreachable", daemonPort));
+    rows.push(unknownProbe("public-ssh-unreachable-or-accepted", sshPort));
   }
 
   return rows;
@@ -1069,8 +1089,10 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .argument("<id>", "Registered host id")
     .option("--posture <profile>", `Run a posture baseline: ${POSTURE_PROFILE_ID} or ${WINDOWS_POSTURE_PROFILE_ID}`)
     .option("--public-addr <ip>", "Public address for the outside-vantage reachability probes (posture items 8-9)")
+    .option("--daemon-port <port>", "Posture daemon listener/public-probe port (default: 7433)")
+    .option("--ssh-port <port>", "Posture public SSH probe port (default: 22)")
     .option("--json", "JSON output")
-    .action(async (id: string, opts: { posture?: string; publicAddr?: string; json?: boolean }) => {
+    .action(async (id: string, opts: { posture?: string; publicAddr?: string; daemonPort?: string; sshPort?: string; json?: boolean }) => {
       const deps: DoctorDeps = doctorDepsOverride ?? defaultDoctorDeps();
       const loaded = loadHostRegistry();
       if (!loaded.ok) {
@@ -1090,10 +1112,16 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         process.exitCode = 1;
         return;
       }
+      if (!opts.posture && (opts.daemonPort !== undefined || opts.sshPort !== undefined)) {
+        console.error("--daemon-port and --ssh-port require --posture"); process.exitCode = 1; return;
+      }
+      let ports: ReturnType<typeof resolvePosturePorts>;
+      try { ports = resolvePosturePorts(opts); }
+      catch (error) { console.error((error as Error).message); process.exitCode = 1; return; }
 
       const rows = await doctorLegs(resolved.host, deps);
       if (opts.posture) {
-        rows.push(...await (opts.posture === WINDOWS_POSTURE_PROFILE_ID ? windowsPostureCheck : postureCheck)(resolved.host, deps, { publicAddr: opts.publicAddr }));
+        rows.push(...await (opts.posture === WINDOWS_POSTURE_PROFILE_ID ? windowsPostureCheck : postureCheck)(resolved.host, deps, { publicAddr: opts.publicAddr, ...ports }));
       }
       renderRows(rows, opts.json);
       if (rows.some((r) => r.status === "fail")) process.exitCode = 1;
