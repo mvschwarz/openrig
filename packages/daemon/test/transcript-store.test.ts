@@ -464,6 +464,20 @@ describe("TranscriptStore", () => {
   });
 
   describe("grep", () => {
+    it.each(["\n", ""])("preserves long matching lines across chunks (ending %j)", (ending) => {
+      const store = new TranscriptStore({ transcriptsRoot: tmpDir });
+      store.ensureTranscriptDir("my-rig");
+      // Numbered sections catch lost or reordered chunks; multibyte characters
+      // straddle the reader's 64 KiB boundaries.
+      const long = Array.from({ length: 10000 }, (_, i) => `${i}:é中😀`).join("|");
+      const first = `MATCH first ${long}`;
+      const last = `MATCH last ${long}`;
+      writeFileSync(store.getTranscriptPath("my-rig", "dev@my-rig"),
+        `ignored\n\x1b[32m${first}\x1b[0m\nignored ${long}\nMATCH short\n${last}${ending}`);
+      expect(store.grep("my-rig", "dev@my-rig", "^MATCH")).toEqual([first, "MATCH short", last]);
+      expect(store.grep("my-rig", "dev@my-rig", "not present")).toEqual([]);
+    });
+
     it("returns matching lines with ANSI stripped", () => {
       const store = new TranscriptStore({ transcriptsRoot: tmpDir });
       store.ensureTranscriptDir("my-rig");
