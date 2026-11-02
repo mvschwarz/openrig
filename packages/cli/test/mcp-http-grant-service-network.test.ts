@@ -241,6 +241,81 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     expect(rows()).toBe(before);
   });
 
+  it("claim and update answer an assistant with what show shows: a blocker or closure target it can't read stays hidden", async () => {
+    const served = await listen();
+    const b = await connect(served.url, B);
+    const internal = (await repo.create({ sourceSession: LEAD, destinationSession: "worker@team-a", body: "team-internal", nudge: false } as never)).qitemId;
+    const mine = (await repo.create({ sourceSession: LEAD, destinationSession: B.seat, body: "for B", nudge: false } as never)).qitemId;
+    repo.update({ qitemId: mine, actorSession: LEAD, state: "blocked", blockedOn: internal, closureReason: "blocked_on", closureTarget: internal, transitionNote: "waiting on the team" } as never);
+    const shown = await b("rig_queue_show", { qitemId: mine });
+    const noted = await b("rig_queue_update", { qitemId: mine, note: "seen it" });
+    const claimed = await b("rig_queue_claim", { qitemId: mine });
+    for (const result of [shown, noted, claimed]) {
+      expect(result.isError).toBe(false);
+      expect(result.text).not.toContain(internal);
+    }
+    expect(row(mine).state).toBe("in-progress");
+  });
+
+  it("an assistant can't change an item addressed to it that it can't read: another workspace's, or another caller's under a partial grant", async () => {
+    grants.set(B.key, { queue: ["create", "show", "list", "claim", "update"], artifact: ["read"] });
+    const served = await listen();
+    const b = await connect(served.url, B);
+    const refused = { isError: true, structured: { code: "out_of_scope" } };
+    const foreign = (await repo.create({ sourceSession: "lead@team-b", destinationSession: B.seat, body: "from another workspace", nudge: false } as never)).qitemId;
+    const fromCaller = (await repo.create({ sourceSession: "cus-vvmaexample02-caller@team-a", destinationSession: B.seat, body: "from another caller", nudge: false } as never)).qitemId;
+    for (const qitemId of [foreign, fromCaller]) {
+      const before = repo.listTransitions(qitemId).length;
+      expect(await b("rig_queue_update", { qitemId, note: "mine?" })).toMatchObject(refused);
+      expect(await b("rig_queue_update", { qitemId, state: "done", closureReason: "no-follow-on" })).toMatchObject(refused);
+      expect(row(qitemId).state).toBe("pending");
+      expect(repo.listTransitions(qitemId).length).toBe(before);
+    }
+  });
+
+  it("an assistant's park names a blocker it can read: a bare re-park after a claim is refused, whether the team's blocker is open or closed", async () => {
+    const served = await listen();
+    const b = await connect(served.url, B);
+    for (const closedAfterClaim of [false, true]) {
+      const internal = (await repo.create({ sourceSession: LEAD, destinationSession: "worker@team-a", body: "team-internal", nudge: false } as never)).qitemId;
+      const mine = (await repo.create({ sourceSession: LEAD, destinationSession: B.seat, body: "for B", nudge: false } as never)).qitemId;
+      repo.update({ qitemId: mine, actorSession: LEAD, state: "blocked", blockedOn: internal, transitionNote: "waiting on the team" } as never);
+      expect((await b("rig_queue_claim", { qitemId: mine })).isError).toBe(false);
+      if (closedAfterClaim) repo.update({ qitemId: internal, actorSession: "worker@team-a", state: "done", closureReason: "no-follow-on" } as never);
+      const reparked = await b("rig_queue_update", { qitemId: mine, state: "blocked" });
+      expect(reparked).toMatchObject({ isError: true, structured: { code: "out_of_scope" } });
+      expect(reparked.text).not.toContain(internal);
+      expect(row(mine)).toMatchObject({ state: "in-progress", blockedOn: null });
+    }
+  });
+
+  it("team discovery names a hosted member's last ring only when it's on an item the assistant may read", async () => {
+    const workspace = path.join(home, "workspace");
+    const savedWorkspace = process.env.OPENRIG_WORKSPACE_ROOT;
+    process.env.OPENRIG_WORKSPACE_ROOT = workspace;
+    try {
+      fs.mkdirSync(path.join(workspace, "rosters"), { recursive: true });
+      fs.writeFileSync(path.join(workspace, "rosters", "team.json"), JSON.stringify({
+        version: 1, id: "team", name: "Team", purpose: "Ship the release", curator: { seat: LEAD, host: INSTANCE }, updated_at: "2026-11-02",
+        members: [{ seat: `grok@${RIG}`, host: INSTANCE, capabilities: ["web research"], engagement: ["delegate"], use_when: "Current sources", why: "Searches the web", hosted: true }],
+      }));
+      const served = await listen();
+      const a = await connect(served.url, A);
+      const ring = (qitemId: string, at: string) =>
+        db.prepare("UPDATE queue_items SET last_nudge_attempt = ?, last_nudge_result = ? WHERE qitem_id = ?").run(at, "wake-accepted:webhook answered 202", qitemId);
+      const fromA = (await repo.create({ sourceSession: A.seat, destinationSession: `grok@${RIG}`, body: "Find the release date.", nudge: false } as never)).qitemId;
+      const internal = (await repo.create({ sourceSession: LEAD, destinationSession: `grok@${RIG}`, body: "team-internal", nudge: false } as never)).qitemId;
+      ring(fromA, "2026-11-02T11:00:00.000Z");
+      ring(internal, "2026-11-02T12:00:00.000Z");
+      const team = await a("rig_team", { rigId: RIG });
+      expect(team.isError).toBe(false);
+      expect(team.structured.hostedMembers).toMatchObject([{ session: `grok@${RIG}`, presence: { lastWake: { qitemId: fromA, at: "2026-11-02T11:00:00.000Z" } } }]);
+      expect(team.text).not.toContain(internal);
+    } finally {
+      if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
+    }
+  });
+
   it("a v1 grant keeps today's rules: no task to or from another caller's seat", async () => {
     grants.set(A.key, V1);
     grants.set(B.key, V1);
