@@ -41,7 +41,7 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import type { TaskTerminalView, TaskMembership } from "./task-terminal-view.js";
 import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, win32 } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
 import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
 import type { TmuxServerSelection } from "../tmux-server-selection.js";
@@ -263,7 +263,8 @@ export class TerminalService {
     this.localTmux ??= (async () => {
       try {
         const path = await this.deps.resolveLocalTmux?.();
-        return typeof path === "string" && isAbsolute(path) ? path : undefined;
+        const absolute = (this.deps.localPlatform ?? process.platform) === "win32" ? win32.isAbsolute : isAbsolute;
+        return typeof path === "string" && absolute(path) ? path : undefined;
       } catch {
         return undefined;
       }

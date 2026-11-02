@@ -27,6 +27,18 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Terminal composition across host platforms (2026-11-02)
+
+TerminalService now validates a resolved executable with the selected local
+platform's absolute-path rules. A win32 composition evaluated on Linux no longer
+silently discards an absolute C:\\... psmux path. Local and SSH recovery commands
+also carry an explicit powershell/sh discriminator on both platforms. The real
+HTTP preview/composition, native discovery and TUI terminal journey files passed
+30 tests on Windows and 29 on WSL (one native Windows discovery skip), using the
+same source follow-up over a03de2d. Daemon TypeScript checking passed. Desktop
+launch and provider liveness in these tests are fixtures; no GUI qualification
+is inferred.
+
 ### Full CLI/TUI and permission comparison at a03de2d (2026-11-02)
 
 The complete Windows CLI/TUI directory run (no file exclusions) finished in
