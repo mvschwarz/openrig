@@ -154,7 +154,7 @@ describe("Specs CLI", () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--kind", ""]);
     });
     expect(stderr.join("\n")).toContain("Warning: unrecognized --kind ''. Supported kinds: rig, agent, workflow");
-    expect(stdout.join("\n")).toContain("No  specs found");
+    expect(stdout.join("\n")).toContain("No specs found");
     expect(exitCode).toBeUndefined();
     expect(libraryRequests.slice(requestStart)).toContain("/api/specs/library?kind=");
   });

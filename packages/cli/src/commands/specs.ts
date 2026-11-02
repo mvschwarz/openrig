@@ -161,7 +161,10 @@ export async function resolveLibrarySpec(
     opts?.kind !== undefined ? `/api/specs/library?kind=${encodeURIComponent(opts.kind)}` : "/api/specs/library",
   );
   const rawEntries = res.data ?? [];
-  const entries = opts?.kind !== undefined ? rawEntries.filter((e) => e.kind === opts.kind) : rawEntries;
+  const entries =
+    opts?.kind !== undefined && !KNOWN_SPEC_KINDS.includes(opts.kind as (typeof KNOWN_SPEC_KINDS)[number])
+      ? rawEntries.filter((e) => e.kind === opts.kind)
+      : rawEntries;
 
   // Try exact ID match first
   const byId = entries.find((e) => e.id === nameOrId);
@@ -173,7 +176,7 @@ export async function resolveLibrarySpec(
 
   if (byName.length > 1) {
     const candidates = byName.map((e) => `  ${e.id} (${e.kind}) — ${e.sourcePath}`).join("\n");
-    const scope = opts?.kind !== undefined ? ` ${opts.kind}` : "";
+    const scope = opts?.kind ? ` ${opts.kind}` : "";
     throw new Error(
       `Spec name '${nameOrId}' is ambiguous — ${byName.length}${scope} entries match.\nUse the ID instead:\n${candidates}`
     );
@@ -193,7 +196,7 @@ export async function resolveLibrarySpec(
     }
   }
 
-  const scope = opts?.kind !== undefined ? ` ${opts.kind}` : "";
+  const scope = opts?.kind ? ` ${opts.kind}` : "";
   throw new Error(
     `Spec '${nameOrId}' not found in${scope} library. Run 'rig specs ls' to see available rigs, agents, workflows, and managed apps.`
   );
@@ -236,7 +239,10 @@ Examples:
         const res = await client.get<LibraryEntry[]>(url);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const rawEntries = res.data ?? [];
-        const entries = opts.kind !== undefined ? rawEntries.filter((e) => e.kind === opts.kind) : rawEntries;
+        const entries =
+          opts.kind !== undefined && !KNOWN_SPEC_KINDS.includes(opts.kind as (typeof KNOWN_SPEC_KINDS)[number])
+            ? rawEntries.filter((e) => e.kind === opts.kind)
+            : rawEntries;
 
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
@@ -245,7 +251,7 @@ Examples:
 
         if (entries.length === 0) {
           if (opts.kind !== undefined) {
-            console.log(`No ${opts.kind} specs found`);
+            console.log(opts.kind ? `No ${opts.kind} specs found` : "No specs found");
           } else {
             console.log("No specs in library. Add specs with: rig specs add <path>");
           }
