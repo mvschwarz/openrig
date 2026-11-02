@@ -13,6 +13,7 @@ import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
 import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 import { windowsHerdrEnvironmentCommand } from "./windows-herdr-command.js";
 import { detachedTerminalEnvironment } from "./terminal-environment.js";
+import { windowsHostingColumns } from "./windows-terminal-columns.js";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
@@ -39,7 +40,8 @@ export interface WindowDeps {
 }
 
 export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): WindowDeps {
-  const env = detachedTerminalEnvironment(sourceEnv);
+  const hostingEnv = { ...sourceEnv };
+  const env = detachedTerminalEnvironment(hostingEnv);
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
@@ -60,7 +62,7 @@ export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): W
     }, socketPath, columns),
     columns: async () => {
       if (process.stdout.isTTY && process.stdout.columns > 0) return process.stdout.columns;
-      if (process.platform === "win32") return undefined;
+      if (process.platform === "win32") return windowsHostingColumns(hostingEnv);
       try {
         const size = await run("/bin/sh", ["-c", "stty size < /dev/tty"], { encoding: "utf8", timeout: 1000 });
         const width = Number(size.stdout.trim().split(/\s+/)[1]);

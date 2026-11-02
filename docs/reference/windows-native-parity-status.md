@@ -1,5 +1,20 @@
 # Native Windows parity: implementation and evidence
 
+## Current piped native hosting width (2026-11-02)
+
+The Windows CLI now measures its hosting psmux window when stdout is piped,
+instead of immediately treating the viewport as unknown. It preserves the
+caller's environment snapshot separately from the detached launch environment
+and uses the full inherited psmux server identity. Missing/invalid pane identity,
+invalid width, an unavailable executable or a failed query remain unknown.
+An owned stock psmux 3.4.0 hidden-console client returned the same 120 columns
+through the actual piped CLI dependency path as the server query; cleanup passed.
+The focused CLI files passed 78 native tests and 77 ordinary-user WSL tests
+(1 native executable lookup skipped), and CLI TypeScript passed. The expanded
+native window-action set passed 242 tests with 13 POSIX-only skips. These results
+do not qualify piped native console callers outside psmux or a full-current-head
+Linux run, and do not establish actual Herdr desktop rendering.
+
 ## Current shared native TUI viewer recovery (2026-11-02)
 
 Windows shared TUIs now recover Herdr/Rex terminal markers from their unique
