@@ -17,7 +17,7 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("keep
   const invoke = async (argv: string[]) => { calls.push(argv); return (await run(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { env, cwd: root, windowsHide: true, timeout: 10000 })).stdout; };
   const adapter = new TmuxAdapter(async () => { throw Error("No shell transport"); }, undefined, invoke, "psmux");
   const first = join(root, "first.json"), second = join(root, "second.json");
-  const unusual: Record<string,string> = { "Owned space": "space value", "owned.dot": "dot value", "owned-hyphen": "hyphen value", "变量": "Unicode value", 'owned"quote': "quoted value", "owned#{pid}": "literal format name" };
+  const unusual: Record<string,string> = { "Owned space": "space value", "owned.dot": "dot value", "owned-hyphen": "hyphen value", "变量": "Unicode value", 'owned"quote': "quoted value", "owned#{pid}": "literal format name", "-owned": "option-shaped name" };
   const record = (file: string) => `[IO.File]::WriteAllText(${q(file)},(ConvertTo-Json @{ value=$env:SELECTED; inherited=$env:INHERITED_OWNED; lower=$env:lowerCase; unusual=@{${Object.keys(unusual).map(key=>`${q(key)}=[Environment]::GetEnvironmentVariable(${q(key)},'Process')`).join(';')}} }))`;
   const values = ["synthetic private first ' 中文\nline", "synthetic private successor $ #{pid}\r\n"];
   try {
@@ -48,6 +48,8 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("keep
     expect(await invoke(["tmux", "show-environment", "-t", "=owned", "SELECTED"])).toBe(`SELECTED=${values[1]}\n`);
     expect(calls.flat().some(arg => values.some(value => arg.includes(value)))).toBe(false);
     expect(calls.filter(argv => argv.includes("new-session") || argv.includes("respawn-pane")).every(argv => !argv.includes("-e"))).toBe(true);
+    await adapter.unsetSessionEnv("owned","-owned");
+    expect(await adapter.getSessionEnv("owned","-owned")).toBeUndefined();
   } finally {
     await invoke(["tmux", "kill-server"]).catch(() => {});
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

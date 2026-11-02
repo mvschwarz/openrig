@@ -5,7 +5,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
 
-it.each(["", "-option", "name=value", "line\nbreak", "line\rbreak", "nul\0key"])("rejects an unrepresentable private environment name %j", key => {
+it.each(["", "name=value", "line\nbreak", "line\rbreak", "nul\0key"])("rejects an unrepresentable private environment name %j", key => {
   expect(()=>psmuxPrivateEnvironmentLine(key,"synthetic")).toThrow("Invalid environment assignment");
 });
 

@@ -1820,8 +1820,9 @@ export class TmuxAdapter {
     if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     try {
-      const output = await this.run(["tmux", "show-environment", "-t", target, key],
-        `tmux show-environment -t ${shellQuote(target)} ${shellQuote(key)}`);
+      const delimiter = this.terminalKind === "psmux" && key.startsWith("-") ? ["--"] : [];
+      const output = await this.run(["tmux", "show-environment", "-t", target, ...delimiter, key],
+        `tmux show-environment -t ${shellQuote(target)} ${delimiter.length ? "-- " : ""}${shellQuote(key)}`);
       if (this.terminalKind === "psmux") {
         // psmux 3.3.8 ignores the optional variable selector and returns the
         // whole environment. Select the exact key without logging that body.
@@ -1864,8 +1865,9 @@ export class TmuxAdapter {
     const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key.toUpperCase() : name === key);
     const flag = parents.length ? "-r" : "-u";
     for (const name of new Set([key, ...parents])) {
-      await this.run(["tmux", "set-environment", "-t", target, flag, name],
-        `tmux set-environment -t ${shellQuote(target)} ${flag} ${shellQuote(name)}`);
+      const delimiter = this.terminalKind === "psmux" && name.startsWith("-") ? ["--"] : [];
+      await this.run(["tmux", "set-environment", "-t", target, flag, ...delimiter, name],
+        `tmux set-environment -t ${shellQuote(target)} ${flag} ${delimiter.length ? "-- " : ""}${shellQuote(name)}`);
     }
   }
 

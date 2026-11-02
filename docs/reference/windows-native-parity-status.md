@@ -27,6 +27,24 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Option-shaped native environment names (2026-11-02)
+
+The native private config and session read/unset commands now insert psmux's
+explicit `--` operand boundary for variable names beginning with a dash. Real
+stock psmux proves an `-owned` name survives initial launch, adapter and external
+respawn, current-value updates, readback and unset without being interpreted as
+an option. Private DACL, scoped-launch/recovery and staging regression runs pass
+21 tests with one platform skip; daemon TypeScript checking passes. Control-
+character names remain unrepresentable by the config-line protocol and are not
+claimed as implemented.
+
+Native-crash narrowing adds two negative reproductions at 5659e82: the last
+worker's queue-stuck file passes 134/134 independently, and a non-Vitest process
+performs 500 in-memory real migrations/query/iteration/close cycles with explicit
+GC successfully. These results do not establish a faulty native module or close
+the access-violation investigation; the nine-file unrequested-exit evidence still
+stands.
+
 ### Case-sensitive native copy identity and worker exit evidence (2026-11-02)
 
 Local overlap detection now compares bigint filesystem device/file identities

@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 
 export interface PrivateConfig { path: string; dispose(): Promise<void> }
 /** Names representable by the native private config parser, without option or line injection. */
-export const isWindowsPrivateEnvironmentName = (key: string): boolean => !!key && !key.startsWith("-") && !/[=\x00-\x1f\x7f]/.test(key);
+export const isWindowsPrivateEnvironmentName = (key: string): boolean => !!key && !/[=\x00-\x1f\x7f]/.test(key);
 const exec = promisify(execFile);
 const PROTECT_DIRECTORY = String.raw`
 $ErrorActionPreference='Stop'
@@ -48,5 +48,5 @@ export function psmuxPrivateEnvironmentLine(key: string, value: string): string 
   const format = value.replaceAll("#", "##").replaceAll("\n", "#{T:#{l:%n}}");
   const quoted = '"' + format.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
   const name = /^[A-Za-z_][A-Za-z0-9_()]*$/.test(key) ? key : '"' + key.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
-  return `set-environment -F ${name} ${quoted}\n`;
+  return `set-environment -F ${key.startsWith("-") ? "-- " : ""}${name} ${quoted}\n`;
 }
