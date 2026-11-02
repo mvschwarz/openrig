@@ -8,6 +8,20 @@ import { windowsTileAttachArgv } from '../src/domain/terminal/windows-tile-attac
 import { composeView } from '../src/domain/terminal/view-composer.js';
 import {writeWindowsNodeFixture} from '../../../scripts/windows-node-fixture.mjs';
 
+test.skipIf(process.platform !== 'win32')('native tile returns an attach refusal instead of reporting a later successful detach', () => {
+ const root=fs.mkdtempSync(join(tmpdir(),'native tile refusal-'));
+ try {
+  const log=join(root,'calls.jsonl');
+  const tmux=writeWindowsNodeFixture(root,'tmux',"import fs from 'node:fs';const a=process.argv.slice(2);fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]==='display-message')console.log('500 $1:owned');else if(a[2]==='show-environment')console.log('OPENRIG_NODE_ID=owned-node');else if(a[2]==='attach')process.exit(7);else process.exit(8);");
+  const argv=windowsTileAttachArgv(tmux,['-L','owned-server'],'owned',true,2);
+  const run=spawnSync(argv[0],argv.slice(1),{env:{...process.env,TEST_TILE_LOG:log},encoding:'utf8',windowsHide:true,timeout:10000});
+  assert.equal(run.status,7,run.stderr);
+  assert.match(run.stderr,/Viewer attach failed \(exit 7\)/);
+  const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls.map(a=>a[2]),['display-message','show-environment','attach']);
+ } finally {fs.rmSync(root,{recursive:true,force:true});}
+},15000);
+
 test('Windows local platform never changes a POSIX SSH remote tile command', () => {
  const member={seat:'remote',label:'remote',tmuxSession:'seat@remote',host:'edge',readOnly:true,alive:true};
  const resolveHost=()=>({id:'edge',transport:'ssh',target:'fixture'});

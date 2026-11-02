@@ -65,7 +65,11 @@ if([string]::IsNullOrEmpty($node)){
   $result=Invoke-Tmux ($attachPrefix+' "'+$snapshot.Id+'"') $false; exit $result.Code
 }
 while($true){
-  $null=Invoke-Tmux ($attachPrefix+' "'+$snapshot.Id+'"') $false
+  $attached=Invoke-Tmux ($attachPrefix+' "'+$snapshot.Id+'"') $false
+  if($attached.Code -ne 0){
+    [Console]::Error.WriteLine("Viewer attach failed (exit "+$attached.Code+"); inspect the selected server before reopening this view.")
+    exit $attached.Code
+  }
   $left=$retrySeconds; $same=0
   while($left -gt 0){
     $next=Read-Snapshot
