@@ -225,7 +225,24 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         await destination.symlink(target!, staged, directory);
         await destination.linkTimes?.(staged, attrs);
       }
-      else { await destination.write(staged, source.read(src)); await destination.times(staged, attrs); }
+      else {
+        let observedBytes = 0;
+        const sizeMismatch = () => Object.assign(new Error(`Source byte count differs from captured size during copy: ${src}`),
+          source === local ? { path: src, syscall: "read" } : {});
+        const verifiedSource = async function* () {
+          for await (const chunk of source.read(src)) {
+            observedBytes += chunk.length;
+            if (attrs.size !== undefined && observedBytes > attrs.size) throw sizeMismatch();
+            yield chunk;
+          }
+          // EOF is a protocol success, but not a complete copy when LSTAT had
+          // advertised more bytes. Refuse before metadata/rename publication.
+          if (attrs.size !== undefined && observedBytes !== attrs.size) throw sizeMismatch();
+        };
+        await destination.write(staged, verifiedSource());
+        if (attrs.size === undefined) bytesTransferred += observedBytes;
+        await destination.times(staged, attrs);
+      }
       if (replacingDirectory) {
         directoryReplacementAttempted = true;
         await destination.rmdir(dst);

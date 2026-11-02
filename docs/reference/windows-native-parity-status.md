@@ -1,5 +1,34 @@
 # Native Windows parity: implementation and evidence
 
+## SFTP source byte-count verification (2026-11-03)
+
+This repair is newer than the frozen whole-workspace checkpoint below. A real
+owned Windows SFTP subsystem reproduced a short source stream being published
+successfully despite its earlier LSTAT advertising more bytes. Both upload and
+download now count the source stream and reject an excess or premature EOF
+before applying final metadata or renaming the stage over the destination.
+The original target stays intact and the failure retains the staging hint.
+A local source mismatch is classified as local-copy-failed, rather than sending
+the operator to investigate the remote command. The diagnostic reports the
+observed byte-count mismatch without asserting its external cause. If a server
+omits optional source size, a successful transfer reports actual streamed bytes.
+
+Five new cases use real owned SFTP subsystem processes: each direction grows or
+shrinks its actual source between observation and reading; another transfers
+binary bytes while the interface omits optional size. The first short-download
+case failed before the repair and all five passed afterward on Windows and
+ordinary-user WSL. These establish byte-count agreement, not an immutable source
+snapshot or detection of same-size content edits.
+
+Five complete related files passed 40 cases on Windows with 14 skips. WSL's
+initial default server selection skipped all 54 and was not accepted as proof;
+using the previously prepared isolated Linux SFTP executable then passed 25
+with 29 Windows-only skips. Final error-attribution checks reran all five new
+native cases and the full WSL selection successfully. The two changed files
+were byte-compared on WSL; CLI TypeScript noEmit passed. No SSH authentication,
+remote test host, original team or running deployment was used. Full-directory
+and installed receipts below predate this repair and do not cover it.
+
 ## Current verification checkpoint (2026-11-03)
 
 Full parity remains incomplete. Later entries below are scoped evidence; older
