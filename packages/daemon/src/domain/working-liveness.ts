@@ -102,12 +102,15 @@ export class WorkingLivenessGate {
   }
 
   /** A beat that was admitted and recorded, at the time the store recorded for it (its `occurredAt`, or when it arrived).
-   *  It raises the seat's sequence, so a delayed or repeated beat doesn't count again, and later posts are ordered
-   *  against its time. */
+   *  One older than the latest counted post is dropped, as `observe` and the activity service drop it. Otherwise it
+   *  raises the seat's sequence, so a delayed or repeated beat doesn't count again, and later posts are ordered against
+   *  its time. */
   count(nodeId: string, beat: { sequence: number | null; eventAt: string | null }): void {
     const seat = this.seats.get(nodeId);
     if (!seat || beat.sequence === null) return;
+    const at = { eventAt: beat.eventAt, sourceSequence: beat.sequence };
+    if (seat.latest && hookPrecedes(at, seat.latest)) return;
     seat.sequence = Math.max(seat.sequence ?? 0, beat.sequence);
-    seat.latest = { eventAt: beat.eventAt, sourceSequence: beat.sequence };
+    seat.latest = at;
   }
 }
