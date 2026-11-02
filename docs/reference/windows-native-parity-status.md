@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Real stock psmux 3.4.0 batch-capture acceptance passed with two task-owned
+sessions under a private `PSMUX_DATA_DIR`, each printing a distinct marker.
+Batch results matched each session's independently captured bytes and contained
+no sibling marker. A batch with an absent middle session correctly marked it
+missing and preserved both live sessions' captures. The existing implementation
+passed; no speculative single-session fallback was added. The opt-in public
+regression test stops only its two exact sessions and removed its temporary
+fixture successfully. This does not qualify arbitrary physical session names,
+attached GUI clients, or interaction/recovery paths outside capture.
+
 Native psmux `switch-client` now places its actual destination operand before
 the literal client name. A client value equal to `-t` previously hid the real
 scoped destination from routing discovery, leaving its encoded identifier
