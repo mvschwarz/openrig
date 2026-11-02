@@ -304,7 +304,9 @@ describe("StartupOrchestrator", () => {
   // #6: a fresh Claude with no login of its own draws its persistent "Not logged in · Run /login" footer and refuses the
   // first request. The footer alone must not block (a gateway may authenticate); the refusal must reach the node view.
   it.each([
-    ["refused", "● Not logged in · Please run /login\n\n"],
+    // Claude 2.1.312 with an empty home draws the refusal as a result row under the prompt.
+    ["refused as a result row", "  ⎿  Not logged in · Please run /login\n\n✻ Cogitated for 0s · done 8:46 AM\n"],
+    ["refused as a reply", "● Not logged in · Please run /login\n\n"],
     ["gateway", "● Ready to work.\n\n"],
     ["quoted", "● The setup guide says to expect:\n  ● Not logged in · Please run /login\n\n"],
   ] as const)("a fresh Claude whose first reply is %s reaches the node view honestly", async (kind, reply) => {
@@ -341,7 +343,7 @@ describe("StartupOrchestrator", () => {
     });
     app.route("/api/rigs/:rigId/nodes", nodesRoutes);
     const served = await (await app.request(`/api/rigs/${seed.rigId}/nodes`)).json();
-    if (kind !== "refused") {
+    if (!kind.startsWith("refused")) {
       expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
       expect(submitted).toHaveLength(2);
       expect(served[0]).toMatchObject({ startupStatus: "ready", needsAttention: false });
