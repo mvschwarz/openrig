@@ -123,6 +123,24 @@ describe("spec-library route folder scan (slice 11)", () => {
     expect(await (await app.request("/api/specs/library?kind=workflow")).json()).toEqual([]);
   });
 
+  it("keeps a user-copy review link usable after the copy is edited", async () => {
+    const builtin = join(builtinDir, "same.yaml");
+    const user = join(folder, "same.yaml");
+    writeFileSync(builtin, VALID_YAML("same"));
+    cache.readThrough(builtin);
+    writeFileSync(user, VALID_YAML("same"));
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ specs: { builtinsVisible: false } }));
+    const app = createApp();
+    const entries = await (await app.request("/api/specs/library?kind=workflow")).json() as Array<{ id: string }>;
+    const id = entries[0]!.id;
+    writeFileSync(user, VALID_YAML("same").replace("Folder-scan fixture", "Changed objective"));
+    const response = await app.request(`/api/specs/library/${encodeURIComponent(id)}/review`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ sourcePath: user, purpose: "Changed objective" });
+    const after = await (await app.request("/api/specs/library?kind=workflow")).json() as Array<{ sourcePath: string }>;
+    expect(after.filter((entry) => entry.sourcePath === user)).toHaveLength(1);
+  });
+
   it("keeps accepted name/version pairs distinct and reviewable when a version contains a colon", async () => {
     writeFileSync(join(folder, "first.yaml"), VALID_YAML("demo").replace("version: '1'", "version: 'release:1'"));
     writeFileSync(join(folder, "second.yaml"), VALID_YAML("demo:release"));

@@ -20,6 +20,8 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 function visibleEntries(entries: SpecLibraryEntry[], settings: SettingsStore | undefined, includeBuiltins = false): SpecLibraryEntry[] {
   const showBuiltins = includeBuiltins || settings?.resolveOne("specs.builtins_visible").value !== false;
   return entries.filter((entry) => {
+    if (entry.id.startsWith("workflow-source:") && entries.some((other) =>
+      !other.id.startsWith("workflow-source:") && other.kind === "workflow" && other.sourcePath === entry.sourcePath)) return false;
     if (entry.id.startsWith("workflow-source:") && showBuiltins && !includeBuiltins) return false;
     return showBuiltins || entry.sourceType !== "builtin";
   });
@@ -64,6 +66,14 @@ export function specLibraryRoutes(): Hono {
           workflowEntries.push({ ...original, id: `workflow-source:${createHash("sha256").update(alias.sourcePath).digest("hex")}`,
             sourceType: "user_file", isBuiltIn: false, sourcePath: alias.sourcePath, relativePath: alias.sourcePath });
         } catch { /* A file changed or disappeared during the scan; try again on the next request. */ }
+      }
+      // Keep a source-specific link valid when an identical copy is edited and
+      // becomes the cache's own user-file row. The normal row is listed once.
+      if (folder) {
+        for (const entry of [...workflowEntries]) {
+          if (entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
+          workflowEntries.push({ ...entry, id: `workflow-source:${createHash("sha256").update(entry.sourcePath).digest("hex")}` });
+        }
       }
       lib.setWorkflowEntries(workflowEntries);
     }
