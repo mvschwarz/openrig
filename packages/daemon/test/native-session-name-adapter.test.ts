@@ -30,6 +30,18 @@ it("maps new probe creation and installs its binding only after a confirmed rece
   const f = fixture(); expect(await f.adapter.createProbeSession(f.logical)).toEqual({ ok: true });
   expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "present" });
 });
+it("maps a detached CLI command only after its creation receipt and keeps child argv literal", async () => {
+  const f = fixture(), child = ["C:/owned tools/node.exe", "C:/owned child.js", "-t", "owned|logical", "$(literal)"];
+  expect(await f.adapter.createDetachedCommandSession(f.logical, child)).toBe("$7");
+  const created = f.calls.find(argv => argv[1] === "new-session")!;
+  expect(created.slice(created.indexOf("--"))).toEqual(["--", ...child]);
+  expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "present" });
+});
+it("does not create a command over an occupied mapped name", async () => {
+  const f = fixture(true);
+  await expect(f.adapter.createDetachedCommandSession(f.logical, ["owned.exe"])).rejects.toThrow("already occupied");
+  expect(f.calls.map(argv => argv[1])).toEqual(["has-session"]);
+});
 it("refuses an occupied physical name without creating or binding over it", async () => {
   const f = fixture(true); expect(await f.adapter.createProbeSession(f.logical)).toMatchObject({ ok: false, code: "duplicate_session" });
   expect(f.calls.map(argv => argv[1])).toEqual(["has-session"]);

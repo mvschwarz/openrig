@@ -1041,6 +1041,23 @@ export class TmuxAdapter {
     return probe.state === "present";
   }
 
+  /** An unmanaged CLI watcher: literal child argv, with a creation receipt and native name binding. */
+  async createDetachedCommandSession(name: string, command: readonly string[]): Promise<string> {
+    if (this.deliveryGuard) throw new Error("Unmanaged command launch is unavailable on a guarded runtime adapter");
+    if (!name || !command[0] || [name, ...command].some(word => word.includes("\0"))) throw new Error("Invalid terminal command argv");
+    const escape = (word: string) => word.endsWith(";") ? word.slice(0, -1) + "\\;" : word;
+    const mapped = this.terminalKind === "psmux" && !!bindNativeSessionName(name).marker;
+    const formattedName = mapped ? name : name.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
+    const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", mapped ? name : escape(formattedName),
+      ...(this.terminalKind === "psmux" ? ["--"] : []), ...command.map(escape)];
+    // Ordinary native names are already format-escaped; do not reinterpret
+    // an escape backslash as a new logical name requiring another binding.
+    const output = this.terminalKind === "psmux" && !mapped ? await this.nativeRaw(argv) : await this.run(argv);
+    const receipt = /^(\$\d+) (\d+)$/.exec(output.trim());
+    if (!receipt) throw new Error("Terminal command creation was not confirmed; any created session was retained");
+    return receipt[1]!;
+  }
+
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     const launchEnv = env === undefined ? undefined : { ...env };
     const nodeId = readPlatformEnv(launchEnv ?? {}, "OPENRIG_NODE_ID", this.isNativeWindows ? "win32" : "linux");

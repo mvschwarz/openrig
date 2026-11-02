@@ -1,5 +1,35 @@
 # Native Windows parity: implementation and evidence
 
+## Chatroom watcher follows the selected terminal instance (2026-11-03)
+
+`chatroom watch --tmux` now confirms the selected instance locally and reads its
+structured executable/prefix and server metadata before creating a terminal.
+Remote addresses, forwarded foreign instances and missing/malformed server
+metadata refuse creation. The daemon terminal adapter creates the detached
+literal command, requires a session-ID/creation-time receipt and registers
+mapped native logical names through the existing marker checks. Occupied mapped
+names are not overwritten; unconfirmed creation is retained without retry.
+Native attach guidance carries the selected executable/server and uses the
+verified single-attach wrapper for mapped names. POSIX guidance uses the returned
+immutable session ID to tolerate tmux's name normalization.
+
+A paired Node child entry sets the selected home and URL before importing the
+CLI. This prevents a surviving multiplexer server's old instance environment
+from redirecting the watcher. Its owned process fixture executes the actual
+entry source with a recorder replacing only the CLI, checks literal Unicode,
+quotes and metacharacters, and verifies legacy home/URL overrides are removed.
+
+Eight complete CLI/adapter/cleanup files passed 94 tests with 17 platform skips
+on Windows. Four complete focused files then passed 19/19, overlapping the
+first set. They cover command-entry propagation, foreign-instance refusal,
+native marker registration, occupied names, literal argv, ordinary tmux/psmux
+format escaping and unconfirmed receipts. Daemon build, CLI noEmit and whitespace
+checks passed. Existing real tmux/psmux argument fixtures exercise the older
+exported argument helper, not this new production creation/child-entry path;
+their old receipts do not qualify this path. Current stock psmux, POSIX real
+watcher, installed-package and full-directory verification remain to be refreshed.
+No actual user watcher, provider, team, deployment or public push was started.
+
 ## Offline destroy retains uncertain session recovery state (2026-11-03)
 
 Offline destroy now reuses the daemon's terminal adapter instead of issuing a

@@ -1,11 +1,23 @@
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, type DaemonResponse } from "../client.js";
-import { readOpenRigEnv } from "../openrig-compat.js";
+import { getOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { assertLocalTmux, isLocalTmuxHost, readTmuxAttachCommand, readTmuxServerArgs } from "../tmux-attachment.js";
+import { bindNativeSessionName, powershellQuote, windowsTileAttachArgv } from "@openrig/daemon/windows-launch";
+import { createTerminalCommandSession } from "@openrig/daemon/terminal-cleanup";
+import { shellQuote } from "../cross-host-executor.js";
+
+/** Creating a local watcher must address the selected local instance, including inherited servers. */
+export async function chatroomTmuxSelection(client: Pick<DaemonClient, "baseUrl" | "get" | "isLocalInstance">): Promise<{ command: string[]; serverArgs: string[] }> {
+  if (!isLocalTmuxHost(client.baseUrl)) throw new Error("A tmux watcher must be started on the selected daemon's machine.");
+  await assertLocalTmux(client, "isolated", "The selected daemon's instance identity could not be confirmed locally; no watcher was created.");
+  const response = await client.get<{ tmux?: { serverArgs?: unknown; command?: unknown } }>("/api/terminal/status");
+  if (response.status >= 400 || response.data.tmux?.serverArgs === undefined) throw new Error("The selected daemon cannot report its tmux server; no watcher was created.");
+  return { command: readTmuxAttachCommand(response.data.tmux.command), serverArgs: readTmuxServerArgs(response.data.tmux.serverArgs) };
+}
 
 export function chatroomWatcherCommand(platform: NodeJS.Platform = process.platform): string[] {
   return platform === "win32" ? [process.execPath, fileURLToPath(new URL("../index.js", import.meta.url))] : ["rig"];
@@ -201,15 +213,21 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
+          const selected = await chatroomTmuxSelection(client);
           // Printed names can be escaped and cannot reliably address the session.
           // Its server-local immutable ID avoids name normalization and shell expansion.
-          const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig, chatroomWatcherCommand()), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-            .trim();
+          const child = [process.execPath, fileURLToPath(new URL("../chatroom-watch-child.js", import.meta.url)), getOpenRigHome(), client.baseUrl, rig];
+          const created = await createTerminalCommandSession(sessionName, child, selected.serverArgs, selected.command);
           if (!/^\$\d+$/.test(created)) throw new Error("No stable tmux session ID returned");
           console.log(`Started watch in tmux session: ${sessionName} (${created})`);
-          console.log(`Attach with: tmux attach -t '${created}'`);
-        } catch {
-          console.error(`Failed to create tmux session '${sessionName}'. It may already exist.`);
+          const quote = process.platform === "win32" ? powershellQuote : shellQuote;
+          const target = process.platform === "win32" ? `=${sessionName}` : created;
+          const attach = process.platform === "win32" && bindNativeSessionName(sessionName).marker
+            ? windowsTileAttachArgv(selected.command[0]!, [...selected.command.slice(1), ...selected.serverArgs], sessionName, false, 30, true)
+            : [...selected.command, ...selected.serverArgs, "attach", "-t", target];
+          console.log(`Attach with: ${process.platform === "win32" ? "& " : ""}${attach.map(quote).join(" ")}`);
+        } catch (error) {
+          console.error(`Failed to create tmux session '${sessionName}': ${error instanceof Error ? error.message : String(error)}`);
           process.exitCode = 1;
         }
         return;
