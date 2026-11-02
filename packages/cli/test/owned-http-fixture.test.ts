@@ -1,7 +1,31 @@
 import http from "node:http";
 import { EventEmitter } from "node:events";
-import { expect, it } from "vitest";
-import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { afterEach, expect, it } from "vitest";
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { resetFetchAllowlist } from "./fetch-guard.js";
+
+afterEach(resetFetchAllowlist);
+
+it("requires a bound server before registering any target", () => {
+  expect(() => allowOwnedHttpFixture(http.createServer())).toThrow(/has not bound/);
+});
+
+it("registers only its bound loopback origin and keeps unrelated targets refused", async () => {
+  const server = http.createServer((_request, response) => response.end("owned fixture"));
+  await listenOwnedHttpFixture(server);
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Fixture did not bind");
+  try {
+    resetFetchAllowlist();
+    allowOwnedHttpFixture(server);
+    expect(await (await fetch(`http://127.0.0.1:${address.port}`)).text()).toBe("owned fixture");
+    await expect(fetch("http://127.0.0.1:7433/healthz")).rejects.toThrow(/FETCH GUARD/);
+    await expect(fetch("http://192.0.2.10:7433/healthz")).rejects.toThrow(/FETCH GUARD/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
 
 it("binds a fetch-compatible owned loopback listener", async () => {
   const server = http.createServer((_req, res) => res.end("owned fixture"));
