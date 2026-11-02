@@ -1,12 +1,29 @@
 import path from "node:path";
-import { powershellQuote } from "../../adapters/windows-launch.js";
+import { powershellQuote, renderWindowsLaunchArgv } from "../../adapters/windows-launch.js";
+import { windowsArguments } from "../../adapters/windows-argv.js";
+import { isWindowsTileAttachArgv } from "./windows-tile-attach.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 
 /** A newly attributed viewer may run only through an observed supported shell. */
 export function nativeViewerCommand(argv: readonly string[], shell: string): string {
   if (!argv.length || argv.some(v => v.includes("\0"))) throw new Error("Invalid viewer argv");
   const kind = path.win32.basename(shell).toLowerCase().replace(/\.exe$/, "");
-  if (["powershell", "pwsh"].includes(kind)) return "& " + argv.map(powershellQuote).join(" ");
+  if (["powershell", "pwsh", "cmd"].includes(kind)) {
+    const canonical = isWindowsTileAttachArgv(argv);
+    const script = renderWindowsLaunchArgv(argv, {}, { beforeStart: "$openrigStart.WorkingDirectory = (Get-Location).ProviderPath" });
+    if (kind !== "cmd") {
+      if (canonical) return "& " + argv.map(powershellQuote).join(" ");
+      return "& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('"
+        + Buffer.from(script, "utf16le").toString("base64") + "'))))";
+    }
+    // Keep data out of cmd's percent/delayed expansion and operator parser.
+    const launch = canonical ? argv : [path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script + "\nexit $global:LASTEXITCODE", "utf16le").toString("base64")];
+    if (/[\"%!\r\n]/.test(launch[0]!)) throw new Error("Viewer executable cannot be represented safely by cmd");
+    const command = windowsArguments(launch);
+    if (command.length > 8190) throw new Error("Viewer command exceeds cmd's input limit");
+    return command;
+  }
   if (["bash", "sh", "dash", "zsh", "ksh"].includes(kind)) return [argv[0]!.replaceAll("\\", "/"), ...argv.slice(1)].map(shellQuote).join(" ");
   throw new Error("The new viewer's foreground shell is unqualified; no command was sent");
 }

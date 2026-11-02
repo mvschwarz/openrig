@@ -30,16 +30,26 @@ test("native viewer decodes only the exact installed tile wrapper", () => {
 });
 
 test("viewer command quotes shell data and refuses an unqualified foreground", () => {
-  expect(nativeViewerCommand(["C:\\owned path\\tool.exe", "a'b;$x"], "C:\\Windows\\powershell.exe")).toBe("& 'C:\\owned path\\tool.exe' 'a''b;$x'");
+  expect(nativeViewerCommand(["C:\\owned path\\tool.exe", "a'b;$x"], "C:\\Windows\\powershell.exe")).toMatch(/^& \(\[ScriptBlock\]::Create/);
   expect(nativeViewerCommand(["C:\\owned path\\tool.exe", "$x"], "bash.exe")).toBe("'C:/owned path/tool.exe' '$x'");
-  for (const shell of ["node.exe", "cmd.exe", "unknown"]) expect(() => nativeViewerCommand(["tool", "%PATH%"], shell)).toThrow(/unqualified/);
+  for (const shell of ["node.exe", "unknown"]) expect(() => nativeViewerCommand(["tool", "%PATH%"], shell)).toThrow(/unqualified/);
   expect(() => nativeViewerCommand(["bad\0arg"], "pwsh.exe")).toThrow(/Invalid/);
 });
 
 test("native viewer dispatch requires the sole foreground process to be its shell", () => {
-  expect(nativeViewerShellCommand(["tool"], {shell_pid:42,foreground_processes:[{pid:42,argv:["pwsh.exe"]}]})).toBe("& 'tool'");
+  expect(nativeViewerShellCommand(["tool"], {shell_pid:42,foreground_processes:[{pid:42,argv:["pwsh.exe"]}]})).toBe(nativeViewerCommand(["tool"], "pwsh.exe"));
   for (const info of [{}, {shell_pid:42,foreground_processes:[{pid:43,argv:["pwsh.exe"]}]},
     {shell_pid:42,foreground_processes:[{pid:42,argv:["node.exe"]}]},
     {shell_pid:42,foreground_processes:[{pid:42,argv:["pwsh.exe"]},{pid:43,argv:["editor.exe"]}]}])
     expect(() => nativeViewerShellCommand(["tool"], info)).toThrow();
+});
+
+test("cmd keeps the canonical tile wrapper compact and rejects oversized input", () => {
+  const argv = windowsTileAttachArgv("C:\\owned path\\psmux.exe", [], "seat %PATH% !x! 中文", true);
+  const command = nativeViewerCommand(argv, "cmd.exe");
+  expect(command).toContain(argv[5]);
+  expect(command).not.toContain("%PATH%");
+  expect(command.length).toBeLessThan(8191);
+  expect(nativeViewerCommand(argv, "powershell.exe")).toBe("& " + argv.map(v => "'" + v.replaceAll("'", "''") + "'").join(" "));
+  expect(() => nativeViewerCommand(["tool", "x".repeat(10000)], "cmd.exe")).toThrow(/input limit/);
 });

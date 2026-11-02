@@ -4373,3 +4373,26 @@ help. That updated gate and complete current-head suites remain pending; the
 earlier c10a79b installed receipt does not cover these newer changes. Real
 remote outside-vantage acceptance remains unverified while the owned SSH
 endpoint is unreachable. No security policy, publication or deployment changed.
+
+### Viewer foreground shell argument preservation (2026-11-03)
+
+An owned receiver reproduced two independent gaps: Windows PowerShell 5's
+native call operator dropped empty arguments and changed embedded quotes;
+the viewer rejected a sole foreground cmd.exe shell outright. Generic native
+viewer argv now uses the existing ProcessStartInfo argument bridge, with the
+observed shell's working directory and child exit status preserved. Cmd uses
+a fixed PowerShell encoded-command bootstrap, keeping percent expansion,
+delayed expansion and command operators out of argument data. Exact canonical
+tile wrappers keep their existing compact encoding. Cmd input longer than
+8190 characters is refused before dispatch; long-command staging is still a
+gap. The sole-foreground-shell identity guard remains required.
+
+Real owned PowerShell and cmd processes both preserved empty strings, quotes,
+trailing backslashes, Unicode, newline and expansion/operator literals, cwd and
+exit status 7. Six related files passed 35/35 on Windows; WSL passed 27 with
+eight native-only skips. Daemon TypeScript checking passed. Receipts:
+viewer-argv-before-20261103.json, viewer-argv-after-20261103.json,
+viewer-native-qualified-20261103.json and viewer-wsl-qualified-20261103.json.
+These process fixtures do not qualify actual Herdr foreground attribution,
+in-pane attachment or GUI reattachment. Those earlier acceptance gaps remain.
+No deployment, team restart or public push was performed.
