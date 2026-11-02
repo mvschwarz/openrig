@@ -109,7 +109,8 @@ configurations, as below; do not take the pin from a cached page summary.
    handoff carries, such as a trust or hook-review prompt they declined.
 2. **Where it works.** If the folder is missing, ask which folder the team should
    work in (usually a clone of their repository) and use its absolute path. Your
-   own working directory is OpenRig's workspace, not their project, so never launch with
+   own working directory is OpenRig's: the workspace's `kernel` folder (on an older
+   install, the workspace itself), not their project, so never launch with
    `--cwd .` from here.
 3. **Three teams, one recommendation.** Present starter, workshop and factory,
    recommend one with a short reason tied to their goal, and show each graph

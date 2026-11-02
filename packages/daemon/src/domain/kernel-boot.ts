@@ -19,7 +19,7 @@
 
 import nodePath from "node:path";
 import os from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { parse as parseToml } from "smol-toml";
 import type { RigRepository } from "./rig-repository.js";
 import type { BootstrapOrchestrator } from "./bootstrap-orchestrator.js";
@@ -45,12 +45,11 @@ export interface KernelBootDeps {
    *  inject a fixture root). Production callsite resolves to the
    *  packaged `packages/daemon/specs/` location. */
   specsDir: string;
-  /** cwdOverride passed to BootstrapOrchestrator.bootstrap. Kernel
-   *  members run against the operator's environment, not the daemon
-   *  installation tree — without this override, the bootstrap path
-   *  refuses with `cwd is inside the OpenRig installation`. Production
-   *  callsite passes the resolved workspace.root setting; tests inject
-   *  a fixture path. */
+  /** The workspace root (the resolved workspace.root setting; tests inject a fixture path). A new kernel's members run
+   *  in its `kernel` folder, or here when that can't be prepared (`prepareNewKernelCwd`), and that's passed to
+   *  BootstrapOrchestrator.bootstrap as its cwdOverride. Kernel members run against the operator's environment, not the
+   *  daemon installation tree: without an override, the bootstrap path refuses with `cwd is inside the OpenRig
+   *  installation`. */
   cwdOverride: string;
   /** Runtime auth probe — defaults to live shellouts; tests inject. */
   probeRuntimes?: () => Promise<RuntimeProbeResult>;
@@ -151,7 +150,7 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     sourceRef: specPath,
     sourceKind: "rig_spec",
     autoApprove: true,
-    cwdOverride: deps.cwdOverride,
+    cwdOverride: prepareNewKernelCwd(deps.cwdOverride, log),
   });
   tracker.startBooting(variant, bootstrapPromise, expectedKernelSeats(specPath));
   return tracker;
@@ -225,6 +224,19 @@ export function classifyManagedKernel(rigRepo: RigRepository, sessionRegistry: S
   } catch {
     return { kind: "unknown" };
   }
+}
+
+/** The folder a newly created kernel works in: `<workspace.root>/kernel`, beside the projects (`<workspace.root>/projects`
+ *  by default) rather than above them, so the guidance a kernel seat writes in its folder (a Claude seat's CLAUDE.md)
+ *  isn't read by the project seats below. It's made here, inside an existing workspace root. When it can't be (a file is
+ *  in the way, or there's no workspace root), the kernel works in the workspace root as before, and nothing is refused.
+ *  An existing kernel keeps the folders it was created with. */
+export function prepareNewKernelCwd(workspaceRoot: string, log: (level: "warn", message: string) => void = defaultLog): string {
+  const cwd = nodePath.join(workspaceRoot, "kernel");
+  try { mkdirSync(cwd); } catch { /* it's already there, or the workspace root isn't */ }
+  try { if (statSync(cwd).isDirectory()) return cwd; } catch { /* nothing there */ }
+  log("warn", `kernel-boot: couldn't prepare ${cwd} for the new kernel; it works in ${workspaceRoot}`);
+  return workspaceRoot;
 }
 
 /** True when a rig named `kernel` already exists in the DB. */

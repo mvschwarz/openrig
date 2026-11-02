@@ -8,7 +8,7 @@
 // post-bootstrap tracker state.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -209,9 +209,30 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
     expect(opts.sourceRef).toBe(join(tmpSpecsDir, "rigs/launch/kernel", "rig.yaml"));
     expect(opts.sourceKind).toBe("rig_spec");
     expect(opts.autoApprove).toBe(true);
-    expect(opts.cwdOverride).toBe(tmpSpecsDir);
+    // A new kernel works in the workspace's own `kernel` folder, prepared here, not in the workspace above its projects.
+    expect(opts.cwdOverride).toBe(join(tmpSpecsDir, "kernel"));
+    expect(statSync(join(tmpSpecsDir, "kernel")).isDirectory()).toBe(true);
     release();
     tracker.stop();
+  });
+
+  it("starts a new kernel in the workspace root, as before, when its folder can't be prepared, and refuses nothing", async () => {
+    // A file where the folder would go, and a workspace root that doesn't exist.
+    writeFileSync(join(tmpSpecsDir, "kernel"), "a user's file\n");
+    const missing = join(tmpSpecsDir, "no-workspace");
+    for (const workspaceRoot of [tmpSpecsDir, missing]) {
+      const bootstrap = makeBootstrapMock();
+      const warnings: string[] = [];
+      const tracker = await bootKernelIfNeeded(makeBaseDeps({ bootstrapOrchestrator: bootstrap, cwdOverride: workspaceRoot,
+        log: (level, message) => { if (level === "warn") warnings.push(message); } }, tmpSpecsDir));
+      expect(tracker.getStatus().kernelState).toBe("booting");
+      const opts = (bootstrap as unknown as { bootstrap: ReturnType<typeof vi.fn> }).bootstrap.mock.calls[0]![0];
+      expect(opts.cwdOverride).toBe(workspaceRoot);
+      expect(warnings).toEqual([expect.stringContaining(join(workspaceRoot, "kernel"))]);
+      tracker.stop();
+    }
+    expect(readFileSync(join(tmpSpecsDir, "kernel"), "utf8")).toBe("a user's file\n");
+    expect(existsSync(missing)).toBe(false);
   });
 
   it("transitions to bootstrap_failed when orchestrator returns errors (post-flush)", async () => {
