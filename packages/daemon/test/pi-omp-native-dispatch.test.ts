@@ -23,8 +23,10 @@ it.runIf(process.platform === "win32").each([["pi", false], ["omp", false], ["pi
     fs.writeFileSync(sessionFile, "owned synthetic history");
     const entry = path.join(cwd, "owned runner.cjs"), argvFile = path.join(root, "argv.json");
     fs.writeFileSync(entry, `const fs=require('fs'),a=process.argv.slice(2);fs.writeFileSync(${JSON.stringify(argvFile)},JSON.stringify(a));fs.writeFileSync(${JSON.stringify(seat.runnerStatePath)},JSON.stringify({ready:true,updatedAt:new Date().toISOString(),launchId:a[a.indexOf('--launch-id')+1],sessionFile:${JSON.stringify(sessionFile)}}));`);
-    const tmux = { sendShellCommand: async (_target: string, command: string) => {
+    const tmux = { sendShellCommand: async (_target: string, command: string, beforeInput?: () => void) => {
       if (command === "owned-unroutable-command") return { ok: false, code: "launch_path_too_long" };
+      beforeInput?.();
+      expect(JSON.parse(fs.readFileSync(seat.runnerStatePath, "utf8"))).toMatchObject({ ready: false });
       execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
         ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")], { encoding: "utf8", windowsHide: true, timeout: 10000 });
       return { ok: true };

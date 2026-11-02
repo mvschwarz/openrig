@@ -42,7 +42,10 @@ function mockTmux(overrides?: {
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
-    sendShellCommand: overrides?.sendShellCommand ?? vi.fn(async () => ({ ok: true as const })),
+    sendShellCommand: vi.fn(async (target: string, text: string, beforeInput?: () => void) => {
+      beforeInput?.();
+      return overrides?.sendShellCommand ? overrides.sendShellCommand(target, text) : { ok: true as const };
+    }),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     hasSession: overrides?.hasSession ?? vi.fn(async () => true),
@@ -95,6 +98,9 @@ it.each(["pi", "omp"].flatMap(runtime => ["fresh", "fork", "resume"].flatMap(kin
     .map(phase => ({ runtime, kind, phase })))))("$runtime $kind refuses changed history selection at $phase", async ({ runtime, kind, phase }) => {
   const stateRoot = nodePath.resolve("owned-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
   const files = memFs({ [sessionFile]: "owned synthetic session" });
+  const previous = readyState(sessionFile, "previous-launch");
+  const statePath = piSeatPaths(stateRoot, SESSION).runnerStatePath;
+  files.files[statePath] = previous;
   let selected = phase !== "initial";
   let release!: () => void;
   let observed!: () => void;
@@ -123,12 +129,16 @@ it.each(["pi", "omp"].flatMap(runtime => ["fresh", "fork", "resume"].flatMap(kin
   expect(await pending).toMatchObject({ ok: false });
   expect(effects).toEqual([]);
   expect(tmux.sendKeys).not.toHaveBeenCalled();
+  expect(files.files[statePath]).toBe(previous);
 });
 
 it.each(["pi", "omp"].flatMap(runtime => (runtime === "pi" ? ["initial", "staging", "before-write", "fallback"] : ["initial", "before-write"])
   .map(phase => ({ runtime, phase }))))("legacy $runtime resume refuses changed selection at $phase", async ({ runtime, phase }) => {
   const stateRoot = nodePath.resolve("owned-resume-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
   const files = memFs({ [sessionFile]: "owned synthetic session" });
+  const previous = readyState(sessionFile, "previous-launch");
+  const statePath = piSeatPaths(stateRoot, SESSION).runnerStatePath;
+  files.files[statePath] = previous;
   let selected = phase !== "initial", calls = 0;
   let release!: () => void;
   let observed!: () => void;
@@ -152,6 +162,7 @@ it.each(["pi", "omp"].flatMap(runtime => (runtime === "pi" ? ["initial", "stagin
   expect(await pending).toMatchObject({ ok: false, code: "attention_required" });
   expect(effects).toEqual([]);
   expect(tmux.sendKeys).not.toHaveBeenCalled();
+  expect(files.files[statePath]).toBe(previous);
 });
 
 // ── protocol builders ─────────────────────────────────────────────────────────

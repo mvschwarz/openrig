@@ -252,9 +252,6 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     }
     const changedSelection = () => ({ ok: false as const, error: "Selected history changed during runner launch preparation; no native command was sent.", recovery: "attention_required" as const });
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
-    const beforeInput = opts.beforeNativeDispatch ? () => {
-      if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before runner input");
-    } : undefined;
     if (opts.resumeToken && opts.forkSource) {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
@@ -294,14 +291,9 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
     // prior runner instance with a pending record BEFORE the command is typed,
     // and only trust sidecar states stamped with THIS attempt's launchId.
-    // The prior record is read FIRST so the durable catch-up cursor
-    // (lastEntryId, FR-5) survives the reset.
+    // Read the prior record at the write boundary so the latest durable
+    // catch-up cursor (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
-    const prior = this.readRunnerState(sessionName);
-    this.fs.writeFile(
-      paths.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-    );
 
     const trust = this.runtime === "omp"
       ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
@@ -335,6 +327,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       : bareCommand;
     // Stage long commands without leaving a shell above the live runner.
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
+    const beforeInput = () => {
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) throw new Error("Selected history changed before runner input");
+      // Read the latest cursor and publish pending only at the actual write
+      // boundary. Cancelled preparation must not replace the prior sidecar.
+      const prior = this.readRunnerState(sessionName);
+      this.fs.writeFile(paths.runnerStatePath, JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)));
+    };
     let textResult = await this.tmux.sendShellCommand(sessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
     if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {

@@ -77,9 +77,6 @@ export class PiResumeAdapter {
     }
     const selectionChanged = () => ({ ok: false as const, code: "attention_required", message: "Selected history changed; no further runner resume input is authorized." });
     if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
-    const beforeInput = beforeNativeDispatch ? () => {
-      if (!beforeNativeDispatch()) throw new Error("Selected history changed before runner resume input");
-    } : undefined;
     const sessionFile = resumeToken!;
 
     if (!this.fs.exists(sessionFile)) {
@@ -94,14 +91,9 @@ export class PiResumeAdapter {
 
     // Launch-attempt scoping (guard fold): overwrite any stale sidecar from a
     // prior runner instance BEFORE typing the command; verifyResume trusts
-    // only states stamped with THIS attempt's launchId. The prior record is
-    // read FIRST so the durable catch-up cursor (lastEntryId, FR-5) survives.
+    // only states stamped with THIS attempt's launchId. Read the prior record
+    // at the write boundary to retain the latest durable catch-up cursor.
     const launchId = (this.options.newLaunchId ?? (() => randomUUID()))();
-    const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
-    this.fs.writeFile(
-      seat.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
-    );
 
     const trust = this.runtime === "omp"
       ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
@@ -135,6 +127,11 @@ export class PiResumeAdapter {
       : bareCommand;
     // Short commands retain the direct path; long commands exec from a private script.
     if (beforeNativeDispatch && !beforeNativeDispatch()) return selectionChanged();
+    const beforeInput = () => {
+      if (beforeNativeDispatch && !beforeNativeDispatch()) throw new Error("Selected history changed before runner resume input");
+      const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
+      this.fs.writeFile(seat.runnerStatePath, JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)));
+    };
     let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
     if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {
