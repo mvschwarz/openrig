@@ -67,7 +67,7 @@ function fixture() {
     post("active", "liveness", { turnId, sequence: next(), livenessSeconds: 30, ...over });
   const state = () => oracle.getSeatState(node.id)!;
   const later = (ms: number) => { clock.now += ms; };
-  const at = () => new Date(clock.now).toISOString();
+  const at = (skewMs = 0) => new Date(clock.now + skewMs).toISOString();
   // A daemon restart: a new activity service takes the seat's last recorded hook, as its reconcile pass does.
   const restart = () => {
     oracle = newOracle();
@@ -190,6 +190,22 @@ describe("the runner's working beat", () => {
     expect(await f.beat("B", { occurredAt: undefined })).toEqual({ ok: true, activity: expect.anything() });
     await f.post("Stop", "end_turn", stopA);
     expect(await f.beat("B")).toEqual({ ok: true, activity: expect.anything() });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
+    expect(f.state()).toMatchObject({ activity: "working" });
+  });
+
+  it("doesn't take an undated beat's arrival as newer when the daemon's clock runs behind the runner's", async () => {
+    const f = fixture();
+    const ahead = 3_000; // the runner's clock runs 3 s ahead of the daemon's
+    await f.post("UserPromptSubmit", "accepted", { turnId: "A", sequence: f.next(), occurredAt: f.at(ahead) });
+    f.later(500);
+    const stopA = { turnId: "A", sequence: f.next(), occurredAt: f.at(ahead) }; // posted now, delivered late
+    f.later(500);
+    await f.post("UserPromptSubmit", "accepted", { turnId: "B", sequence: f.next(), occurredAt: f.at(ahead) });
+    f.later(500);
+    await f.beat("B", { occurredAt: undefined }); // recorded at the daemon's time, which reads before B's accepted
+    await f.post("Stop", "end_turn", stopA);
+    expect(await f.beat("B", { occurredAt: f.at(ahead) })).toEqual({ ok: true, activity: expect.anything() });
     f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
     expect(f.state()).toMatchObject({ activity: "working" });
   });
