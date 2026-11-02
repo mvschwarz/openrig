@@ -135,6 +135,12 @@ interface SwitchRow {
   committed_at: string | null; outcome: string | null; attention: string | null; created_at: string;
 }
 
+/** What to do about a seat with no pane to switch. */
+const NO_PANE = "it has no bound tmux pane";
+const NO_PANE_GUIDANCE = "If the seat is stopped, start it first, then switch it. If it has never started, there's nothing to switch: "
+  + "declare the other runtime for this member in its rig spec and bring the team up again from that spec. That makes a new "
+  + "generation of the seat, and it doesn't carry this seat's edges, settings or queued work the way a switch does.";
+
 const COSTS = [
   "A new conversation: native history isn't converted; only the handover carries over.",
   "Same address, different terminal: the seat's session and address stay, its pane and scrollback change.",
@@ -245,13 +251,14 @@ export class SeatRuntimeSwitchService {
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
-    const unsupported = !sessionName || !binding?.tmuxPane ? "it has no bound tmux pane"
+    const unsupported = !sessionName || !binding?.tmuxPane ? NO_PANE
       : binding.attachmentType && binding.attachmentType !== "tmux" ? `it's attached through ${binding.attachmentType}, not tmux`
       : !predecessorGeneration ? "its current occupant generation isn't recorded"
       : running.length !== 1 || running[0]!.sessionName !== sessionName ? "it doesn't have exactly one running session at its address"
       : !node.cwd || !nodePath.isAbsolute(node.cwd) ? "its working directory isn't an absolute path"
       : null;
-    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`);
+    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
+      unsupported === NO_PANE ? NO_PANE_GUIDANCE : undefined);
     try {
       const [panes, windows] = await Promise.all([tmux.listPanes(sessionName!), tmux.listWindows(sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
