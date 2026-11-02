@@ -27,6 +27,24 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Current native Herdr endpoint selection (2026-11-02)
+
+The default Windows CLI window path now retains an already marked Herdr context
+instead of bypassing it for a new Windows Terminal window. TERM_PROGRAM=herdr
+or the complete Herdr pane-marker trio selects the existing Herdr path; native
+case-insensitive environment normalization applies before selection. Explicit
+tmux still selects Windows Terminal, and inherited Rex markers keep that native
+default. Preview composition remains the Herdr plan used by both window paths.
+
+Two native-context fixtures confirm that a stale expected plan is refused on
+the Herdr path without Windows Terminal lookup, configuration writes or provider
+mutation. The ordinary common-path suite covers create/reuse/focus, while a new
+explicit-tmux fixture covers the Windows override. The two files pass 64 checks
+on Windows and 63 on the ordinary WSL mirror, with the real native tool lookup
+skipped on WSL. CLI TypeScript checking passes. This is route/guard qualification,
+not a new real Herdr desktop or shared-TUI client-context acceptance result.
+Windows last-active-client marker recovery remains open.
+
 ### TUI native window preview/launch selection (2026-11-02)
 
 Windows TUI terminal previews now use the same Herdr-composed plan as the

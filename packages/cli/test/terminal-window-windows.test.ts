@@ -87,6 +87,12 @@ describe("Windows desktop terminal view", () => {
     expect(f.launch).toHaveBeenCalledOnce();
     expect((f.deps.exec as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === "/bin/sh")).toBe(false);
   });
+  it("honors an explicit tmux window even inside a native Herdr pane",async()=>{
+    const f=fixture();f.deps.env={TERM_PROGRAM:'herdr',HERDR_ENV:'1',HERDR_PANE_ID:'owned',HERDR_SOCKET_PATH:'C:\\owned\\herdr.sock'};
+    expect(await openTerminalWindow(f.client,'saved','tmux',f.deps)).toMatchObject({ok:true,provider:'tmux'});
+    expect(f.launch).toHaveBeenCalledOnce();
+    expect((f.deps.exec as ReturnType<typeof vi.fn>).mock.calls.some(([,args])=>args.includes('herdr.exe'))).toBe(false);
+  });
   it("refuses explicit Rex on Windows before any native or POSIX subprocess", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "saved", "rex", f.deps);

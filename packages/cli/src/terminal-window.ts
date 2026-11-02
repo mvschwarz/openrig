@@ -395,7 +395,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   if (deps.platform !== "win32" && !following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
     return openRexView(client, view, deps, expectedPlan);
   }
-  const selectedProvider = requestedProvider ?? (session !== undefined || following ? "herdr" : undefined);
+  const nativeCurrentHerdr = deps.platform === "win32" && (deps.env.TERM_PROGRAM === "herdr" || inHerdrPane(deps.env));
+  const selectedProvider = requestedProvider ?? (session !== undefined || following || nativeCurrentHerdr ? "herdr" : undefined);
   const sessionFlag = session === undefined ? "" : ` --session ${shellQuote(session)}`;
   const sessionQuery = session === undefined ? "" : `&session=${encodeURIComponent(session)}`;
   let provider = selectedProvider ?? "herdr";
