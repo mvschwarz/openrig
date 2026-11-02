@@ -159,6 +159,42 @@ describe("provider routes", () => {
     expect(bad.status).toBe(400);
   });
 
+  // A managed launch runs the frozen realpath of a custom-path Claude, so the process isn't named claude.
+  it.each([[true, "high"], [false, null]] as const)("a switch reads a custom-path Claude seat's running effort through its launched executable (known: %s)", async (known, expected) => {
+    const db = createFullTestDb();
+    try {
+      const repo = new RigRepository(db), registry = new SessionRegistry(db);
+      const rig = repo.createRig("fixture-rig");
+      const node = repo.addNode(rig.id, "dev.a", { runtime: "claude-code" });
+      db.prepare("UPDATE nodes SET effort = 'medium' WHERE id = ?").run(node.id);
+      const session = registry.registerSession(node.id, "dev-a@fixture-rig");
+      registry.updateStatus(session.id, "running");
+      registry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "dev-a@fixture-rig", tmuxPane: "%101" });
+      const executable = "/opt/openrig-host-programs/078-host-native/2.1.316", startedAt = "Mon Nov  2 05:00:00 2026";
+      const listProcesses = async () => [
+        { pid: 700, ppid: 1, pgid: 700, tpgid: 702, executableName: "bash", command: "-bash", startedAt },
+        { pid: 702, ppid: 700, pgid: 702, tpgid: 702, executableName: "2.1.316", executablePath: executable,
+          command: `${executable} --effort high --session-id 9bab03df-f6e6-4ed3-8f3d-9a9efa3a79cc`, startedAt },
+      ];
+      const claude = { launchedExecutable: (nodeId: string, pane: string) => known && nodeId === node.id && pane === "%101" ? { executable } : null };
+      let lent!: ClaudeSeatRelaunch;
+      const app = new Hono();
+      app.use("*", async (c, next) => {
+        for (const [key, value] of Object.entries({ rigRepo: repo, tmuxAdapter: { getPanePid: async () => 700 }, listProcesses,
+          runtimeAdapters: { "claude-code": claude },
+          providerService: { ...stubService, precheck: async (_i: unknown, _r: unknown, claudeSeat: ClaudeSeatRelaunch) => { lent = claudeSeat; return { safe: true }; } } })) {
+          c.set(key as never, value as never);
+        }
+        await next();
+      });
+      app.route("/api/provider", providerRoutes());
+      await app.request("/api/provider/precheck?seat=dev-a@fixture-rig&toAccount=work&tokenFile=%2Ftokens%2Fwork");
+      const effort = await lent.effortChange!(node.id, "%101");
+      if (expected) expect(effort).toEqual({ running: expected, relaunch: "medium", relaunchIsSeatChoice: false });
+      else expect(effort).toBeNull(); // today's disclosed fallback: the running effort couldn't be read
+    } finally { db.close(); }
+  });
+
   it("a Claude seat's relaunch keeps its pane: restore launches only that seat from the snapshot in it, under the seat's lease, and its warnings come back", async () => {
     const db = createFullTestDb();
     try {
