@@ -5207,6 +5207,17 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Real stock psmux 3.4.0 parent-environment suppression acceptance passed under
+an owned private registry: a synthetic global `CLAUDECODE` value remained set,
+the selected session's override was removed through a lowercase alias with a
+removal marker, and its next directly respawned Node process received no such
+variable. The sibling session retained its distinct override and remained
+present; the global value was unchanged. Existing implementation passed and no
+speculative global-routing change was applied. The public opt-in regression
+test kills only its two exact owned sessions and cleaned its fixture. This is
+same-registry session suppression evidence, not cross-home global-environment,
+interactive-shell or warm-standby acceptance.
+
 Native selected-environment response keys now use the established Windows
 environment lookup rule rather than requiring the query's exact key spelling.
 Real stock psmux returned the stored uppercase name for a successful lowercase
