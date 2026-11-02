@@ -1110,6 +1110,17 @@ A seat can switch itself (its CLI may end when it retires; the daemon finishes).
         console.log(`${name} already runs ${String(data["to"])}. Nothing changed.`);
         return;
       }
+      if (data["firstStart"] === true) {
+        const from = String(data["from"]), to = String(data["to"]);
+        console.log(data["dryRun"]
+          ? `${name} has never started: its saved runtime would change from ${from} to ${to}, and its first start would use it. Nothing changes until you run it without --dry-run.`
+          : `${name} has never started, so nothing was switched (no switch id): its saved runtime changed from ${from} to ${to}, and its first start uses it.`);
+        const permission = data["permission"] as { mode: string; source: string } | undefined;
+        if (permission) console.log(`  permissions: ${permission.source === "explicit" ? `${permission.mode} (as given)` : "the seat's member and rig policy"}`);
+        const dropped = (data["dropped"] as Array<{ setting: string; value: string }> | undefined) ?? [];
+        if (dropped.length) console.log(`Cleared from ${from}: ${dropped.map((d) => `${d.setting} ${d.value}`).join("; ")}. Its first start takes the rest from its agent spec for ${to}.`);
+        return;
+      }
       const label = (source: string) => source === "explicit" ? "as given" : source === "agent_spec" ? "from the seat's agent spec" : "the runtime's default";
       const settings = (data["settings"] ?? {}) as Record<string, { value: string | null; source: string }>;
       if (data["dryRun"]) console.log(`Runtime switch plan for ${name}: ${String(data["from"])} -> ${String(data["to"])}. Nothing changes until you run it without --dry-run.`);

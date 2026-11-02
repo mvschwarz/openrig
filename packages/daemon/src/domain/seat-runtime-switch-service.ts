@@ -125,7 +125,14 @@ export type SetRuntimeResult =
   /** The seat already runs that runtime and no settings were given: nothing to do. */
   | ({ ok: true; dryRun: boolean; changed: false } & Pick<RuntimeSwitchPlan, "seat" | "from" | "to">)
   | ({ ok: true; dryRun: false; changed: true; switchId: string; generation: string; previousGeneration: string;
-      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean } & RuntimeSwitchPlan);
+      claimsMoved: number; openRows: number; confirmation: { note: string; at: string }; recoveryPending: boolean } & RuntimeSwitchPlan)
+  /** A materialized seat that has never started: its saved runtime changed, and nothing was switched. */
+  | ({ ok: true; dryRun: boolean; changed: true; firstStart: true }
+      & Pick<RuntimeSwitchPlan, "seat" | "from" | "to" | "accountHome" | "accountToken" | "permission" | "dropped">);
+
+/** A seat that has never started and wasn't materialized takes its runtime from the rig spec it was created from. */
+const DECLARED_FIRST_START = "It has never started, so its first start takes the runtime its rig spec declares: declare the other runtime there "
+  + "and create the seat again. A seat from rig import --materialize-only can change runtime before its first start.";
 
 interface SwitchRow {
   id: string; node_id: string; canonical_session: string; staging_session: string;
@@ -245,14 +252,18 @@ export class SeatRuntimeSwitchService {
     }
     const predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)?.generationUuid;
     const running = sessionRegistry.getSessionsForRig(node.rigId).filter((session) => session.nodeId === node.id && session.status === "running");
-    const unsupported = !sessionName || !binding?.tmuxPane ? "it has no bound tmux pane"
+    // A seat that has never started has no conversation, occupant or native history for a switch to carry.
+    const firstStart = this.neverStarted(node.id, node.rigId);
+    const unsupported = firstStart === "materialized" ? null
+      : !sessionName || !binding?.tmuxPane ? "it has no bound tmux pane"
       : binding.attachmentType && binding.attachmentType !== "tmux" ? `it's attached through ${binding.attachmentType}, not tmux`
       : !predecessorGeneration ? "its current occupant generation isn't recorded"
       : running.length !== 1 || running[0]!.sessionName !== sessionName ? "it doesn't have exactly one running session at its address"
       : !node.cwd || !nodePath.isAbsolute(node.cwd) ? "its working directory isn't an absolute path"
       : null;
-    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`);
-    try {
+    if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
+      firstStart === "declared" ? DECLARED_FIRST_START : undefined);
+    if (firstStart !== "materialized") try {
       const [panes, windows] = await Promise.all([tmux.listPanes(sessionName!), tmux.listWindows(sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
         return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: only a single-window, single-pane seat can, and its session has ${windows.length} window(s) and ${panes.length} pane(s).`);
@@ -277,6 +288,9 @@ export class SeatRuntimeSwitchService {
           : validateNativePermissionSelection(target, mode);
       }
     } catch (error) { return refuse("invalid_runtime_settings", (error as Error).message); }
+    if (firstStart === "materialized") {
+      return this.saveFirstStartRuntime({ input: { ...input, reason }, node, seatRef, target, explicit, selection, sourceSelection, base, refuse });
+    }
 
     let materials: RuntimeSwitchMaterials;
     try {
@@ -327,6 +341,71 @@ export class SeatRuntimeSwitchService {
   }
 
   /** Stage and confirm the successor before commit; failed preparation retains the predecessor and records cleanup needs. */
+  /** "materialized": a seat from rig import --materialize-only that has never started, exactly as its first start checks
+   *  it (no binding, session, occupant or saved startup context). "declared": one that has never started but has no
+   *  materialized source. null: a seat with history. */
+  private neverStarted(nodeId: string, rigId: string): "materialized" | "declared" | null {
+    const { db, rigRepo, sessionRegistry } = this.deps;
+    if (sessionRegistry.getBindingForNode(nodeId) || sessionRegistry.currentOccupantTenure(nodeId)
+      || sessionRegistry.getSessionsForRig(rigId).some((session) => session.nodeId === nodeId)
+      || db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(nodeId)) return null;
+    return rigRepo.getRigStartupLayers(rigId)?.materializedSources?.some((entry) => entry.nodeIds.includes(nodeId)) ? "materialized" : "declared";
+  }
+
+  /** A materialized seat that has never started: nothing runs, so nothing is switched (no successor, switch record or
+   *  switch id). Its saved runtime changes, and the source runtime's settings are cleared as a switch clears them; its
+   *  first start resolves the rest for the new runtime. The node row, and the member in its launch recipe that a
+   *  restore's first start reads, both change, with a snapshot, so every way of starting it agrees. */
+  private saveFirstStartRuntime(ctx: {
+    input: SetRuntimeInput & { reason: string }; node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number]; seatRef: string;
+    target: SwitchRuntime; explicit: { model?: string; effort?: string; codexConfigProfile?: string };
+    selection: NativePermissionSelection | null; sourceSelection: { runtime: string; mode: string } | null;
+    base: Pick<RuntimeSwitchPlan, "seat" | "from" | "to" | "accountHome">; refuse: (code: string, message: string) => RuntimeSwitchRefusal;
+  }): SetRuntimeResult {
+    const { db, rigRepo, sessionRegistry, eventBus } = this.deps;
+    const { input, node, target, explicit, selection } = ctx;
+    const dropped = [...(["model", "effort", "advisor", "codexConfigProfile"] as const)
+      .filter((key) => node[key] && !(key !== "advisor" && explicit[key]))
+      .map((key) => ({ setting: key === "codexConfigProfile" ? "Codex profile" : key, value: node[key]! })),
+      ...(ctx.sourceSelection ? [{ setting: "native permission choice", value: `${ctx.sourceSelection.runtime}:${ctx.sourceSelection.mode}` }] : [])];
+    const result = (dryRun: boolean): SetRuntimeResult => ({ ok: true, dryRun, changed: true, firstStart: true, ...ctx.base,
+      ...(input.accountToken ? { accountToken: input.accountToken } : {}),
+      permission: selection ? { mode: selection.mode, source: "explicit" } : { mode: "inherit", source: "member_or_rig_policy" }, dropped });
+    if (input.dryRun) return result(true);
+    const notifications: PersistedEvent[] = [];
+    try {
+      db.transaction(() => {
+        if (this.neverStarted(node.id, node.rigId) !== "materialized"
+          || (db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(node.id) as { runtime: string } | undefined)?.runtime !== node.runtime) {
+          throw new Error("it started or changed meanwhile");
+        }
+        db.prepare("UPDATE nodes SET runtime = ?, model = ?, effort = ?, effort_choice = NULL, advisor = NULL, codex_config_profile = ? WHERE id = ?")
+          .run(target, explicit.model ?? null, explicit.effort ?? null, target === "codex" ? explicit.codexConfigProfile ?? null : null, node.id);
+        db.prepare("UPDATE nodes SET account_home = ?, claude_token_ref = CASE WHEN ? THEN ? ELSE claude_token_ref END WHERE id = ?")
+          .run(input.accountHome ?? null, input.accountHome !== undefined || node.accountHome ? 1 : 0,
+            input.accountToken ? JSON.stringify(input.accountToken) : null, node.id);
+        new NativePermissionStore(db).write(node.id, selection, input.requestedBy?.trim() || ctx.seatRef, input.reason);
+        if (target === "codex" && selection) clearCodexMemberPermissions(db, node.id);
+        // A restore's first start builds the member from this recipe, not the node row.
+        const recipe = rigRepo.getNodeLaunchRecipe(node.id);
+        const dot = node.logicalId.indexOf(".");
+        const member = recipe?.rigSpec.pods.find((pod) => pod.id === node.logicalId.slice(0, dot))?.members
+          .find((candidate) => candidate.id === node.logicalId.slice(dot + 1));
+        if (recipe && member) {
+          member.runtime = target;
+          delete member.model; delete member.effort; delete member.advisor; delete member.codexConfigProfile;
+          db.prepare("UPDATE nodes SET launch_recipe_json = ? WHERE id = ?").run(JSON.stringify(recipe), node.id);
+        }
+        new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo: new SnapshotRepository(db), checkpointStore: new CheckpointStore(db) })
+          .captureSnapshot(node.rigId, "runtime-switch", { deferNotify: (persisted) => notifications.push(persisted) });
+      })();
+    } catch (error) {
+      return ctx.refuse("runtime_switch_unsupported", `${ctx.seatRef} can't change runtime: ${(error as Error).message}. Nothing changed.`);
+    }
+    for (const event of notifications) eventBus.notifySubscribers(event);
+    return result(false);
+  }
+
   private async execute(ctx: {
     input: SetRuntimeInput & { reason: string }; node: NonNullable<ReturnType<RigRepository["getRig"]>>["nodes"][number]; seatRef: string; sessionName: string;
     predecessorPane: string; predecessorGeneration: string; target: SwitchRuntime; materials: RuntimeSwitchMaterials;
