@@ -107,7 +107,8 @@ export type ValidationErrorCode =
   | "UNKNOWN_EMIT_BEHAVIOR"
   | "USAGE_LIMIT_IN_STUB_TOPOLOGY"
   | "UNBOUND_STEP_VERB"
-  | "UNKNOWN_DAEMON_OP";
+  | "UNKNOWN_DAEMON_OP"
+  | "QUEUE_PRECONDITION_INVALID";
 
 export interface ValidationError {
   code: ValidationErrorCode;
