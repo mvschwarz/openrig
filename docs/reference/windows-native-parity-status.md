@@ -5207,6 +5207,15 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Integrated Windows file-transfer checkpoint at
+`c154d6c18b2a914d7c654c4b101af81d2a76e061`: ten explicit CLI test files,
+146 tests, 127 passed, zero failed, 19 skipped. This includes command/planner,
+protocol, transport custody, text identity, staging permissions, directory
+recovery and captured-source-size checks. The default run did not enable the
+Linux-subsystem cross-endpoint opt-in; its separate 28-pass/1-skip result above
+remains separately scoped. Source HEAD and tracked cleanliness were checked
+after the run. This is not a full workspace or Linux comparison checkpoint.
+
 Local path policy comparison now treats Windows extended-length drive and UNC
 spellings as the same locations as ordinary paths, retaining the original I/O
 spelling. Scoped checks cover each existing denied local home segment and both
