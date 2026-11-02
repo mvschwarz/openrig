@@ -760,7 +760,9 @@ To move an existing kernel yourself, if you want to:
    conversation: `rig seat launch <seat> --fresh --stop --reason <text>` starts a
    blank one, and `rig handover <seat> --source rebuild --reason <text>` carries
    durable context into a new one. Nothing does this for you.
-3. Tidy the old `<workspace.root>/CLAUDE.md` (or `AGENTS.md`) by hand. Remove only
+3. Tidy the old `<workspace.root>/CLAUDE.md` (or `AGENTS.md`) by hand, once no
+   running rig's seat still works in that folder: a seat there still reads those
+   blocks, and `rig down` checks the same before it removes them. Remove only
    OpenRig's managed blocks, each from its `<!-- BEGIN OpenRig MANAGED BLOCK: … -->`
    line through its `END` line, as in the steps above, and keep everything else,
    including your own text. Don't move or delete the whole file.
