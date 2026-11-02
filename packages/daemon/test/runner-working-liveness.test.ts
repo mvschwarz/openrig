@@ -36,9 +36,13 @@ function fixture() {
   const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock.now),
     resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
-  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
-    now: () => new Date(clock.now), restoreHookEvidence: (seat, seatRuntime) => restoredRunnerHookEvidence(store, seat, seatRuntime) });
-  oracle.declareRungInventory({ seatNodeId: node.id, sessionName: session.sessionName }, runtimeRungInventory(runtime));
+  const newOracle = () => {
+    const service = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
+      now: () => new Date(clock.now), restoreHookEvidence: (seat, seatRuntime) => restoredRunnerHookEvidence(store, seat, seatRuntime) });
+    service.declareRungInventory({ seatNodeId: node.id, sessionName: session.sessionName }, runtimeRungInventory(runtime));
+    return service;
+  };
+  let oracle = newOracle();
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("agentActivityStore" as never, store as never);
@@ -47,7 +51,7 @@ function fixture() {
     await next();
   });
   app.route("/api/activity", activityRoutes);
-  const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+  let generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
   async function post(hookEvent: string, subtype: string | null, over: Record<string, unknown> = {}) {
     const response = await app.request("/api/activity/hooks", { method: "POST",
       headers: { authorization: "Bearer fixture-token", "Content-Type": "application/json" },
@@ -63,7 +67,28 @@ function fixture() {
     post("active", "liveness", { turnId, sequence: next(), livenessSeconds: 30, ...over });
   const state = () => oracle.getSeatState(node.id)!;
   const later = (ms: number) => { clock.now += ms; };
-  return { post, accepted, beat, next, state, later, oldGeneration, runtime };
+  const at = () => new Date(clock.now).toISOString();
+  // A daemon restart: a new activity service takes the seat's last recorded hook, as its reconcile pass does.
+  const restart = () => {
+    oracle = newOracle();
+    const evidence = restoredRunnerHookEvidence(store, { seatNodeId: node.id, sessionName: session.sessionName }, runtime);
+    if (evidence) oracle.reportEvidence({ ...evidence, seq: 0 });
+  };
+  // `rig seat clear-attention`: the operator's word that the prompt is gone, outside the hook route.
+  const clearAttention = () => {
+    store.recordHookEvent({ sessionName: session.sessionName, runtime, generation, hookEvent: "PermissionPromptCleared" });
+    oracle.settlePermissionPrompt(session.sessionName);
+  };
+  // A same-name replacement: a new occupant takes the seat and keeps its session name.
+  const replaceOccupant = () => {
+    const previous = generation;
+    sessions.updateStatus(session.id, "exited");
+    const replacement = sessions.registerSession(node.id, session.sessionName, "handover");
+    sessions.updateStatus(replacement.id, "running");
+    generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
+    return { previous, current: generation };
+  };
+  return { post, accepted, beat, next, state, later, at, restart, clearAttention, replaceOccupant, oldGeneration, runtime };
 }
 
 describe("the runner's working beat", () => {
@@ -139,6 +164,60 @@ describe("the runner's working beat", () => {
     await f.post("Stop", `${f.runtime}_exited`, { sequence: f.next() });
     expect(await f.beat("1")).toMatchObject({ ignored: "turn_ended" });
     expect(f.state()).toMatchObject({ activity: "unknown" });
+  });
+
+  it("isn't ended by an earlier turn's Stop that arrives after the next accepted turn", async () => {
+    const f = fixture();
+    await f.accepted("A");
+    f.later(1_000);
+    const stopA = { turnId: "A", sequence: f.next(), occurredAt: f.at() }; // posted now, delivered late
+    f.later(1_000);
+    await f.accepted("B");
+    await f.post("Stop", "end_turn", stopA);
+    expect(await f.beat("B")).toEqual({ ok: true, activity: expect.anything() });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
+    expect(f.state()).toMatchObject({ activity: "working" });
+  });
+
+  it("counts again after an operator clears the seat's attention", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    await f.post("Notification", "permission_prompt", { turnId: "1" });
+    expect(await f.beat("1")).toMatchObject({ ignored: "attention_outstanding" });
+    f.clearAttention();
+    expect(f.state().needsInput).toMatchObject({ count: 0 });
+    expect(await f.beat("1")).toEqual({ ok: true, activity: expect.anything() });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
+    expect(f.state()).toMatchObject({ activity: "working" });
+  });
+
+  it("keeps its admitted lifetime across a daemon restart", async () => {
+    for (const [given, lasts] of [[6000, 60], [5, 5]] as const) {
+      const f = fixture();
+      await f.accepted("1");
+      await f.beat("1", { livenessSeconds: given });
+      f.restart();
+      f.later(lasts * 1000 - 500);
+      expect(f.state().activity, `a restored livenessSeconds ${given} beat still counts at ${lasts} s`).toBe("working");
+      f.later(1_000);
+      expect(f.state().activity, `a restored livenessSeconds ${given} beat has lapsed after ${lasts} s`).toBe("unknown");
+    }
+  });
+
+  it("is ignored with no generation, and from the previous occupant after a same-name replacement", async () => {
+    const f = fixture();
+    await f.accepted("1");
+    expect(await f.beat("1", { generation: undefined })).toMatchObject({ ignored: "stale_generation" });
+    const { previous, current } = f.replaceOccupant();
+    // The previous occupant's beat, and the new occupant's beat for the turn its predecessor opened.
+    expect(await f.beat("1", { generation: previous })).toMatchObject({ ignored: "stale_generation" });
+    expect(await f.beat("1", { generation: current })).toMatchObject({ ignored: "stale_generation" });
+  });
+
+  it("is ignored for a turn whose accepted prompt carried no generation", async () => {
+    const f = fixture();
+    await f.post("UserPromptSubmit", "accepted", { turnId: "1", sequence: f.next(), generation: undefined });
+    expect(await f.beat("1")).toMatchObject({ ignored: "stale_generation" });
   });
 
   it("leaves a runner that sends no beats as before: a quiet turn falls to unknown after 15 s", async () => {
