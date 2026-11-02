@@ -1,5 +1,28 @@
 # Native Windows parity: implementation and evidence
 
+## Durable per-rename intent for name/marker recovery (2026-11-03)
+
+The existing runtime-switch journal can now retain a qualified rename intent
+containing its from/to slots, occupant generation, server PID, session ID and
+creation time before the terminal write. A pending intent survives direction
+changes and SQLite reopening. It cannot be overwritten or cleared by a different
+intent. A recovery-capable backend must resolve it before another rename is
+planned; a missing backend or lost lifecycle lease retains it as pending.
+Unrelated switch-plan fields remain intact. Older backends without intent hooks
+retain their existing observed-slot flow.
+
+Three complete journal/planner/runtime-service files passed 112 with five skips
+on Windows; daemon build and whitespace checks passed. Tests cover unknown
+results before and after a server-applied rename, recovery without replay, durable
+reopening, preserved direction/custody, and refusal of unqualified recovery.
+They use controlled terminal state and actual SQLite, not real psmux renames.
+
+This is recovery infrastructure, not completed mapped-name runtime exchange:
+the physical rename/marker backend has not opted in and the planner still rejects
+names requiring encoding. That backend must qualify the stored server identity
+and repair intermediate marker state before support can be claimed. No deployment,
+user-team operation or public push occurred.
+
 ## View retargeting keeps session name separate from window syntax (2026-11-03)
 
 The seat view-switch service now passes the canonical session and window index
