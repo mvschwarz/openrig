@@ -1,7 +1,7 @@
 import nodePath from "node:path";
 import fs from "node:fs";
 import { Command } from "commander";
-import { writeTextAtomically } from "../atomic-text-write.js";
+import { writeNewText, writeTextAtomically } from "../atomic-text-write.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -10,6 +10,8 @@ import { rigIdForHandle } from "../rig-handle.js";
 
 export interface ExportDeps extends StatusDeps {
   writeFile: (path: string, content: string) => void;
+  /** Must fail with EEXIST when the path is taken. */
+  writeNewFile?: (path: string, content: string) => void;
   exists?: (path: string) => boolean;
 }
 
@@ -37,27 +39,37 @@ function copyCulture(file: string, root: string, outDir: string): void {
   console.log(`Copied culture to ${target}`);
 }
 
+/** rig.yaml is also the name of an authored spec, and an export doesn't carry all of one (comments, a summary, startup
+ *  it couldn't read back). So a default export takes the first free name, created so that it can't replace a file that
+ *  appeared after the daemon was asked. Only a path the person named with -o may replace a file. */
+function writeDefaultExport(write: (path: string, content: string) => void, first: string, content: string): string {
+  for (let attempt = 1; ; attempt++) {
+    const path = attempt === 1 ? first : attempt === 2 ? "rig-export.yaml" : `rig-export-${attempt - 1}.yaml`;
+    try {
+      write(path, content);
+      if (attempt > 1) console.warn(`${first} already exists and was left unchanged. Use -o ${first} to replace it.`);
+      return path;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+}
+
 export function exportCommand(depsOverride?: ExportDeps): Command {
   const cmd = new Command("export").description("Export a rig spec as YAML");
   const getDeps = (): ExportDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
     writeFile: (p, content) => writeTextAtomically(p, content, "export"),
+    writeNewFile: writeNewText,
     exists: (p) => fs.existsSync(p),
   };
 
   cmd
     .argument("<rig>", "Rig name or ID to export")
-    .option("-o, --output <path>", "Output file path; an existing file is replaced only when named here", "rig.yaml")
+    .option("-o, --output <path>", "Output file path, replacing any file there. Without it, an existing rig.yaml is kept and the export goes to an unused rig-export*.yaml", "rig.yaml")
     .action(async (rigId: string, opts: { output: string }) => {
       const deps = getDeps();
-      // rig.yaml is also the name of an authored spec, and an export doesn't carry all of one (comments, a summary,
-      // startup it couldn't read back). Only a path the person named may replace a file, as copyCulture keeps one.
-      if (cmd.getOptionValueSource("output") === "default" && (deps.exists ?? fs.existsSync)(opts.output)) {
-        console.error(`${opts.output} already exists, so nothing was exported or changed. Name a new file with -o <path>, or replace this one with -o ${opts.output}.`);
-        process.exitCode = 1;
-        return;
-      }
       const status = await getDaemonStatus(deps.lifecycleDeps);
 
       if (!daemonStatusGuard(status)) return;
@@ -74,8 +86,10 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
         console.error(`Export failed: ${res.data}`);
         process.exitCode = 1;
       } else {
-        deps.writeFile(opts.output, res.data);
-        console.log(`Exported to ${opts.output}`);
+        const written = cmd.getOptionValueSource("output") === "default"
+          ? writeDefaultExport(deps.writeNewFile ?? deps.writeFile, opts.output, res.data)
+          : (deps.writeFile(opts.output, res.data), opts.output);
+        console.log(`Exported to ${written}`);
         for (const line of String(res.data).split("\n")) {
           if (line.startsWith("# Not carried: ")) console.log(line.slice(2));
           if (line.startsWith("# Member startup not carried for ")) console.warn(`Warning: ${line.slice(2)}`);
@@ -99,7 +113,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
           const parsed = parse(res.data) as Record<string, unknown> | null;
           if (parsed && typeof parsed === "object") {
             if (parsed["name"] === "starter") {
-              console.warn("Warning: this export still installs as 'starter'. Before sharing, rename the team's name in rig.yaml; changing the bundle name alone does not rename the installed rig.");
+              console.warn(`Warning: this export still installs as 'starter'. Before sharing, rename the team's name in ${written}; changing the bundle name alone does not rename the installed rig.`);
             }
             const pods = parsed["pods"] as Array<{
               id?: string;
