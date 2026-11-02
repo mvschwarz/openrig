@@ -1,4 +1,5 @@
 import { listNamedSessionWindows } from "../adapters/session-pane-lookup.js";
+import { switchClientToNamedSession } from "../adapters/session-target-operations.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter, TmuxWindow, TmuxClient } from "../adapters/tmux.js";
 import { SeatStatusService } from "./seat-status-service.js";
@@ -204,7 +205,7 @@ export class SeatSwitchClientService {
     //    OpenRig routing/identity).
     const target = `${session}:${windowIndex}`;
     // The canonical session may have ended since the probes; never switch to a prefix sibling.
-    const switchResult = await this.tmuxAdapter.switchClient(targetClient, `=${target}`);
+    const switchResult = await switchClientToNamedSession(this.tmuxAdapter, targetClient, session, windowIndex);
     if (!switchResult.ok) {
       return {
         ok: false,

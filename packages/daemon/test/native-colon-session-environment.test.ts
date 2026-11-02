@@ -23,6 +23,7 @@ function fixture(valid = true, drift = false) {
     }
     if (command === "capture-pane") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return "owned capture\n"; }
     if (command === "set-option" || command === "show-option") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return command === "show-option" ? "owned option\n" : ""; }
+    if (command === "switch-client") { expect(argv).toEqual(["tmux", "switch-client", "-t", "=" + binding.physical + ":2", "-c", "-t"]); return ""; }
     if (command === "show-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "OWNED_VALUE=literal\n"; }
     if (["source-file", "set-environment"].includes(command!)) { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
     throw new Error("Unexpected command: " + command);
@@ -80,6 +81,17 @@ it("does not set session or native-server options after a marker mismatch", asyn
   expect(await f.adapter.setNativeServerOption(f.name, "set-clipboard", "on")).toMatchObject({ ok: false });
   expect(await f.adapter.getSessionOption(f.name, "@owned")).toBeNull();
   expect(f.calls.some(argv => argv.includes("set-option") || argv.includes("show-option"))).toBe(false);
+});
+it("switches a selected view using the bound session and separate window index", async () => {
+  const f = fixture();
+  expect(await f.adapter.switchClientToSession("-t", f.name, 2)).toEqual({ ok: true });
+  expect(f.calls.flat()).not.toContain("=owned:logical:2");
+});
+it("does not send a view switch after a marker mismatch or invalid window index", async () => {
+  const f = fixture(false);
+  expect(await f.adapter.switchClientToSession("-t", f.name, 2)).toMatchObject({ ok: false });
+  expect(await f.adapter.switchClientToSession("-t", f.name, -1)).toMatchObject({ ok: false, code: "invalid_window" });
+  expect(f.calls.some(argv => argv.includes("switch-client"))).toBe(false);
 });
 it("does not fall back to the name prefix when its marker is wrong", async () => {
   const f = fixture(false);

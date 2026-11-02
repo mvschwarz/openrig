@@ -1139,10 +1139,10 @@ export class TmuxAdapter {
         }
       }
       const clients=async()=>{
-        const output=await this.run(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT]);
+        const output=await this.runNamedSession(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT], identity.staging);
         const rows=parseLines(output,parseClientLine);
         if(output.split(/\r?\n/).filter(line=>line.trim()!=="").length!==rows.length)throw new Error("Native attached-client listing is malformed");
-        const rawCount=(await this.run(["tmux","display-message","-p","-t",`=${identity.staging}:`,"#{session_attached}"])).trim();
+        const rawCount=(await this.runNamedSession(["tmux","display-message","-p","-t",`=${identity.staging}:`,"#{session_attached}"], identity.staging, undefined, true)).trim();
         // Stock psmux reports this format as a boolean, unlike tmux's count.
         if(!/^\d+$/.test(rawCount) || (Number(rawCount)>0)!==(rows.length>0))throw new Error("Native attached-client observation changed or is incomplete");
         return rows;
@@ -2673,5 +2673,17 @@ export class TmuxAdapter {
     } catch (err) {
       return classifyWriteError(err);
     }
+  }
+
+  /** Retarget an existing view with session identity separate from window syntax. */
+  async switchClientToSession(client: string, name: string, windowIndex?: number): Promise<TmuxResult> {
+    if (windowIndex !== undefined && (!Number.isSafeInteger(windowIndex) || windowIndex < 0)) return { ok: false, code: "invalid_window", message: "Invalid window index" };
+    const target = `=${name}${windowIndex === undefined ? "" : ":" + windowIndex}`;
+    try {
+      const argv = this.terminalKind === "psmux" ? ["tmux", "switch-client", "-t", target, "-c", client]
+        : ["tmux", "switch-client", "-c", client, "-t", target];
+      await this.runNamedSession(argv, name, `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`, windowIndex !== undefined, windowIndex);
+      return { ok: true };
+    } catch (error) { return classifyWriteError(error); }
   }
 }

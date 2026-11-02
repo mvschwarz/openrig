@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## View retargeting keeps session name separate from window syntax (2026-11-03)
+
+The seat view-switch service now passes the canonical session and window index
+separately to an explicit adapter entry, rather than constructing one ambiguous
+colon-delimited target. Native logical names are bound before constructing the
+physical window target. The actual target operand remains before a client name
+that may literally be `-t`. The generic switchClient API and legacy injected
+adapter call arguments remain compatible. The new operation retargets an
+existing client only; it does not create clients/sessions or change routing DB
+identity. Invalid window indices or marker mismatches send no switch command.
+
+Native runtime-follow observation likewise uses the complete staging session
+name for selected client and attachment-count reads. This is not a qualification
+of the full mapped-name runtime-exchange rename/marker lifecycle.
+
+Five complete colon/view-service/route/routing/exchange files passed 56/56 on
+Windows. Daemon TypeScript/assets build and whitespace checks passed. Controlled
+regressions cover the physical window target, literal client name and no-write
+refusals. They do not demonstrate real cross-server psmux client following or a
+desktop attachment, and installed/full-directory receipts predate this change.
+No deployment, user-team operation or public push occurred.
+
 ## Creation parent-identity removal and respawn retain server identity (2026-11-03)
 
 Creation's exclusion of inherited parent-session identities now retains its
