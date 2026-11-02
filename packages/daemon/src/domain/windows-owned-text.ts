@@ -536,14 +536,14 @@ export function isWindowsDirectoryLink(file: string): boolean {
 }
 
 /** No-follow native timestamps, checked against the caller's lstat identity. */
-export function readWindowsEntryTimes(file: string, expected: { dev: number; ino: number }): { atime: number; mtime: number } {
+export function readWindowsEntryTimes(file: string, expected: { dev: number; ino: number }): { atime: number; mtime: number; atimeMs: number; mtimeMs: number } {
   const output = execFileSync(nativeHelper(), ["entry-times", toNamespacedPath(file)], {
     encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   }).trim().split(" ");
   if (output.length !== 4 || output.some(value => !/^-?\d+$/.test(value))) throw new Error("Invalid native entry times");
   if (Number(output[0]) !== expected.dev || Number(output[1]) !== expected.ino) throw new Error("File identity changed while reading native entry times");
   const seconds = (value: string) => { const ticks = BigInt(value); return Number(ticks >= 0n ? ticks / 10_000_000n : (ticks - 9_999_999n) / 10_000_000n); };
-  return { atime: seconds(output[2]!), mtime: seconds(output[3]!) };
+  return { atime: seconds(output[2]!), mtime: seconds(output[3]!), atimeMs: Number(BigInt(output[2]!)) / 10_000, mtimeMs: Number(BigInt(output[3]!)) / 10_000 };
 }
 
 export function isWindowsDirectoryCaseSensitive(file: string): boolean {

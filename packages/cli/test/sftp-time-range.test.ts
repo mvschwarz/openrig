@@ -15,7 +15,7 @@ it.skipIf(process.platform !== "win32")("reads native time range and rejects a c
     for (const seconds of [-1, 0, 2147483648, 4294967295, 4294967296]) {
       await utimes(file, new Date(seconds * 1000), new Date(seconds * 1000));
       const identity = await lstat(file);
-      expect(readWindowsEntryTimes(file, identity)).toEqual({ atime: seconds, mtime: seconds });
+      expect(readWindowsEntryTimes(file, identity)).toMatchObject({ atime: seconds, mtime: seconds });
       expect(() => readWindowsEntryTimes(file, { dev: identity.dev, ino: 0 })).toThrow("File identity changed");
     }
   } finally { await rm(root, { recursive: true, force: true }); }

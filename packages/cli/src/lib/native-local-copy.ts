@@ -4,6 +4,17 @@ import { randomUUID } from "node:crypto";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { moveLocalEntryNoReplace } from './local-entry-move.js';
+import { readWindowsEntryTimes } from "@openrig/daemon/windows-owned-files";
+
+async function entryStat(file: string) {
+  const info = await lstat(file);
+  if (process.platform === "win32") {
+    const times = readWindowsEntryTimes(file, info);
+    info.atimeMs = times.atimeMs; info.mtimeMs = times.mtimeMs;
+    info.atime = new Date(times.atimeMs); info.mtime = new Date(times.mtimeMs);
+  }
+  return info;
+}
 
 /** Resolve existing parents too: a destination need not exist yet, but its
  * junction/short-name parent can already name a child of the source. */
@@ -45,12 +56,12 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
   let directoryReplacementAttempted = false;
   let retainedOriginal: string | undefined;
   let originalConfirmed = false;
-  const stat = async (p: string) => lstat(p).catch((error: NodeJS.ErrnoException) => {
+  const stat = async (p: string) => entryStat(p).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined;
     throw error;
   });
   const copy = async (src: string, dst: string): Promise<void> => {
-    const source = await lstat(src);
+    const source = await entryStat(src);
     const destination = await stat(dst);
     if (source.isDirectory()) {
       // Never traverse a destination junction/symlink when merging a directory.
@@ -152,7 +163,7 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
         if (source.isSymbolicLink()) {
           await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
           await lutimes(staged, source.atime, source.mtime);
-        } else await cp(src, staged, { force: false, errorOnExist: true, preserveTimestamps: true });
+        } else { await cp(src, staged, { force: false, errorOnExist: true }); await utimes(staged, source.atime, source.mtime); }
         // Nonrecursive removal is the final emptiness check; a newly added
         // child makes it fail without deleting that child's data.
         directoryReplacementAttempted = true;
@@ -179,20 +190,22 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
       }
       if (process.platform === "win32" && source.isFile() && destination?.isFile()) {
         staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
-        await cp(src, staged, { force: false, errorOnExist: true, preserveTimestamps: true });
+        await cp(src, staged, { force: false, errorOnExist: true });
+        await utimes(staged, source.atime, source.mtime);
         replaceWindowsCopiedFile(dst, staged);
         staged = undefined;
         return;
       }
       // fs.cp overwrites the entry, preserving links rather than following their targets.
-      await cp(src, dst, { force: true, preserveTimestamps: true, verbatimSymlinks: true });
+      await cp(src, dst, { force: true, verbatimSymlinks: true });
       if (source.isSymbolicLink()) await lutimes(dst, source.atime, source.mtime);
+      else await utimes(dst, source.atime, source.mtime);
     }
   };
   try {
     const src = path.resolve(plan.src.path);
     const dst = path.resolve(plan.dst.path);
-    const source = await lstat(src);
+    const source = await entryStat(src);
     const destination = await stat(dst);
     const contentsOnly = plan.src.path.endsWith(path.sep) || plan.src.path.endsWith("/");
     const target = destination?.isDirectory() && !(source.isDirectory() && contentsOnly) ? path.join(dst, path.basename(src)) : dst;

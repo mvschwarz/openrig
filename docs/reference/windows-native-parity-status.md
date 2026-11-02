@@ -5207,6 +5207,18 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Native-local copy now uses the identity-checked Windows time reader for source
+and destination comparisons and restoration. It explicitly applies captured
+times after copying bytes, avoiding `fs.cp`'s own wrapped `stat` timestamps.
+Two real native tests preserve file and directory times at -1 and 2^32 seconds,
+verify copied content, and verify repeat previews require no retransmission.
+The 2^32 file case starts with an equal-size destination at epoch zero, catching
+the previous false unchanged classification. Combined local-copy/time checks:
+25 passed, three POSIX mode checks skipped; daemon build and CLI no-emit passed.
+The reader exposes millisecond values for local copies and separately floors
+integer protocol seconds. Existing file/directory-link and readonly regression
+checks passed; out-of-range link-time acceptance remains separately unverified.
+
 SFTP local-endpoint metadata now reads access/write times through a no-follow
 Windows file handle and checks its volume/file identity against the caller's
 `lstat`. Signed native 100ns values are converted with integer arithmetic before
