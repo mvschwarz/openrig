@@ -4676,3 +4676,16 @@ compiled surface and quote module; it is not a fresh complete-source WSL build.
 These witnesses prove shell parsing, not arbitrary native shim behavior for
 every quote-bearing remote POSIX filename. The installed package gate at
 176f9cd predates this additional export/import and does not qualify this change.
+
+### Installed paired import gate at d118cf5 (2026-11-03)
+
+The target-native installed gate passed at
+d118cf56a2a46b44486958c502878ed80becdd84 with clean tracked source before
+and after, 2026-11-02 18:36:45 through 18:37:51 UTC. Current source built,
+packed and installed into an isolated prefix; CLI loading includes the new
+auth guidance import through the paired windows-launch surface. Provider
+recovery helper delivery/loading and the existing native ABI, resource, file,
+terminal-helper and rig.cmd checks passed. Receipt:
+pack-terminal-assets-d118cf5.json and its log. This is package delivery/loading
+evidence, not full current-head suites or real authenticated provider/engine
+acceptance. No actual runtime installation, deployment or public push occurred.
