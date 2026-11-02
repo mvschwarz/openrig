@@ -1,5 +1,29 @@
 # Native Windows parity: implementation and evidence
 
+## Installed watcher reads a real owned SSE stream (2026-11-03)
+
+The complete native build/pack/isolated-prefix install gate passed at
+`a0d6490d019f8f63d0087de742ea05cc7046a60d` in 70 seconds on the second ordinary
+invocation, with unchanged HEAD and tracked diff. The first invocation exited
+0xC0000005 during daemon compilation, before the SSE probe; it remains a failed
+build receipt rather than an SSE result. No Node/worker variant was introduced.
+
+The gate runs the actual installed `chatroom-watch-child.js` and CLI against an
+owned HTTP listener on an ephemeral loopback port. It supplies incorrect old
+home/URL environment values, then passes the intended home/URL and a literal
+Unicode/pipe/quote-bearing rig as child arguments. The actual CLI performs health,
+rig-summary and chat-watch GETs against the intended listener, renders its SSE
+message and exits zero when the stream closes. All observed requests are GETs.
+The listener and temporary home are closed/removed afterward. This verifies the
+installed entry/import/connection/rendering path with real HTTP/SSE, while the
+service responses are fixture data. The installed mapped-command and offline
+cleanup probes and the remaining gate checks also passed at this head.
+
+This is not a real provider or psmux-in-pane watcher qualification, a desktop
+attachment, live user-daemon acceptance or all-host transport proof. Existing
+full-directory failures and deferred real-provider/remote dependencies remain.
+No deployment, team/provider startup or public push occurred.
+
 ## Real POSIX command creation and offline stop at 4335017 (2026-11-03)
 
 Ordinary-user WSL compiled the paired daemon at
