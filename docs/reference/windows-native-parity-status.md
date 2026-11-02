@@ -1,5 +1,52 @@
 # Native Windows parity: implementation and evidence
 
+## Current verification checkpoint (2026-11-03)
+
+Full parity remains incomplete. Later entries below are scoped evidence; older
+tables are historical and must not override this checkpoint or later receipts.
+The following complete CLI/TUI/UI selections used frozen source
+f7946ecbec567075cca17e5106f0b3d40f6318ea, after the recent Podman, viewer,
+native Rex entry and terminal-control custody repairs.
+
+| Platform | CLI passed / failed / skipped | TUI passed / failed / skipped | UI passed / failed / skipped |
+| --- | --- | --- | --- |
+| Native Windows | 6,377 / 1 / 97 | 1,232 / 0 / 19 | 1,837 / 0 / 0 |
+| Ordinary-user WSL | 6,291 / 0 / 183 | 1,237 / 0 / 14 | 1,837 / 0 / 0 |
+
+Windows totals: 9,446 passed, one failed, 116 skipped in 11 minutes 14 seconds.
+WSL totals: 9,365 passed, zero failed, 197 skipped in 5 minutes 21 seconds.
+The sole Windows failure remains terminal-window-windows.test.ts's owned-PATH
+system-discovery case. This complete-directory run retained it; no new variant
+of its exhausted bounded investigation was attempted. Skips are unverified
+coverage, not passes. UI uses jsdom rather than visible desktop acceptance.
+
+All 4,705 public regular files matched the snapshot before/after WSL tests;
+Windows HEAD and tracked-diff hashes also stayed unchanged. Six symlinks remain
+outside that comparison. The excluded dependency's Git-normalized identity
+matched before/after the paired WSL daemon compilation and after the suites,
+without viewing or copying its source. WSL compilation initially started before
+the public overlay completed and refused a missing new file; after the original
+overlay finished, compilation passed. That ordering mistake did not enter the
+WSL suite and is not a product failure. Native Node was 24.14.1 and WSL Node
+24.11.0; these are same-source functional results, not a performance benchmark.
+
+| Goal requirement | Implemented and scoped evidence | Still incomplete or unqualified |
+| --- | --- | --- |
+| Independent terminal servers | Durable namespace selection, migration guards, exact attachment routing and environment spelling; owned stock psmux sibling isolation and mixed-case routing passed. | Concurrent server-name/PID exchange atomicity and literal-pipe session names. |
+| OpenShell / Podman engine path | Native rootless Podman pipe discovery, negotiated Libpod API and real container/observer capture, removal and absence checks passed. | Actual OpenShell CLI lifecycle; native build/distribution and Linux-guest contract qualification. |
+| File transfer and metadata | Native CLI local/SFTP paths, binary transfer, scoped symlink/readonly/timestamp and replacement recovery checks exist. | POSIX owner/group/execute, directory ACL and special-file equivalence; remaining remote/case-sensitive-host qualification. |
+| Terminal backend mapping | Native Herdr viewer/follow contracts, staged long cmd argv, explicit Rex CLI route and bounded Job control are implemented and scoped-tested. | Real Herdr foreground/GUI and Rex app/server acceptance; other shell/backend combinations. |
+| Stock psmux environment privacy | Private bootstrap/recovery, selected environment forwarding and consumed-bootstrap respawn have scoped real stock receipts below. | Full real-provider/installed-runtime continuity and the remaining host/terminal matrix. |
+| Whole-version acceptance | Complete current CLI/TUI/UI comparison and the clean d23b093 installed gate passed their stated scopes, except the one Windows discovery failure. | Full daemon suite remains crash-blocked; deferred OAuth, unreachable owned SSH host, other host/user/runtime lifecycle checks and deployment remain open. |
+
+Receipts: workspaces-comparison-f7946ec.json,
+workspace-cli-tui-f7946ec-metadata.json,
+cli-tui-ui-wsl-f7946ec-verified-metadata.json,
+daemon-build-wsl-verified-f7946ec.json,
+private-version-post-suite-f7946ec.json and their full reports/logs.
+No main runtime/team restart, publication or push was performed. The goal is
+not complete; the remaining rows are not waived by these passing checks.
+
 ## Legacy Pi/OMP restore selection forwarding (2026-11-02)
 
 The legacy Pi resume API now accepts a trailing selection guard, shared by OMP. It checks before preparation and after asynchronous staging, passes the guard to the write boundary, and rechecks before the no-input path-length fallback. Refusal remains attention-required; missing conversation files retain their existing retry-fresh/stop-and-ask handling. RestoreOrchestrator now forwards its selected-history guard to both legacy adapters and refuses a known-invalid selection before calling them, preserving old argument layouts when no guard exists.
