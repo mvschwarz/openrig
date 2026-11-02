@@ -174,6 +174,7 @@ function validateFile(
 
   let parsed: Record<string, unknown> | null;
   try {
+    if (fm.body === null) throw new Error("unterminated frontmatter: missing closing --- delimiter");
     parsed = parseYaml(fm.body) as Record<string, unknown> | null;
   } catch (err) {
     out.gaps.push({
@@ -186,7 +187,7 @@ function validateFile(
     });
     return out;
   }
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     out.gaps.push({
       filePath,
       relativePath,
@@ -229,7 +230,7 @@ function validateFile(
 
 interface FrontmatterExtraction {
   found: boolean;
-  body: string;
+  body: string | null;
 }
 
 /** Extract YAML frontmatter delimited by `---` lines. The opening `---`
@@ -245,5 +246,5 @@ function extractFrontmatter(raw: string): FrontmatterExtraction {
       return { found: true, body: lines.slice(1, i).join("\n") };
     }
   }
-  return { found: false, body: "" };
+  return { found: true, body: null };
 }
