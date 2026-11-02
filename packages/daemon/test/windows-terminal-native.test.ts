@@ -10,6 +10,7 @@ import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { pathToFileURL } from "node:url";
 import { verifyPaneIdleShell, verifyCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 import { verifyWindowsPaneReceiver } from "../src/domain/windows-pane-receiver.js";
+import { nextNativeRuntimeExchangeStep, type NativeExchangeSlot } from "../src/domain/native-runtime-switch-exchange.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
@@ -37,6 +38,54 @@ function ownedInvoker(dir: string) {
 }
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
+  it("exchanges owned session names without moving or killing either ConPTY",async()=>{
+    const dir=mkdtempSync(path.join(os.tmpdir(),"openrig-native-name-exchange-"));
+    const suffix=randomUUID(),canonical=`owned-canonical-${suffix}`,staging=`owned-staging-${suffix}`,parked=`owned-parked-${suffix}`;
+    const invoke=ownedInvoker(dir);
+    const adapter=new TmuxAdapter(async()=>{throw Error("No POSIX transport");},undefined,invoke,"psmux");
+    try{
+      const identity={canonical,staging,parking:parked,predecessorGeneration:randomUUID(),successorGeneration:randomUUID()};
+      for(const [name,generation] of [[canonical,identity.predecessorGeneration],[staging,identity.successorGeneration]]){
+        const created=await adapter.createSession(name!,dir,{OPENRIG_OCCUPANT_GENERATION:generation!});expect(created.ok,created.message).toBe(true);
+      }
+      const before=async(name:string)=>{
+        const panes=await adapter.listPanes(name);expect(panes).toHaveLength(1);
+        return {pane:panes[0]!.id,pid:await adapter.getPanePid(panes[0]!.id)};
+      };
+      const predecessor=await before(canonical),successor=await before(staging);
+      expect(predecessor.pid).toBeGreaterThan(0);expect(successor.pid).toBeGreaterThan(0);expect(predecessor.pid).not.toBe(successor.pid);
+      const observe=async(name:string):Promise<NativeExchangeSlot>=>{
+        const probe=await adapter.probeSession(name);
+        if(probe.state==="absent")return {state:"absent"};
+        if(probe.state!=="present")return {state:"unknown"};
+        const generation=await adapter.getSessionEnv(name,"OPENRIG_OCCUPANT_GENERATION");
+        return generation?{state:"present",generation}:{state:"unknown"};
+      };
+      const exchange=async(direction:"forward"|"rollback")=>{
+        for(let attempt=0;attempt<4;attempt++){
+          const step=nextNativeRuntimeExchangeStep(identity,{canonical:await observe(canonical),staging:await observe(staging),parking:await observe(parked)},direction);
+          if(step.state==="complete")return;
+          if(step.state!=="rename")throw Error(step.reason);
+          await invoke(["tmux","rename-session","-t",`=${step.from}`,step.to]);
+        }
+        throw Error("Owned exchange did not reach its observed terminal state");
+      };
+      await exchange("forward");
+      const active=await before(canonical),retired=await before(staging);
+      expect(active.pid).toBe(successor.pid);expect(retired.pid).toBe(predecessor.pid);
+      expect(Buffer.from(active.pane.split(":")[1]!,"base64url").toString("utf8")).toBe(canonical);
+      // The scope name changes with a rename. Recovery must use generations/PIDs,
+      // not mistake a same local %N under the canonical name for the predecessor.
+      expect(active.pane).not.toBe(successor.pane);
+      expect((await adapter.listSessions()).map(s=>s.name).sort()).toEqual([canonical,staging].sort());
+      await exchange("rollback");
+      expect(await before(canonical)).toEqual(predecessor);expect(await before(staging)).toEqual(successor);
+    }finally{
+      for(const name of [canonical,staging,parked])await invoke(["tmux","kill-session","-t",`=${name}`]).catch(()=>{});
+      await invoke(["tmux","kill-server"]).catch(()=>{});
+      rmSync(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100});
+    }
+  },30000);
   it("verifies the stock pane label and lineage of an owned native provider stub", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-provider-"));
     const session = `owned-provider-${randomUUID()}`;

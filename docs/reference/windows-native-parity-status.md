@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native exchange primitive and observed rollback (2026-11-02)
+
+A generation-based native exchange planner now maps fresh observations of the
+canonical, staging and parking session slots to exactly one rename. The three
+forward states and their reverse states retain both server processes; missing,
+unknown, foreign or duplicate occupant identities refuse another write. A client
+timeout is not interpreted as a failed rename: the planner's contract requires
+fresh observations before any next operation.
+
+An owned stock psmux 3.4.0 test performs the real three-rename exchange and reverse
+sequence, checking generation environment values and both original pane PIDs.
+Both processes survive and return to their initial addresses on rollback.
+Scoped pane IDs change when their session name changes, confirming that recovery
+must use generation identity rather than relying on a stable scoped ID. The
+planner's 17 cases plus the native exchange pass; four unrelated native tests
+were not selected. Daemon TypeScript checking passes.
+
+This primitive is not yet wired into the runtime-switch service. Durable custody
+before the first rename, interrupted-exchange recovery, binding remapping,
+attached-client following and predecessor retirement still require integration
+and acceptance. The runtime-switch implementation gap below remains open.
+
 ### Native runtime-switch and literal-name gaps identified (2026-11-02)
 
 The pane identity audit finds a current implementation gap in runtime switching:
