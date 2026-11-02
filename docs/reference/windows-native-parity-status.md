@@ -27,6 +27,31 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native runtime-switch and literal-name gaps identified (2026-11-02)
+
+The pane identity audit finds a current implementation gap in runtime switching:
+`swapRuntimeSwitchPanes` requires bare `%N` identifiers, so valid scoped native
+`psmux:<session-base64url>:%N` identities return `runtime_switch_target_changed`
+with "Exact pane ids are required." A bounded direct invocation reproduces the
+refusal with zero terminal executor calls. The real seat runtime-switch service
+uses this method for exchange and rollback, so scoped pane discovery alone does
+not establish Windows runtime-switch equivalence.
+
+Simply accepting the scoped identifier would be insufficient. Stock psmux 3.4.0
+does not support cross-session `swap-pane`; its cross-session `join-pane` uses a
+TCP proxy with the real ConPTY retained in the source process. A native exchange
+must therefore handle source-server lifetime, rollback, staging retirement and
+durable recovery without killing the successor's real process. This remains
+implementation work; no runtime-switch acceptance is claimed.
+
+An owned stock psmux test with a literal `|` in the session name also fails at
+the client's ten-second creation deadline, before pane parsing is reached.
+The checked v3.4.0 path code uses literal session names for registry filenames.
+The fixture cleanup completes and an exact-namespace process query finds no
+remaining psmux process. Linux literal-name coverage does not qualify this native
+case; native naming equivalence remains open. No live team or main daemon was
+changed by either investigation.
+
 ### CRLF ordinary terminal-list equivalence (2026-11-02)
 
 The shared list parser now recognizes CRLF as well as LF, extending the batch
