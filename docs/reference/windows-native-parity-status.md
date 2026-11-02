@@ -1,5 +1,23 @@
 # Native Windows parity: implementation and evidence
 
+## Current authored relative-path validation (2026-11-02)
+
+The byte-identical CLI/daemon safe-path validators now reject drive-relative
+spellings such as C:foo and a bare drive selector. Those resolve against the
+drive's current directory, not an authored bundle root. Embedded NUL is rejected
+before filesystem use. Existing absolute/UNC/extended-prefix and traversal
+refusals remain, and ordinary relative Unicode/space spellings are unchanged.
+The consumer audit covers agent resource paths, startup references, rig schema,
+export references and the permission-policy twins. Three selected files passed
+75 tests on Windows and 75 in the ordinary-user WSL mirror; both package
+TypeScript checks passed. This is the authored relative-path grammar, not a
+claim that every accepted spelling is representable on every filesystem.
+
+The old 0b0df4c full CLI/TUI receipt's three failing files (doctor, file-command,
+lazy-program) subsequently passed all 70 of their current native checks. That
+closes those old failures for this targeted source run; the complete current
+CLI/TUI directory suite and broad path audit remain unfinished.
+
 ## Current case-distinct resource paths and legacy compatibility (2026-11-02)
 
 Ordinary resource IDs now encode uppercase and Unicode characters on Windows,
