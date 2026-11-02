@@ -54,9 +54,20 @@ OpenRig says the request isn't the seat's current occupant's (for example, after
 ## Before you declare resume
 
 The preset leaves `resume` out. The runner reopens a conversation by the method dsh advertises: `session/resume`, or
-`session/load`. When dsh advertises neither, it tries `session/resume`. It reports a conversation missing only on dsh's
-own not-found error (`-32002`); any other failure leaves the resume unconfirmed, and it never starts a new conversation
-on a resume. Add `resume: true` after a real dsh has reopened a conversation and refused a missing one.
+`session/load`. When dsh advertises neither, it tries `session/resume`. It never starts a new conversation on a resume.
+
+**Telling a missing conversation from one that won't reopen.** dsh `0.2.1-rc.2` answers `-32602` both for a
+conversation it doesn't have and for one already active elsewhere, so the runner never reads that error as missing.
+- **Only dsh's own not-found error (`-32002`) counts as missing.** Any other failure leaves the resume unconfirmed.
+- **When dsh advertises `session/list`** (it does), the runner first asks the list, following its pages. A conversation
+  the list names but that won't reopen stays unconfirmed, even on a not-found.
+- **An unlisted conversation is still reopened.** dsh's list can leave out a conversation another running dsh holds
+  unsaved, so it can't show a conversation is gone.
+
+**Limit:** dsh answers `-32602`, not `-32002`, for a conversation it doesn't have, so the runner can't report a missing
+dsh conversation as missing. It reads unconfirmed.
+
+Add `resume: true` after a real dsh has reopened a conversation and recalled what was said in it.
 
 ## Check it without a model
 
