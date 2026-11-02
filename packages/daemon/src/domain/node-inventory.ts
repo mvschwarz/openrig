@@ -34,6 +34,7 @@ import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { powershellQuote } from "../adapters/windows-launch.js";
+import { providerRecoveryCommand } from "./provider-recovery-command.js";
 
 // -- Row types for SQL results --
 
@@ -114,7 +115,7 @@ interface BindingRow {
 // -- Helpers --
 
 function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean, claudeMcp?: ClaudeMcp | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp);
+  return providerRecoveryCommand(buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut, claudeMcp));
 }
 
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
@@ -158,7 +159,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? "Try native Claude resume first, then fall back to the workspace-local picker if needed."
         : "No stored Claude resume token. Use the workspace-local Claude picker fallback.",
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }
@@ -193,7 +194,7 @@ function computeRecoveryGuidance(input: {
       summary: resumeToken
         ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
         : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
-      commands,
+      commands: commands.map(command => providerRecoveryCommand(command)!),
       notes,
     };
   }

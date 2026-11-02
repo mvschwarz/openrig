@@ -176,6 +176,10 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
     }
     assert.throws(()=>execFileSync(process.execPath,[join(installed,"daemon/assets/terminal/follow-events.mjs")],{cwd:home,encoding:"utf8",stdio:"pipe"}),
       error=>error.status===1 && String(error.stderr).includes("An explanation log path is required"),"installed following helper must load and reject a missing path");
+    const providerRecoveryHelper = join(installed,"daemon/assets/windows-provider-recovery.mjs");
+    assert.deepEqual(readFileSync(providerRecoveryHelper),readFileSync(join(REPO_ROOT,"packages/daemon/assets/windows-provider-recovery.mjs")),"installed provider recovery helper must match source");
+    assert.throws(()=>execFileSync(process.execPath,[providerRecoveryHelper],{cwd:home,encoding:"utf8",stdio:"pipe",windowsHide:true}),
+      error=>error.status===1 && String(error.stderr).includes("Windows provider recovery requires one payload"),"installed provider recovery helper must load its paired launcher modules before rejecting missing data");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     const entry = join(installed, manifest.bin.rig);
     assert.ok(existsSync(entry), "installed bin entry must exist");

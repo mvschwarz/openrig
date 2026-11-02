@@ -4547,3 +4547,33 @@ Owned fixture directories were removed. No provider, existing session or main
 runtime was launched or changed. Provider recovery argv, including native
 PowerShell handling of inline MCP JSON, remains a separate unqualified scope;
 the shell-function witnesses above do not prove that native boundary.
+
+### Provider recovery argv and npm resolution (2026-11-03)
+
+A real Node receiver reproduced loss of the double quotes in Claude's inline
+MCP JSON when PowerShell 5 forwarded a served recovery command. Inventory
+presentation now wraps quote-bearing or empty provider words in a data-only
+recovery bridge. Ordinary safe hints and POSIX commands keep their current
+form; managed launch builders are unchanged.
+
+At execution time a finite Node helper uses the existing Windows provider
+resolver to select a native executable or a recognized npm installation from
+the invoking environment. It emits the existing ProcessStartInfo launcher as
+base64 UTF-16, avoiding console-codepage corruption of Unicode paths. The
+PowerShell caller launches the resolved argv with inherited console handles
+and the current literal working directory, then preserves the provider exit
+status. Missing providers fail explicitly instead of falling back to a shell
+alias/function. This helper does not start a daemon or inspect credentials.
+
+Owned npm fixtures executed all served Claude recovery variants and Codex
+profile recovery variants through actual PowerShell and Node. Inline MCP JSON,
+an apostrophe-bearing Codex profile, names and exit status 7 were preserved;
+missing-provider cases launched no receiver. The complete inventory file
+passed 75/75 on Windows and 73 with two native-only skips on WSL; daemon
+TypeScript checking passed. Receipts: recovery-provider-before-20261103.json,
+recovery-provider-native-final-20261103.json and recovery-provider-wsl-final-20261103.json.
+Fixture files were removed. These are native argv and npm-resolution proofs,
+not authenticated provider continuity or interactive console qualification.
+Custom non-npm script launchers, cmd guidance and cross-host copying of local
+helper paths remain unqualified. The installed gate now checks the new helper
+bytes and paired-module loading; that updated gate has not yet run.
