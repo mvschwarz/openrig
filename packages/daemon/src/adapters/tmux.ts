@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
+import { bindNativeSessionName, logicalNameFromNativeBinding, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
 import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
@@ -632,6 +633,34 @@ export class TmuxAdapter {
   private readonly serverArgs: readonly string[];
   private readonly terminalKind: "tmux" | "psmux";
 
+  private async nativeRaw(argv: string[], env?: Readonly<Record<string, string | undefined>>): Promise<string> {
+    if (!this.argvExec || (env && !this.argvExec.supportsEnvironment)) throw new Error("Native session-name mapping requires argv transport");
+    const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
+    return env ? this.argvExec(targeted, { env }) : this.argvExec(targeted);
+  }
+
+  private async nativeBoundName(logical: string): Promise<string> {
+    const binding = bindNativeSessionName(logical);
+    if (!binding.marker) return logical;
+    const marker = (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${binding.physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
+    if (logicalNameFromNativeBinding(binding.physical, marker) !== logical) throw new Error("Native session name has no matching logical identity marker");
+    return binding.physical;
+  }
+
+  private async nativeBoundTarget(target: string): Promise<string> {
+    const scoped = /^psmux:([A-Za-z0-9_-]+):([%$@]\d+)$/.exec(target);
+    if (scoped) {
+      const logical = Buffer.from(scoped[1]!, "base64url").toString("utf8");
+      const physical = await this.nativeBoundName(logical);
+      return `psmux:${Buffer.from(physical).toString("base64url")}:${scoped[2]}`;
+    }
+    if (/^[%@$]\d+$/.test(target)) return target;
+    const exact = target.startsWith("=") ? "=" : "", body = target.slice(exact.length);
+    const separator = body.indexOf(":"), logical = separator < 0 ? body : body.slice(0, separator);
+    if (!logical) return target;
+    return exact + await this.nativeBoundName(logical) + (separator < 0 ? "" : body.slice(separator));
+  }
+
   /** Prefix one adapter-owned tmux invocation, including its chained commands.
    * The daemon's explicit server wins over an inherited TMUX or wrapper socket. */
   private onServer(command: string): string {
@@ -653,7 +682,28 @@ export class TmuxAdapter {
    * preserve an exact legacy string, never to smuggle new semantics.
    */
   private async run(argv: string[], legacy?: string, bufferScope?: string, env?: Readonly<Record<string,string|undefined>>): Promise<string> {
+    let createdBinding: ReturnType<typeof bindNativeSessionName> | undefined;
     if (this.terminalKind === "psmux") {
+      if (argv[1] === "new-session") {
+        const nameFlag = argv.indexOf("-s"), logical = argv[nameFlag + 1];
+        if (nameFlag > 1 && logical) {
+          const binding = bindNativeSessionName(logical);
+          if (binding.marker) {
+            let present = true;
+            try { await this.nativeRaw(["tmux", "has-session", "-t", `=${binding.physical}`]); }
+            catch (error) {
+              const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
+              if ((failure.code === 1 && failure.stdout === "" && failure.stderr === "" && !failure.signal && !failure.killed)
+                || isSessionAbsenceError(tmuxReportedError(error))) present = false;
+              else throw error;
+            }
+            if (present) throw new Error("duplicate session: mapped native name is already occupied; existing session was not modified");
+            const format = argv[argv.indexOf("-F") + 1];
+            if (!argv.includes("-P") || !["#{pane_id}", "#{session_id} #{session_created}"].includes(format ?? "")) throw new Error("Mapped session creation requires an explicit creation receipt");
+            createdBinding = binding; argv = [...argv]; argv[nameFlag + 1] = binding.physical; legacy = undefined;
+          }
+        }
+      }
       // Only the command's first target operand can carry routing metadata.
       // Option values, key payloads and child argv are literal user data even
       // when their bytes happen to equal a scoped pane identifier.
@@ -661,6 +711,11 @@ export class TmuxAdapter {
       const targetOption = argv[1] === "detach-client" ? "-s" : "-t";
       const targetFlag = argv.findIndex((arg, index) => index > 1 && (end < 0 || index < end) && arg === targetOption);
       const targetIndex = targetFlag < 0 ? -1 : targetFlag + 1;
+      if (targetIndex > 0 && argv[targetIndex]) {
+        const mapped = await this.nativeBoundTarget(argv[targetIndex]!);
+        if (mapped !== argv[targetIndex]) { argv = [...argv]; argv[targetIndex] = mapped; legacy = undefined; }
+      }
+      if (bufferScope) bufferScope = await this.nativeBoundTarget(bufferScope);
       const scopedArg = targetIndex > 0 && /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(argv[targetIndex] ?? "") ? argv[targetIndex] : undefined;
       const scoped = scopedArg ?? bufferScope;
       if (scoped) {
@@ -675,6 +730,21 @@ export class TmuxAdapter {
         argv = [argv[0]!, "-t", target, ...argv.slice(1).map((a, index) => scopedArg && index + 1 === targetIndex ? pane! : a)];
         legacy = undefined;
       }
+    }
+    if (createdBinding?.marker) {
+      const output = await this.nativeRaw(argv, env), receipt = output.trim();
+      const sessionReceipt = /^(\$\d+) (\d+)$/.exec(receipt);
+      if (!/^%\d+$/.test(receipt) && !sessionReceipt) throw new Error("Mapped native session creation was not confirmed; session retained");
+      const target = `=${createdBinding.physical}:`;
+      const condition = sessionReceipt
+        ? `#{&&:#{==:#{session_id},${sessionReceipt[1]}},#{==:#{session_created},${sessionReceipt[2]}}}`
+        : `#{==:#{pane_id},${receipt}}`;
+      const refused = `openrig-name-binding-refused-${randomUUID()}`;
+      const bound = await this.nativeRaw(["tmux", "if-shell", "-F", "-t", target, condition,
+        `set-option -t ${shellQuote(target)} ${NATIVE_LOGICAL_SESSION_OPTION} ${createdBinding.marker}`, `display-message -p ${refused}`]);
+      if (bound.includes(refused)) throw new Error("Mapped native session identity changed before binding; session retained");
+      await this.nativeBoundName(createdBinding.logical);
+      return output;
     }
     const targeted = this.serverArgs.length ? [argv[0]!, ...this.serverArgs, ...argv.slice(1)] : argv;
     if (env) {

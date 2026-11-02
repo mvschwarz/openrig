@@ -5207,6 +5207,27 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Physical-name phase 1 now intercepts constrained native creation names and
+exact/scoped target lookup. Creation requires a positive absent-name probe and
+an explicit new-session identity receipt; the logical marker is installed under
+a conditional identity check and read back before success. Target lookup
+refuses a missing/mismatched marker rather than adopting a matching-looking
+physical name. Four controlled adapter checks passed (fresh binding, occupied
+refusal, missing marker, unconfirmed receipt), alongside 14 codec checks;
+237 existing related checks passed before the final occupied-name precheck was
+added, and daemon build passed afterward.
+
+An initial real stock-psmux `owned|logical-name` probe passed creation, fresh-
+adapter lookup, private environment update/read and missing-marker refusal with
+cleanup. Extending it with occupied-name assertions then hit two EBUSY cleanup
+failures; those runs are not passing acceptance and two task-owned temporary
+directories were retained without process guessing. The fixture was adjusted
+to preserve primary and cleanup errors together; it was not rerun afterward.
+Listings/scoped pane identity decoding, probe rollback, legacy reserved-prefix
+compatibility, external attach guidance and concurrent name exchange remain
+unfinished. This partial implementation is local only and does not establish
+complete arbitrary-name support or authorize deployment.
+
 Physical session-name mapping implementation has started with a deterministic
 binding module: constrained logical names map to bounded SHA-256 native names,
 and canonical UTF-8/base64url metadata binds the original logical name to that
