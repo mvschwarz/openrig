@@ -27,6 +27,20 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### CRLF ordinary terminal-list equivalence (2026-11-02)
+
+The shared list parser now recognizes CRLF as well as LF, extending the batch
+reader correction to session, window, pane and attached-client lists. The
+regression fixture first reproduced an attached session being reported as
+detached under CRLF. Corrected parsing also retains active window/pane flags and
+the exact client session identity, including separator characters and meaningful
+spaces in names and paths.
+
+The complete adapter, batch-read, exact-target and argv-exec files pass 227 tests;
+daemon TypeScript checking passes. This is evidence for both line-ending forms
+at the adapter boundary, not a claim about which particular native executable
+emits CRLF or completion of real interactive viewer acceptance.
+
 ### CRLF activity-batch equivalence (2026-11-02)
 
 Both batch window readers now split LF and CRLF transport records without

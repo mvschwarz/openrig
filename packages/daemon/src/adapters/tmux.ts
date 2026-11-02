@@ -383,7 +383,7 @@ function parsePaneLine(line: string): TmuxPane | null {
 
 function parseLines<T>(output: string, parser: (line: string) => T | null): T[] {
   return output
-    .split("\n")
+    .split(/\r?\n/)
     .filter((line) => line.trim() !== "")
     .map(parser)
     .filter((result): result is T => result !== null);

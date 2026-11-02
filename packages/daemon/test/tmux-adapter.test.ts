@@ -30,6 +30,19 @@ function mockExec(responses: Record<string, { stdout?: string; error?: Error }>)
 }
 
 describe("TmuxAdapter", () => {
+  it.each(["\n","\r\n"])("preserves attachment, active panes and client identity with %j record endings",async newline=>{
+    const name=" seat|notes ";
+    const adapter=new TmuxAdapter(mockExec({
+      "list-sessions":{stdout:`${name}|1|1790000100|1${newline}`},
+      "list-windows":{stdout:`0| window|notes |1|1${newline}`},
+      "list-panes":{stdout:`%1|0|C:/owned|path |80|24|1${newline}`},
+      "list-clients":{stdout:`client-1|${name}${newline}`},
+    }));
+    expect(await adapter.listSessions()).toEqual([{name,windows:1,created:"1790000100",attached:true}]);
+    expect(await adapter.listWindows(name)).toEqual([{index:0,name:" window|notes ",panes:1,active:true}]);
+    expect(await adapter.listPanes(name)).toEqual([{id:"%1",index:0,cwd:"C:/owned|path ",width:80,height:24,active:true}]);
+    expect(await adapter.listClients()).toEqual([{name:"client-1",session:name}]);
+  });
   it("starts only an empty terminal server and reconciles repeated requests", async () => {
     let live = false;
     const exec = vi.fn(async (command: string) => {
