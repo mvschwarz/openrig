@@ -1,5 +1,26 @@
 # Native Windows parity: implementation and evidence
 
+## Shell inspection retains both observed pane and managed selector (2026-11-03)
+
+Shell launch intentionally keeps its managed node/session selector for nested
+paste/Enter guard checks: replacing it with a reused bare pane could lose the
+unambiguous lease. Its shell-kind inspection, however, still queried that selector
+through the generic pane metadata API. A node ID or punctuation-bearing name was
+not the verified pane the outer guard had observed. Launch now passes that
+observed pane only to shell-kind inspection on POSIX and native paths, while
+nested writes and submission bookkeeping retain the original managed identity.
+
+A real registry/reconciliation/guard fixture failed before the repair and then
+passed, including a stale binding sharing the fresh pane ID and a node-ID launch
+with source-in-pane enabled. Complete identity/delivery-guard files and daemon
+build passed. A separate controlled native case verifies the observed scoped pane
+is inspected but every nested guard check and submitted record uses the managed
+identity; no real native input is sent. Its first fake guard lacked the existing
+submission callback and was corrected without changing production permissions.
+These fixtures do not establish real stock psmux/provider launch or current
+installed/full-directory qualification. No deployment, user-team operation or
+public push occurred.
+
 ## Explicit session composer inspection and Codex PID capture (2026-11-03)
 
 The Codex thread-id capture's production callers all supply session names, so

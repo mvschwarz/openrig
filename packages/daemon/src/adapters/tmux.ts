@@ -1522,15 +1522,15 @@ export class TmuxAdapter {
     // ID can also occur in detached bindings after a tmux restart; resolving it
     // again would lose the unambiguous session/node and its existing lease.
     // Each nested write still validates the lease and targets its observed pane.
-    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
+    return this.guardedInput(target, pane => this.sendShellCommandUnchecked(target, command, beforeInput, options, pane));
   }
 
   /** Stage or send a launch while leaving a consumed script's cleanup to the receiving shell. */
-  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
-    if (this.terminalKind === "psmux") return this.sendWindowsShellCommand(target, command, beforeInput);
+  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions, observedPane: string): Promise<TmuxResult> {
+    if (this.terminalKind === "psmux") return this.sendWindowsShellCommand(target, command, beforeInput, observedPane);
     const commandBytes = Buffer.byteLength(command, "utf8");
     // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
-    const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
+    const paneShell = options.sourceInPane ? (await this.getPaneCommand(observedPane) ?? "").replace(/^-/, "") : "";
     const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
     let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
@@ -1585,8 +1585,8 @@ export class TmuxAdapter {
     }
   }
 
-  private async sendWindowsShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
-    const paneShell = pathBaseName(await this.getPaneCommand(target) ?? "").toLowerCase().replace(/\.exe$/, "").replace(/^-/, "");
+  private async sendWindowsShellCommand(target: string, command: string, beforeInput: (() => void) | undefined, observedPane: string): Promise<TmuxResult> {
+    const paneShell = pathBaseName(await this.getPaneCommand(observedPane) ?? "").toLowerCase().replace(/\.exe$/, "").replace(/^-/, "");
     const posix = ["bash","sh","dash","zsh","ksh"].includes(paneShell);
     if (!["pwsh", "powershell", "cmd"].includes(paneShell) && !posix) {
       return { ok: false, code: "unsupported_windows_pane", message: "Native launch requires a PowerShell, cmd or supported POSIX pane shell; no command was typed." };
