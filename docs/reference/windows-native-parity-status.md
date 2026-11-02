@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Previously skipped seat-route interaction (2026-11-02)
+
+The empty skipped seat-route case is replaced with an actual memory-router render of SeatScopePage and LiveNodeDetails, a synthetic node-detail API response, and Overview/Details clicks that assert body replacement and an unchanged URL. It targets the current two-tab page rather than the retired outer three-tab definition. The old export-shape assertion is now labelled accurately instead of claiming a direct component render.
+
+The complete topology-view-mode file passed 19/19 on Windows and 19/19 on ordinary-user WSL; UI typecheck passed. The fixture uses a stopped infrastructure node and verifies the exact node-detail request. Both hosts report jsdom's unimplemented canvas context during xterm import, so actual terminal rendering and a deployed browser are not accepted by this fixture. This test-only change follows the `20e601f` complete UI run; it is not a renewed full-directory run at the newer head.
+
 ## Complete UI comparison after native path fixes (2026-11-02)
 
 At `20e601f30915cd97c8947035d10adebc590432c3`, the complete UI directory passed 1,836 tests with zero failures and one pending scenario on both native Windows and ordinary-user WSL. All 545 tracked public UI files matched the selected native source and remained unchanged before/after; native head and tracked diff also remained unchanged. The retained reports have SHA-256 `317c199dd77dbce22010a9035f3d5f64036257a870de2c5b3b6f1dd195f91735` (Windows) and `7d3365585fddeb74ccb910b9c523dd7a0958f5866d3dcf2ff3d0075759e6d31e` (WSL).
