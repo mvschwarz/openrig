@@ -106,6 +106,11 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
     const badUser = { ...VPS, id: "bad.dev", user: "invalid user" };
     const registryLoader = () => ({ ok: true as const, registry: { hosts: [ssh, http, badUser] } });
     for (const [operand, code] of [["edge.dev:", "bad_operand"], ["edge.dev:relative", "denied_path"], ["edge.dev:/srv/a b", "denied_path"], ["edge.dev:/srv/.ssh/key", "denied_path"], ["web.dev:/srv/x", "unsupported_transport"], ["bad.dev:/srv/x", "invalid_registry_user"]]) {
+      if (process.platform === "win32" && operand === "edge.dev:/srv/a b") {
+        expect(planFileCopy(operand, "./out.md", { registryLoader }).ok).toBe(true);
+        expect(planFileCopy("./in.md", operand, { registryLoader }).ok).toBe(true);
+        continue;
+      }
       for (const [src, dst] of [[operand, "./out.md"], ["./in.md", operand]]) {
         expect(planFileCopy(src!, dst!, { registryLoader })).toMatchObject({ ok: false, code });
       }

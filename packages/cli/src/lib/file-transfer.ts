@@ -28,6 +28,9 @@
 //      string is built ONLY from registry fields (user shape-checked).
 //   Deletion-class flags are UNREACHABLE (property-tested, incl. the
 //   `-s`/--protect-args ABSENCE uniformity pin).
+// Native Windows uses binary SFTP instead of rsync. Its separate path check
+// permits Unicode, spaces and /C:/ drive roots without a remote shell. The
+// rsync builder independently enforces the original shell-inert grammar.
 //
 // DENY WALL (FR-4, arch-endorsed SHORT CLOSED NAMED list — extension = a
 // ruling, never a growing blocklist): local side denies resolved paths under
@@ -190,6 +193,25 @@ export function checkRemotePath(raw: string, hostId: string): PathCheck {
   return { ok: true, normalizedPath: normalized };
 }
 
+/** Binary SFTP paths are never interpolated into a remote shell command. */
+export function checkRemoteSftpPath(raw: string, hostId: string): PathCheck {
+  if (!raw.startsWith("/") || /[\x00-\x1f\x7f\\]/.test(raw)) {
+    return { ok: false, error: `refused: SFTP path for '${hostId}' must be absolute, slash-separated and contain no control characters` };
+  }
+  // OpenSSH on Windows uses /C:/...; no alternate data streams or drive-relative operands.
+  const withoutDrive = raw.replace(/^\/[A-Za-z]:\//, "/");
+  if (withoutDrive.includes(":")) return { ok: false, error: "refused: colons are allowed only in an absolute /C:/ SFTP drive prefix" };
+  if (raw.split("/").includes("..")) return { ok: false, error: "refused: SFTP path contains a '..' traversal segment" };
+  const normalized = path.posix.normalize(raw);
+  for (const part of normalized.split("/")) {
+    // Also refuse Windows case/Win32 trailing-dot aliases of protected directories.
+    if ((DENIED_SEGMENTS as readonly string[]).includes(part.replace(/[ .]+$/, "").toLowerCase())) {
+      return { ok: false, error: `refused: SFTP path contains denied directory segment '${part}'` };
+    }
+  }
+  return { ok: true, normalizedPath: normalized };
+}
+
 // ── planning ────────────────────────────────────────────────────────────────
 
 export interface CopySide {
@@ -228,7 +250,7 @@ function resolveRemoteSide(hostId: string, rawPath: string, deps: PlanDeps): { o
   if (resolved.host.user !== undefined && !SSH_USER_SHAPE.test(resolved.host.user)) {
     return { ok: false, error: `registry entry '${hostId}' has a user field outside [A-Za-z0-9._-] — refusing to place it on an ssh command line`, code: "invalid_registry_user" };
   }
-  const pathCheck = checkRemotePath(rawPath, hostId);
+  const pathCheck = process.platform === "win32" ? checkRemoteSftpPath(rawPath, hostId) : checkRemotePath(rawPath, hostId);
   if (!pathCheck.ok) return { ok: false, error: pathCheck.error, code: "denied_path" };
   return { ok: true, side: { kind: "remote", path: pathCheck.normalizedPath, host: resolved.host } };
 }
@@ -280,6 +302,13 @@ function sideOperand(side: CopySide): string {
  *  across GNU rsync and openrsync — the G18-P3 absence pin); `--` ALWAYS
  *  precedes the two path operands; option positions are fixed. */
 export function buildRsyncArgv(plan: CopyPlan): string[] {
+  // SFTP's wider binary path grammar must never leak into rsync's remote shell.
+  for (const side of [plan.src, plan.dst]) {
+    if (side.kind === "remote") {
+      const checked = checkRemotePath(side.path, side.host?.id ?? "remote");
+      if (!checked.ok) throw new Error(checked.error);
+    }
+  }
   const argv = ["--archive", "--itemize-changes", "--stats"];
   if (plan.dryRun) argv.push("--dry-run");
   const remote = plan.src.kind === "remote" ? plan.src : plan.dst.kind === "remote" ? plan.dst : null;

@@ -1,5 +1,29 @@
 # Native Windows parity: implementation and evidence
 
+## Current reading guide (2026-11-02)
+
+The tables below are the historical initial map, not the current remaining-work
+list. Later dated receipts supersede their older limitations only for the exact
+tested scope. In particular, developer-mode symlink checks, the owned local Pi
+and service snapshot/restore, real SSH disconnect survival and request-bound
+shutdown, and ACP companion fixture teardown have passing follow-up evidence.
+Their earlier failures are not current blockers for those tested paths.
+
+Current source follow-ups add Windows per-home psmux server selection, keeping
+the previous server while registered sessions remain or observation is unknown;
+and ordinary Windows file-copy planning for binary SFTP Unicode/space paths and
+absolute `/C:/` roots. These are implementation and scoped verification, not a
+full same-head platform acceptance result. The corresponding receipts are below.
+
+Remaining implementation/contract work includes local Windows OpenShell/Podman
+engine observation and cleanup, terminal-backend behavior mapping, stock psmux
+initial/respawn environment privacy, and file-transfer archive metadata semantics.
+Remaining acceptance includes same-head full Windows/Linux comparison, remote
+real-provider continuity after renewed Pi OAuth login, other harness lifecycles,
+foreign-user daemon access, supported runtime/architecture/job-policy matrices
+and reboot/suspend/power-loss behavior. Latest source changes are not deployed to
+the existing main instance. No overall parity claim is made.
+
 Initial map at source commit `c778b2a52` (2026-10-30), with later scoped,
 source-bound updates below. This is an implementation
 coverage map for Draft #1309, not a declaration of complete Windows support.
@@ -2275,3 +2299,48 @@ candidate processes, including canonical short-path comparisons. This does not
 identify the old force-stop EPERM's exact handle/OS cause. The passing result
 establishes the corrected fixture lifecycle and supersedes the earlier ACP
 cleanup failure for this file, not a product shutdown fix or broad ACP matrix.
+
+### Native retained-state durability and server selection (2026-11-02)
+
+Environment checkpoints and exported artifacts formerly fsynced read-only Node
+handles; Windows returned EPERM, including the directory publication barrier.
+They now use the existing private native helper to acquire a writable handle,
+verify the selected file/directory type and current owner, reject final reparse
+points, and call FlushFileBuffers. Environment state directories receive the
+native owner-only inheritable DACL. Flush failures still fail the operation;
+POSIX keeps its file/directory fsync path. Three direct barrier/refusal tests
+and 62 environment lifecycle/platform/startup/HTTP export checks pass. This
+establishes the selected API paths, not a physical power-loss experiment.
+
+Windows `terminal.tmux_server=isolated` now selects and persists a per-home -S
+path instead of returning inherit. Execution and new-terminal metadata use the
+same path. Existing live registered sessions and unavailable observations retain
+the previous selection; no session is moved, restarted or killed by selection.
+The inspector uses a nonempty suffix to retain an empty owner field when psmux
+trims trailing whitespace. Malformed replies still remain unknown.
+
+An actual stock psmux 3.4.0 witness starts equal session names in two selected
+homes, captures distinct receiver markers through the production adapter, reads
+each namespace through its attachment metadata, reopens the durable selection,
+and observes neither from a default client. A real server inventory prevents a
+requested migration with the old session alive. Stopping one session leaves the
+sibling readable. The witness and complete selection file pass 43 tests with
+two POSIX symlink skips; the wider five-file selection/terminal subset passed
+68 with two skips before the inspector suffix follow-up. Daemon and CLI type
+checks pass. No existing daemon or team used the changed selection.
+
+### Binary SFTP command-path planning (2026-11-02)
+
+The ordinary native Windows copy planner now accepts Unicode, spaces and
+absolute `/C:/` paths for binary SFTP. It rejects relative paths, traversal,
+control characters, backslashes, alternate-stream colons and protected directory
+segments including Windows case/trailing-dot aliases. These paths are protocol
+strings, not shell commands. The rsync builder separately rechecks its original
+shell-inert path grammar, preventing a wider SFTP plan from reaching that shell
+transport through an injected executor or other caller.
+
+The path/planner, file-transfer, SFTP-copy and protocol set passes 60 tests with
+three skips. Local sftp-server integration is unavailable on this host and is
+not counted as passed. The existing real remote transport receipt predates
+this planner change and exercised the executor directly; it does not renew the
+ordinary CLI end-to-end acceptance. Archive metadata equivalence remains open.

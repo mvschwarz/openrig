@@ -6,6 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
 import type { CopyPlan } from "../src/lib/file-transfer.js";
+import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
@@ -35,9 +36,14 @@ describe.skipIf(process.platform !== "win32" || !existsSync(server))("native rec
   });
   it("uploads, downloads, previews and preserves extra files through the real subsystem", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-sftp-copy-"));
-    const source = path.join(root, "source"), remote = path.join(root, "remote"), download = path.join(root, "download");
+    const source = path.join(root, "source"), remote = path.join(root, "remote space 中文"), download = path.join(root, "download");
     const start = () => spawn(server, [], { stdio: "pipe", windowsHide: true });
-    const plan: CopyPlan = { src: { kind: "local", path: source + path.sep }, dst: { kind: "remote", path: "/" + remote.replaceAll("\\", "/"), host: { id: "fixture", target: "fixture", transport: "ssh" } }, dryRun: true };
+    const planned = planFileCopy(source + path.sep, "fixture:/" + remote.replaceAll("\\", "/"), {
+      dryRun: true, registryLoader: () => ({ ok: true, registry: { hosts: [{ id: "fixture", target: "fixture", transport: "ssh" }] } }),
+    });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) throw new Error(planned.error);
+    const plan: CopyPlan = planned.plan;
     try {
       await mkdir(source); await mkdir(remote); await mkdir(download);
       await mkdir(path.join(source, "nested"));

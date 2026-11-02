@@ -256,12 +256,12 @@ describe("durable tmux server selection", () => {
   });
 
   it("reads session ownership from the inspected server", async () => {
-    vi.spyOn(execution, "execArgvCommand").mockResolvedValue(`owned\t${home}\nlegacy\t\n`);
+    vi.spyOn(execution, "execArgvCommand").mockResolvedValue(`owned\t${home}\topenrig-owner-v1\nlegacy\t\topenrig-owner-v1\n`);
     expect(await inspectTmuxServer(oldSocket)).toEqual({ state: "available", sessions: [
       { name: "owned", home }, { name: "legacy" },
     ] });
     expect(execution.execArgvCommand).toHaveBeenCalledWith([
-      "tmux", "-u", "-S", oldSocket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}",
+      "tmux", "-u", "-S", oldSocket, "list-sessions", "-F", "#{session_name}\t#{OPENRIG_HOME}\topenrig-owner-v1",
     ]);
   });
 
@@ -362,12 +362,29 @@ describe("durable tmux server selection", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(original);
   });
 
-  it("reports the unsupported Windows selection without pretending to isolate psmux", async () => {
-    expect(await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" })).toMatchObject({
-      requestedMode: "isolated", mode: "inherit", serverArgs: [], migrationPending: true,
-      note: expect.stringContaining("POSIX"),
+  it("pins Windows execution and new-terminal attachment to the same durable namespace", async () => {
+    const selected = await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" });
+    expect(selected).toMatchObject({ requestedMode: "isolated", mode: "isolated", migrationPending: false });
+    expect(selected.executionArgs).toEqual(["-S", selected.socketPath]);
+    expect(selected.serverArgs).toEqual(selected.executionArgs);
+    expect(selected.socketPath).toContain(home);
+    expect(await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated" })).toEqual(selected);
+    const other = await selectTmuxServer({ ...options(), home: path.join(root, "other"), platform: "win32", mode: "isolated" });
+    expect(other.socketPath).not.toBe(selected.socketPath);
+  });
+
+  it("keeps live Windows sessions on their original server until an explicit stop", async () => {
+    const observer = vi.fn(async () => ({ state: "available" as const, sessions: [{ name: "owned", home }] }));
+    const selected = await selectTmuxServer({ ...options(), platform: "win32", mode: "isolated", registeredSessions: ["owned"], inspect: observer });
+    expect(selected).toMatchObject({ mode: "inherit", migrationPending: true, socketPath: oldSocket, blockingSessions: ["owned"], executionArgs: ["-S", oldSocket] });
+    expect(observer).toHaveBeenCalledWith(oldSocket);
+  });
+
+  it("records an explicit native default attachment path without changing inherited execution", async () => {
+    const data = path.join(root, "psmux");
+    expect(await selectTmuxServer({ ...options(), platform: "win32", env: { PSMUX_DATA_DIR: data } })).toMatchObject({
+      mode: "inherit", executionArgs: [], serverArgs: ["-S", path.join(data, "default")], migrationPending: false,
     });
-    expect(fs.existsSync(home)).toBe(false);
   });
 
   it.each([
