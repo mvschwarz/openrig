@@ -5207,6 +5207,20 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Native session environment reads now retain complete selected values instead
+of truncating at their first newline. Before interpreting a multiline response,
+a read-only missing-variable probe qualifies selector support; older servers
+that return an entire environment rather than the selected variable are refused
+without exposing that body. Exactly one protocol LF is removed, preserving a
+value's trailing CR in both psmux and POSIX tmux paths. Real stock psmux 3.4.0
+reproduced the old truncation and passed after repair, including empty values,
+trailing CR/LF/CRLF, Unicode and assignment-looking lines inside values.
+Four related controlled test files: 221 passed, two opt-in interactive cases
+not run; daemon build passed. Real POSIX tmux multiline acceptance remains to
+be refreshed; controlled POSIX byte-preservation checks passed. Legacy whole-
+environment servers cannot yet supply lossless multiline reads through this
+interface and remain explicitly unsupported for that operation.
+
 Real stock psmux 3.4.0 direct-first-child environment acceptance passed: a
 synthetic value containing quotes, backslash, format-looking text, LF/CRLF and
 Unicode reached the initial direct Node process exactly through protected

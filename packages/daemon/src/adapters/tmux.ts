@@ -1935,15 +1935,25 @@ export class TmuxAdapter {
       const output = await this.run(["tmux", "show-environment", "-t", target, ...delimiter, key],
         `tmux show-environment -t ${shellQuote(target)} ${delimiter.length ? "-- " : ""}${shellQuote(key)}`);
       if (this.terminalKind === "psmux") {
-        // psmux 3.3.8 ignores the optional variable selector and returns the
-        // whole environment. Select the exact key without logging that body.
-        const values = output.split(/\r?\n/).filter(line => line.startsWith(`${key}=`));
-        if (values.length > 1) throw new Error("Ambiguous session environment response");
-        return values[0]?.slice(key.length + 1);
+        // The protocol adds one LF; a preceding CR belongs to the value.
+        const body = output.endsWith("\n") ? output.slice(0, -1) : output;
+        if (body.includes("\n")) {
+          // Older psmux ignores the selector and returns the whole environment.
+          // A missing-key query must prove selector support before interpreting
+          // a multiline response as one value. Never log either response.
+          const probe = `OPENRIG_SELECTOR_PROBE_${randomUUID().replace(/-/g, "")}`;
+          let selective = false;
+          try { await this.run(["tmux", "show-environment", "-t", target, probe]); }
+          catch (error) { selective = error instanceof Error && error.message.includes(`unknown variable: ${probe}`); }
+          if (!selective) throw new Error("Native environment selectors are not qualified");
+        }
+        if (body === `-${key}`) return undefined;
+        if (!body.startsWith(`${key}=`)) throw new Error("Unexpected session environment response");
+        return body.slice(key.length + 1);
       }
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
-      return output.slice(key.length + 1).replace(/\r?\n$/, "");
+      return output.slice(key.length + 1).replace(/\n$/, "");
     } catch (error) {
       if (error instanceof Error && error.message.includes(`unknown variable: ${key}`)) return undefined;
       throw new Error("Cannot read the session's launch environment.");

@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 
 it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("delivers private initial configuration only to the selected first direct child", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "openrig-direct-private-"));
@@ -23,6 +24,12 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("deli
       await expect.poll(async () => { try { return JSON.parse(await readFile(outputs[i]!, "utf8")); } catch { return null; } }, { timeout: 5000 }).not.toBeNull();
     }
     expect(JSON.parse(await readFile(outputs[0]!, "utf8"))).toEqual({ value });
+    const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell transport"); }, undefined, argv => invoke(argv.slice(1)), [], "psmux");
+    expect(await adapter.getSessionEnv(names[0]!, key)).toBe(value);
+    for (const updated of ["", "synthetic trailing CR\r", "synthetic trailing LF\n", "synthetic trailing CRLF\r\n", "synthetic first\n" + key + "=literal value line\n"]) {
+      await adapter.setSessionEnv(names[0]!, key, updated);
+      expect(await adapter.getSessionEnv(names[0]!, key)).toBe(updated);
+    }
     expect(JSON.parse(await readFile(outputs[1]!, "utf8"))).toEqual({});
     expect(calls.flat().some(arg => arg.includes("SYNTHETIC direct"))).toBe(false);
   } finally {
