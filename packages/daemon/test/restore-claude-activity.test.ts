@@ -124,8 +124,8 @@ describe("contained Claude restore activity resources", () => {
   }
   function restore(f: ReturnType<typeof seed>, runtimeAdapter: RuntimeAdapter = adapter, beforeResume = () => {}, desired?: (nodeId: string) =>
     | { status: "known"; selected: boolean } | { status: "unknown"; evidence: string },
-    adapters?: Record<string, RuntimeAdapter>) {
-    const claude = { canResume: () => true, resume: vi.fn(async () => { beforeResume(); return { ok: true }; }) } as unknown as ClaudeResumeAdapter;
+    adapters?: Record<string, RuntimeAdapter>, claudeResume?: ClaudeResumeAdapter) {
+    const claude = claudeResume ?? { canResume: () => true, resume: vi.fn(async () => { beforeResume(); return { ok: true }; }) } as unknown as ClaudeResumeAdapter;
     const nodeLauncher = new NodeLauncher({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events, tmuxAdapter: tmux });
     const orch = new RestoreOrchestrator({ db, rigRepo: rigs, sessionRegistry: registry, eventBus: events,
       snapshotRepo: snapshots, snapshotCapture: capture, checkpointStore: checkpoints, nodeLauncher, tmuxAdapter: tmux,
@@ -438,6 +438,27 @@ describe("contained Claude restore activity resources", () => {
       expect(replayBinding.cwd).toBe(liveCwd);
     }
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // CodeRabbit follow-up on #2373: the legacy resume adapter must receive the
+  // same resolved launch directory as the hook projection and the startup
+  // replay — when the snapshot node has no cwd, the seat was launched in the
+  // live node's directory, not "/" (which a managed launch would reject as a
+  // directory mismatch for a seat with an explicit permission mode).
+  it("resumes the legacy seat in the live seat directory when the snapshot node has no cwd", async () => {
+    const { liveCwd, liveSettingsPath } = liveProject();
+    const f = seed(false, true, "claude-code", true, null);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
+    const resume = vi.fn(async () => ({ ok: true }));
+    const result = await restore(f, adapter, () => {}, undefined, undefined,
+      { canResume: () => true, resume } as unknown as ClaudeResumeAdapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(resume).toHaveBeenCalled();
+    // 4th positional argument: the launch directory handed to the resume adapter.
+    expect(resume.mock.calls[0]![3]).toBe(liveCwd);
+    expect(liveOwned(liveSettingsPath).length).toBeGreaterThan(0);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
 
