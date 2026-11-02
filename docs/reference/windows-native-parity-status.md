@@ -4747,3 +4747,50 @@ initialization/start, image execution or real OpenShell/Podman lifecycle was
 performed. Help exposes host-default mounts; any subsequent owned machine test
 must use task-local Windows config/data locations and explicit task volumes,
 preserving existing engines and running WSL work. Engine acceptance remains open.
+
+### Real scoped Podman observer acceptance and API negotiation (2026-11-03)
+
+The subsequent task-owned rootless Podman 6.1.4 machine test supersedes the
+prerequisite-only result above. Its private configuration/data directory and
+explicit workspace mount were isolated from existing engines. The official
+Windows SSH proxy exposed one task-specific named pipe; its default Docker-pipe
+route was omitted. The selected engine reported Linux, rootless operation and
+the non-root guest user's UID mapping.
+
+The real server exposed an implementation defect hidden by the former fixture:
+unversioned `/libpod/info` returned HTTP 404 with a plain-text body, while
+`/v6.1.4/libpod/info` returned HTTP 200. The observer now discovers the Libpod API
+version from the explicit Podman Engine component of `/version`, independently
+of the Docker compatibility ApiVersion. It validates the numeric version before
+forming paths and repeats discovery rather than retaining a version across
+endpoint replacement. Non-success response bodies no longer mask their HTTP
+status with a JSON parse error. Docker-only and malformed advertisements fail
+before inventory; existing endpoint ownership and rootless identity checks stay
+in force.
+
+Native Windows passed all four observer regressions; the same two changed source
+and test files passed three on WSL with one Windows-only case skipped. The daemon
+TypeScript build passed. Regression HTTP servers accept only versioned Libpod
+routes and deliberately return plain-text 404 responses for absent volumes.
+
+Real acceptance then pulled the official hello image, ran its rootless container,
+created two explicitly labeled test containers with three dedicated volumes,
+and exercised the compiled default OpenRig observer. Exact capture and presence
+passed; deleting those exact resources and observing their absence also passed.
+Containers, volumes and the pulled image were removed; the owned proxy exited,
+its pipe disappeared and the owned machine stopped. The default Docker pipe
+remained absent throughout. The registered stopped machine and its private data
+remain available for this ongoing acceptance task.
+
+Receipts: podman-native-6.1.4-20261103/owned-version-r2-acceptance.json
+(API discovery), owned-observer-fixed-acceptance.json (the acceptance harness's
+overly strict image-ID-format check), and owned-observer-final-acceptance.json
+(all four real acceptance stages passed). The harness accepted Podman's actual
+bare hexadecimal image ID on the final run; that was not a product change.
+An earlier version-probe receipt-name collision and missing pipe-readiness wait
+were harness failures; their proxy was terminated and scoped state reconciled.
+
+These are real Podman engine and observer checks using synthetic OpenShell
+labels. They do not qualify an actual OpenShell CLI lifecycle, real provider
+continuity, the entire daemon suite or every Windows/Linux behavior. No running
+OpenRig deployment, original team, global installation or public push changed.

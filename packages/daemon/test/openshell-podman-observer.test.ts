@@ -13,7 +13,10 @@ async function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "podman-observer-"))); closers.push(() => rmSync(root, { recursive: true, force: true }));
   const socket = process.platform === "win32" ? `\\\\.\\pipe\\openrig-owned-engine-${randomUUID()}` : join(root, "engine.sock");
   const server: Server = createServer((req, res) => {
-    void engineRead(req.url ?? "").then(result => { res.writeHead(result.status, { "content-type": "application/json" }); res.end(JSON.stringify(result.body)); });
+    const path = req.url ?? ""; wirePaths.push(path);
+    if (path === "/version") { res.end(JSON.stringify({ ApiVersion: "1.44", Components: [{ Name: engineName, Details: { APIVersion: apiVersion } }] })); return; }
+    if (!path.startsWith("/v6.1.4/libpod/")) { res.writeHead(404); res.end("Not Found\n"); return; }
+    void engineRead(path.slice("/v6.1.4".length)).then(result => { res.writeHead(result.status, { "content-type": "application/json" }); res.end(result.status === 404 ? "Not Found\n" : JSON.stringify(result.body)); });
   }); await new Promise<void>(resolve => server.listen(socket, resolve));
   closers.push(() => new Promise<void>(resolve => server.close(() => resolve())));
   const id = "compute-one", workloadId = "a".repeat(64), supervisorId = "b".repeat(64);
@@ -21,6 +24,8 @@ async function fixture() {
     { Id: supervisorId, Names: [`openshell-supervisor-${id}`], Labels: {} }];
   let volumeStatus = 404;
   let rootless = true, graphRoot = "/home/owned/.local/share/containers/storage";
+  let engineName = "Podman Engine", apiVersion = "6.1.4";
+  const wirePaths: string[] = [];
   const paths: string[] = [];
   const engineRead = async (path: string) => {
     paths.push(path);
@@ -32,13 +37,23 @@ async function fixture() {
   };
   const observer = new OpenShellPodmanObserver();
   const binding = { resource: { id }, placement: { workspace: "workspace" } } as EnvironmentBinding;
-  return { observer, binding, socket, paths, disappear: () => { rows = [{ Id: "c".repeat(64), Names: ["unrelated"], Labels: {} }]; }, failVolume: () => { volumeStatus = 500; }, rootful: () => { rootless = false; }, replaceEngine: () => { graphRoot = "/different-engine"; } };
+  return { observer, binding, socket, paths, wirePaths, incompatible: (name: string, version: string) => { engineName = name; apiVersion = version; }, disappear: () => { rows = [{ Id: "c".repeat(64), Names: ["unrelated"], Labels: {} }]; }, failVolume: () => { volumeStatus = 500; }, rootful: () => { rootless = false; }, replaceEngine: () => { graphRoot = "/different-engine"; } };
 }
 it.skipIf(!supported)("captures exact local workload/supervisor/volumes then ignores unrelated engine resources", async () => {
   const f = await fixture(), selected = await f.observer.capture(f.binding, f.socket);
   expect(selected).toMatchObject({ resourceId: "compute-one", workloadId: "a".repeat(64), supervisorId: "b".repeat(64) });
   f.disappear(); expect(await f.observer.observe(f.binding, selected)).toEqual({ workload: false, supervisor: false, volumes: false });
+  expect(f.wirePaths).toContain("/version");
+  expect(f.wirePaths.every(path => path === "/version" || path.startsWith("/v6.1.4/libpod/"))).toBe(true);
   expect(f.paths.every(path => path.startsWith("/libpod/containers/") || path.startsWith("/libpod/volumes/") || process.platform === "win32" && path === "/libpod/info")).toBe(true);
+});
+it.skipIf(!supported)("rejects Docker compatibility versions and malformed Podman API paths before inventory", async () => {
+  const f = await fixture();
+  for (const [name, version] of [["Docker Engine", "6.1.4"], ["Podman Engine", "6.1.4/../../other"]]) {
+    f.incompatible(name, version);
+    await expect(f.observer.capture(f.binding, f.socket)).rejects.toMatchObject({ code: "environment_engine_unsupported" });
+  }
+  expect(f.paths).toEqual([]);
 });
 it.skipIf(process.platform !== "win32")("requires a native owned pipe and a rootless engine identity, retaining that identity for absence checks", async () => {
   const f = await fixture();

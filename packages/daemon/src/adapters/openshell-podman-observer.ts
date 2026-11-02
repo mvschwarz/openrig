@@ -11,14 +11,30 @@ export type PodmanCleanupSelection = { version: 1; socket: string; socketDevice:
   resourceId: string; workspace: string; workloadId: string; supervisorId: string; volumes: string[];
   windowsPipe?: { pid: number; started: string; sid: string }; engineFingerprint?: string };
 type EngineRead = (socket: string, path: string) => Promise<{ status: number; body: unknown }>;
-const read: EngineRead = (socket, path) => new Promise((resolve, reject) => {
+const readResponse: EngineRead = (socket, path) => new Promise((resolve, reject) => {
   const req = request({ socketPath: socket, path, method: "GET", timeout: 5000 }, res => {
     const chunks: Buffer[] = []; let bytes = 0;
     res.on("data", chunk => { bytes += chunk.length; if (bytes > 2 * 1024 * 1024) { req.destroy(new Error("Engine inventory exceeds its bound")); return; } chunks.push(chunk); });
-    res.on("error", reject); res.on("end", () => { try { resolve({ status: res.statusCode ?? 0, body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null }); } catch (error) { reject(error); } });
+    res.on("error", reject); res.on("end", () => { try {
+      const status = res.statusCode ?? 0;
+      resolve({ status, body: status >= 200 && status < 300 && chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null });
+    } catch (error) { reject(error); } });
   });
   req.on("timeout", () => req.destroy(new Error("Engine inventory timed out"))); req.on("error", reject); req.end();
 });
+const read: EngineRead = async (socket, path) => {
+  // The compatibility API's top-level ApiVersion describes Docker, not Libpod.
+  // Discover the Podman component version on this endpoint before each read;
+  // caching it could outlive a server replacement at the same socket name.
+  const version = await readResponse(socket, "/version");
+  const components = (version.body as { Components?: unknown } | null)?.Components;
+  const engines = Array.isArray(components) ? components.filter(component => component?.Name === "Podman Engine") : [];
+  const apiVersion = engines.length === 1 ? engines[0]?.Details?.APIVersion : undefined;
+  if (version.status !== 200 || typeof apiVersion !== "string" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(apiVersion)) {
+    throw new EnvironmentError("environment_engine_unsupported", "The selected endpoint must advertise a Podman Libpod API version");
+  }
+  return readResponse(socket, `/v${apiVersion}${path}`);
+};
 /** Read-only local rootless engine inventory. No engine mutation or global-emptiness requirement. */
 export class OpenShellPodmanObserver {
   constructor(private readonly get: EngineRead = read) {}
