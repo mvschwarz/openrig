@@ -155,6 +155,54 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it("waits for shared startup admission before launching a native harness", async () => {
+    let release!: () => void;
+    const permit = new Promise<void>(resolve => { release = resolve; });
+    const run = vi.fn(async (_nodeId: string, _kind: string, work: () => Promise<unknown>) => {
+      await permit;
+      return work();
+    });
+    Object.assign(tmux, { startupAdmission: { run } });
+    const adapter = mockAdapter();
+    const attempt = createOrchestrator().startNode(makeInput(seedSession(), { adapter }));
+    try {
+      await Promise.resolve();
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(adapter.launchHarness).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await attempt;
+    }
+    expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares admission between independently constructed startup orchestrators", async () => {
+    let release!: () => void;
+    const permit = new Promise<void>(resolve => { release = resolve; });
+    const run = vi.fn(async (_nodeId: string, _kind: string, work: () => Promise<unknown>) => {
+      await permit;
+      return work();
+    });
+    Object.assign(tmux, { startupAdmission: { run } });
+    const first = seedSession();
+    const otherRig = rigRepo.createRig("other-rig");
+    const otherNode = rigRepo.addNode(otherRig.id, "other", { runtime: "claude-code" });
+    const otherSession = sessionRegistry.registerSession(otherNode.id, "other@other-rig");
+    const second = { rigId: otherRig.id, nodeId: otherNode.id, sessionId: otherSession.id };
+    const a = createOrchestrator().startNode(makeInput(first));
+    const b = createOrchestrator().startNode(makeInput(second, {
+      binding: { ...makeBinding(), nodeId: otherNode.id, tmuxSession: "other@other-rig" },
+    }));
+    try {
+      await Promise.resolve();
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run.mock.calls.map(call => call[0])).toEqual([first.nodeId, second.nodeId]);
+    } finally {
+      release();
+      await Promise.all([a, b]);
+    }
+  });
+
   it("community contract: launch surfaces undelivered startup files without placing or pasting them", async () => {
     const root = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "community-startup-files-"));
     try {
