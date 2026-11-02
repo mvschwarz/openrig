@@ -27,6 +27,33 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Installer exit coverage and remaining probe background lifetime gap (2026-11-02)
+
+Native installer execution now has real exit-0 and exit-7 descendant coverage.
+Each owned detached child acknowledges startup before its parent exits; both
+processes must be gone before the installer result settles. Successful output
+and nonzero stderr/code are retained. The installer/planner/executor/native-probe
+files pass 38 tests, including timeout, output overflow and unrelated-child
+survival checks. These use owned Node fixtures, not a real package installation.
+
+The broader bounded-probe file previously used POSIX-only executable fixtures,
+`printf`, `exec` and `ps`. Its Windows fake now has a literal Node `.cmd` launcher,
+native PID reaping and quoted command paths; verifier PATH contains only its
+fixture directory so a broken fake cannot fall through to an installed model
+CLI. Before this correction a version assertion read the host's real Codex
+version instead of the fixture. The POSIX group-stop fallback simulation and
+POSIX TERM-handler final-output case are now explicitly POSIX-only; native Job
+timeout/output behavior has separate actual coverage.
+
+The corrected bounded-probe file passes 11 cases, skips those two POSIX-specific
+cases and still fails one genuine behavior comparison: a successful POSIX probe
+leaves a descendant that closed its standard streams running, while the current
+Windows kill-on-close Job ends it. That expectation remains failing. Matching
+normal-exit probe lifetime without weakening timeout/pipe-holder cleanup or the
+installer's stricter whole-tree policy is open implementation work. Seven
+explicit host-execution source files received bounded semantic review; this does
+not clear the wider source inventory or full native suite.
+
 ### OpenShell private policy and binary result files (2026-11-02)
 
 The OpenShell driver no longer relies on POSIX `0600` mode bits to protect
