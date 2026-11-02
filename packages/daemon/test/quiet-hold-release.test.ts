@@ -316,7 +316,7 @@ describe("holding and releasing through the gateway", () => {
     quietNow();
     const row = await park();
     const dispatched: unknown[] = [];
-    const engine = makeOperatorDeliveryEngine({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registryWith(prefs) },
+    const engine = makeOperatorDeliveryEngine({ home, ...{ readiness: async () => ({ ready: true, reason: "fixture" }) }, queueRepo: repo, registry: { loadHumanRegistry: () => registryWith(prefs) },
       dispatch: (_op, _ref, payload) => { dispatched.push(payload); return { ok: true, decisionId: "d" } as never; } });
     const out = await engine.dispatchEscalation(row, "test");
     expect(out).toMatchObject({ dispatched: true, decision: "interrupt" });

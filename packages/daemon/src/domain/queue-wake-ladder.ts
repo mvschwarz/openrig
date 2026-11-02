@@ -118,6 +118,7 @@ export const LADDER_SUSPEND_PREFIX = "ladder-suspend:";
 export const LADDER_RESUME_PREFIX = "ladder-resume:";
 
 const LADDER_ACTOR = "wake-ladder@system";
+const UNACCEPTED_CARRIER_REROUTE = "unaccepted wake escalation uses a local carrier; human dispatch still requires readiness";
 
 export interface WakeLadderStatusSnapshot {
   lastTickAt: string | null;
@@ -278,6 +279,14 @@ function readLadder(db: Database.Database, qitemId: string, after = lastMeaningf
   let resumes = 0;
   for (const r of rows) {
     const note = r.transition_note ?? "";
+    // This unaccepted route changed owners. Its old self-skip/floor did not wake the new fallback.
+    if (note.startsWith("fallback-routed: ") && note.endsWith(`(${UNACCEPTED_CARRIER_REROUTE})`)) {
+      view.orchRung = false;
+      view.orchRungFailed = false;
+      view.exhausted = false;
+      view.exhaustedNote = null;
+      view.lastMarkerTs = null;
+    }
     const isAttempt = note.startsWith(LADDER_ATTEMPT_PREFIX);
     const isRung = note.startsWith(LADDER_RUNG_PREFIX);
     if (isAttempt) view.attempts += 1;
@@ -444,15 +453,13 @@ function readSuspension(
   const override = process.env[WAKE_SUSPEND_OVERRIDE_ENV];
   if (override) {
     for (const entry of override.split(",")) {
-      const idx = entry.lastIndexOf(":");
-      const session = entry.slice(0, entry.indexOf(":"));
-      const untilIso = entry.slice(entry.indexOf(":") + 1);
-      void idx;
-      if (session === destination) {
-        const until = Date.parse(untilIso);
-        if (!Number.isNaN(until) && now.getTime() < until) {
-          return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
-        }
+      // Match this destination's own prefix: an external destination can itself hold a colon
+      // (`slack:U...@external`), and the rest is whatever date form Date.parse reads.
+      if (!entry.startsWith(`${destination}:`)) continue;
+      const untilIso = entry.slice(destination.length + 1);
+      const until = Date.parse(untilIso);
+      if (!Number.isNaN(until) && now.getTime() < until) {
+        return { reason: `operator override (${WAKE_SUSPEND_OVERRIDE_ENV}) until ${untilIso}`, until: untilIso };
       }
     }
   }
@@ -743,7 +750,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
     for (const { qitem_id } of [...batonRows, ...parkedOwnerFailureRows]) {
       const row = deps.queueRepo.getById(qitem_id);
-      if (!row) continue;
+      if (!row || recoversEscalationNotice(deps, row)) continue;
       const usagePool = usagePoolBySeat.get(row.destinationSession);
       // OPR.0.5.6.24: the usage-limit PARK mutation applies only to pending
       // batons — a claimed in-progress row is someone's live work and is never
@@ -869,7 +876,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // F3 — per-destination aggregation: ONE escalation carrying the row list, refreshed
     // not duplicated (the S02 idempotency shape), and rung markers on every member baton.
     for (const [dest, members] of escalating) {
-      const orch = openEscalationOwner(deps.db, escalationDedupTag(dest)) ?? resolveOrch(dest);
+      const orch = openEscalationOwner(deps, escalationDedupTag(dest)) ?? resolveOrch(dest);
       const route = !deps.resolveOrchestrator
         ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
       const routeReason = route && route.outcome !== "none" && route.outcome !== "parent" ? route.reason : "";
@@ -1083,11 +1090,33 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
   return true;
 }
 
+/** Carrier selection skips positively identified people; missing registry data does not turn an agent into a person. */
+function knownPerson(deps: WakeLadderDeps, destination: string): boolean {
+  if (parseSessionName(destination).kind === "external") return true;
+  try {
+    const registry = (deps.loadHumanRegistry ?? (() => loadHumanRegistry()))();
+    return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
+  } catch { return false; }
+}
+
+function gatewayOwnsEscalation(deps: WakeLadderDeps, row: QueueItem): boolean {
+  return readLadder(deps.db, row.qitemId, 0).opEngineDispatched
+    || Boolean(deps.deliveryEngine?.hasAcceptedEscalation?.(row));
+}
+
 // The operator engine owns actual human delivery. Its non-nudged queue carrier
 // must still be locally admissible; cross-host source provenance is not a local destination.
 function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
   const candidates = [resolveOperatorSeat(), source];
-  return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+  return candidates.find((candidate): candidate is string => Boolean(candidate && !knownPerson(deps, candidate) && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+}
+
+/** A delivery-recovery finding about our own notice stays readable without spawning another notice.
+ * Ordinary human asks still use the existing recovery route; the original obligations are untouched. */
+function recoversEscalationNotice(deps: WakeLadderDeps, row: QueueItem): boolean {
+  const prefix = "stuck-sweep:undelivered-human-notice:";
+  return row.tags?.some(tag => tag.startsWith(prefix)
+    && deps.queueRepo.getById(tag.slice(prefix.length))?.tags?.includes(WAKE_ESCALATION_TAG)) ?? false;
 }
 
 /** Positive refusals enter the existing rungs without ever retrying the blocked
@@ -1140,14 +1169,14 @@ async function advancePromptRefusals(
   };
   for (const { qitem_id, destination_session } of candidates) {
     const primary = readCandidate(qitem_id, destination_session);
-    if (!primary) continue;
+    if (!primary || recoversEscalationNotice(deps, primary)) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
       if (!episode.key.startsWith(`${primary.destinationSession}|`)) continue;
       // Ordinary work shares an episode; consumed recoveries retain independent dispositions.
       const rows = episode.ids.map(id => readCandidate(id, primary.destinationSession)).filter((row): row is QueueItem =>
-        Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
+        Boolean(row && !recoversEscalationNotice(deps, row) && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)
           && !closedEpisode(`${PROMPT_EPISODE_TAG}${episode.key}${hasConsumedEscalationHop(deps.db, row.qitemId) ? `|consumed:${row.qitemId}` : ""}`)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
@@ -1353,7 +1382,7 @@ async function advancePromptRefusals(
       members.splice(i, 1);
     }
     if (!members.length && !group.jobs.size && !group.hookReview) continue;
-    const orch = openEscalationOwner(deps.db, `prompt-destination:${dest}`) ?? resolveOrch(dest);
+    const orch = openEscalationOwner(deps, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const toOperator = orch === null || orch === dest;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
@@ -1397,6 +1426,11 @@ async function advancePromptRefusals(
     // The aggregate ID is the episode. Claiming it does not start a second
     // delivery episode or erase its accepted dispatch/receipt history.
     const view = readLadder(deps.db, row.qitemId, 0);
+    // A crash can leave a durable gateway decision without its ladder marker. Reconcile that custody before any wake.
+    if (!view.opEngineDispatched && deps.deliveryEngine?.hasAcceptedEscalation?.(row)) {
+      if (await operatorRung(deps, row, reason, actions, view, false)) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
+      continue;
+    }
     // The explicit-only floor stopped this alert without a person. If the seat's prompt now needs one (a permission prompt
     // joined it), the permission leg still runs; accepted or deferred delivery stays exactly-once.
     const floorOnly = view.exhausted && !view.opEngineDispatched
@@ -1552,10 +1586,13 @@ async function refreshEscalationRowIfExists(
 }
 
 /** Existing recovery custody takes precedence over a newly resolved topology fallback. */
-function openEscalationOwner(db: Database.Database, dedupTag: string): string | null {
-  return (db.prepare(`SELECT destination_session FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+function openEscalationOwner(deps: WakeLadderDeps, dedupTag: string): string | null {
+  const found = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
     AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
-    .get(dedupTag) as { destination_session: string } | undefined)?.destination_session ?? null;
+    .get(dedupTag) as { qitem_id: string } | undefined;
+  const row = found ? deps.queueRepo.getById(found.qitem_id) : null;
+  // An unaccepted legacy person carrier is not an orchestrator; reselect the existing fallback/visible route.
+  return row && (!knownPerson(deps, row.destinationSession) || gatewayOwnsEscalation(deps, row)) ? row.destinationSession : null;
 }
 
 async function ensureEscalationRow(
@@ -1576,6 +1613,12 @@ async function ensureEscalationRow(
     )
     .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (existing) {
+    const row = deps.queueRepo.getById(existing.qitem_id);
+    if (row && knownPerson(deps, row.destinationSession) && !gatewayOwnsEscalation(deps, row)) {
+      deps.queueRepo.routeToFallback(row.qitemId, knownPerson(deps, orch)
+        ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession) : orch,
+        UNACCEPTED_CARRIER_REROUTE);
+    }
     await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }
@@ -1591,7 +1634,7 @@ async function ensureEscalationRow(
     ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
   const oneHop = route?.outcome === "routed" && route.owner === orch;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0] ?? OPENRIG_SENDER,
+    sourceSession: OPENRIG_SENDER,
     destinationSession: orch,
     body,
     summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,

@@ -562,6 +562,10 @@ remain shared.
 - Selected skills are projected into the seat's own agent directory under OpenRig's state, not into a shared
   workspace folder
 
+For Pi tool-selection diagnosis and deliberate in-place recovery, see
+[Pi tool-selection recovery](pi-tool-selection-recovery.md). It distinguishes
+configured, currently intended, registered and active tools, including the TUI/RPC boundary.
+
 **Terminal seats** (`builtin:terminal`) get no agent or profile layers and no startup proof.
 
 ### Claude compaction preparation directory

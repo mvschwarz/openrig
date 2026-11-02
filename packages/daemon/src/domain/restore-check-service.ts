@@ -1,4 +1,5 @@
 import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.js";
+import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
@@ -222,9 +223,7 @@ export interface RestoreCheckDeps {
   /** Configured OpenRig instance root, matching the Claude adapter stateDir. */
   stateDir?: string;
   /** Read-only current authored selection, invoked only where hook detail is inspected. */
-  getDesiredClaudeActivityHooks?: (nodeId: string) =>
-    | { status: "known"; selected: boolean }
-    | { status: "unknown"; evidence: string };
+  getDesiredClaudeActivityHooks?: (nodeId: string) => DesiredClaudeActivityHooks;
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
 }

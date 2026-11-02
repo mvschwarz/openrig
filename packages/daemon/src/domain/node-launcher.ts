@@ -87,6 +87,13 @@ interface NodeLauncherDeps {
   paneExit?: PaneCutoverTiming;
 }
 
+/** For a kept pane: the failures that come before its takeover sent any signal, so this attempt stopped nothing. Every
+ *  later failure comes after TERM, and a death probe that fails reads as "not ended", so those stay unknown. */
+export const NOTHING_STOPPED_LAUNCH_CODES: ReadonlySet<string> = new Set([
+  "node_not_found", "selection_changed", "already_bound", "invalid_session_name", "address_conflict",
+  "pane_not_found",
+]);
+
 export class NodeLauncher {
   readonly db: Database.Database;
   private rigRepo: RigRepository;

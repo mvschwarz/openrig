@@ -8,6 +8,66 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.7.7]
+
+OpenRig 0.7.7 is 0.7.6 with three reliability fixes for managed Claude seats: an
+idle prompt under Claude's "Update installed" line is recognized again, managed
+compaction no longer types into a message you haven't sent, and a Claude seat
+launched through a wrapper script can be rebuilt again.
+
+### Before you upgrade
+
+- **Restart the daemon after installing** so the fixes take effect:
+  ```bash
+  npm install -g @openrig/cli@0.7.7
+  rig daemon stop && rig daemon start
+  ```
+  There are no database migrations. The bundled openrig-core plugin stays at
+  0.1.23 with unchanged files.
+
+### Fixed
+
+- **A Claude seat under the "Update installed" line reads idle again.** After
+  Claude installs an update, it prints "✔ Update installed · /restart to apply"
+  (or "Restart to apply") below its mode bar. OpenRig didn't recognize that line,
+  so a seat at an empty prompt read unknown instead of idle, and managed
+  compaction waited. Both spellings are now recognized; lines that only look
+  similar still read unknown. ([#2311](https://github.com/mvschwarz/openrig/pull/2311))
+- **Managed compaction no longer types into a draft.** With the optional typing
+  guard off (the default), compaction's preparation prompt could be pasted onto
+  a message someone had typed but not sent. Now the preparation prompt,
+  `/compact` and the restore prompts check the input box first: typed or
+  unreadable input holds the step with a reason. A held restore prompt goes ahead
+  on its own once the box is empty; a manual `rig compact` says why it stopped,
+  to be retried once the box is empty. An empty box or Claude's own suggestion
+  goes ahead.
+  ([#2347](https://github.com/mvschwarz/openrig/pull/2347))
+- **A Claude seat launched through a wrapper script can be rebuilt again.** On
+  0.7.6, `rig seat handover --source rebuild` on a seat whose `claude` is a `#!`
+  script that starts the real Claude without `exec` stopped after 30 seconds with
+  "Waiting to confirm the new Claude process in this pane", though the new Claude
+  was running. The readiness check now also accepts the script's own direct child
+  when it names this launch's conversation; every other check is unchanged.
+  ([#2341](https://github.com/mvschwarz/openrig/issues/2341), [#2354](https://github.com/mvschwarz/openrig/pull/2354))
+- **A failed handover no longer moves the seat's resume target** to the new,
+  unprimed conversation while the seat keeps its previous occupant.
+  ([#2354](https://github.com/mvschwarz/openrig/pull/2354))
+
+### Known limits
+
+- **Other reasons managed compaction can wait are unchanged.**
+- **The draft check reads the input box just before pasting.** Typing that starts
+  in the same moment can still be appended to.
+- **A Claude seat whose current occupant generation was never registered,** such as
+  an adopted Claude carrying another generation, or a managed launch whose tenure
+  record failed to write, keeps its first conversation token, but later hooks don't
+  move it.
+- **The 0.7.6 known limits below still apply.**
+
+### Thanks
+
+- @oneandonlydean for the report and the evidence in #2341.
+
 ## [0.7.6]
 
 OpenRig 0.7.6 lets one terminal workspace follow the current owners of a slice's

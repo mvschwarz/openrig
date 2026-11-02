@@ -71,6 +71,12 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
     && /\/\.local\/share\/claude\/versions\/\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(token);
 }
 
+/** Whether a process command names a Claude executable anywhere in its argv: `claude` by name, or the native
+ *  installer's versioned path (whose process runs as its version, not as `claude`). */
+export function commandNamesClaude(command: string): boolean {
+  return tokens(command).some((token) => claudeExecutable(token));
+}
+
 // Nixpkgs packages Claude as a wrapper that execs its sibling `.claude-unwrapped`
 // (wrapProgram: `.claude-wrapped`) with argv[0] inherited. Linux truncates that OS
 // name to 15 bytes, so ucomm reads `.claude-unwrapp`.
@@ -568,10 +574,26 @@ function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation |
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string; afterScript?: true };
 export type CodexProcessObservation = NativeProcessObservation;
 
+/** The process still running the frozen `#!` script: the kernel starts it as `<interpreter> [one shebang option] <script>
+ *  args…`, so the script's path is its argv[1], or its argv[2] after a single option. */
+function runsFrozenScript(row: NativeProcessRow, selectedExecutable: string): boolean {
+  const [, first, second] = tokens(row.command);
+  return first === selectedExecutable || (first?.startsWith("-") === true && second === selectedExecutable);
+}
+
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string, scriptLaunch?: boolean): NativeProcessObservation[] {
   const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable));
   if (exact.length > 0 || runtime !== "claude-code" || !selectedExecutable || scriptLaunch !== true) return exact;
-  return candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript).map(candidate => ({ ...candidate, afterScript: true as const }));
+  const named = candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript);
+  if (named.length > 0) return named.map(candidate => ({ ...candidate, afterScript: true as const }));
+  // #2341: a wrapper that starts Claude without `exec` keeps running the frozen script as the foreground parent, and
+  // Claude can run under any name. That script's direct child naming a Claude conversation is the launched runtime;
+  // the caller still requires the launch's own token, one candidate and a stable fingerprint.
+  const byPid = new Map(rows.map(row => [row.pid, row]));
+  return candidatesMatching(rows, panePid, runtime, row => {
+    const parent = byPid.get(row.ppid);
+    return !!parent && runsFrozenScript(parent, selectedExecutable) && claudeSessionToken(tokens(row.command).slice(1)) !== null;
+  }).map(candidate => ({ ...candidate, afterScript: true as const }));
 }
 
 function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, claudeRow: (row: NativeProcessRow) => boolean): NativeProcessObservation[] {
