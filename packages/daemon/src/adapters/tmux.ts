@@ -654,6 +654,9 @@ export class TmuxAdapter {
     if (this.terminalKind !== "psmux" || !name.includes(":")) return this.run(argv, legacy);
     const flag = argv.indexOf("-t");
     if (flag < 1) throw new Error("Named session command lacks target");
+    // Compatibility APIs also accept explicit scoped addresses. Only the
+    // actual target operand can select that path, never an option value.
+    if (/^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(argv[flag + 1] ?? "")) return this.run(argv, legacy);
     const physical = await this.nativeBoundName(name), selected = [...argv];
     selected[flag + 1] = `=${physical}${pane ? ":" + (windowIndex ?? "") : ""}`;
     return this.nativeRaw(selected);
@@ -2455,8 +2458,8 @@ export class TmuxAdapter {
     // set/show-option take a target-pane even when the option is session-scoped.
     const exact = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "set-option", "-t", exact, key, value],
-        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`);
+      await this.runNamedSession(["tmux", "set-option", "-t", exact, key, value], sessionName,
+        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`, true);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -2473,8 +2476,8 @@ export class TmuxAdapter {
     // freshly created server; the unscoped POSIX server API must not be used.
     const exact = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "set-option", "-s", "-t", exact, option, value],
-        `tmux set-option -s -t ${shellQuote(exact)} ${shellQuote(option)} ${shellQuote(value)}`);
+      await this.runNamedSession(["tmux", "set-option", "-s", "-t", exact, option, value], sessionName,
+        `tmux set-option -s -t ${shellQuote(exact)} ${shellQuote(option)} ${shellQuote(value)}`, true);
       return { ok: true };
     } catch (err) { return classifyWriteError(err); }
   }
@@ -2511,8 +2514,8 @@ export class TmuxAdapter {
     // set/show-option take a target-pane even when the option is session-scoped.
     const exact = exactTarget(sessionName, "pane");
     try {
-      const output = await this.run(["tmux", "show-option", "-v", "-t", exact, key],
-        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`);
+      const output = await this.runNamedSession(["tmux", "show-option", "-v", "-t", exact, key], sessionName,
+        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`, true);
       return output.trim() || null;
     } catch {
       return null;

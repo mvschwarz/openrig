@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Session options keep logical binding and explicit scoped compatibility (2026-11-03)
+
+Session option read/write and targeted native-server option writes now resolve
+colon-bearing logical names through the same observed binding used by session
+metadata. Session options retain session scope; the targeted native-server call
+retains its server flag and selected physical server. A wrong marker refuses the
+option command. The explicit scoped pane/window address accepted by compatibility
+callers still uses the established routing path: only the actual target operand
+can select it, never option data that happens to resemble a routing token.
+
+New colon option checks failed before the repair. The complete tmux adapter file
+passed 160/160. Supplementary defaults/routing checks exposed the scoped-address
+compatibility regression in the first implementation; after preserving that
+contract, the complete colon/defaults/routing/exact-target/argv files and daemon
+build passed. These controlled tests assert session/server flags, exact physical
+targets, marker-mismatch no-write behavior and literal option payloads. They do
+not qualify actual stock psmux configuration, provider input or current installed/
+cross-platform full-directory acceptance. No deployment, user-team operation or
+public push occurred.
+
 ## Shell inspection retains both observed pane and managed selector (2026-11-03)
 
 Shell launch intentionally keeps its managed node/session selector for nested

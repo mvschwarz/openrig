@@ -22,6 +22,7 @@ function fixture(valid = true, drift = false) {
       return argv.at(-1) === "#{pane_pid}" ? "1234\n" : "owned-runtime\n";
     }
     if (command === "capture-pane") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return "owned capture\n"; }
+    if (command === "set-option" || command === "show-option") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return command === "show-option" ? "owned option\n" : ""; }
     if (command === "show-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "OWNED_VALUE=literal\n"; }
     if (["source-file", "set-environment"].includes(command!)) { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
     throw new Error("Unexpected command: " + command);
@@ -64,6 +65,21 @@ it("reads a stable composer snapshot without treating a colon as target syntax",
 it("returns unknown if the named-session cursor changes during capture", async () => {
   const f = fixture(true, true);
   expect(await f.adapter.captureSessionComposerSnapshot(f.name)).toBeNull();
+});
+it("keeps session option and targeted native server option scopes on the bound session", async () => {
+  const f = fixture();
+  expect(await f.adapter.setSessionOption(f.name, "status", "off")).toEqual({ ok: true });
+  expect(await f.adapter.getSessionOption(f.name, "@owned")).toBe("owned option");
+  expect(await f.adapter.setNativeServerOption(f.name, "set-clipboard", "on")).toEqual({ ok: true });
+  const writes = f.calls.filter(argv => argv.includes("set-option"));
+  expect(writes[0]).not.toContain("-s"); expect(writes[1]).toContain("-s");
+});
+it("does not set session or native-server options after a marker mismatch", async () => {
+  const f = fixture(false);
+  expect(await f.adapter.setSessionOption(f.name, "status", "off")).toMatchObject({ ok: false });
+  expect(await f.adapter.setNativeServerOption(f.name, "set-clipboard", "on")).toMatchObject({ ok: false });
+  expect(await f.adapter.getSessionOption(f.name, "@owned")).toBeNull();
+  expect(f.calls.some(argv => argv.includes("set-option") || argv.includes("show-option"))).toBe(false);
 });
 it("does not fall back to the name prefix when its marker is wrong", async () => {
   const f = fixture(false);
