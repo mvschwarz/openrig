@@ -77,7 +77,8 @@ const PROGRESS_FILENAME = "PROGRESS.md";
 // is filename-agnostic and treats STEERING.md content the same as any
 // other markdown rail.
 const STEERING_FILENAME = "STEERING.md";
-const TREE_FILENAMES = new Set([PROGRESS_FILENAME, STEERING_FILENAME]);
+const nativeName = (name: string): string => process.platform === "win32" ? name.toLowerCase() : name;
+const TREE_FILENAMES = new Set([PROGRESS_FILENAME, STEERING_FILENAME].map(nativeName));
 const SKIP_DIRS = new Set(["node_modules", ".git", ".worktrees", "dist", "build", ".turbo", ".next"]);
 
 const ENV_VAR = "OPENRIG_PROGRESS_SCAN_ROOTS";
@@ -101,7 +102,7 @@ export function decodeProgressScanRoots(raw: string): ProgressScanRoot[] {
     const rawPath = trimmed.slice(colon + 1).trim();
     if (!name || !rawPath || !path.isAbsolute(rawPath)) continue;
     let canonical: string;
-    try { canonical = fs.realpathSync(rawPath); } catch { canonical = path.resolve(rawPath); }
+    try { canonical = process.platform === "win32" ? fs.realpathSync.native(rawPath) : fs.realpathSync(rawPath); } catch { canonical = path.resolve(rawPath); }
     out.set(name, canonical);
   }
   return Array.from(out.entries()).map(([name, canonicalPath]) => ({ name, canonicalPath }));
@@ -159,12 +160,13 @@ export class ProgressIndexer {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
-      if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+      const name = nativeName(entry.name);
+      if (entry.name.startsWith(".") || SKIP_DIRS.has(name)) continue;
       const childAbs = path.join(abs, entry.name);
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         this.walkDir(root, childAbs, childRel, depth + 1, out);
-      } else if (entry.isFile() && TREE_FILENAMES.has(entry.name)) {
+      } else if (entry.isFile() && TREE_FILENAMES.has(name)) {
         const node = this.parseProgressFile(root, childAbs, childRel);
         if (node) out.push(node);
       }

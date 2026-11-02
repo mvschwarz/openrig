@@ -1,5 +1,32 @@
 # Native Windows parity: implementation and evidence
 
+## Current native progress scanning and path classification (2026-11-02)
+
+Progress scanning now matches its filenames and excluded dependency/build
+directories case-insensitively on Windows, in parallel with the existing spec
+scanner. POSIX names remain case-sensitive. Native scan-root decoding records
+the filesystem's actual spelling. Steering canonicalizes its selected lane root
+and keeps Mode-N/PROGRESS filename variants on the canonical mode-n lane ID;
+failed root resolution is reported as an unavailable source.
+
+The pure UI rail classifier selects Windows case rules from the daemon file's
+canonical drive/UNC path syntax, not the browser host. The existing payload is
+sufficient; no API field was added. Tests cover mixed-case mission/lane/slice
+paths, POSIX counterexamples and Windows drive/UNC/extended-prefix spellings.
+A real native scan was passed to that helper, and a real Steering fixture kept
+its mode-2 ID and canonical file path. These are helper/API tests, not rendered
+browser acceptance. Three focused files passed 54 native checks and 51 checks
+in the ordinary-user WSL mirror (3 native-only skips). Daemon and UI TypeScript
+checks passed. Main deployment and existing teams were unchanged.
+
+The reviewed bundle source already uses native canonical paths and relative
+containment checks. A separate actual Git 2.51.2.windows.1 configuration probe
+confirmed that bundleGit ignored owned global/XDG witnesses and retained its
+HTTPS-only and hooks-path policies with its existing /dev/null configuration.
+The probe did not fetch, authenticate or execute hooks/askpass; those paths are
+not qualified by that result. No change was made merely for a POSIX-looking
+Git-specific path string. The comprehensive path audit remains in progress.
+
 ## Current file-browser root boundaries and native canonical spelling (2026-11-02)
 
 Local roots now preserve an existing trailing separator, so an allowlisted

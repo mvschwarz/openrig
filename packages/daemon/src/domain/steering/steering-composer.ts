@@ -263,16 +263,22 @@ export class SteeringComposer {
     // — same checkbox-status semantics as the UI Enhancement Pack v0
     // /progress view, so the steering view stays consistent with what
     // the operator sees in the Progress workspace.
+    let canonicalDir: string;
+    try { canonicalDir = process.platform === "win32" ? fs.realpathSync.native(dir) : fs.realpathSync(dir); }
+    catch (error) {
+      unavailableSources.push({ section: "laneRails", reason: `failed to resolve delivery-ready directory: ${(error as Error).message}`, envVar: ENV_DELIVERY_READY_DIR });
+      return [];
+    }
     const indexer = new ProgressIndexer({
-      roots: [{ name: "delivery-ready", canonicalPath: dir }],
+      roots: [{ name: "delivery-ready", canonicalPath: canonicalDir }],
       maxDepth: 3,
     });
     const result = indexer.scan();
     const lanes: LaneRailPayload[] = [];
     for (const file of result.files) {
       // Derive laneId from "mode-N/PROGRESS.md" or fallback to relPath.
-      const m = file.relPath.match(/^(mode-\d+)\/PROGRESS\.md$/);
-      const laneId = m ? m[1]! : file.relPath.replace(/\/?PROGRESS\.md$/i, "") || file.relPath;
+      const m = file.relPath.match(process.platform === "win32" ? /^(mode-\d+)\/PROGRESS\.md$/i : /^(mode-\d+)\/PROGRESS\.md$/);
+      const laneId = m ? (process.platform === "win32" ? m[1]!.toLowerCase() : m[1]!) : file.relPath.replace(/\/?PROGRESS\.md$/i, "") || file.relPath;
       lanes.push(this.composeLaneFromFile(laneId, file));
     }
     lanes.sort((a, b) => a.laneId.localeCompare(b.laneId));
