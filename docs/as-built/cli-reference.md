@@ -628,7 +628,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig specs` | — | — |
-| `rig specs ls` | — | `--kind <kind>`<br>`--json` |
+| `rig specs ls` | — | `--kind <kind>`<br>`--include-builtins`<br>`--json` |
 | `rig specs show <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs preview <name-or-id>` | — | `--kind <kind>`<br>`--json` |
 | `rig specs add <path>` | — | `--json` |

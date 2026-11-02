@@ -11,7 +11,7 @@ interface AgentLibraryEntry {
 /** Resolve the runtime's terminal seat or the shipped general-purpose agent. */
 export async function resolveDefaultAgentRef(client: DaemonClient, runtime: string): Promise<string> {
   if (runtime === "terminal") return "builtin:terminal";
-  const res = await client.get<AgentLibraryEntry[]>("/api/specs/library?kind=agent");
+  const res = await client.get<AgentLibraryEntry[]>("/api/specs/library?kind=agent&include_builtins=true");
   const entry = res.data?.find(
     (candidate) =>
       candidate.kind === "agent"

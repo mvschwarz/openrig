@@ -69,6 +69,7 @@ Keys:
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)
   context.root           addressable context library for 'rig context add' (default $OPENRIG_HOME/context)
   context.system_world   default System World, replacement manifest path, or disabled
+  specs.builtins_visible show built-ins in spec inventory (default true)
   skills.root            versioned skill catalog (default $OPENRIG_HOME/skills)
   skills.router_line.enabled  the person's yes to the seat-skills line (one line plus OpenRig's markers) in AGENTS.md / CLAUDE.md (default false)
   onboarding.default_pack.enabled  deliver the two-part fresh-seat mental-model pack (default on)

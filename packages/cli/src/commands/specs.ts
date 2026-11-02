@@ -149,15 +149,21 @@ export async function resolveLibrarySpec(
   nameOrId: string,
   opts?: { kind?: LibraryEntry["kind"] },
 ): Promise<LibraryEntry> {
-  const res = await client.get<LibraryEntry[]>(opts?.kind ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library");
-  const entries = res.data ?? [];
-
-  // Try exact ID match first
+  const url = opts?.kind ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library";
+  const res = await client.get<LibraryEntry[]>(url);
+  const visibleEntries = res.data ?? [];
+  // An exact ID always wins, including when a visible name matches a hidden ID.
+  const visibleId = visibleEntries.find((entry) => entry.id === nameOrId);
+  if (visibleId) return visibleId;
+  const separator = opts?.kind ? "&" : "?";
+  const all = await client.get<LibraryEntry[]>(`${url}${separator}include_builtins=true`);
+  const entries = all.data ?? [];
   const byId = entries.find((e) => e.id === nameOrId);
   if (byId) return byId;
 
-  // Try name match
-  const byName = entries.filter((e) => e.name === nameOrId);
+  // Visible names take precedence over hidden built-ins with the same name.
+  const visibleNames = visibleEntries.filter((e) => e.name === nameOrId);
+  const byName = visibleNames.length ? visibleNames : entries.filter((e) => e.name === nameOrId);
   if (byName.length === 1) return byName[0]!;
 
   if (byName.length > 1) {
@@ -216,11 +222,15 @@ Examples:
   cmd.command("ls")
     .description("List library rigs, agents, and managed apps")
     .option("--kind <kind>", "Filter by kind (rig, agent, or workflow)")
+    .option("--include-builtins", "Include built-ins hidden by the visibility setting")
     .option("--json", "JSON output")
-    .action(async (opts: { kind?: string; json?: boolean }) => {
+    .action(async (opts: { kind?: string; json?: boolean; includeBuiltins?: boolean }) => {
       try {
         const client = await getClient();
-        const url = opts.kind ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library";
+        const params = new URLSearchParams();
+        if (opts.kind) params.set("kind", opts.kind);
+        if (opts.includeBuiltins) params.set("include_builtins", "true");
+        const url = `/api/specs/library${params.size ? `?${params}` : ""}`;
         const res = await client.get<LibraryEntry[]>(url);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];

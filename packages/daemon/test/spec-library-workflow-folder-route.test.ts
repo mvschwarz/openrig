@@ -21,6 +21,7 @@ import { SpecLibraryService } from "../src/domain/spec-library-service.js";
 import { SpecReviewService } from "../src/domain/spec-review-service.js";
 import { ActiveLensStore } from "../src/domain/active-lens-store.js";
 import { specLibraryRoutes } from "../src/routes/spec-library.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 const VALID_YAML = (id: string) => `workflow:
   id: ${id}
@@ -90,12 +91,37 @@ describe("spec-library route folder scan (slice 11)", () => {
       c.set("rigRepo" as never, { db });
       c.set("workflowBuiltinSpecsDir" as never, builtinDir);
       c.set("workflowSpecCache" as never, cache);
+      c.set("settingsStore" as never, new SettingsStore(join(tmp, "config.json")));
       if (opts.withFolder) c.set("workflowsFolderDir" as never, folder);
       await next();
     });
     app.route("/api/specs/library", specLibraryRoutes());
     return app;
   }
+
+  it("keeps an identical user copy visible when built-in workflows are hidden", async () => {
+    const builtin = join(builtinDir, "same.yaml");
+    const user = join(folder, "same.yaml");
+    writeFileSync(builtin, VALID_YAML("same"));
+    cache.readThrough(builtin);
+    writeFileSync(user, VALID_YAML("same"));
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ specs: { builtinsVisible: false } }));
+    const app = createApp();
+    const response = await app.request("/api/specs/library?kind=workflow");
+    const entries = await response.json() as Array<{ id: string; sourcePath: string; sourceType: string }>;
+    const userEntry = entries.find((entry) => entry.sourcePath === user && entry.sourceType === "user_file");
+    expect(userEntry).toBeDefined();
+    const review = await (await app.request(`/api/specs/library/${encodeURIComponent(userEntry!.id)}/review`)).json();
+    expect(review).toMatchObject({ sourcePath: user, isBuiltIn: false });
+    const all = await (await app.request("/api/specs/library?kind=workflow&include_builtins=true")).json() as Array<{ id: string; sourcePath: string }>;
+    expect(all.find((entry) => entry.sourcePath === builtin)?.id).not.toBe(userEntry!.id);
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ specs: { builtinsVisible: true } }));
+    expect((await app.request(`/api/specs/library/${encodeURIComponent(userEntry!.id)}/review`)).status).toBe(200);
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ specs: { builtinsVisible: false } }));
+    rmSync(user);
+    expect(await (await app.request("/api/specs/library/sync", { method: "POST" })).json()).toEqual([]);
+    expect(await (await app.request("/api/specs/library?kind=workflow")).json()).toEqual([]);
+  });
 
   it("keeps accepted name/version pairs distinct and reviewable when a version contains a colon", async () => {
     writeFileSync(join(folder, "first.yaml"), VALID_YAML("demo").replace("version: '1'", "version: 'release:1'"));

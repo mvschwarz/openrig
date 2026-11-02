@@ -38,11 +38,13 @@ const RIG_REVIEW = {
 describe("Specs CLI", () => {
   let server: http.Server;
   let port: number;
+  let lastLibraryUrl = "";
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       const url = decodeURIComponent(req.url ?? "");
       if (url === "/api/specs/library" || url.startsWith("/api/specs/library?")) {
+        lastLibraryUrl = url;
         res.writeHead(200, { "Content-Type": "application/json" });
         const kind = new URL(`http://localhost${url}`).searchParams.get("kind");
         const filtered = kind ? LIBRARY_ENTRIES.filter((e) => e.kind === kind) : LIBRARY_ENTRIES;
@@ -112,6 +114,13 @@ describe("Specs CLI", () => {
     expect(parsed.length).toBe(2);
   });
 
+  it("requests hidden built-ins only when explicitly asked", async () => {
+    await captureLogs(async () => { await makeCmd().parseAsync(["node", "rig", "specs", "ls", "--include-builtins", "--kind", "rig"]); });
+    const params = new URL(`http://localhost${lastLibraryUrl}`).searchParams;
+    expect(params.get("kind")).toBe("rig");
+    expect(params.get("include_builtins")).toBe("true");
+  });
+
   it("specs show resolves by name and prints metadata", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "specs", "show", "review-rig"]);
@@ -149,7 +158,7 @@ describe("Specs CLI", () => {
   it("specs show --kind resolves same-name rig/workflow entries", async () => {
     const dupServer = http.createServer((req, res) => {
       const url = decodeURIComponent(req.url ?? "");
-      if (url === "/api/specs/library?kind=rig") {
+      if (url.startsWith("/api/specs/library?kind=rig")) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify([{ ...LIBRARY_ENTRIES[0], id: "rig-same", kind: "rig", name: "conveyor" }]));
       } else {

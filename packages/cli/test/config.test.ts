@@ -63,6 +63,14 @@ describe("ConfigStore", () => {
   });
 
   // Test 1
+  it("persists the built-in inventory preference as a validated boolean", () => {
+    const store = new ConfigStore(join(tmpDir, "config.json"));
+    expect(store.resolveOne("specs.builtins_visible").value).toBe(true);
+    store.set("specs.builtins_visible", "false");
+    expect(store.resolve().specs.builtinsVisible).toBe(false);
+    expect(() => store.set("specs.builtins_visible", "no")).toThrow();
+  });
+
   it("resolve() returns defaults when no config file and no env", () => {
     const store = new ConfigStore(join(tmpDir, "config.json"));
     const config = store.resolve();
