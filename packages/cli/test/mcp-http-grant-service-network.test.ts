@@ -132,7 +132,7 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     const served = await listen();
     const a = await connect(served.url, A);
     const b = await connect(served.url, B);
-    const team = await a("rig_team", { rig: RIG });
+    const team = await a("rig_team", { rigId: RIG });
     expect(team.isError).toBe(false);
     expect(team.text).toContain(B.seat);
     expect(team.text).toContain(LEAD);
@@ -142,9 +142,14 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     const qitemId = createdId(sent);
     expect(row(qitemId)).toMatchObject({ sourceSession: A.seat, destinationSession: B.seat });
 
+    // What A reads at each step: queued (pending, unclaimed), picked up (B's claim), answered (done with a resolution).
+    // B reading or listing the item changes none of it.
     const inbox = await b("rig_queue_list", { owned: true });
     expect(inbox.text).toContain(qitemId);
+    expect((await b("rig_queue_show", { qitemId })).isError).toBe(false);
+    expect((await a("rig_queue_show", { qitemId })).structured.item).toMatchObject({ state: "pending", claimedAt: null });
     expect((await b("rig_queue_claim", { qitemId })).isError).toBe(false);
+    expect((await a("rig_queue_show", { qitemId })).structured.item).toMatchObject({ state: "in-progress", resolution: null });
     expect((await b("rig_queue_update", { qitemId, state: "done", resolution: "Two risks; see the notes.", closureReason: "no-follow-on" })).isError).toBe(false);
     expect(row(qitemId)).toMatchObject({ state: "done", resolution: "Two risks; see the notes." });
 
@@ -214,12 +219,23 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     expect((await b("rig_queue_show", { qitemId: toTeam })).isError).toBe(true);
     expect((await a("rig_queue_create", { destination: "lead@team-b", body: "other workspace" })).isError).toBe(true);
     expect((await a("rig_queue_create", { destination: "someone@external", body: "a person" })).isError).toBe(true);
+    expect((await a("rig_team", { rigId: "team-b" })).isError).toBe(true);
     expect(row(toB).state).toBe("pending");
+
+    // B waits only on an item it can read: never on a person (who would be asked) or on the team's own item.
+    expect((await b("rig_queue_claim", { qitemId: toB })).isError).toBe(false);
+    for (const blockedOn of ["someone@external", toTeam, "qitem-network-missing"]) {
+      expect((await b("rig_queue_update", { qitemId: toB, state: "blocked", blockedOn }))).toMatchObject({ isError: true, structured: { code: "out_of_scope" } });
+    }
+    expect(row(toB).state).toBe("in-progress");
+    const ask = createdId(await b("rig_queue_create", { destination: LEAD, body: "Which of the two plans?" }));
+    expect((await b("rig_queue_update", { qitemId: toB, state: "blocked", blockedOn: ask })).isError).toBe(false);
+    expect(row(toB)).toMatchObject({ state: "blocked", blockedOn: ask });
 
     grants.set(B.key, "revoked");
     const before = rows();
-    await expect(b("rig_queue_claim", { qitemId: toB })).rejects.toThrow();
-    expect(row(toB).state).toBe("pending");
+    await expect(b("rig_queue_update", { qitemId: toB, state: "in-progress" })).rejects.toThrow();
+    expect(row(toB).state).toBe("blocked");
     expect(rows()).toBe(before);
   });
 
