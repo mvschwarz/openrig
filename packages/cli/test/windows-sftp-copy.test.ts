@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
@@ -35,25 +35,27 @@ describe.skipIf(process.platform !== "win32" || !existsSync(server))("native rec
       await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
-  it("retains the local original and reports staging when Windows refuses readonly replacement", async () => {
+  it.each([false,true])("replaces an owned readonly destination while retaining its old hardlink (source readonly=%s)", async readonly => {
     const root = await mkdtemp(path.join(os.tmpdir(), "openrig-sftp-readonly-"));
-    const source = path.join(root, "source.txt"), destination = path.join(root, "destination.txt");
+    const source = path.join(root, "source.txt"), destination = path.join(root, "destination.txt"), alias = path.join(root, "retained-alias.txt");
     const start = () => spawn(server, [], { stdio: "pipe", windowsHide: true });
     try {
       await writeFile(source, "owned new remote bytes\n");
+      if (readonly) await chmod(source, 0o444);
       await writeFile(destination, "owned original\n");
+      await link(destination, alias);
       await chmod(destination, 0o444);
       const result = await runNativeSftpCopy({
         src: { kind: "remote", path: "/" + source.replaceAll("\\", "/"), host: { id: "fixture", target: "fixture", transport: "ssh" } },
         dst: { kind: "local", path: destination }, dryRun: false,
       }, start);
-      expect(result.ok).toBe(false);
-      expect(result.failedStep).toBe("local-copy-failed");
-      expect(await readFile(destination, "utf8")).toBe("owned original\n");
-      expect(result.hint).toContain("existing destination was not removed");
+      expect(result.ok, result.stderr).toBe(true);
+      expect(await readFile(destination, "utf8")).toBe("owned new remote bytes\n");
+      expect(Boolean((await lstat(destination)).mode & 0o200)).toBe(!readonly);
+      expect(await readFile(alias, "utf8")).toBe("owned original\n");
+      expect((await lstat(alias)).mode & 0o200).toBe(0);
       const staged = (await readdir(root)).filter(file => file.startsWith(".openrig-copy-"));
-      expect(staged).toHaveLength(1);
-      expect(await readFile(path.join(root, staged[0]!), "utf8")).toBe("owned new remote bytes\n");
+      expect(staged).toHaveLength(0);
     } finally {
       await chmod(destination, 0o666).catch(() => {});
       await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

@@ -30,6 +30,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="owned-pipe")OwnedPipe(args[1]);
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
+      else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -133,7 +134,7 @@ public static class OpenRigOwnedText {
     var basic=new BasicInformation(); basic.attributes=attributes==0?0x80u:attributes;
     if(!SetFileInformationByHandle(file,0,ref basic,(uint)Marshal.SizeOf(basic)))throw new Win32Exception(Marshal.GetLastWin32Error());
   }
-  static void ReplaceArtifact(string target,string staging) {
+  static void ReplaceArtifact(string target,string staging,bool retainDestinationReadonly=true) {
     using(var original=AttributeHandle(target))using(var replacement=AttributeHandle(staging)) {
       var oldInfo=Regular(original,false); var newInfo=Regular(replacement,false);
       bool oldReadOnly=(oldInfo.attributes&1u)!=0, newReadOnly=(newInfo.attributes&1u)!=0, replaced=false;
@@ -147,7 +148,7 @@ public static class OpenRigOwnedText {
         // failed native replacement. Retained hard-link aliases keep readonly.
         try { if(oldReadOnly && (!replaced || oldInfo.links>1))Attributes(original,oldInfo.attributes); }
         finally {
-          if(replaced && oldReadOnly)Attributes(replacement,newInfo.attributes|1u);
+          if(replaced && oldReadOnly && retainDestinationReadonly)Attributes(replacement,newInfo.attributes|1u);
           else if(newReadOnly)Attributes(replacement,newInfo.attributes);
         }
       }
@@ -465,6 +466,14 @@ export function inspectWindowsOwnedPipe(pipe: string): { pid: number; started: s
  * pinned handles restore them on success/failure. No ignore-ACL-errors flags. */
 export function replaceWindowsFilePreservingMetadata(target: string, staging: string, explicitArtifactReplacement = false): void {
   execFileSync(nativeHelper(), [explicitArtifactReplacement ? "replace-artifact" : "replace-preserve", toNamespacedPath(target), toNamespacedPath(staging)], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** File-copy replacement takes the staged source's readonly state, while
+ * preserving the destination DACL and restoring any retained hardlink inode. */
+export function replaceWindowsCopiedFile(target: string, staging: string): void {
+  execFileSync(nativeHelper(), ["replace-copy", toNamespacedPath(target), toNamespacedPath(staging)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }

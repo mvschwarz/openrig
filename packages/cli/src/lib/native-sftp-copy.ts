@@ -6,6 +6,7 @@ import path from "node:path";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
 import { looksLikePermissionGate } from "../cross-host-executor.js";
+import { replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 
 interface Endpoint {
   paths: typeof path.posix;
@@ -48,7 +49,13 @@ const local: Endpoint = {
     // it cannot install POSIX owner/group/execute permissions or replace a DACL.
     if (attrs.mode !== undefined) await chmod(file, attrs.mode & 0o7777);
   },
-  async rename(src, dst) { await rename(src, dst); },
+  async rename(src, dst, replacing) {
+    if (process.platform === "win32" && replacing && kind(await local.stat(src)) === 0o100000 && kind(await local.stat(dst)) === 0o100000) {
+      try { replaceWindowsCopiedFile(dst, src); }
+      catch (error) { throw Object.assign(error as Error, {path: dst, syscall: "replace"}); }
+    }
+    else await rename(src, dst);
+  },
 };
 const kind = (attrs: SftpAttrs | undefined) => (attrs?.mode ?? 0) & 0o170000;
 
