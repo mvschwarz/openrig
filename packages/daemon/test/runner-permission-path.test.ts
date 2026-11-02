@@ -214,14 +214,37 @@ describe("a runner seat's answered permission path", () => {
   });
 
   it.each([
-    ["a typed yes", { decision: "Yes." }, "answered", "allow"],
-    ["a typed no", { decision: "no" }, "answered", "reject"],
-    ["typed words that are neither", { decision: "what does this edit do?" }, "permitted", "allow"],
-  ])("reads %s from the person as the offered option, and no answer as the default", async (_case, choice, state, optionId) => {
+    ["a typed yes", { decision: "Yes." }, "answered", "allow", undefined],
+    ["a typed no", { decision: "no" }, "answered", "reject", undefined],
+    ["typed words that are neither", { decision: "what does this edit do?" }, "permitted", "allow", "what does this edit do?"],
+  ])("reads %s from the person as the offered option, and no answer as the default", async (_case, choice, state, optionId, said) => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
     expect(await f.answer(askId, choice)).toMatchObject({ status: 200 });
-    expect(await f.read(askId)).toMatchObject({ body: { state, optionId } });
+    const read = await f.read(askId);
+    expect(read).toMatchObject({ body: { state, optionId } });
+    // The person's own words reach the runner beside the default, never in place of an option.
+    expect(read.body.said).toBe(said);
+  });
+
+  it("carries the person's words with the refusal when the agent offered no allow option, never reading them as a no", async () => {
+    const f = fixture();
+    const askId = String((await f.submit({ options: [{ optionId: "reject", name: "Reject", kind: "reject_once" },
+      { optionId: "never", name: "Never", kind: "reject_always" }] })).body.askId);
+    expect(await f.answer(askId, { decision: "use the other file instead" })).toMatchObject({ status: 200 });
+    expect((await f.read(askId)).body).toEqual({ ok: true, state: "refused", reason: "no_allow_offered", said: "use the other file instead" });
+  });
+
+  it("carries a colleague's words, whole, when the ask was routed to them", async () => {
+    const f = fixture();
+    const askId = String((await f.submit()).body.askId);
+    await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
+    const colleague = f.queueRepo.list({ limit: 100 }).find((row) => row.destinationSession === OTHER_PERSON && row.handedOffFrom === askId)!;
+    const words = `only the tests folder; ${"and nothing else. ".repeat(200)}`;
+    expect(await f.answer(colleague.qitemId, { decision: words }, OTHER_PERSON)).toMatchObject({ status: 200 });
+    const read = await f.read(askId, 1);
+    expect(read.body).toMatchObject({ state: "permitted", optionId: "allow" });
+    expect(read.body.said).toBe(words.trim());
   });
 
   it.each([
