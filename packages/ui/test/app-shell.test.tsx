@@ -290,6 +290,9 @@ describe("AppShell — Phase 2 chrome", () => {
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
       expect(tray).toBeTruthy();
       expect(tray.className).toContain("-translate-x-full");
+      // Keep every link reachable when the notice leaves a short viewport.
+      expect(tray.className).toContain("overflow-y-auto");
+      expect(tray.className).toContain("bottom-14");
     });
 
     // Slice 20 mobile: hamburger menu items stack vertically
