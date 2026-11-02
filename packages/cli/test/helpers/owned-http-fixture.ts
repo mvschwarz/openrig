@@ -1,4 +1,5 @@
 import type { Server } from "node:http";
+import { randomInt } from "node:crypto";
 import { allowFetchTarget } from "../fetch-guard.js";
 
 /** Register only the loopback origins of this test's already-bound HTTP server.
@@ -11,4 +12,25 @@ export function allowOwnedHttpFixture(server: Server): void {
       : address.address === "::1" ? ["[::1]"] : address.address.startsWith("127.") ? [address.address] : [];
   if (!hosts.length) throw new Error("Owned HTTP fixture did not bind a loopback-compatible address");
   for (const host of hosts) allowFetchTarget(`http://${host}:${address.port}`);
+}
+
+/** Windows can assign port 0 a low port that fetch refuses (for example 6566).
+ * Bind a bounded high-port candidate instead, registering only the actual listener. */
+export async function listenOwnedHttpFixture(server: Server): Promise<void> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const failed = (error: Error) => { server.off("listening", ready); reject(error); };
+        const ready = () => { server.off("error", failed); resolve(); };
+        server.once("error", failed);
+        server.once("listening", ready);
+        try { server.listen(randomInt(49152, 65536), "127.0.0.1"); }
+        catch (error) { server.off("error", failed); failed(error as Error); }
+      });
+      allowOwnedHttpFixture(server);
+      return;
+    } catch (error) {
+      if (!["EADDRINUSE", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "") || attempt === 15) throw error;
+    }
+  }
 }
