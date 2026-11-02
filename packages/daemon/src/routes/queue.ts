@@ -1179,6 +1179,7 @@ export function queueRoutes(): Hono {
         activeOnly,
         handedOffFrom,
         updatedSince,
+        sortByUpdated: c.req.query("sort") === "updated",
       });
       return c.json(items);
     }

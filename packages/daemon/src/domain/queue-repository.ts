@@ -539,6 +539,9 @@ export interface QueueListOptions {
   handedOffFrom?: string;
   /** Items updated at or after this time: an ISO-8601 UTC timestamp in the stored form (toISOString). */
   updatedSince?: string;
+  /** Pick and order rows by their latest update instead of their creation, so a bounded window of closed items holds
+   *  the ones closed most recently. */
+  sortByUpdated?: boolean;
 }
 
 /** Adds the handoff-successor and updated-since filters both list paths share. */
@@ -4135,9 +4138,10 @@ export class QueueRepository {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const columns = opts?.compact ? this.compactColumns() : "*";
     const useActiveFirst = !!(opts?.rig || opts?.asSession || opts?.activeOnly);
+    const newest = opts?.sortByUpdated ? "ts_updated DESC" : "ts_created DESC";
     const orderBy = useActiveFirst
-      ? "CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC"
-      : "ts_created DESC";
+      ? `CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ${newest}`
+      : newest;
     params.push(limit);
 
     const rows = this.db

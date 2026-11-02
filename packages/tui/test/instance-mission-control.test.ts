@@ -280,7 +280,7 @@ describe("S12 view-aware hydration", () => {
         "/api/queue/list?state=blocked": [],
         "/api/queue/list?state=in-progress": [],
         "/api/queue/list?state=pending&limit=50": [],
-        "/api/queue/list?state=done,handed-off&limit=20": [],
+        "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
         "/api/scopes?detail=1": { missions: [] },
         "/api/views/execution": { rows: [] },
         "/api/queue/recent-transitions?scope=instance&limit=20": [],
@@ -310,7 +310,7 @@ describe("S12 view-aware hydration", () => {
         "/healthz": {}, "/api/queue/attention-aggregate": { hosts: [] }, "/api/rigs/summary": [],
         "/api/review/fleet": { needsYou: { items: [] }, hosts: [] }, "/api/stream/list?limit=5&direction=latest": [],
         "/api/queue/list?attention=1": [], "/api/queue/list?state=blocked": [], "/api/queue/list?state=in-progress": [],
-        "/api/queue/list?state=pending&limit=50": [], "/api/queue/list?state=done,handed-off&limit=20": [],
+        "/api/queue/list?state=pending&limit=50": [], "/api/queue/list?state=done,handed-off&sort=updated&limit=20": [],
         "/api/scopes?detail=1": { missions: [] }, "/api/views/execution": { rows: [] },
       };
       return { ok: route in empty, status: route in empty ? 200 : 404, json: async () => empty[route] ?? {} } as Response;

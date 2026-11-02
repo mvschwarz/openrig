@@ -314,7 +314,7 @@ describe("PULSE view increment 3 — Lanes LIVE (NOW / JUST FINISHED / UP NEXT +
   it("JUST FINISHED: recent done/handed-off newest-FINISHED-first (tsUpdated desc) with HH:MM times", () => {
     const snap = liveSnap({
       recentlyFinished: [
-        // served in ts_created order (NOT finish order) — the view re-sorts by tsUpdated
+        // any served order — the view sorts by tsUpdated
         attn({ qitemId: "f1", state: "done", summary: "older close-out", tsUpdated: "2026-08-06T10:58:00.000Z" }),
         attn({ qitemId: "f2", state: "handed-off", summary: "newest fold receipt", tsUpdated: "2026-08-06T11:44:00.000Z" }),
         attn({ qitemId: "f3", state: "done", summary: "mid terminal CLEAR", tsUpdated: "2026-08-06T11:20:00.000Z" }),

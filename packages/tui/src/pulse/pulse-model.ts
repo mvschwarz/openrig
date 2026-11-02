@@ -306,7 +306,7 @@ function nowRows(seatActivity: SeatActivitySummary[], inProgress: QueueRead[], s
 }
 
 /** ✓ JUST FINISHED rows — recent terminal transitions newest-FINISHED-first.
- * The shipped /list read serves ts_created order, so we re-sort by tsUpdated
+ * The /list read picks the most recently updated rows; we sort them by tsUpdated
  * DESC (the finish time) and cap to a recent window (count == rendered — this is
  * inherently a WINDOW, not a total). Time = the transition's tsUpdated (HH:MM). */
 function finishedRows(recent: QueueRead[], cap: number, snap: FleetSnapshot, timeZone: string): PulseLaneRow[] {
