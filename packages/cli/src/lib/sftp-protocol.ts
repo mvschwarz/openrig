@@ -106,6 +106,10 @@ export class SftpClient {
     try { return (await this.request(7, str(file), 105)).attrs(); }
     catch (error) { if (error instanceof SftpStatusError && error.code === 2) return undefined; throw error; }
   }
+  async stat(file: string): Promise<SftpAttrs | undefined> {
+    try { return (await this.request(17, str(file), 105)).attrs(); }
+    catch (error) { if (error instanceof SftpStatusError && error.code === 2) return undefined; throw error; }
+  }
   async readdir(file: string): Promise<string[]> {
     const handle = (await this.request(11, str(file), 102)).bytes(), names: string[] = [];
     try {

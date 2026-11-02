@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
+import { chmod, lstat, stat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -11,10 +11,11 @@ import { replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 interface Endpoint {
   paths: typeof path.posix;
   stat(file: string): Promise<SftpAttrs | undefined>;
+  followsDirectory(file: string): Promise<boolean>;
   names(file: string): Promise<string[]>;
   link(file: string): Promise<string>;
   mkdir(file: string): Promise<void>;
-  symlink(target: string, file: string): Promise<void>;
+  symlink(target: string, file: string, directory?: boolean): Promise<void>;
   read(file: string): AsyncIterable<Buffer>;
   write(file: string, data: AsyncIterable<Buffer>): Promise<void>;
   times(file: string, attrs: SftpAttrs): Promise<void>;
@@ -27,8 +28,9 @@ const local: Endpoint = {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   },
   names: readdir, link: readlink,
+  async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } },
   async mkdir(file) { await mkdir(file); },
-  async symlink(target, file) { await symlink(target, file); },
+  async symlink(target, file, directory) { await symlink(target, file, directory ? "dir" : "file"); },
   read: file => createReadStream(file),
   async write(file, data) {
     const handle = await open(file, "wx");
@@ -84,6 +86,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     await client.ready;
     const remote: Endpoint = {
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
+      followsDirectory: async file => kind(await client!.stat(file)) === 0o040000,
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), symlink: (target, file) => client!.symlink(target, file),
       read: file => client!.read(file), write: (file, data) => client!.write(file, data),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
@@ -134,7 +137,12 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       if (!isLink) { filesTransferred++; bytesTransferred += attrs.size ?? 0; }
       if (plan.dryRun) return;
       staged = destination.paths.join(destination.paths.dirname(dst), `.openrig-copy-${randomUUID()}`);
-      if (isLink) await destination.symlink(target!, staged);
+      if (isLink) {
+        // NTFS distinguishes directory and file links. Inspect only target type;
+        // copy the original link text, never recursively copy its referent.
+        const directory = destination === local && process.platform === "win32" && await source.followsDirectory(src);
+        await destination.symlink(target!, staged, directory);
+      }
       else { await destination.write(staged, source.read(src)); await destination.times(staged, attrs); }
       await destination.rename(staged, dst, existing !== undefined);
       staged = undefined;

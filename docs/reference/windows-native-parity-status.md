@@ -27,6 +27,20 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### SFTP directory symlink type (2026-11-02)
+
+Downloads to NTFS now query the source link's referent type with SFTP STAT and
+create a directory symlink when that referent is a directory. The original link
+text is preserved; the referent is not recursively copied. A real Windows
+OpenSSH subsystem round trip verified that the downloaded entry remains a link,
+retains its relative target, allows directory traversal, and transfers zero file
+bytes. The nine native subsystem/protocol tests and 55 transfer/path tests passed
+(three existing platform skips); CLI TypeScript checking passed.
+
+A dangling POSIX link carries no directory/file type in SFTP v3, so its future
+directory intent remains unknown and is not covered by this result. Ownership,
+execute bits, directory ACLs and special files remain open below.
+
 ### Native Bash idle and receiver distinction (2026-11-02)
 
 The canonical scoped bootstrap now exposes only its unique, creation-time-bound

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
@@ -10,6 +10,20 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("downloads a directory symlink as a directory link without copying its referent", async () => {
+    const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-dirlink-"));
+    const target=path.join(root,"target"), source=path.join(root,"source-link"), destination=path.join(root,"destination-link");
+    try {
+      await mkdir(target); await writeFile(path.join(target,"witness.txt"),"owned referent");
+      await symlink("target",source,"dir");
+      const result=await runNativeSftpCopy({src:{kind:"remote",path:"/"+source.replaceAll("\\","/"),host:{id:"fixture",target:"fixture",transport:"ssh"}},dst:{kind:"local",path:destination},dryRun:false},()=>spawn(server,[],{stdio:"pipe",windowsHide:true}));
+      expect(result.ok,result.stderr).toBe(true);
+      expect((await lstat(destination)).isSymbolicLink()).toBe(true);
+      expect(await readlink(destination)).toBe(await readlink(source));
+      expect(await readFile(path.join(destination,"witness.txt"),"utf8")).toBe("owned referent");
+      expect(result.filesTransferred).toBe(0); expect(result.bytesTransferred).toBe(0);
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("previews directory time drift and restores parent times after copying children", async () => {
     const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-directory-"));
     const source=path.join(root,"source"), destination=path.join(root,"destination");
