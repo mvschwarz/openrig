@@ -77,3 +77,15 @@ it("rechecks dispatch permission after the driver's own identity await", async (
   await entered; eligible = false; release(); await refused;
   expect(command.mock.calls.some(([args]) => args.includes("stop"))).toBe(false);
 });
+
+it("rechecks cleanup selection after delete's identity await", async () => {
+  let eligible = true;
+  const command = vi.fn(async (args: string[]) => {
+    if (args.includes("get")) { eligible = false; return JSON.stringify({ id: "immutable", name: "worker-one", workspace: "workspace", phase: "Ready" }); }
+    return "";
+  });
+  const binding = { placement: { gateway: "gateway", workspace: "workspace", name: "worker-one" }, resource: { id: "immutable", name: "worker-one", workspace: "workspace" } } as EnvironmentBinding;
+  await expect(new OpenShellDriver(command).deleteEnvironment(binding, "cleanup-one", () => eligible))
+    .rejects.toMatchObject({ code: "environment_selection_changed" });
+  expect(command.mock.calls.some(([args]) => args.includes("delete"))).toBe(false);
+});

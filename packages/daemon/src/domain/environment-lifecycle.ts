@@ -12,7 +12,7 @@ export type EnvironmentLifecycleDriver = EnvironmentDriver & {
   nativeIdentity?(binding: EnvironmentBinding): Promise<NativeObservation>;
   stopNative?(binding: EnvironmentBinding, native: NativeObservation, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
   stopCompute?(binding: EnvironmentBinding, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
-  deleteEnvironment?(binding: EnvironmentBinding, operationId: string): Promise<void>;
+  deleteEnvironment?(binding: EnvironmentBinding, operationId: string, beforeDispatch?: () => boolean): Promise<void>;
   captureCleanup?(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection>;
   cleanupState?(binding: EnvironmentBinding, selection?: PodmanCleanupSelection): Promise<DependentObservation>;
   checkpointFiles?(binding: EnvironmentBinding, native: NativeObservation): Promise<Array<{ path: string; sha256: string; bytes: number }>>;
@@ -22,7 +22,7 @@ export type EnvironmentCheckpoint = {
   nativeType: "community:openshell-claude"; nativeId: string; predecessorResourceId: string;
   destinationCwd: string; nativeState: string; artifacts: Array<{ path: string; source: string; sha256: string; bytes: number; taskId: string }>; files: Array<{ path: string; source: string; sha256: string; bytes: number }>;
 };
-export type EffectReceipt = { version: 1; operationId: string; bindingId: string; generation: string; resourceId: string;
+export type EffectReceipt = { version: 1; operationId: string; bindingId: string; generation: string | null; resourceId: string;
   effect: EnvironmentEffect; state: "confirmed" | "pending" | "unconfirmed"; remaining?: DependentObservation; detail?: string };
 type Operation = { binding_id: string; kind: string; request_json: string; state: string; receipt_json: string | null; effect_id: string | null };
 const stable = (v: unknown): string => JSON.stringify(v, (_key, x) => x && typeof x === "object" && !Array.isArray(x)
@@ -49,6 +49,14 @@ export class EnvironmentLifecycle {
     if (binding.generation !== generation) refuse("environment_generation_changed", "The selected execution generation changed");
     return binding;
   }
+  private cleanupSelection(id: string, resourceId: unknown): EnvironmentBinding {
+    identifier(resourceId, "resourceId");
+    const binding = this.platform.get(id);
+    if (!binding?.resource) refuse("environment_binding_missing", "A confirmed compute binding is required");
+    if (binding.generation !== null) refuse("environment_generation_changed", "An execution generation now exists; select it explicitly");
+    if (binding.resource.id !== resourceId) refuse("environment_identity_changed", "The selected cleanup resource changed");
+    return binding;
+  }
   private operation(id: string): Operation | undefined { return this.platform.db.prepare("SELECT * FROM environment_operations WHERE operation_id = ?").get(id) as Operation | undefined; }
   private intent(binding: EnvironmentBinding, id: string, kind: string, request: unknown): Operation {
     identifier(id, "operationId");
@@ -73,9 +81,11 @@ export class EnvironmentLifecycle {
     if (!native || native.nativeType !== "community:openshell-claude" || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(native.nativeId)) refuse("environment_native_unconfirmed", "The selected compute has no confirmed exact native identity");
     return native;
   }
-  async effect(id: string, input: { operationId: string; generation: string; effect: EnvironmentEffect; engineSocket?: string; requestedBy?: string }, beforeDispatch?: () => boolean): Promise<EffectReceipt> {
+  async effect(id: string, input: { operationId: string; generation: string | null; resourceId?: string; effect: EnvironmentEffect; engineSocket?: string; requestedBy?: string }, beforeDispatch?: () => boolean): Promise<EffectReceipt> {
     if (!["close-viewer", "stop-native", "stop-compute", "delete-owned"].includes(input.effect)) refuse("environment_effect_unsupported", "Select close-viewer, stop-native, stop-compute or delete-owned", 400);
-    const binding = this.selected(id, input.generation);
+    const select = () => input.effect === "delete-owned" && input.generation === null
+      ? this.cleanupSelection(id, input.resourceId) : this.selected(id, identifier(input.generation, "generation"));
+    const binding = select();
     if (input.effect !== "close-viewer" && binding.ownership !== "owned") refuse("environment_attached_preserved", "Attached native, storage and compute are preserved; close only this consumer's viewer");
     const request = { ...input, resourceId: binding.resource!.id }, op = this.intent(binding, input.operationId, "effect", request);
     if (op.receipt_json) return JSON.parse(op.receipt_json);
@@ -119,8 +129,9 @@ export class EnvironmentLifecycle {
         const found = listed.resources.find(row => row.id === binding.resource!.id);
         if (found) {
           this.platform.assertResource(binding, found);
-          this.selected(id, input.generation);
-          if (this.claim(input.operationId)) { try { await this.driver.deleteEnvironment(binding, op.effect_id!); } catch { /* observe original effect, never repeat */ } }
+          select();
+          if (!await dispatch(allowed => this.driver.deleteEnvironment!(binding, op.effect_id!, allowed)))
+            return result("pending", { detail: "The selection changed before dispatch; no delete was sent" });
           listed = await this.driver.list(binding.placement);
         }
         if (!listed.complete || listed.resources.some(row => row.id === binding.resource!.id || row.name === binding.resource!.name)) return result("pending", { detail: "Exact provider absence is not confirmed" });
