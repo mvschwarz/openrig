@@ -106,7 +106,13 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const saved = readSeatEffort(rigRepo.db, nodeId);
       if (!tmux || !saved) return null;
       const listProcesses = c.get("listProcesses" as never) as NativeProcessLister | undefined;
-      const running = await verifyClaudePaneRuntime({ target: pane, tmux, ...(listProcesses ? { listProcesses } : {}) });
+      const observe = (frozen?: { executable: string; scriptLaunch?: boolean }) => verifyClaudePaneRuntime({ target: pane, tmux,
+        ...(listProcesses ? { listProcesses } : {}), ...(frozen ? { selectedExecutable: frozen.executable, scriptLaunch: frozen.scriptLaunch } : {}) });
+      // Today's recognised shapes first; then the exact executable this daemon launched in the pane (a custom path).
+      const claude = ((c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined) ?? {})["claude-code"] as
+        { launchedExecutable?: (nodeId: string, pane: string) => { executable: string; scriptLaunch?: boolean } | null } | undefined;
+      const frozen = claude?.launchedExecutable?.(nodeId, pane) ?? null;
+      const running = await observe() ?? (frozen ? await observe(frozen) : null);
       if (!running) return null;
       const emitted = emittedEffortFromArgv("claude-code", processArgv(running.process.command));
       // A switch's relaunch is restore's resume from a snapshot taken now: its effort is the seat's explicit choice, else

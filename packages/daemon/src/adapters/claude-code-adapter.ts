@@ -92,6 +92,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private listProcesses?: NativeProcessLister;
   private readinessTimeoutMs?: number;
   private autoLaunches = new Map<string, { binding: NodeBinding; token: string; freshInPlace?: boolean; executable?: string; scriptLaunch?: boolean; fingerprint?: string; process?: ClaudeLaunchedProcess }>();
+  /** The frozen executable of this daemon's managed launch now in `pane`, for read-only process observation. It's in
+   *  memory only: after a daemon restart, or for a launch this daemon didn't make, there's none. */
+  launchedExecutable(nodeId: string, pane: string): { executable: string; scriptLaunch?: boolean } | null {
+    const launch = this.autoLaunches.get(nodeId);
+    if (!launch?.executable || (launch.binding.tmuxPane && launch.binding.tmuxPane !== pane)) return null;
+    return { executable: launch.executable, ...(launch.scriptLaunch ? { scriptLaunch: true } : {}) };
+  }
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
