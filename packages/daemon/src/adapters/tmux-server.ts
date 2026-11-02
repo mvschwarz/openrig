@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
+import { nativeViewerCommand } from "../domain/terminal/native-viewer-command.js";
 
 function realpath(p: string): string {
   try {
@@ -68,12 +69,19 @@ function shellWord(value: string): string {
 }
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
-function tmuxOnDaemonServer(): string {
+function tmuxOnDaemonServer(command: readonly string[]): string {
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
-  return `tmux${server ? ` ${server}` : ""}`;
+  const executable = command.map(shellWord).join(" ");
+  return `${process.platform === "win32" && (command.length !== 1 || command[0] !== "tmux") ? "& " : ""}${executable}${server ? ` ${server}` : ""}`;
 }
 
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
-export function tmuxAttachCommand(session: string): string {
-  return `${tmuxOnDaemonServer()} attach -t ${shellWord(session)}`;
+export function tmuxAttachCommand(session: string, command: readonly string[] = ["tmux"]): string {
+  if (!command[0] || [...command, ...daemonServerArgs, session].some(value => value.includes("\0"))) throw new Error("Invalid attach command argv");
+  const argv = [...command, ...daemonServerArgs, "attach", "-t", session];
+  // PowerShell 5's native call operator alters embedded quotes and drops empty
+  // words even after shell parsing preserved them. Use the established native
+  // argv bridge for those values; ordinary recovery hints stay readable.
+  if (process.platform === "win32" && argv.some(value => value === "" || value.includes('"'))) return nativeViewerCommand(argv, "powershell.exe");
+  return `${tmuxOnDaemonServer(command)} attach -t ${shellWord(session)}`;
 }

@@ -4484,3 +4484,22 @@ changes (live-events-native-observed-final-20261103.json and
 live-events-wsl-observed-final-20261103.json). Product SSE parsing/reconnect
 code was not changed. A future complete run must still establish whether the
 earlier full-run failures recur; these scoped passes do not replace them.
+
+### Recovery guidance across the native argv boundary (2026-11-03)
+
+The previous shell-function witnesses did not establish what a native child
+receives. A new owned Node receiver, launched through an actual Windows Job
+and PowerShell 5, reproduced alteration of a double-quote-bearing session
+argument; space and apostrophe cases already passed. The guidance renderer
+now uses the existing native argv bridge for empty or double-quote-bearing
+words. Other hints retain readable platform-shell quoting. Callers can supply
+an explicit executable argv prefix; existing callers retain tmux by default.
+NUL-bearing argv and missing executable prefixes are rejected before rendering.
+
+Four related files passed 19/19 on Windows. WSL passed 14 with five native-only
+skips; daemon TypeScript checking passed. Receipts:
+attach-native-argv-before-20261103.json, attach-native-argv-after-20261103.json
+and attach-native-argv-wsl-after-20261103.json. The receiver proves child argv
+and exit status 7 without starting tmux or touching any existing sessions. It
+does not establish stock psmux's support for every session-name character,
+actual attachment, or cmd recovery-guidance parsing. Those remain unqualified.
