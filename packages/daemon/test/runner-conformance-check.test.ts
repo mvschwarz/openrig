@@ -101,6 +101,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
     ["stop-before-end", "4b", "turn end: nothing is held once the ask is withdrawn"],
     ["stop-low-sequence", "4b", "pending: no idle Stop while it waits"],
+    // An idle Stop whose occurredAt isn't a string: OpenRig dates it by its arrival, so it counts.
+    ["stop-numeric-time", "4b", "pending: no idle Stop while it waits"],
     ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
     ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
     ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
@@ -115,6 +117,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["idle-on-exit", "7", "no idle report for the turn it died in"],
     // An idle Stop numbered below the turn's accepted prompt but later in time: OpenRig orders by time first, so it counts.
     ["idle-low-sequence-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop at the accepted prompt's time with a string sequence: OpenRig reads no sequence there, so it counts.
+    ["idle-string-sequence-on-exit", "7", "no idle report for the turn it died in"],
     ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],

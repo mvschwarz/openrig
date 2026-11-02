@@ -34,6 +34,8 @@ let beatTurn = null;
 let deferredWithdraw = null;
 // --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
 let stoppedEarly = false;
+// The current turn's accepted prompt's occurredAt.
+let acceptedAt = null;
 if (beatMode) setInterval(() => {
   if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
     ...(breaks.has("beat-time-backwards") ? { occurredAt: new Date(Date.now() - 15_000).toISOString() } : {}) });
@@ -43,7 +45,8 @@ const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
 // Activity posts go one at a time, in order, and never hold up the agent.
-let sequence = 0;
+// With --break idle-string-sequence-on-exit the first post is numbered 2, so a "1" falls below the accepted prompt.
+let sequence = breaks.has("idle-string-sequence-on-exit") ? 1 : 0;
 let posting = Promise.resolve();
 let holdNextPostMs = 0;
 function post(hookEvent, subtype, extra = {}) {
@@ -122,6 +125,9 @@ agent.on("exit", async () => {
   await withdrawLive("exited");
   // --break idle-low-sequence-on-exit: an idle Stop for the dead turn, numbered below its accepted prompt but later in time.
   if (breaks.has("idle-low-sequence-on-exit")) await post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
+  // --break idle-string-sequence-on-exit: an idle Stop for the dead turn at its accepted prompt's time, numbered below it but
+  // as a string, which OpenRig doesn't read as a sequence.
+  if (breaks.has("idle-string-sequence-on-exit")) await post("Stop", "idle_heartbeat", { livenessSeconds: 30, occurredAt: acceptedAt, sequence: "1" });
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
 });
@@ -189,6 +195,8 @@ async function onPermission(msg) {
   if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
   // --break stop-low-sequence: an idle Stop while the ask waits, numbered below the accepted prompt but later in time.
   if (breaks.has("stop-low-sequence")) void post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
+  // --break stop-numeric-time: an idle Stop while the ask waits, its occurredAt a number, which OpenRig dates by arrival.
+  if (breaks.has("stop-numeric-time")) void post("Stop", "idle_heartbeat", { livenessSeconds: 30, occurredAt: 0 });
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
   live = ask;
@@ -266,7 +274,8 @@ async function prompt(text) {
   beatTurn = turn;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
-  const accepted = post("UserPromptSubmit", "accepted", { turnId: String(turn) });
+  acceptedAt = new Date().toISOString();
+  const accepted = post("UserPromptSubmit", "accepted", { turnId: String(turn), occurredAt: acceptedAt });
   if (startupIdleMs === null) await accepted; // with --startup-idle, the agent doesn't wait on the post, as in dsh's runner
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   await withdrawLive("turn_ended");
