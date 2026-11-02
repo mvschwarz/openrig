@@ -1,3 +1,4 @@
+import { daemonStartupAdmission } from "./domain/daemon-startup-admission.js";
 import { EnvironmentStartup } from "./domain/environment-startup.js";
 import { EnvironmentPlatform } from "./domain/environment-platform.js";
 import { OpenShellDriver } from "./adapters/openshell-driver.js";
@@ -557,6 +558,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
+  tmuxAdapter.startupAdmission = daemonStartupAdmission(db, eventBus, sessionRegistry, tmuxAdapter);
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
   // Lives at module scope so the projection chain (PsProjectionService,

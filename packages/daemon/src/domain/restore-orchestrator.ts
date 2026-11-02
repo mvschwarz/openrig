@@ -938,6 +938,7 @@ export class RestoreOrchestrator {
     const afterProbe = current();
     if (!afterProbe || afterProbe.name !== row.name || afterProbe.pane !== row.pane) return "Startup occupant or correction changed during the terminal probe; no replacement attempted.";
     this.tmuxAdapter.deliveryGuard?.checkInput(row.name);
+    this.tmuxAdapter.startupAdmission?.beforeDispatch(target.nodeId, row.name);
     const killed = await this.tmuxAdapter.killSession(row.name);
     if (!killed.ok) return "Could not stop the startup occupant; no replacement attempted.";
     if (!current()) return "Startup occupant changed during stop; no replacement launched.";
@@ -1083,6 +1084,15 @@ export class RestoreOrchestrator {
     warnings?: string[],
     preserveStoppedCurrent = false,
   ): Promise<RestoreNodeResult> {
+    const admission = this.tmuxAdapter.startupAdmission;
+    if (admission && !admission.owns(entry.node.id)) {
+      try { return await admission.run(entry.node.id, "restore", () =>
+        this.restoreNodeWithCompensation(entry, rigId, snapshotId, data, opts, warnings, preserveStoppedCurrent), JSON.stringify([snapshotId, opts?.freshLogicalIds, opts?.keepPane, opts?.keepEffort, opts?.selectedHistory?.historySessionId, preserveStoppedCurrent])); }
+      catch (error) { return { nodeId: entry.node.id, logicalId: entry.node.logicalId, status: "awaiting-decision", error: (error as Error).message }; }
+    }
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(entry.node.id)) return guard.lifecycle([entry.node.id], () =>
+      this.restoreNodeWithCompensation(entry, rigId, snapshotId, data, opts, warnings, preserveStoppedCurrent));
     // Compare against the live logical target without changing saved post-launch inputs.
     const node = entry.node;
     // Activity-hook restore gaps (#1530) are collected out-of-band: postLaunchRestore
@@ -2411,6 +2421,7 @@ export class RestoreOrchestrator {
         ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
       const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(nodeId, sessionName);
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
         ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
       if (result.ok) {
@@ -2446,6 +2457,7 @@ export class RestoreOrchestrator {
         : launchTail;
       const guardedCodexTail = beforeNative ? [...codexTail, ...Array(Math.max(0, 6 - codexTail.length)).fill(undefined), beforeNative] : codexTail;
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(nodeId, sessionName);
       const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model,
         ...(guardedCodexTail as [...typeof launchTail, seatCodexHome?: string, codexPermissions?: import("./codex-member-permissions.js").CodexMemberPermissions, beforeNativeDispatch?: () => boolean]));
       if (result.ok) {
@@ -2473,6 +2485,7 @@ export class RestoreOrchestrator {
     // session file returns retry_fresh, which the caller maps to the
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(nodeId, sessionName);
       const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, effort);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
@@ -2489,6 +2502,7 @@ export class RestoreOrchestrator {
       return { kind: "failed", message: result.message };
     }
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(nodeId, sessionName);
       const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);

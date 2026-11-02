@@ -49,8 +49,8 @@ describe("SuccessorSessionLauncher", () => {
     return { runtime, launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier): SuccessorSessionLauncher {
-    const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
+  function launcher(tmuxOptionDefaults?: TmuxOptionDefaultsApplier, startupAdmission?: TmuxAdapter["startupAdmission"]): SuccessorSessionLauncher {
+    const tmux = { startupAdmission, createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
     return new SuccessorSessionLauncher(tmux, discoveryRepo, {
       sessionEnv: { OPENRIG_HOME: "/home", HOME: "/daemon-home", CODEX_HOME: "/daemon-codex" },
       newId: () => "01ABCDEFG",
@@ -62,6 +62,22 @@ describe("SuccessorSessionLauncher", () => {
       tmuxOptionDefaults,
     });
   }
+
+  it.each(["in-place", "staged"])("requires admission before a %s successor touches any native process", async mode => {
+    const admission = { owns: () => false, run: vi.fn(async () => { throw new Error("Cancelled before dispatch"); }) } as unknown as NonNullable<TmuxAdapter["startupAdmission"]>;
+    const instance = launcher(undefined, admission);
+    const node = { id: "node-1", runtime: "codex", cwd: "/w" };
+    const result = mode === "in-place"
+      ? await instance.createSuccessor({ node, departingSessionName: "seat@rig" })
+      : await instance.stageSuccessor({ node, stagingSession: "staged@rig", canonicalSession: "seat@rig",
+        occupantGeneration: "selected", onPaneCreated: vi.fn(), staged: {} as never });
+    expect(result).toMatchObject({ ok: false, code: "startup_admission" });
+    expect(admission.run).toHaveBeenCalledTimes(1);
+    expect(createSession).not.toHaveBeenCalled();
+    expect(signalPaneProcess).not.toHaveBeenCalled();
+    expect(respawnPane).not.toHaveBeenCalled();
+    expect(launchHarness).not.toHaveBeenCalled();
+  });
 
   it("the successor's respawned pane gets the seat's declared env, and the declared names are recorded", async () => {
     const res = await launcher().createSuccessor({

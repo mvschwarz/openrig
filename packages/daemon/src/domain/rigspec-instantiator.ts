@@ -2359,6 +2359,11 @@ export class PodRigInstantiator {
      *  start recorded rather than read an empty request as "none". */
     keepRecordedAdditions?: boolean;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; code?: string; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    const admission = this.deps.tmuxAdapter?.startupAdmission;
+    if (admission && !admission.owns(input.nodeId)) {
+      try { return await admission.run(input.nodeId, "first start", () => this.launchExistingAgentMember(input)); }
+      catch (error) { return { status: "attention_required", error: (error as Error).message }; }
+    }
     const guard = this.deps.tmuxAdapter?.deliveryGuard;
     if (guard && !guard.ownsLifecycle(input.nodeId)) {
       return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));

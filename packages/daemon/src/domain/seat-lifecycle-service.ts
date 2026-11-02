@@ -1510,6 +1510,11 @@ export class SeatLifecycleService {
     }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    const admission = this.tmuxAdapter.startupAdmission;
+    if (admission && !admission.owns(resolved.nodeId)) {
+      try { return await admission.run(resolved.nodeId, "fresh launch", () => this.launchFresh(input), JSON.stringify([input.fresh, input.stop, input.reason, input.operator])); }
+      catch (error) { return { ok: false, code: "attention_required", status: "attention_required", message: (error as Error).message }; }
+    }
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
       return guard.lifecycle([resolved.nodeId], () => this.launchFresh(input));
@@ -1567,6 +1572,7 @@ export class SeatLifecycleService {
     if (canonicalProbe.state === "present") {
       const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
       if ("code" in currentSession) return currentSession;
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(resolved.nodeId, canonicalSessionName);
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,

@@ -273,6 +273,18 @@ function state(activity: string, needs = 0): ArbitratedSeatState {
 }
 
 describe("rig seat restart --keep-conversation: gates before any signal", () => {
+  it("obtains shared admission before stopping a healthy in-place restart", async () => {
+    const w = world();
+    const run = vi.fn(async () => { throw new Error("Cancelled before native dispatch"); });
+    Object.assign(w.tmux, { startupAdmission: { owns: () => false, run } });
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: "selected restart" });
+    expect(result).toMatchObject({ ok: false, code: "startup_admission" });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(w.relaunched).toBe(false);
+    expect(w.launches).toEqual([]);
+    expect(w.events()).toEqual([]);
+  });
+
   it("plan reports activity, child processes and settings, and changes nothing", async () => {
     const w = world({ activity: state("working") });
     w.setRows([shellRow(100, 200), codexRow(200, 100, `-m gpt-5.5 -s workspace-write resume ${TOKEN}`),

@@ -82,18 +82,43 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
     .argument("[nodeRef]", "Node logical ID or node ID (single target)")
     .option("--seats <ids>", "Comma-separated logical IDs for subset launch")
     .option("--hold-reason <reason>", "Reason for holding non-target seats")
+    .option("--startup-admission <action>", "Inspect a pending start, cancel before dispatch, or continue one despite memory risk: status|cancel|continue")
     .option("--snapshot-id <id>", "Use this exact restore-usable snapshot")
     .option("--retry-startup-from <member-file>", "Retry a stopped first start that failed during projection, using its original member fragment")
     .option("--rig-root <path>", "Original absolute source root for --retry-startup-from")
     .option("--plan", "Show restore selection and non-target effects without mutation; does not preview first start of a never-started materialized seat")
     .option("--json", "JSON output")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (rigHandle: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {
+    .action(async (rigHandle: string, nodeRef: string | undefined, opts: { startupAdmission?: string; json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly.
       opts.host = resolveEffectiveHost(opts.host);
       const deps = getDeps();
+      if (opts.startupAdmission) {
+        if (!nodeRef || !["status", "cancel", "continue"].includes(opts.startupAdmission) || opts.seats || opts.plan || opts.snapshotId || opts.retryStartupFrom || opts.rigRoot || opts.holdReason) {
+          console.error("Startup admission requires one seat and status, cancel or continue; do not combine it with a launch selection.");
+          process.exitCode = 1; return;
+        }
+        const body = { action: opts.startupAdmission };
+        if (opts.host) {
+          const { runRemoteHttpOp, lookupRemoteRigId } = await import("../remote-host-ops.js");
+          const lookup = await lookupRemoteRigId(opts.host, rigHandle, deps);
+          if (lookup.kind === "ambiguous") { refuseAmbiguousRig(rigHandle, lookup.ids, opts.json, opts.host, lookup.count); return; }
+          const id = lookup.kind === "resolved" ? lookup.rigId : rigHandle;
+          const answer = await runRemoteHttpOp(opts.host, "POST", `/api/rigs/${encodeURIComponent(id)}/nodes/${encodeURIComponent(nodeRef)}/startup-admission`, body, deps, opts);
+          console.log(JSON.stringify(answer.ok ? answer.data : answer, null, 2));
+          if (!answer.ok) process.exitCode = 1;
+        } else {
+          const client = await getClient(deps); if (!client) { process.exitCode = 1; return; }
+          const lookup = await resolveRigHandle(client, rigHandle);
+          if (lookup.kind === "ambiguous") { refuseAmbiguousRig(rigHandle, lookup.ids, opts.json); return; }
+          const id = lookup.kind === "resolved" ? lookup.id : rigHandle;
+          const answer = await client.post(`/api/rigs/${encodeURIComponent(id)}/nodes/${encodeURIComponent(nodeRef)}/startup-admission`, body);
+          console.log(JSON.stringify(answer.data, null, 2)); if (answer.status >= 400) process.exitCode = 1;
+        }
+        return;
+      }
       let retryBody: { retryStartupFrom: { member: Record<string, unknown>; rigRoot: string } } | undefined;
       if (opts.retryStartupFrom || opts.rigRoot) {
         if (!nodeRef || !opts.retryStartupFrom || !opts.rigRoot || !isAbsolute(opts.rigRoot) || opts.seats || opts.snapshotId || opts.plan || opts.holdReason) {

@@ -380,6 +380,7 @@ export class NodeLauncher {
     }
     // The guard resolves the selected seat before writing to its immutable pane id.
     const inputTarget = this.tmuxAdapter.deliveryGuard ? nodeId : pane;
+    this.tmuxAdapter.startupAdmission?.beforeDispatch(nodeId, sessionName);
     const ended = await terminatePaneInPlace(this.tmuxAdapter, pane, this.paneExit, "The seat's process", inputTarget);
     if (!ended.ok) return { ok: false, code: "pane_process_not_ended", message: ended.message };
     const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";

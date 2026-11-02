@@ -1,3 +1,4 @@
+import { StartupAdmissionError } from "./startup-admission.js";
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
@@ -333,7 +334,16 @@ export class StartupOrchestrator {
 
   async startNode(input: StartupInput): Promise<StartupResult> {
     const warnings: string[] = [];
-    const result = await this.startNodeWithWarnings(input, warnings);
+    const work = () => this.startNodeWithWarnings(input, warnings);
+    let result: StartupResult;
+    try {
+      result = this.tmuxAdapter.startupAdmission
+        ? await this.tmuxAdapter.startupAdmission.run(input.nodeId, "startup", work, JSON.stringify([input.sessionId, input.binding.launchGeneration]))
+        : await work();
+    } catch (error) {
+      if (!(error instanceof StartupAdmissionError)) throw error;
+      return { ok: false, startupStatus: "attention_required", errors: [error.message] };
+    }
     return { ...result, ...(warnings.length ? { warnings: [...new Set(warnings)] } : {}) };
   }
 
@@ -607,6 +617,7 @@ export class StartupOrchestrator {
           if (input.beforeNativeLaunch && !input.beforeNativeLaunch()) {
             return this.fail(input, "attention_required", ["The selected seat, settings or history changed after preparation; native resume was not dispatched."], undefined, false, undefined, false, "harness_launch", true);
           }
+          this.tmuxAdapter.startupAdmission?.beforeDispatch(input.nodeId, input.binding.tmuxSession ?? undefined);
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             ...(launchPrompt ? { firstInputText: launchPrompt.prompt } : {}),

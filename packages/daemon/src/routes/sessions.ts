@@ -178,6 +178,7 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const modelReader = c.get("currentModelReader" as never) as CurrentModelReader | undefined;
   const observations = modelReader ? await modelReader.observeInventory(withTerminalAndWork) : null;
   const nodes = withTerminalAndWork.map((n, i) => ({ ...n, hostSelfId,
+    startupAdmission: deps.tmuxAdapter.startupAdmission?.status(n.nodeId) ?? null,
     modelObservation: observations?.[i] ?? unknownModelObservation("observer-unavailable"),
   }));
   return c.json(nodes);
@@ -204,6 +205,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
     agentActivity: deps.agentActivityStore,
   });
   Object.assign(detail, {
+    startupAdmission: deps.tmuxAdapter.startupAdmission?.status(detail.nodeId) ?? null,
     needsAttention: detailWithTerminalAndWork?.needsAttention,
     arbitratedNeedsInput: detailWithTerminalAndWork?.arbitratedNeedsInput,
     needsInputEvidence: detailWithTerminalAndWork?.needsInputEvidence,
@@ -258,6 +260,23 @@ nodesRoutes.get("/:logicalId", async (c) => {
   }
 
   return c.json(detail);
+});
+
+// Startup admission controls never acquire the seat lifecycle lease held by a waiting launch.
+nodesRoutes.post("/:logicalId/startup-admission", async c => {
+  const { rigRepo, tmuxAdapter } = getDeps(c);
+  const rigId = c.req.param("rigId")!;
+  const ref = c.req.param("logicalId")!;
+  const node = rigRepo.getRig(rigId)?.nodes.find(node => node.logicalId === ref || node.id === ref);
+  if (!node) return c.json({ error: "Seat not found" }, 404);
+  const admission = tmuxAdapter.startupAdmission;
+  if (!admission) return c.json({ error: "Startup admission is unavailable on this daemon" }, 503);
+  const body = await c.req.json().catch(() => ({})) as { action?: string };
+  if (!["status", "cancel", "continue"].includes(body.action ?? "")) return c.json({ error: "Use status, cancel or continue" }, 400);
+  if (body.action !== "status" && !admission.control(node.id, body.action as "cancel" | "continue")) {
+    return c.json({ error: "No cancellable queued request. Native input is never cancelled or replayed here.", admission: admission.status(node.id) }, 409);
+  }
+  return c.json({ ok: true, admission: admission.status(node.id), requestActive: admission.pending(node.id), options: admission.options });
 });
 
 // POST /api/rigs/:rigId/nodes/:logicalId/launch

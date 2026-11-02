@@ -235,6 +235,8 @@ one is dropped without a message.
 
 ### Readiness, startup proof and failure
 
+Managed starts share [memory admission and pacing](host-resources.md#pace-managed-startup-memory) within the owning daemon. A queued request has status/cancel/continue controls; a timed-out client does not authorize another native launch.
+
 **Readiness.** After launch OpenRig polls the pane until the harness is interactive (backing off 1, 2, 4, 8 and 16
 seconds), for up to 30 seconds by default. Change the window with
 `rig config set runtime.readiness_timeout_seconds <1-600>` (or `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`); it

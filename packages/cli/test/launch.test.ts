@@ -54,6 +54,13 @@ describe("rig launch --seats", () => {
     process.exitCode = undefined;
   });
 
+  it.each(["status", "cancel", "continue"])("routes startup admission %s without posting a new launch", async action => {
+    const deps = makeDeps({ "startup-admission": { status: 200, data: { ok: true, admission: { phase: "held" } } } });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.driver", "--startup-admission", action]);
+    expect(deps._client.post).toHaveBeenCalledTimes(1);
+    expect(deps._client.post).toHaveBeenCalledWith("/api/rigs/rig-1/nodes/dev.driver/startup-admission", { action });
+  });
+
   it("posts to launch-subset with seats array and holdReason", async () => {
     const deps = makeDeps({
       "launch-subset": {

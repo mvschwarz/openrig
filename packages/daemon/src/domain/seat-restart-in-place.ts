@@ -37,7 +37,7 @@ import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 export type InPlaceRestartTmux = Pick<TmuxAdapter,
   | "getPanePid" | "getPaneCommand" | "listPanes" | "getSessionEnv" | "signalPid" | "setRemainOnExit"
   | "signalPaneProcess" | "isPaneDead" | "respawnPane" | "getPaneLocalOption" | "restorePaneOption"
-  | "capturePaneHistory" | "capturePaneHistoryParts">;
+  | "capturePaneHistory" | "capturePaneHistoryParts" | "startupAdmission">;
 
 /** The Codex runtime adapter's resume surface this operation reuses. */
 export interface InPlaceCodexLauncher {
@@ -104,7 +104,7 @@ export interface InPlaceRestartTarget {
 
 export type InPlaceRestartRefusalCode =
   | "pane_unverified" | "pane_shape_unknown" | "resume_binding_unverified" | "settings_unverified"
-  | "settings_drift" | "restart_in_progress" | "relaunch_unavailable" | "tmux_probe_failed";
+  | "startup_admission" | "settings_drift" | "restart_in_progress" | "relaunch_unavailable" | "tmux_probe_failed";
 
 export interface InPlaceRestartRefusal { ok: false; code: InPlaceRestartRefusalCode; message: string; guidance?: string; detail?: unknown }
 
@@ -239,10 +239,16 @@ export class CodexInPlaceRestart {
   }
 
   async execute(target: InPlaceRestartTarget, input: { reason: string; operator: string | null; seenStartedSeq: number }): Promise<InPlaceRestartReport | InPlaceRestartRefusal> {
+    const admission = this.deps.tmux.startupAdmission;
+    if (admission && !admission.owns(target.seat.nodeId)) {
+      try { return await admission.run(target.seat.nodeId, "in-place restart", () => this.execute(target, input), JSON.stringify([input.reason, input.operator, input.seenStartedSeq])); }
+      catch (error) { return { ok: false, code: "startup_admission", message: (error as Error).message }; }
+    }
     const observed = await this.observe(target, input.seenStartedSeq);
     if (!observed.ok) return observed;
     const { report } = observed;
     const { sessionName, seat } = target;
+    this.deps.tmux.startupAdmission?.beforeDispatch(target.seat.nodeId, target.sessionName);
     this.persist({
       type: RESTART_STARTED, rigId: seat.rigId, nodeId: seat.nodeId, logicalId: seat.logicalId, sessionName,
       pane: report.pane, paneShape: report.paneShape, oldPid: observed.codexPid, oldStartedAt: observed.codexStartedAt,

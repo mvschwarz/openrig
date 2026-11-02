@@ -383,6 +383,14 @@ describe("SeatLifecycleService.launchFresh", () => {
     }
   });
 
+  it("never enters startup admission or launches from a fresh preview", async () => {
+    const seat = seedSeat({ clean: true });
+    const run = vi.fn(async () => { throw new Error("a preview cannot admit native work"); });
+    Object.assign(tmux, { startupAdmission: { owns: () => false, run } });
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(result).toMatchObject({ ok: true, planOnly: true });
+    expect(run).not.toHaveBeenCalled(); expect(tmux.createSession).not.toHaveBeenCalled();
+  });
   it.each([false, true])("previews fresh launch without changing target, siblings or startup state (live=%s)", async live => {
     const seat = seedSeat({ clean: !live });
     const sibling = rigRepo.addNode(seat.rig.id, "dev.qa", { runtime: "claude-code", cwd: "/sibling" });

@@ -379,6 +379,8 @@ function usableEnvLine(lines: readonly string[], name: string): boolean {
 }
 
 export class TmuxAdapter {
+  /** Shared owning-daemon admission, absent on isolated adapters and test fixtures. */
+  startupAdmission?: import("../domain/startup-admission.js").StartupAdmission;
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
   launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>>;
     /** The runtime directory a seat gets when it has none of its own (seat-runtime-dir.ts); none on macOS. */

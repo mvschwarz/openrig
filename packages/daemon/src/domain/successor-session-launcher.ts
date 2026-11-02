@@ -191,6 +191,13 @@ export class SuccessorSessionLauncher {
      *  post-fork token, never the parent's. Absent → a plain fresh launch. */
     forkSource?: ForkSource;
   }): Promise<SuccessorLaunchResult> {
+    const admission = this.tmuxAdapter.startupAdmission;
+    if (admission && !admission.owns(input.node.id)) {
+      try { return await admission.run(input.node.id, "successor", () => this.createSuccessor(input), JSON.stringify([input.departingSessionName, input.occupantGeneration, input.forkSource])); }
+      catch (error) { return { ok: false, code: "startup_admission", message: (error as Error).message, step: "create_successor", replacementStarted: false }; }
+    }
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(input.node.id)) return guard.lifecycle([input.node.id], () => this.createSuccessor(input));
     // CUTOVER MODEL (plan 411c43de): a SEAT = one durable tmux session; the successor takes over the
     // retiree's EXACT pane via respawn-pane, so the canonical session name is PRESERVED (no -h shuffle)
     // and native scrollback survives — predecessor history stays above the successor boot (the money
@@ -245,6 +252,7 @@ export class SuccessorSessionLauncher {
     //    money-proof). The swap: set remain-on-exit so the pane survives the exit → graceful SIGTERM
     //    ("exits in place"; also protects the provider session state the successor's resume depends on) →
     //    bounded-timeout SIGKILL fallback (pinned degraded path) → respawn-pane (no -k) on the dead pane.
+    this.tmuxAdapter.startupAdmission?.beforeDispatch(input.node.id, input.departingSessionName);
     const terminated = await this.terminateRetiree(pane.id);
     if (!terminated.ok) {
       return { ok: false, code: "retiree_not_terminated", step: "create_successor", message: terminated.message, replacementStarted: false };
@@ -335,6 +343,13 @@ export class SuccessorSessionLauncher {
     staged: Omit<StagedLaunch, "canonicalSession">;
   }): Promise<{ ok: true; tmuxPane: string; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation; notes?: string[] }
     | { ok: false; code: string; message: string }> {
+    const admission = this.tmuxAdapter.startupAdmission;
+    if (admission && !admission.owns(input.node.id)) {
+      try { return await admission.run(input.node.id, "staged successor", () => this.stageSuccessor(input), input.occupantGeneration); }
+      catch (error) { return { ok: false, code: "startup_admission", message: (error as Error).message }; }
+    }
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(input.node.id)) return guard.lifecycle([input.node.id], () => this.stageSuccessor(input));
     const env = compactEnv({
       OPENRIG_NODE_ID: input.node.id,
       OPENRIG_SESSION_NAME: input.canonicalSession,
@@ -443,6 +458,7 @@ export class SuccessorSessionLauncher {
 
     let launch: Awaited<ReturnType<RuntimeAdapter["launchHarness"]>>;
     try {
+      this.tmuxAdapter.startupAdmission?.beforeDispatch(node.id, tmuxSession);
       launch = await adapter.launchHarness(binding, staged
         ? { name: staged.canonicalSession }
         : { name: tmuxSession, ...(forkSource ? { forkSource } : { freshInPlace: true }) });

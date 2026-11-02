@@ -254,6 +254,7 @@ export type RigEvent =
   // AgentSpec reboot events — pods + startup + continuity
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
+  | { type: "node.startup_admission"; rigId: string; nodeId: string; admission: import("./startup-admission.js").StartupAdmissionSnapshot }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_first_input_passed"; rigId: string; nodeId: string; sessionId: string; path: string; submission: "unconfirmed" }
   | { type: "node.startup_model_passed"; rigId: string; nodeId: string; sessionId: string; model: string; resume: boolean }

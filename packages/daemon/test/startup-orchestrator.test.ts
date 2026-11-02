@@ -162,7 +162,7 @@ describe("StartupOrchestrator", () => {
       await permit;
       return work();
     });
-    Object.assign(tmux, { startupAdmission: { run } });
+    Object.assign(tmux, { startupAdmission: { run, beforeDispatch: () => {} } });
     const adapter = mockAdapter();
     const attempt = createOrchestrator().startNode(makeInput(seedSession(), { adapter }));
     try {
@@ -183,7 +183,7 @@ describe("StartupOrchestrator", () => {
       await permit;
       return work();
     });
-    Object.assign(tmux, { startupAdmission: { run } });
+    Object.assign(tmux, { startupAdmission: { run, beforeDispatch: () => {} } });
     const first = seedSession();
     const otherRig = rigRepo.createRig("other-rig");
     const otherNode = rigRepo.addNode(otherRig.id, "other", { runtime: "claude-code" });

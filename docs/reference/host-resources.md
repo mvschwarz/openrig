@@ -59,3 +59,65 @@ and is retried; normal config
 writes reject invalid values. Changing `transcripts.enabled` or
 `transcripts.path` still requires a daemon restart. This feature does not impose
 CPU quotas or allocate build slots.
+
+
+## Pace managed startup memory
+
+One shared admission gate coordinates this daemon's managed starts and resumes,
+including overlapping rig requests, staged successors and in-place restarts.
+It admits one at a time by default. It preserves the selected conversation,
+model, effort and dependency order; it does not evict healthy seats or choose a
+fresh conversation to reduce memory. It does not coordinate other daemons,
+users, manual native launches or memory on remote execution hosts. A local
+proxy's admission is not protection for its remote guest's memory.
+
+Readiness proves the runtime became interactive; it does not prove its memory
+peak ended. Admission retains the slot for bounded pacing after readiness.
+Linux observations use MemAvailable, readable cgroup v2 headroom and memory PSI
+(pressure is high at some avg10 >= 10% or full avg10 >= 1%). macOS uses the
+read-only memory_pressure -Q percentage and the kernel's memory-pressure level.
+These are OS-specific observations, not equivalent guarantees of free capacity.
+Samples older than five seconds are unavailable.
+
+Set these environment variables on the daemon's next ordinary start; they do
+not change a running daemon's policy:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| OPENRIG_STARTUP_CONCURRENCY | 1 | Concurrent managed startup operations, integer 1-16. |
+| OPENRIG_STARTUP_HEADROOM_PERCENT | 25 | Defer below this observed headroom percentage, integer 0-90. |
+| OPENRIG_STARTUP_SETTLE_MS | 3000 | Pacing after the native operation returns, 0-60000 ms, capped by SETTLE_LIMIT_MS. |
+| OPENRIG_STARTUP_SETTLE_LIMIT_MS | 15000 | Maximum settling time after native return, 0-120000 ms. |
+| OPENRIG_STARTUP_STRICT_TELEMETRY | unset | Set to 1 to wait when memory observations are unavailable. |
+
+The defaults are conservative pacing settings, not a promise that a particular
+conversation fits a laptop. Missing, stale or unreadable observations normally
+serialize starts, retain readiness and bounded pacing, and report that memory
+protection is unavailable. Strict telemetry waiting is opt-in. Known pressure
+or a real headroom deficit can defer dispatch even with other telemetry missing.
+A one-seat deficit means no startup operation holds another slot: waiting for
+another start to finish cannot by itself make that seat fit.
+
+Inspect and control the original request without submitting another launch:
+
+```bash
+rig launch my-rig my-seat --startup-admission status --json
+rig launch my-rig my-seat --startup-admission cancel --json
+rig launch my-rig my-seat --startup-admission continue --json
+```
+
+The rig may be an ID or an unambiguous name; --host selects the destination
+daemon. Cancel applies only before native dispatch or an incumbent stop. It
+never kills a native child. Continue deliberately admits one queued request
+despite its observed memory risk, once its concurrency slot is free; it cannot
+repeat an unresolved launch. Admission facts also appear on node inventory,
+node detail and node.startup_admission events. requestActive distinguishes a
+live waiting request from retained historical status after a daemon restart.
+
+A client timeout does not cancel server-side startup. Repeated matching requests
+join its existing attempt while it remains owned. After a daemon restart,
+reconcile an interrupted native attempt before retrying; a live or unknown
+process is not permission to send another resume. A queued request that never
+dispatched can be requested again through the original start command. Retained
+ready evidence or proven native absence resolves interrupted custody. Failed
+or unconfirmed starts remain visible rather than being retried automatically.
