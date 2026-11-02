@@ -1,5 +1,21 @@
 # Native Windows parity: implementation and evidence
 
+## Qualified physical name-transition recovery foundation (2026-11-03)
+
+A separate transition implementation now reobserves the source and destination
+around physical rename and marker repair. Recovery accepts only the recorded
+server PID, session ID, creation time, node and generation, with the expected old
+or final marker. An applied rename whose reply was lost is not replayed; moving
+to an ordinary name removes the previous marker. Unknown observations, foreign
+markers, occupied destinations and lost lifecycle ownership retain pending intent.
+Malformed identity fields are refused even if a test occupant matches them.
+
+Controlled fault tests cover failures before rename, after rename and after marker
+write. This module is not yet connected to the real terminal transport, whose
+command-boundary identity checks remain required. The runtime exchange planner
+still rejects encoded names. No real mapped-name rename acceptance, deployment
+or public push is claimed by this checkpoint.
+
 ## Durable per-rename intent for name/marker recovery (2026-11-03)
 
 The existing runtime-switch journal can now retain a qualified rename intent
