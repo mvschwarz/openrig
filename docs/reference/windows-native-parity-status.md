@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Repaired paired terminal checkpoint at 239daf4 (2026-11-03)
+
+The same 20 terminal/lifecycle/CLI files were rerun at
+`239daf402577a231e5c863dd79d43582ab3d8954` after the inert SystemRoot fixture
+correction. Both selected 576 tests: Windows passed 571 with five skips; WSL
+passed 569 with seven skips; neither failed. The earlier failed WSL checkpoint
+remains historical evidence and is not rewritten as success. The 4,736 public
+regular files matched before/after both current runs. WSL's paired daemon build
+passed, and the existing private dependency's normalized Git identity matched
+before/after build and after the suite without viewing or copying the source.
+Six documentation links and untracked/generated mirror files remain outside
+complete checkout equivalence. Different Node versions and skips prevent a
+performance claim from these durations.
+
+This refreshes only the selected terminal paths. It is not a full daemon or
+workspace result, real provider/stock-psmux acceptance or deployment. Further
+call-site review found pure session names still entering generic pane command,
+PID and capture APIs; those need explicit contract review and regression before
+arbitrary native-name behavior can be claimed complete. The installed gate at
+0182c73 predates only the test/document correction, but is still reported at its
+own head. No user-team operation or public push occurred.
+
 ## Current installed gate and paired terminal checkpoint at 0182c73 (2026-11-03)
 
 The complete native build/pack/isolated-prefix install gate passed at
