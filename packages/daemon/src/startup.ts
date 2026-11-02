@@ -1268,7 +1268,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // workspace, not the daemon installation tree. Without this
       // cwdOverride, BootstrapOrchestrator refuses with
       // "cwd is inside the OpenRig installation". Use the resolved
-      // workspace.root setting as the per-operator default.
+      // workspace.root setting as the per-operator default; a new kernel
+      // works in its `kernel` folder (prepareNewKernelCwd).
       cwdOverride: runtimeSettings.workspaceRoot,
       degradedTimeoutMs,
       // A kernel a reboot left down comes back the way `rig up kernel --existing` brings it back.

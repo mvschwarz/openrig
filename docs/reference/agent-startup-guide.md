@@ -741,6 +741,30 @@ rig uses it, so it stays until then. To remove it sooner, by hand:
 3. Keep a copy of the file, remove only those lines, and compare the result with
    the copy: nothing else in the file should differ.
 
+**The kernel's own folder.** A newly created default kernel works in
+`<workspace.root>/kernel`, beside your projects (`<workspace.root>/projects` by
+default) rather than above them. Claude reads `CLAUDE.md` from a seat's folder
+and from every folder above it, so a kernel working in the workspace root put its
+guidance into every Claude project seat below it. If that folder can't be made,
+the new kernel works in the workspace root, as before.
+
+A kernel that already exists keeps its folders, usually `workspace.root`.
+Upgrading moves no seat, changes no restored conversation and removes no file.
+To move an existing kernel yourself, if you want to:
+
+1. Save the new folder for each kernel seat with `rig seat set-cwd <seat> --cwd
+   <workspace.root>/kernel --reason <text>`, using the absolute path. It creates
+   the folder ([details](#change-an-existing-seats-working-directory)).
+2. Choose when each seat adopts it. A seat keeps its current folder until it
+   starts again, and the new start doesn't continue its current native
+   conversation: `rig seat launch <seat> --fresh --stop --reason <text>` starts a
+   blank one, and `rig handover <seat> --source rebuild --reason <text>` carries
+   durable context into a new one. Nothing does this for you.
+3. Tidy the old `<workspace.root>/CLAUDE.md` (or `AGENTS.md`) by hand. Remove only
+   OpenRig's managed blocks, each from its `<!-- BEGIN OpenRig MANAGED BLOCK: … -->`
+   line through its `END` line, as in the steps above, and keep everything else,
+   including your own text. Don't move or delete the whole file.
+
 **Separate project context from role**
 
 Don't put project documentation inside the role guidance. The role is about the agent's function; project context is about what the agent is working on. Use rig-level or pod-level startup files for project context.
