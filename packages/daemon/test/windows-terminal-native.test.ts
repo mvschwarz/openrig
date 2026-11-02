@@ -29,20 +29,22 @@ function ownedInvoker(dir: string) {
     HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir,
     PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: config,
   };
-  return async (argv: string[]) => {
+  const invoke = async (argv: string[]) => {
     const args = ["-L", namespace, ...argv.slice(1)];
     // The owned config selects a real profile-free shell. Do not append a
     // second -- command over the adapter's private production bootstrap.
     return (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, args, { env, cwd: dir, windowsHide: true, timeout: 10000 })).stdout;
   };
+  return Object.assign(invoke,{environment:env,namespace});
 }
 
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
-  it("exchanges owned session names without moving or killing either ConPTY",async()=>{
+  it.each([0,1,2])("exchanges owned session names without moving or killing either ConPTY (attached clients=%i)",async clientCount=>{
     const dir=mkdtempSync(path.join(os.tmpdir(),"openrig-native-name-exchange-"));
     const suffix=randomUUID(),canonical=`owned-canonical-${suffix}`,staging=`owned-staging-${suffix}`,parked=`owned-parked-${suffix}`,nodeId=`owned-node-${suffix}`;
     const invoke=ownedInvoker(dir);
     const adapter=new TmuxAdapter(async()=>{throw Error("No POSIX transport");},undefined,invoke,"psmux");
+    const clientPids:number[]=[];
     try{
       const identity={canonical,staging,parking:parked,predecessorGeneration:randomUUID(),successorGeneration:randomUUID()};
       for(const [name,generation] of [[canonical,identity.predecessorGeneration],[staging,identity.successorGeneration]]){
@@ -54,6 +56,21 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       };
       const predecessor=await before(canonical),successor=await before(staging);
       expect(predecessor.pid).toBeGreaterThan(0);expect(successor.pid).toBeGreaterThan(0);expect(predecessor.pid).not.toBe(successor.pid);
+      if(clientCount){
+        const windows=process.env.SystemRoot??"C:\\Windows";
+        const compiler=["Framework64","Framework"].map(folder=>path.join(windows,"Microsoft.NET",folder,"v4.0.30319","csc.exe")).find(existsSync);
+        expect(compiler).toBeDefined();
+        const source=path.join(dir,"hidden-client.cs"),launcher=path.join(dir,"hidden-client.exe");
+        // ShellExecute allocates the child's own console instead of inheriting
+        // the test runner's pipes. Its window stays hidden throughout.
+        writeFileSync(source,'using System; using System.Diagnostics; using System.Text.RegularExpressions; class Owned { static void Main(string[] a) { if(a.Length!=3 || !Regex.IsMatch(a[1],"^[A-Za-z0-9_-]+$") || !Regex.IsMatch(a[2],"^[A-Za-z0-9_-]+$")) throw new Exception("Invalid owned client arguments"); var s=new ProcessStartInfo(a[0],"-L "+a[1]+" attach-session -t ="+a[2]); s.UseShellExecute=true; s.WindowStyle=ProcessWindowStyle.Hidden; using(var p=Process.Start(s)) Console.WriteLine(p.Id); } }');
+        execFileSync(compiler!,["/nologo","/target:exe","/out:"+launcher,source],{windowsHide:true,stdio:"pipe"});
+        for(let index=0;index<clientCount;index++){
+          const clientPid=Number(execFileSync(launcher,[process.env.OPENRIG_TEST_PSMUX!,invoke.namespace,canonical],{env:invoke.environment,cwd:dir,windowsHide:true,encoding:"utf8"}).trim());
+          expect(Number.isSafeInteger(clientPid)&&clientPid>1).toBe(true);clientPids.push(clientPid);
+        }
+        await expect.poll(async()=>(await adapter.listClients()).filter(client=>client.session===canonical).length,{timeout:5000}).toBe(clientCount);
+      }
       const backend=adapter.nativeRuntimeExchangeTerminal(nodeId,identity);
       const exchange=async(direction:"forward"|"rollback")=>{
         for(let attempt=0;attempt<4;attempt++){
@@ -82,14 +99,23 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(active.pane).not.toBe(successor.pane);
       expect((await adapter.listSessions()).map(s=>s.name).sort()).toEqual([canonical,staging].sort());
       expect(await adapter.followNativeRuntimeExchangeClients(nodeId,identity)).toEqual({ok:true});
+      if(clientCount){
+        await expect.poll(async()=>(await adapter.listClients()).filter(client=>client.session===canonical).length,{timeout:5000}).toBe(clientCount);
+        for(const clientPid of clientPids)expect(await invoke(["tmux","list-clients","-t",`=${canonical}`,"-F","#{client_pid}|#{client_session}"])).toContain(`${clientPid}|${canonical}`);
+        await invoke(["tmux","kill-session","-t",`=${staging}`]);
+        expect(await before(canonical)).toEqual(active);
+        for(const clientPid of clientPids)expect(await invoke(["tmux","list-clients","-t",`=${canonical}`,"-F","#{client_pid}|#{client_session}"])).toContain(`${clientPid}|${canonical}`);
+        return;
+      }
       await exchange("rollback");
       expect(await before(canonical)).toEqual(predecessor);expect(await before(staging)).toEqual(successor);
     }finally{
       for(const name of [canonical,staging,parked])await invoke(["tmux","kill-session","-t",`=${name}`]).catch(()=>{});
       await invoke(["tmux","kill-server"]).catch(()=>{});
+      for(const clientPid of clientPids)await expect.poll(()=>{try{process.kill(clientPid,0);return false;}catch(error){if((error as NodeJS.ErrnoException).code==="ESRCH")return true;throw error;}},{timeout:5000}).toBe(true);
       rmSync(dir,{recursive:true,force:true,maxRetries:10,retryDelay:100});
     }
-  },30000);
+  },45000);
   it("verifies the stock pane label and lineage of an owned native provider stub", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "openrig-native-provider-"));
     const session = `owned-provider-${randomUUID()}`;

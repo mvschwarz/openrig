@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Real native attached-client following and retirement (2026-11-02)
+
+The owned stock psmux exchange test now covers zero, one and two real attached
+clients. Each attached client gets its own hidden Windows console through a
+task-owned launcher, not the test runner's redirected pipes or an existing user
+terminal. Before exchange its presence is confirmed by the server. The actual
+adapter client-following path then reconnects it to the successor's canonical
+session, retaining the same client PID.
+
+After following, removing the predecessor session leaves both the successor
+pane PID and every attached client PID connected to the canonical session.
+Final fixture shutdown confirms all hidden client processes exited before its
+directory is removed. The zero-client case still checks reverse exchange and
+restoration of both original pane identities and PIDs. All three native cases
+pass; four unrelated cases in that file were not selected.
+
+This qualifies the real attachment/following/retirement protocol path for the
+tested stock psmux host. It does not replace provider-backed runtime-switch
+acceptance, visible viewer rendering checks or the same-head full platform suite.
+The prior missing real attached-client following evidence is superseded only for
+these tested counts and lifecycle operations.
+
 ### Native runtime-switch service integration (2026-11-02)
 
 The runtime-switch service now selects the native name-exchange coordinator on
