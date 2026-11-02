@@ -1947,9 +1947,11 @@ export class TmuxAdapter {
           catch (error) { selective = error instanceof Error && error.message.includes(`unknown variable: ${probe}`); }
           if (!selective) throw new Error("Native environment selectors are not qualified");
         }
-        if (body === `-${key}`) return undefined;
-        if (!body.startsWith(`${key}=`)) throw new Error("Unexpected session environment response");
-        return body.slice(key.length + 1);
+        if (body.startsWith("-") && readPlatformEnv({ [body.slice(1)]: "removed" }, key, "win32") !== undefined) return undefined;
+        const separator = body.indexOf("=");
+        const selected = separator < 0 ? undefined : readPlatformEnv({ [body.slice(0, separator)]: body.slice(separator + 1) }, key, "win32");
+        if (selected === undefined) throw new Error("Unexpected session environment response");
+        return selected;
       }
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");

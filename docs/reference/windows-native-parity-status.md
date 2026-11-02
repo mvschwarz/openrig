@@ -5207,6 +5207,17 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Native selected-environment response keys now use the established Windows
+environment lookup rule rather than requiring the query's exact key spelling.
+Real stock psmux returned the stored uppercase name for a successful lowercase
+query, which previously caused recovery reads to fail. The owned direct-child
+fixture now verifies missing-versus-empty values, case-alias multiline reads,
+and removal through a lowercase alias followed by absence under the original
+name. It passed with successful exact-session/config cleanup. Three related
+controlled files passed all 220 checks; daemon build passed. POSIX key matching
+remains exact. This does not qualify every Unicode environment-name alias or
+replace the still-open interactive/warm-start acceptance.
+
 Real isolated WSL tmux 3.4 exposed a further POSIX readback defect: printable
 responses encode controls using VIS_CSTYLE/VIS_OCTAL while leaving literal
 backslashes unescaped. POSIX environment reads now request the shell-form
