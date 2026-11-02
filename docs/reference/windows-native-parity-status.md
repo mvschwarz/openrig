@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## TUI long native source labels (2026-11-02)
+
+Long Windows source paths now shorten by native or mixed path segments instead of collapsing to an empty ellipsis label. A single oversized filename retains its suffix. POSIX literal backslashes remain filename content. The original full path stays in the file-open action; display shortening never rewrites the target.
+
+Validation: the complete render-regression file passed 20/20 on Windows and 20/20 on ordinary-user WSL, including drive, UNC, long basename and POSIX literal-backslash cases; TUI typecheck passed. Two native runs first failed in test setup because PowerShell CodeDom could not find its transient source in global TEMP. Compiler TEMP/TMP now point to the owned stub fixture directory, with inherited case variants removed; the subsequent native run prepared and passed. The original transient-file disappearance is not attributed to a proven host cause. These tests qualify rendered text and action data, not physical desktop acceptance.
+
 ## Browser references to native daemon paths (2026-11-02)
 
 Agent startup-file chips and library rig member drilldowns now resolve references using the daemon source path's syntax, independently of the browser host. The shared browser-safe resolver handles drive paths, UNC shares, extended drive/UNC prefixes, native or mixed separators and parent segments without climbing above the drive/share root. Drive-relative Windows refs are unavailable because the browser has no per-drive working directory. POSIX backslashes remain literal filename characters. Library lookup compares normalized whole segments and preserves case distinctions.

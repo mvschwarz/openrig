@@ -45,11 +45,13 @@ public static class OpenRigTestRuntime {
   const files = ["codex", "claude"].map(name => path.join(dir, `${name}.exe`));
   if (files.every(file => fs.existsSync(file)) && fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8") === hash) return;
   const temporary = path.join(dir, `.native-${randomUUID()}.exe`);
+  // CodeDom's transient sources belong to this fixture too, not a shared TEMP.
+  const compilerEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:TEMP|TMP)$/i.test(key)));
   const script = `$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'\nAdd-Type -TypeDefinition @'\n${source}\n'@ -OutputAssembly $env:OPENRIG_TEST_STUB_ASSEMBLY -OutputType ConsoleApplication`;
   try {
     execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-      { env: { ...process.env, OPENRIG_TEST_STUB_ASSEMBLY: temporary }, windowsHide: true, timeout: 15_000, stdio: "pipe" });
+      { env: { ...compilerEnv, TEMP: dir, TMP: dir, OPENRIG_TEST_STUB_ASSEMBLY: temporary }, windowsHide: true, timeout: 15_000, stdio: "pipe" });
     for (const file of files) fs.copyFileSync(temporary, file);
     fs.writeFileSync(stamp, hash);
   } finally { fs.rmSync(temporary, { force: true }); }
