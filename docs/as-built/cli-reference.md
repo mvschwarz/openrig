@@ -25,7 +25,7 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,304 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts.
+These are counts for that source snapshot, not a claim about a deployed release. The provider-switch and set-runtime rows include the later account-home options; those additions are not included in the snapshot counts. The `environment` section and the `host edit`, `host remove` and `terminal attach` rows were added later from source at `522d635c`, and aren't in the snapshot counts either. With `environment`, main registers 91 top-level commands.
 
 ## Reading this reference
 
@@ -350,6 +350,8 @@ the sections that were not read are `null`.
 | `rig host add` | — | `--id <id>` **required**<br>`--transport <transport>` **required**<br>`--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--json` |
 | `rig host select <id>` | — | `--json` |
 | `rig host rename <name>` | — | `--json` |
+| `rig host edit <id>` | — | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--notes <text>`<br>`--json` |
+| `rig host remove <id>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |
 | `rig host list` | `ls` | `--json` |
 | `rig host doctor <id>` | — | `--posture <profile>`<br>`--public-addr <ip>`<br>`--json` |
@@ -541,6 +543,7 @@ do not establish connectivity to a live peer.
 | `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
 | `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+| `rig terminal attach <session>` | — | `--read-only` |
 
 See [named terminal sessions](../reference/terminal-sessions.md) to select a
 Herdr session per request, including session-bound previews and window reuse.
@@ -696,6 +699,24 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig community-harness` | — | — |
 | `rig community-harness list` | — | `--json` |
+
+### environment
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig environment` | — | — |
+| `rig environment setup` | — | `--directory <path>` **required**<br>`--binding <id>`<br>`--seat <address>`<br>`--rig <name>`<br>`--mcp-url <url>`<br>`--guest-base-url <origin>`<br>`--artifact-root <path>`<br>`--json` |
+| `rig environment create <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json` |
+| `rig environment attach <binding>` | — | `--seat <address>` **required**<br>`--node <id>`<br>`--gateway <ref>` **required**<br>`--workspace <ref>` **required**<br>`--name <name>` **required**<br>`--image <digest>` **required**<br>`--provider <ref>` **required**<br>`--policy <path>` **required**<br>`--guest-base-url <origin>` **required**<br>`--operation <id>`<br>`--json`<br>`--resource-id <id>` **required**<br>`--fingerprint <value>` |
+| `rig environment inspect <binding>` | — | `--live`<br>`--json` |
+| `rig environment connect <binding>` | — | `--generation <id>` **required** |
+| `rig environment export <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment checkpoint <binding>` | — | `--generation <id>` **required**<br>`--operation <id>` **required**<br>`--json` |
+| `rig environment recreate <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment completion <binding>` | — | `--request <path>` **required**<br>`--json` |
+| `rig environment effect <binding>` | — | `--effect <name>` **required**<br>`--generation <id>`<br>`--resource-id <id>`<br>`--operation <id>` **required**<br>`--engine-socket <path>`<br>`--json` |
+
+It drives the maintained OpenShell reference; see the [OpenShell example](../reference/community-harness-examples/openshell/README.md).
 
 ### fork
 

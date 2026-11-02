@@ -580,11 +580,16 @@ to a 0600 file holding the token>. Only the path is kept, as the seat's referenc
 so the token never passes through OpenRig. First the daemon checks that the file would apply and that nothing Claude Code ranks
 above the token is set (a cloud provider, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, an apiKeyHelper), and refuses with each one
 and its remedy if it is. When the token applies, the launch also unsets those names for Claude's process, so the pane shell's
-own exports can't outrank it. It takes a snapshot and checks that the snapshot resumes the seat's conversation. Then, holding
-the seat so no other stop, launch or switch runs on it in between, it sets the reference and relaunches the seat from that
-snapshot in its own pane: Claude ends there, the pane and its scrollback stay, and restore resumes the same conversation in it.
-Work in flight when it stopped doesn't carry over. Only a refusal before Claude was touched reads as unchanged; a relaunch that
-doesn't report a resumed conversation reads unknown, with the snapshot's recovery command, and isn't retried.
+own exports can't outrank it. For a running seat, it takes a snapshot and checks that the snapshot resumes the seat's
+conversation. Then, holding the seat so no other stop, launch or switch runs on it in between, it sets the reference and
+relaunches the seat from that snapshot in its own pane: Claude ends there, the pane and its scrollback stay, and restore
+resumes the same conversation in it. Work in flight when it stopped doesn't carry over. Only a refusal before Claude was
+touched reads as unchanged; a relaunch that doesn't report a resumed conversation reads unknown, with the snapshot's recovery
+command, and isn't retried. The relaunch uses the seat's own effort choice (rig seat set-effort) when there is one; otherwise
+it asks to keep the running effort, and uses the seat's saved effort when it can't. The report's effort line says which.
+A stopped seat isn't relaunched, and no snapshot is taken: the reference is saved only when the seat's next launch would
+resume its conversation, and the report prints that launch (rig launch <rig> <seat> --snapshot-id <id>, or a plain rig launch
+when restore's periodic carry resumes it). Otherwise it refuses and nothing changes.
 Seats sharing the config dir keep their own login: Claude Code reads the token from that one process's environment and doesn't
 save it. That environment is Claude's, so the tools, hooks and MCP servers it starts inherit the token, and one that prints its
 environment writes it into the transcript. A token-authenticated seat can make model requests but can't use claude.ai

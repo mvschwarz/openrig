@@ -6,7 +6,8 @@ section:
 - **identity:** the launch record, written once the conversation is open;
 - **one prompt per block:** each submitted block becomes one `session/prompt`, using bracketed paste in a TTY;
 - **turn boundaries:** reported as activity hooks, with a working beat every 10 s through a long, quiet turn;
-- **cancel:** `/abort` or Ctrl-C sends `session/cancel`, and a turn reads cancelled only when dsh says so;
+- **cancel:** `/abort` or Ctrl-C sends `session/cancel`, and a turn reads cancelled only when dsh says so. Type `/abort`
+  in the seat's pane: one sent with `rig send` arrives inside a From/To envelope, so it's an ordinary prompt;
 - **permissions:** each request goes to a person through OpenRig;
 - **resume:** it reopens the exact conversation, or says honestly that it couldn't.
 
@@ -58,8 +59,10 @@ OpenRig says the request isn't the seat's current occupant's (for example, after
 
 ## Before you declare resume
 
-The preset leaves `resume` out. The runner reopens a conversation by the method dsh advertises: `session/resume`, or
-`session/load`. When dsh advertises neither, it tries `session/resume`. It never starts a new conversation on a resume.
+The preset leaves `resume` out, so a restore stops and asks, and a fresh launch starts a new conversation.
+`rig seat restart --keep-conversation` is for Codex seats only. The runner reopens a conversation by the method dsh
+advertises: `session/resume`, or `session/load`. When dsh advertises neither, it tries `session/resume`. It never starts
+a new conversation on a resume.
 
 **Telling a missing conversation from one that won't reopen.** dsh `0.2.1-rc.2` answers `-32602` both for a
 conversation it doesn't have and for one already active elsewhere, so the runner never reads that error as missing.
