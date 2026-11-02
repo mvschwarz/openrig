@@ -1,5 +1,26 @@
 # Native Windows parity: implementation and evidence
 
+## Current shared native TUI viewer recovery (2026-11-02)
+
+Windows shared TUIs now recover Herdr/Rex terminal markers from their unique
+last-active non-control psmux client. The inherited `PSMUX_TARGET_SESSION` pins
+the full namespace/server identity; a bare pane ID never selects a server.
+The selected client's own-user token and same-bitness x86/x64 process layout are
+checked before reading its environment. Only terminal marker names leave the
+bounded native helper. Missing/unreadable/unsupported clients, tied activity,
+and a viewer change during the read return unknown without choosing another
+client. Linux keeps its `/proc` path and gains the post-read selection check.
+
+On this Windows x64 host, three focused files passed 59 tests with 9 POSIX-only
+skips, and the TUI TypeScript check passed. The same selected source files in
+the retained ordinary-user WSL mirror passed 61 with 7 native-only skips; this
+is not a whole-current-head WSL run. An owned, isolated stock psmux 3.4.0 hidden
+console client also passed actual server selection and marker retrieval, with
+no private sentinel forwarded and successful process/directory cleanup. This
+supersedes the Windows viewer-recovery implementation limitation below, but
+does not qualify ARM64, cross-bitness clients, another user's processes, actual
+Herdr desktop reuse, or all-platform parity. The main deployment was unchanged.
+
 ## Current native TUI marker casing (2026-11-02)
 
 The TUI now interprets inherited terminal marker names case-insensitively on

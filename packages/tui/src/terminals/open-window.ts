@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { helperCwd } from "../helper-cwd.js";
 import type { TerminalOpenResult } from "../daemon-client.js";
+import { windowsViewerEnvironment } from "./windows-viewer-env.js";
 
 export function terminalWindowNotice(view: string, result: TerminalOpenResult): string {
   return [
@@ -60,29 +61,56 @@ const CMUX_SOCKET_HINT = 'This TUI runs inside cmux, so cmux is installed; its s
  * The Herdr or Rex markers of the tmux client that was active last: a hint for which one the person is viewing, normally the
  * client whose key started this. tmux only counts keys a client types, so a key sent with `send-keys` or by a
  * control-mode client marks no one, and the client found may belong to a different viewer. A shared TUI runs in the
- * daemon's tmux server, so its own environment never carries the markers; they are on the attached client. Linux only
- * (the client's environment is read from /proc). Undefined when there's no single last-active Herdr or Rex client: no
+ * daemon's tmux server, so its own environment never carries the markers; they are on the attached client. Linux uses
+ * /proc; Windows reads only an own-user, same-bitness client's marker allowlist. Undefined when there's no single last-active Herdr or Rex client: no
  * client, more than one active in the same second, a client that can't be read or is in neither, or any failure. The
  * child then keeps today's detection.
  */
-export async function viewerTerminalEnv(): Promise<NodeJS.ProcessEnv | undefined> {
-  const pane = process.env["TMUX"] && process.env["TMUX_PANE"];
-  if (!pane || process.platform !== "linux") return undefined;
-  try {
-    const listed = (await promisify(execFile)("tmux", ["list-clients", "-t", pane, "-F", "#{client_activity} #{client_pid} #{client_control_mode}"],
-      { encoding: "utf8", timeout: 1000 })).stdout;
-    const clients = listed.trim().split("\n").flatMap(line => {
-      const [activity, pid, control] = line.split(" ");
-      return activity && pid && control !== "1" ? [{ activity: Number(activity), pid: Number(pid) }] : [];
+export interface ViewerEnvironmentDeps {
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  listClients(target: string): Promise<string>;
+  readClientEnvironment(pid: number): Promise<NodeJS.ProcessEnv | undefined>;
+}
+
+export async function viewerTerminalEnv(overrides: Partial<ViewerEnvironmentDeps> = {}): Promise<NodeJS.ProcessEnv | undefined> {
+  const platform = overrides.platform ?? process.platform;
+  const inherited = overrides.env ?? process.env;
+  const env = platform === "win32" ? Object.fromEntries(Object.entries(inherited).map(([key, value]) => [key.toUpperCase(), value])) : inherited;
+  const pane = env["TMUX_PANE"];
+  if (!pane || (platform !== "linux" && platform !== "win32")) return undefined;
+  // psmux pane IDs are only unique within a session/server. Never list another
+  // session's clients by interpreting a bare %N as its server name.
+  const session = env["PSMUX_TARGET_SESSION"];
+  const target = platform === "win32" ? session && !session.includes("\0") ? `=${session}` : undefined : env["TMUX"] ? pane : undefined;
+  if (!target) return undefined;
+  // PSMUX_TARGET_SESSION is the full registry/server identity (including its
+  // namespace), not a display session name to feed back through -t parsing.
+  const listClients = overrides.listClients ?? (async (selected: string) => (await promisify(execFile)("tmux", ["list-clients", ...(platform === "win32" ? [] : ["-t", selected]), "-F", "#{client_activity} #{client_pid} #{client_control_mode}"],
+    { env: inherited, encoding: "utf8", timeout: 1000, windowsHide: true })).stdout);
+  const readClientEnvironment = overrides.readClientEnvironment ?? (platform === "win32" ? windowsViewerEnvironment : async (pid: number) =>
+    Object.fromEntries((await readFile(`/proc/${pid}/environ`, "utf8")).split("\0").flatMap(entry => {
+      const at = entry.indexOf("=");
+      return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
+    })));
+  const latestClient = (listed: string): number | undefined => {
+    const clients = listed.trim().split(/\r?\n/).flatMap(line => {
+      const match = /^(\d+) (\d+) ([01])$/.exec(line);
+      if (!match || match[3] === "1") return [];
+      const activity = Number(match[1]), pid = Number(match[2]);
+      return Number.isSafeInteger(activity) && Number.isSafeInteger(pid) && pid > 0 && pid <= 0x7fffffff ? [{ activity, pid }] : [];
     });
     const newest = Math.max(...clients.map(client => client.activity));
     const latest = clients.filter(client => client.activity === newest);
-    if (latest.length !== 1) return undefined;
-    const env = Object.fromEntries((await readFile(`/proc/${latest[0]!.pid}/environ`, "utf8")).split("\0").flatMap(entry => {
-      const at = entry.indexOf("=");
-      return at > 0 ? [[entry.slice(0, at), entry.slice(at + 1)]] : [];
-    }));
-    return inHerdr(env) || inRex(env) ? Object.fromEntries(MARKER_KEYS.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])) : undefined;
+    return latest.length === 1 ? latest[0]!.pid : undefined;
+  };
+  try {
+    const pid = latestClient(await listClients(target));
+    if (pid === undefined) return undefined;
+    const markers = await readClientEnvironment(pid);
+    if (!markers || latestClient(await listClients(target)) !== pid) return undefined;
+    const selected = terminalMarkerEnvironment(markers, platform);
+    return inHerdr(selected) || inRex(selected) ? Object.fromEntries(MARKER_KEYS.flatMap(key => selected[key] === undefined ? [] : [[key, selected[key]]])) : undefined;
   } catch { return undefined; }
 }
 
