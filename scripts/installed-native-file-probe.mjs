@@ -14,13 +14,14 @@ assert.equal(typeof helpers.isWindowsDirectoryCaseSensitive(root), "boolean");
 assert.equal(helpers.windowsNamesCollide(["Name.txt", "name.txt"]), true);
 assert.equal(helpers.windowsNamesCollide(["K.txt", "K.txt"]), false);
 const source = join(root, "source.txt"), destination = join(root, "destination.txt"), alias = join(root, "old-alias.txt");
-writeFileSync(source, "owned installed replacement"); writeFileSync(destination, "retained installed original");
+// Different lengths force an archive copy even when fixture mtimes share a second.
+writeFileSync(source, "owned installed replacement with new bytes"); writeFileSync(destination, "retained installed original");
 linkSync(destination, alias); chmodSync(destination, 0o444);
 try {
   const plan = {src:{kind:"local",path:source},dst:{kind:"local",path:destination},dryRun:false};
   const copied = await runNativeLocalCopy(plan);
   assert.equal(copied.ok, true, copied.stderr);
-  assert.equal(readFileSync(destination, "utf8"), "owned installed replacement");
+  assert.equal(readFileSync(destination, "utf8"), "owned installed replacement with new bytes");
   assert.equal(readFileSync(alias, "utf8"), "retained installed original");
   assert.equal(lstatSync(alias).mode & 0o200, 0);
   assert.notEqual(lstatSync(destination).mode & 0o200, 0);
