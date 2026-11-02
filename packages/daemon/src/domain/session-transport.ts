@@ -3991,8 +3991,9 @@ export class SessionTransport {
     const runtimeNames = ["OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
     const inspected = typeof this.tmuxAdapter?.hasSessionEnvBatch === "function" || typeof this.tmuxAdapter?.hasSessionEnv === "function";
     if (typeof this.tmuxAdapter?.hasSessionEnvBatch === "function") {
-      // One fresh listing for every name, read once per diagnosis: all aliases see the same moment. A failed listing
-      // leaves every name unknown (never absent) and is not retried name by name.
+      // One batch API call per diagnosis. The adapter may need independent
+      // native selectors or lossless decoding, so this is not an atomic snapshot.
+      // Unknown entries stay unknown; this layer never retries them individually.
       let presence: Record<string, boolean | null> = {};
       try {
         presence = await this.tmuxAdapter.hasSessionEnvBatch(sessionName, [...urlNames, ...tokenNames, ...runtimeNames]);

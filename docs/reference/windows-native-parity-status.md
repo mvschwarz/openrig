@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Presence-callsite review found only the producer-link diagnostic in
+`session-transport.ts` using these APIs outside the adapter. It preserves null
+and absent map entries as UNKNOWN, allows a positively present alias to win, and
+does not turn lookup failure into restart/reconfiguration. Its stale comment
+claiming an atomic single listing was corrected to one batch API call; native
+queries may be independent. Six selected existing diagnostic regressions passed
+(259 other tests excluded by name filter), including no error/token text leaks,
+no individual retries at the diagnostic layer, endpoint fallback and prompt
+guards. This is callsite-scoped evidence, not full session-transport acceptance.
+
 Usable-environment presence now agrees with exact value reads. Native psmux
 uses deduplicated selected-key queries instead of splitting an ambiguous raw
 multiline listing, fixing case-alias false absence and assignment-looking
