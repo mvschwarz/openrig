@@ -23,7 +23,7 @@ it.runIf(process.platform === "win32").each(["owned seat", "owned'quote", 'owned
     const timer = setTimeout(() => child.kill("SIGKILL"), 15000);
     const code = await new Promise((resolve, reject) => { child.once("close", resolve); child.once("error", reject); }).finally(() => clearTimeout(timer));
     expect(code, stderr).toBe(7);
-    expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual(["-S", "C:/owned server/socket", "attach", "-t", session]);
+    expect(JSON.parse(fs.readFileSync(output, "utf8"))).toEqual(["-S", "C:/owned server/socket", "attach", "-t", "=" + session]);
   } finally {
     for (const file of [receiver, output]) if (fs.existsSync(file)) fs.unlinkSync(file);
     fs.rmdirSync(root);

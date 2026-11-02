@@ -4503,3 +4503,28 @@ and attach-native-argv-wsl-after-20261103.json. The receiver proves child argv
 and exit status 7 without starting tmux or touching any existing sessions. It
 does not establish stock psmux's support for every session-name character,
 actual attachment, or cmd recovery-guidance parsing. Those remain unqualified.
+
+### Exact recovery attachment names (2026-11-03)
+
+Recovery attachment hints previously passed a bare session name. An independent
+owned tmux 3.4 server containing only owned-neighbor confirmed that has-session
+accepts the missing bare name owned by prefix, while =owned fails and
+=owned-neighbor succeeds. The shared guidance renderer now passes =<name>,
+matching the CLI's existing exact-name attachment behavior. Inventory, recovery
+actions, CMUX layout and session-route expectations were updated to preserve
+that target. The temporary server and its directory were removed.
+
+Windows passed 262 tests in the initial seven-file validation and 99 in the
+final CMUX/session-route recheck; WSL's combined eleven-file run passed 393 with
+four native-only skips. Daemon TypeScript checking passed. Receipts:
+attach-exact-native-after-20261103.json, attach-exact-callers-final-20261103.json,
+attach-exact-wsl-final-20261103.json and tmux-exact-target-oracle-20261103.json.
+The inventory MCP shell-parser test now uses actual PowerShell on Windows
+instead of unconditionally spawning /bin/sh; it remains a shell-function
+witness, not native Claude argv or provider acceptance.
+
+The target oracle uses has-session's session-target semantics. An earlier
+display-message attempt was not a valid oracle for that grammar and did not
+establish an attach result. No GUI attachment or stock psmux prefix behavior
+was qualified by the Linux oracle. Exact naming also does not close the
+existing concurrent same-name replacement/PID atomicity gap.

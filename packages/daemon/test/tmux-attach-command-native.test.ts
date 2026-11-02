@@ -9,7 +9,7 @@ it.each(["owned-seat", "owned seat", "owned'quote", "owned;$literal"])("attach g
   const server = "/owned server/quo'te";
   setDaemonTmuxServer(["-S", server]);
   const command = tmuxAttachCommand(session);
-  const expected = ["-S", server, "attach", "-t", session];
+  const expected = ["-S", server, "attach", "-t", "=" + session];
   if (process.platform === "win32") {
     const script = "function tmux { ConvertTo-Json -Compress -InputObject @($args) }\n" + command;
     const output = execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),

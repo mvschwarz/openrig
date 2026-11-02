@@ -78,10 +78,13 @@ function tmuxOnDaemonServer(command: readonly string[]): string {
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxAttachCommand(session: string, command: readonly string[] = ["tmux"]): string {
   if (!command[0] || [...command, ...daemonServerArgs, session].some(value => value.includes("\0"))) throw new Error("Invalid attach command argv");
-  const argv = [...command, ...daemonServerArgs, "attach", "-t", session];
+  // This API receives a session name, not a tmux target expression. A stale
+  // hint must not fall back to a surviving session with the same prefix.
+  const target = "=" + session;
+  const argv = [...command, ...daemonServerArgs, "attach", "-t", target];
   // PowerShell 5's native call operator alters embedded quotes and drops empty
   // words even after shell parsing preserved them. Use the established native
   // argv bridge for those values; ordinary recovery hints stay readable.
   if (process.platform === "win32" && argv.some(value => value === "" || value.includes('"'))) return nativeViewerCommand(argv, "powershell.exe");
-  return `${tmuxOnDaemonServer(command)} attach -t ${shellWord(session)}`;
+  return `${tmuxOnDaemonServer(command)} attach -t ${shellWord(target)}`;
 }

@@ -141,7 +141,7 @@ describe("Node Inventory Projection", () => {
 
     const entries = getNodeInventory(db, "rig-1");
     const entry = entries.find((e) => e.logicalId === "dev.impl");
-    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t dev-impl@test-rig");
+    expect(entry?.tmuxAttachCommand).toBe("tmux attach -t =dev-impl@test-rig");
   });
 
   it("tmuxAttachCommand names the daemon's tmux server when it isn't the default one", () => {
@@ -150,7 +150,7 @@ describe("Node Inventory Projection", () => {
     setDaemonTmuxServer(["-L", "person"]);
     try {
       const entry = getNodeInventory(db, "rig-1").find((e) => e.logicalId === "dev.impl");
-      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t dev-impl@test-rig");
+      expect(entry?.tmuxAttachCommand).toBe("tmux -L person attach -t =dev-impl@test-rig");
     } finally {
       setDaemonTmuxServer([]);
     }
@@ -182,7 +182,11 @@ describe("Node Inventory Projection", () => {
       .filter((command): command is string => command?.startsWith("claude ") === true);
     expect(commands).toHaveLength(resumeToken ? 3 : 1);
     for (const command of commands) {
-      const argv = execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).trim().split("\n");
+      const argv: string[] = process.platform === "win32"
+        ? JSON.parse(execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from("function claude { ConvertTo-Json -Compress -InputObject @($args) }\n" + command, "utf16le").toString("base64")],
+          { encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim())
+        : execFileSync("/bin/sh", ["-c", `claude() { printf '%s\\n' "$@"; }; ${command}`], { encoding: "utf8" }).trim().split("\n");
       expect(argv).toContain("--resume");
       expect(argv.filter(arg => arg === "--strict-mcp-config")).toHaveLength(selection === "none" ? 1 : 0);
       expect(argv.filter(arg => arg === "--mcp-config")).toHaveLength(selection === "none" ? 1 : 0);

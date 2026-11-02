@@ -947,8 +947,8 @@ edges: []
     });
 
     it.each([
-      { server: [], attach: "tmux attach -t dev-impl@conveyor" },
-      { server: ["-S", "/private/selected socket"], attach: "tmux -S '/private/selected socket' attach -t dev-impl@conveyor" },
+      { server: [], attach: "tmux attach -t =dev-impl@conveyor" },
+      { server: ["-S", "/private/selected socket"], attach: "tmux -S '/private/selected socket' attach -t =dev-impl@conveyor" },
     ])("HG-4: blocked + attention_required includes the effective attachment: $attach", ({ server, attach }) => {
       setDaemonTmuxServer(server);
       const result = {
@@ -1005,9 +1005,9 @@ edges: []
       // Plural phrasing
       expect(r!.error.action).toMatch(/^Inspect each affected session/);
       // First 3 hints listed
-      expect(r!.error.action).toContain("tmux attach -t dev-impl@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t dev-qa@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t dev-review@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =dev-impl@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =dev-qa@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =dev-review@conveyor");
       expect(r!.attentionNodes).toHaveLength(3);
     });
 
@@ -1034,9 +1034,9 @@ edges: []
       const r = buildAttentionResponse(result);
       expect(r).not.toBeNull();
       expect(r!.error.action).toMatch(/^Inspect each affected session listed in attentionNodes/);
-      expect(r!.error.action).toContain("tmux attach -t intake-lead@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t plan-planner@conveyor");
-      expect(r!.error.action).toContain("tmux attach -t build-builder@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =intake-lead@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =plan-planner@conveyor");
+      expect(r!.error.action).toContain("tmux attach -t =build-builder@conveyor");
       expect(r!.error.action).toContain("plus 1 more listed in attentionNodes");
       expect(r!.error.action).not.toContain("review-reviewer@conveyor");
       expect(r!.attentionNodes).toHaveLength(4);
@@ -1191,7 +1191,7 @@ edges: []
         expect(body.error.fact).toMatch(/require[s]? attention/i);
         expect(body.error.consequence).toMatch(/rig-stub-1/);
         expect(body.error.consequence).toMatch(/rig ps/);
-        expect(body.error.action).toMatch(/tmux attach -t dev-impl@conveyor-attention-route-test/);
+        expect(body.error.action).toMatch(/tmux attach -t =dev-impl@conveyor-attention-route-test/);
         expect(body.error.action).not.toMatch(/rig setup --cwd/);
         // attentionNodes array carried through to operator
         expect(body.attentionNodes).toBeInstanceOf(Array);
