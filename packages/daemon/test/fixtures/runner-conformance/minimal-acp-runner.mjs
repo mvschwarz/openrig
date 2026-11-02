@@ -3,8 +3,10 @@
 // catches it.
 //   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none] [--withdraw-after-stop]
 // --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
-// --read-retries <n> keeps it another way too: a read OpenRig answers with a status other than 200 is retried n times, 1.5 s apart, before the
-// runner acts on it; section 7 sets no time limit for that.
+// --read-retries <n> keeps it another way too: a read refusal the runner would permit on (a code section 7 marks "permits",
+// or one it doesn't list) is retried n times, 1.5 s apart, before the runner permits; section 7 sets no time limit for that.
+// A refusal section 7 cancels or holds on (a request that isn't the current occupant's, or the seat's opt-in to hold) is
+// acted on at once.
 // --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
 // posted, not before; the contract doesn't order the two posts.
 import { spawn } from "node:child_process";
@@ -18,10 +20,21 @@ const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait")
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
 const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
+// --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
+// every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
+// first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
+// before it did, so its sequence no longer rises with the runner's own time).
+const beatMode = argv.includes("--beat");
+let beatTurn = null;
 // With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
 let deferredWithdraw = null;
 // --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
 let stoppedEarly = false;
+if (beatMode) setInterval(() => {
+  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
+    ...(breaks.has("beat-time-backwards") ? { occurredAt: new Date(Date.now() - 15_000).toISOString() } : {}) });
+}, 10_000).unref();
+const resolved = (ask) => { if (beatMode && !breaks.has("no-resolve")) void post("active", "permission_resolved", { turnId: String(turn), askId: ask.askId }); };
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
@@ -98,6 +111,7 @@ agent.stdout.on("data", (chunk) => {
 let exiting = false;
 agent.on("exit", async () => {
   if (exiting) return;
+  beatTurn = null;
   await withdrawLive("exited");
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
@@ -161,6 +175,8 @@ async function onPermission(msg) {
   // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
   attention = true;
   if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
+  // --break beat-during-ask beats as soon as the ask waits too, so the check sees it whatever the 10 s timer's phase.
+  if (breaks.has("beat-during-ask") && beatTurn !== null) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
   if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
@@ -170,7 +186,8 @@ async function onPermission(msg) {
   if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
   for (;;) {
     let read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
-    for (let tries = 0; read.status >= 300 && tries < readRetries && !ask.done; tries++) {
+    const permitsOn = (r) => r.status >= 300 && !NOT_CURRENT.has(r.body?.code) && !HOLDS.has(r.body?.code);
+    for (let tries = 0; permitsOn(read) && tries < readRetries && !ask.done; tries++) {
       await new Promise((done) => setTimeout(done, 1500));
       read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
     }
@@ -189,6 +206,7 @@ async function onPermission(msg) {
       select(ask.id, read.body.optionId);
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
       attention = false;
+      resolved(ask);
     } else if (!ask.done) {
       // A refused, withdrawn or stale read, or a refusal saying the request isn't the current occupant's: it can't take an
       // answer, and no person is still waiting, so it's cancelled and nothing is held. The seat's opt-in refuses and holds.
@@ -201,7 +219,7 @@ async function onPermission(msg) {
       else if (cancelled || (!state && breaks.has("cancel-on-read-error")) || (state && breaks.has("cancel-on-unlisted-state"))) {
         refuse(ask.id); attention = breaks.has("hold-on-cancel");
       }
-      else { permit(); attention = !allowOf(options); }
+      else { permit(); attention = !allowOf(options); if (!attention) resolved(ask); }
     }
     ask.done = true;
     if (live === ask && (!ask.open || breaks.has("forget-permitted-ask"))) live = null;
@@ -234,11 +252,13 @@ async function prompt(text) {
   cancelSent = false;
   turn += 1;
   stoppedEarly = false;
+  beatTurn = turn;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
   await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   await withdrawLive("turn_ended");
+  if (!breaks.has("beat-after-stop")) beatTurn = null;
   if (res.error) {
     if (!breaks.has("no-error-post")) await post("Notification", "runtime_error");
   } else {

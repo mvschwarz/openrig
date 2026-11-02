@@ -364,6 +364,65 @@ const cases = {
     return r;
   },
 
+  // The optional working beat (section 4). When a runner posts active/liveness in a quiet turn, each beat names the open
+  // turn it belongs to, keeps the post order, comes often enough for its own lifetime, stops at the turn's end, and never
+  // runs while a person is asked; after an answer, active/permission_resolved comes before the next beat. Order is read
+  // from the runner's own sequence and times, so a slow delivery never reads as a broken runner.
+  async "3b"() {
+    const r = result("3b", "Working beat (optional): beats name their open turn, keep order, and stop at its end and while a person is asked");
+    const quiet = scale(22000);
+    const seqOf = (p) => Number(p?.body?.sequence);
+    const at = (p) => Date.parse(p.body.occurredAt);
+    const h = await launch("3b", { scenario: { turns: [{ silent: true, holdMs: quiet }, {}] } });
+    if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
+    h.paste(message(h, "a long, quiet turn"));
+    const accepted = await waitFor(() => h.hooks("UserPromptSubmit", "accepted")[0]);
+    const end = await waitFor(() => h.hooks("Stop", "end_turn")[0], quiet + opts.waitMs);
+    await sleep(scale(11000)); // room for a beat a runner wrongly sends after the Stop
+    const beats = h.hooks("active", "liveness");
+    if (!beats.length) return r.skip("the runner sends no working beat in a quiet turn; the beat is optional (section 4)");
+    r.check("each beat names the turn it belongs to", accepted && beats.every((b) => b.body.turnId === accepted.body.turnId),
+      `turnIds: ${beats.map((b) => b.body.turnId).join(", ")}`);
+    // In the runner's own time order, not delivery's: a post delivered late still has to fit where the runner sent it.
+    const byTime = (a, b) => at(a) - at(b) || seqOf(a) - seqOf(b);
+    const timed = h.posts().slice().sort(byTime);
+    r.check("sequence rises with the runner's own time across every post, beats included",
+      timed.every((p, i) => Number.isFinite(seqOf(p)) && Number.isFinite(at(p)) && (i === 0 || seqOf(p) > seqOf(timed[i - 1]))),
+      `sequences in occurredAt order: ${timed.map(seqOf).join(", ")}`);
+    const life = (b) => (Number.isFinite(b.body.livenessSeconds) ? b.body.livenessSeconds : 30);
+    const inTurn = beats.filter((b) => !end || seqOf(b) < seqOf(end)).sort(byTime);
+    const gaps = inTurn.map((b, i) => at(b) - at(i === 0 ? accepted : inTurn[i - 1]));
+    r.check("beats come more often than every livenessSeconds / 2", inTurn.every((b, i) => gaps[i] <= life(b) * 500 + 1000),
+      `gaps by the runner's own times: ${gaps.join(", ")} ms`);
+    r.check("no beat after the turn's Stop", end && beats.every((b) => seqOf(b) < seqOf(end)),
+      `beats after Stop/end_turn: ${beats.filter((b) => end && seqOf(b) > seqOf(end)).length}`);
+
+    // A person is asked first, and answers after a while; the agent then carries on, quietly, in the same turn.
+    const p = await launch("3b-asked", { scenario: { turns: [{ permission: true, silent: true, holdMs: quiet }, {}] },
+      asks: { answer: { afterMs: scale(12000), state: "answered", optionId: "allow-once" } } });
+    if (!r.check("asked: the runner opens its conversation", await ready(p), "no launch record")) return r;
+    p.paste(message(p, "edit the notes"));
+    const submitted = await waitFor(() => p.permissionCalls("POST").find((c) => c.path === "/api/activity/permission-requests"), scale(5000));
+    if (!r.check("asked: the request is submitted", submitted, "no submit")) return r;
+    await waitFor(() => p.hooks("Stop", "end_turn")[0], scale(12000) + quiet + opts.waitMs);
+    const resolvedPost = p.hooks("active", "permission_resolved")[0];
+    const before = p.hooks("active", "liveness").filter((b) => at(b) > submitted.at && (!resolvedPost || seqOf(b) < seqOf(resolvedPost)));
+    r.check("asked: no beat while the ask waits on a person", before.length === 0, `${before.length} beats while it waited`);
+    r.check("asked: after the answer, active/permission_resolved names the turn and the ask, before any beat",
+      resolvedPost && resolvedPost.body.askId && resolvedPost.body.turnId === p.hooks("UserPromptSubmit", "accepted")[0]?.body.turnId,
+      resolvedPost ? `permission_resolved: ${JSON.stringify({ turnId: resolvedPost.body.turnId, askId: resolvedPost.body.askId })}` : "no permission_resolved");
+
+    // OpenRig permits at submit when no one can be asked: no ask opens, so nothing waits and the beats go on.
+    const q = await launch("3b-permitted", { scenario: { turns: [{ permission: true, silent: true, holdMs: quiet }, {}] },
+      asks: { submit: { permitted: true } } });
+    if (!r.check("permitted at submit: the runner opens its conversation", await ready(q), "no launch record")) return r;
+    q.paste(message(q, "edit the notes"));
+    const qEnd = await waitFor(() => q.hooks("Stop", "end_turn")[0], quiet + opts.waitMs);
+    const qBeats = q.hooks("active", "liveness").filter((b) => !qEnd || seqOf(b) < seqOf(qEnd));
+    r.check("permitted at submit: the quiet turn's beats go on, with no ask to resolve", qBeats.length > 0, "no beat in the quiet turn after the permit");
+    return r;
+  },
+
   // Section 7's default is permit: when no one can be asked, the agent gets its own allow option at once, allow_once before
   // allow_always. Only the seat's opt-in refusal (denied_by_seat), or a request with no allow option, is refused at once,
   // shown, and held as needs input until the next prompt, even when the turn is cancelled.
@@ -704,7 +763,7 @@ const cases = {
   },
 };
 
-const order = ["1", "1b", "2", "3", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9"];
+const order = ["1", "1b", "2", "3", "3b", "4", "4b", "4c", "5", "6", "7", "7b", "7c", "8", "9"];
 const selected = opts.cases ?? order;
 const unknown = selected.filter((id) => !order.includes(id));
 if (unknown.length) { console.error(`unknown case ${unknown.join(", ")}; cases are ${order.join(", ")}`); process.exit(2); }

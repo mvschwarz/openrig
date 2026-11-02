@@ -14,10 +14,10 @@ type Check = { name: string; ok: boolean; detail?: string };
 type Result = { id: string; status: "pass" | "fail" | "skip" | "advisory"; met?: boolean; checks: Check[]; reason?: string };
 type Report = { results: Result[]; summary: { pass: number; fail: number; skip: number; advisory: number } };
 
-async function check(args: string[], runnerFlags = "", nodeArgs: string[] = []): Promise<{ code: number; report: Report }> {
+async function check(args: string[], runnerFlags = "", nodeArgs: string[] = [], timeoutMs = 90_000): Promise<{ code: number; report: Report }> {
   const runner = `${process.execPath} ${RUNNER} --agent {agent}${runnerFlags}`;
   try {
-    const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: 90_000 });
+    const { stdout } = await promisify(execFile)(process.execPath, [...nodeArgs, CHECK, "--runner", runner, "--name", "minimal", "--json", ...args], { timeout: timeoutMs });
     return { code: 0, report: JSON.parse(stdout) };
   } catch (error) {
     const failed = error as { code?: number; stdout?: string; stderr?: string };
@@ -32,7 +32,9 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 0, advisory: 2 });
+    // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 2 });
+    expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
     expect(report.results.find((r) => r.id === "4c")).toMatchObject({ status: "advisory", met: true });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
@@ -139,6 +141,28 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"]]);
     expect(code).toBe(0);
   }, 90_000);
+
+  // The optional working beat (section 4): a runner that beats in a quiet turn keeps 3b's promises, and each way of
+  // breaking one is caught by the check that names it. Case 3b's three launches take about 90 s, so it gets a longer bound.
+  const CASE_3B_MS = 170_000;
+  it("passes 3b for a runner that beats through a quiet turn, stops while a person is asked, and resolves before beating again", async () => {
+    const { code, report } = await check(["--cases", "3b"], " --beat", [], CASE_3B_MS);
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["3b", "pass"]]);
+    expect(code).toBe(0);
+  }, CASE_3B_MS + 10_000);
+  it.concurrent.each([
+    ["beat-after-stop", "no beat after the turn's Stop"],
+    ["beat-during-ask", "asked: no beat while the ask waits on a person"],
+    ["no-resolve", "asked: after the answer, active/permission_resolved names the turn and the ask, before any beat"],
+    ["beat-time-backwards", "sequence rises with the runner's own time across every post, beats included"],
+  ])("catches %s in case 3b", async (broken, name) => {
+    const { code, report } = await check(["--cases", "3b"], ` --beat --break ${broken}`, [], CASE_3B_MS);
+    const result = report.results.find((r) => r.id === "3b")!;
+    expect(result.status).toBe("fail");
+    expect(result.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining(name));
+    expect(code).toBe(1);
+  }, CASE_3B_MS + 10_000);
 
   // Section 7 sets no time limit for a permit after a read OpenRig answered with a status it doesn't list. A runner that
   // retries such a read a few times first keeps the contract, so the check waits its ordinary per-step bound for it.

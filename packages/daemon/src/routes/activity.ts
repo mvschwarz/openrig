@@ -5,6 +5,7 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
+import { WorkingLivenessGate, isWorkingLivenessBeat, workingLivenessSeconds, type WorkingLivenessIgnored } from "../domain/working-liveness.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
 import { ActivityGrantStore, grantGeneration, type ActivityGrant } from "../domain/activity-grants.js";
@@ -34,6 +35,8 @@ import {
  *  exclusion); the turn's working/idle stays whatever other evidence says. */
 export function evidenceFromHookActivity(input: {
   seatNodeId: string;
+  /** A counted working beat: how long it counts as working, in place of the hook window. */
+  workingLivenessSeconds?: number;
   sessionName: string;
   runtime: string | null;
   activity: AgentActivity;
@@ -49,6 +52,7 @@ export function evidenceFromHookActivity(input: {
     observedAt: input.activity.eventAt ?? input.activity.sampledAt,
     ...(input.activity.sourceSequence ? { sourceSequence: input.activity.sourceSequence } : {}),
     ...(input.activity.livenessSeconds ? { livenessSeconds: input.activity.livenessSeconds } : {}),
+    ...(input.workingLivenessSeconds ? { workingLivenessSeconds: input.workingLivenessSeconds } : {}),
     ...(input.route ? { route: input.route } : {}),
   };
   if (input.activity.reason === "permission_request_pending") {
@@ -92,7 +96,10 @@ export function restoredRunnerHookEvidence(
   const state = !latest.stale ? latest.state
     : latest.reason === "stale_runtime_hook"
       ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime, latest.communityRunner === true) : "unknown";
+  // A working beat keeps the lifetime it was admitted with, as when it was posted.
   return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
+    ...(isWorkingLivenessBeat(latest.rawEvent, latest.rawSubtype)
+      ? { workingLivenessSeconds: workingLivenessSeconds(latest.livenessSeconds) } : {}),
     activity: { ...latest, state }, seq: 0 });
 }
 
@@ -105,6 +112,20 @@ export function hookRelayRoute(value: unknown): EvidenceRoute | undefined {
 
 // Per-source monotonic seq for ingested hook evidence (the relay does not mint one).
 const hookEvidenceSeq = new Map<string, number>();
+// What each seat's runner has said about its turns, for deciding whether a working beat counts (the runner contract §4).
+const workingLiveness = new WorkingLivenessGate();
+function sourceSequence(body: Record<string, unknown>): number | null {
+  return typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null;
+}
+/** The seat's current occupant generation, as a runner's permission request checks it; null when none resolves. */
+function liveOccupantGeneration(c: Context, store: AgentActivityStore, nodeId: string): string | null {
+  const registry = (c.get("sessionRegistry" as never) as SessionRegistry | undefined) ?? new SessionRegistry(store.db);
+  try {
+    return registry.currentOccupantTenure(nodeId)?.generationUuid ?? null;
+  } catch {
+    return null;
+  }
+}
 function nextHookSeq(key: string): number {
   const next = (hookEvidenceSeq.get(key) ?? 0) + 1;
   hookEvidenceSeq.set(key, next);
@@ -600,13 +621,30 @@ async function postHook(c: Context, installTokenAccepted: boolean): Promise<Resp
   }
 
   const recorded = recordHookActivity(c, store, body);
+  if ("ignored" in recorded) return c.json({ ok: true, ignored: recorded.ignored });
   return "refused" in recorded ? recorded.refused : c.json({ ok: true, activity: recorded.activity });
 }
 
 /** Record one hook event for its seat and feed it to the activity oracle: the tail of the hook ingress, also used when a
  *  runner's permission request is submitted (its permission prompt). */
 function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<string, unknown>):
-  { activity: AgentActivity } | { refused: Response } {
+  { activity: AgentActivity } | { refused: Response } | { ignored: WorkingLivenessIgnored } {
+  const oracle = c.get("seatActivityService" as never) as
+    | import("../domain/seat-activity-service.js").SeatActivityService
+    | undefined;
+  // A working beat counts only for the live occupant's open turn, in order and outside attention. One that doesn't is
+  // ignored before anything is recorded, so it can't change what the seat or its send gate reads.
+  const beat = isWorkingLivenessBeat(body.hookEvent, body.subtype);
+  if (beat) {
+    const sessionName = stringOrNull(body.sessionName);
+    const nodeId = stringOrNull(body.nodeId) ?? (sessionName ? store.resolveSession({ sessionName })?.nodeId ?? null : null);
+    const admitted = nodeId
+      ? workingLiveness.admit(nodeId, { generation: stringOrNull(body.generation), liveGeneration: liveOccupantGeneration(c, store, nodeId),
+        turnId: stringOrNull(body.turnId), sequence: sourceSequence(body), eventAt: stringOrNull(body.occurredAt),
+        attention: (oracle?.getSeatState(nodeId)?.needsInput.count ?? 0) > 0 })
+      : { ok: false as const, reason: "no_turn" as const };
+    if (!admitted.ok) return { ignored: admitted.reason };
+  }
   const result = store.recordHookEvent({
     runtime: stringOrNull(body.runtime),
     sessionName: stringOrNull(body.sessionName),
@@ -621,9 +659,11 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
     turnId: stringOrNull(body.turnId),
     ...(body.hookAgentId === null || (typeof body.hookAgentId === "string" && body.hookAgentId.trim().length > 0)
       ? { hookAgentId: body.hookAgentId } : {}),
-    sourceSequence: typeof body.sequence === "number" && Number.isSafeInteger(body.sequence) && body.sequence > 0 ? body.sequence : null,
-    livenessSeconds: typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
-      && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
+    sourceSequence: sourceSequence(body),
+    // A counted beat is recorded with the lifetime it was admitted with, so a restore reads it back the same.
+    livenessSeconds: beat ? workingLivenessSeconds(body.livenessSeconds)
+      : typeof body.livenessSeconds === "number" && Number.isSafeInteger(body.livenessSeconds)
+        && body.livenessSeconds > 0 && body.livenessSeconds <= 3600 ? body.livenessSeconds : null,
   });
 
   if (!result.ok) {
@@ -635,9 +675,6 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
   // normalized) event becomes ladder evidence on the lifecycle-hooks rung. The store
   // remains the raw-event recorder (startup-proof, delivery verification); arbitration
   // happens only in SeatActivityService.
-  const oracle = c.get("seatActivityService" as never) as
-    | import("../domain/seat-activity-service.js").SeatActivityService
-    | undefined;
   const emitted = result.event as { nodeId?: string; sessionName?: string; runtime?: string } | undefined;
   // Recording a historical hook is valid, but its raw activity cannot staff the
   // current oracle. The store may resolve nodeId to a newer session even when
@@ -670,10 +707,25 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
         runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
       );
     }
+    if (beat) {
+      workingLiveness.count(emitted.nodeId, { sequence: result.activity.sourceSequence ?? null,
+        eventAt: result.activity.eventAt ?? result.activity.sampledAt ?? null });
+    } else {
+      workingLiveness.observe(emitted.nodeId, {
+        generation: result.activity.generation ?? null,
+        hookEvent: result.activity.rawEvent ?? (typeof body.hookEvent === "string" ? body.hookEvent : ""),
+        subtype: result.activity.rawSubtype ?? stringOrNull(body.subtype),
+        turnId: result.activity.turnId ?? null,
+        sequence: result.activity.sourceSequence ?? null,
+        eventAt: result.activity.eventAt ?? result.activity.sampledAt ?? null,
+        exit: result.activity.rawEvent === "Stop" && isRunnerExit(result.activity.rawSubtype, runtime, result.activity.communityRunner === true),
+      });
+    }
     const evidence = evidenceFromHookActivity({
       seatNodeId: emitted.nodeId,
       sessionName: emitted.sessionName,
       runtime,
+      ...(beat ? { workingLivenessSeconds: workingLivenessSeconds(body.livenessSeconds) } : {}),
       activity: result.activity,
       seq: nextHookSeq(`${emitted.nodeId}:${runtime ?? "unknown-runtime"}:hooks`),
       route: hookRelayRoute(body.relayRoute),

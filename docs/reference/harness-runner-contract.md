@@ -104,6 +104,8 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
 |---|---|---|
 | You gave the agent the prompt for a submitted message | `UserPromptSubmit` / `accepted`, `turnId` = your prompt number | working |
 | The agent is working (message chunks, tool calls) | `active` / `agent_message`; `PreToolUse` / `<tool kind>` | working |
+| Optional working beat, from 0.7.9: the turn is still outstanding and the agent alive, with nothing new to report (a long tool or model call) | `active` / `liveness`, with `turnId`, `sequence` and `livenessSeconds` | working while beats keep coming |
+| From 0.7.9: you delivered an answer or permit to a request OpenRig had shown as needing input, and the agent continues the same turn (section 7) | `active` / `permission_resolved`, with `turnId` and `askId` | working |
 | You refused a permission request (section 7) | `Notification` / `permission_prompt` | needs input |
 | The turn ended | `Stop` / its stop reason (`end_turn`, `cancelled`, `max_tokens`, `refusal`) | idle. While you hold attention (section 7), don't post it: OpenRig reads any non-exit `Stop` as idle and clears needs input |
 | Optional idle heartbeat | `Stop` / `idle_heartbeat`, with `livenessSeconds` | idle while beats keep coming |
@@ -114,6 +116,41 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
   idle `Stop`, the turn's end as well as each beat. OpenRig stops reading the seat idle after 2 × `livenessSeconds` without
   a newer idle report. Without it, an idle report holds until your next post, even if your runner has died. Never send a
   non-exit `Stop` or a beat while holding permission attention.
+- **Working evidence lasts 15 seconds.** A working post (`UserPromptSubmit`, `active`, `PreToolUse`) decides the seat's
+  activity for 15 s. After that the seat reads from its other evidence: the screen can still show work, but it never
+  reads a runner seat idle, so with nothing else the seat reads unknown.
+- **The working beat (from 0.7.9)** keeps a long, quiet turn reading working. It says only that this turn's prompt is
+  outstanding and the agent process you started is alive. It isn't progress.
+  - **When to beat:** only while a prompt is outstanding and the agent is alive, more often than every
+    `livenessSeconds` ÷ 2.
+  - **When to stop:** stop at once on the turn's `Stop`, on a permission request that needs a person, or on the agent's
+    exit, and post that boundary first.
+  - **`livenessSeconds`** is how long one beat counts as working. OpenRig clamps it to 5-60 s, and uses 30 s when a beat
+    has none. After that the beat stops counting, and the seat reads from its other evidence, as a working post's does.
+  - **A beat counts only when all of these hold:**
+    - it carries `generation`, equal to the seat's live occupant generation, and so did the `UserPromptSubmit` /
+      `accepted` post that opened its turn;
+    - its `turnId` is your latest `UserPromptSubmit` / `accepted` turn, and you haven't posted that turn's `Stop` or an
+      exit;
+    - it carries a `sequence`, greater than every earlier post's in the same generation that OpenRig counted, beats
+      included;
+    - the seat has no attention outstanding, such as a permission request waiting on a person.
+
+    So number every post with one `sequence` that rises across your whole runner process, beats included. OpenRig
+    orders your posts by `occurredAt`, then `sequence`. A post older than one OpenRig already counted changes nothing:
+    a late `Stop` for an earlier turn doesn't end the current one, and an older beat doesn't count. A post without a
+    valid `occurredAt` is dated when it arrives, by OpenRig's clock, so it can read older than it is when your clock
+    runs ahead. Give every post its `occurredAt`.
+  - **After you deliver an answer or permit** to a request OpenRig had shown as needing input (section 7; it created an
+    ask, and a permit at submit opens none), post `active` / `permission_resolved` with the turn's `turnId` and the
+    `askId`, before your next beat. That clears the seat's attention. So does any other working or idle post OpenRig
+    counts, and an operator's `rig seat clear-attention`. OpenRig doesn't match `permission_resolved` to its `askId`.
+    Beats are ignored until attention clears.
+  - **A beat that fails any of these is ignored.** The seat reads as it would without it. A beat never starts or extends
+    a turn, never clears attention, and never stands in for a `Stop`.
+  - **OpenRig keeps what it needs to judge beats in memory.** After a daemon restart, a beat already counted keeps its
+    lifetime, but new beats are ignored until your next accepted prompt, and the seat reads as it would without them.
+  - **A runner that sends no beats** behaves as before.
 - **Exit:** post `Stop` / `<preset name>_exited` only when you observe the agent's process exit.
 
 - **The screen still counts,** but only as evidence of work. On its own it never reads a runner seat idle.
