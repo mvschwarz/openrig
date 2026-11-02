@@ -123,8 +123,11 @@ The reviewed bundle source already uses native canonical paths and relative
 containment checks. A separate actual Git 2.51.2.windows.1 configuration probe
 confirmed that bundleGit ignored owned global/XDG witnesses and retained its
 HTTPS-only and hooks-path policies with its existing /dev/null configuration.
-The probe did not fetch, authenticate or execute hooks/askpass; those paths are
-not qualified by that result. No change was made merely for a POSIX-looking
+An additional actual bundleGit probe received a synthetic Basic-authentication
+challenge from an owned loopback HTTPS server. It refused in 53 ms after one
+request with no Authorization header; the server and synthetic certificate/key
+were removed. This qualifies noninteractive authentication refusal on this host,
+not successful authenticated fetches or hook execution. No change was made merely for a POSIX-looking
 Git-specific path string. The comprehensive path audit remains in progress.
 
 ## Current file-browser root boundaries and native canonical spelling (2026-11-02)
