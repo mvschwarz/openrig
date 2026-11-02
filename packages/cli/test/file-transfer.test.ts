@@ -167,6 +167,22 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
 // ── the deny wall (FR-4) ────────────────────────────────────────────────────
 
 describe("checkLocalPath — resolve-then-recheck deny wall", () => {
+  it.skipIf(process.platform !== "win32")("applies the same local policy to namespace and ordinary spellings", () => {
+    for (const segment of DENIED_SEGMENTS) {
+      const candidate = path.join(os.homedir(), segment, "artifact.md");
+      expect(checkLocalPath(candidate).ok).toBe(false);
+      expect(checkLocalPath(path.toNamespacedPath(candidate)).ok).toBe(false);
+    }
+    const saved = process.env.OPENRIG_HOME;
+    try {
+      for (const home of [path.join(os.tmpdir(), "owned-transfer-policy"), "\\\\owned-server\\owned-share\\rig-state"]) {
+        process.env.OPENRIG_HOME = home;
+        expect(checkLocalPath(path.toNamespacedPath(path.join(home, "hosts.yaml"))).ok).toBe(false);
+        process.env.OPENRIG_HOME = path.toNamespacedPath(home);
+        expect(checkLocalPath(path.join(home, "state", "artifact.md")).ok).toBe(false);
+      }
+    } finally { if (saved === undefined) delete process.env.OPENRIG_HOME; else process.env.OPENRIG_HOME = saved; }
+  });
   it("denies resolved paths under each short-closed-list root, incl. via traversal and ~", () => {
     const home = os.homedir();
     for (const seg of DENIED_SEGMENTS) {

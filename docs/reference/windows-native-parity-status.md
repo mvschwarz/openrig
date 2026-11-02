@@ -5207,6 +5207,12 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Local path policy comparison now treats Windows extended-length drive and UNC
+spellings as the same locations as ordinary paths, retaining the original I/O
+spelling. Scoped checks cover each existing denied local home segment and both
+directions of custom active-home namespace spelling. UNC checks are lexical
+policy checks, not remote share access or acceptance. CLI no-emit passed.
+
 Explicit remote paths now receive the same alias check before opening transport,
 including intermediate components and both upload/download directions. Two
 command-level copy tests verify rejection before transport and preservation of

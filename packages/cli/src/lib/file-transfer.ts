@@ -123,7 +123,14 @@ export function checkLocalPath(raw: string): PathCheck {
   const activeOpenRigHome = path.resolve(getOpenRigHome());
   const activeHostsRegistry = path.resolve(getDefaultOpenRigPath("hosts.yaml"));
   // Windows paths are case-insensitive; spelling changes must not bypass the wall.
-  const comparable = (p: string) => process.platform === "win32" ? p.toLowerCase() : p;
+  const comparable = (p: string) => {
+    if (process.platform !== "win32") return p;
+    // Extended-length spelling names the same filesystem location. Keep the
+    // original path for I/O, but compare the ordinary drive/UNC spelling.
+    const ordinary = /^\\\\\?\\UNC\\/i.test(p) ? "\\\\" + p.slice(8)
+      : /^\\\\\?\\[A-Za-z]:\\/.test(p) ? p.slice(4) : p;
+    return ordinary.toLowerCase();
+  };
   const within = (candidate: string, root: string) => comparable(candidate) === comparable(root)
     || comparable(candidate).startsWith(comparable(root.endsWith(path.sep) ? root : root + path.sep));
   if (comparable(resolved) === comparable(activeHostsRegistry)) {
