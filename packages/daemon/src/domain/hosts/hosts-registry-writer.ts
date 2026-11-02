@@ -93,12 +93,12 @@ export function addHostEntry(rawEntry: Record<string, unknown>, path: string = d
 
 /** Fields an edit may touch, per transport. id/transport never appear here. */
 const EDITABLE_FIELDS: Record<"ssh" | "http", readonly string[]> = {
-  ssh: ["target", "user", "notes"],
+  ssh: ["target", "user", "remoteShell", "rigPath", "notes"],
   http: ["url", "notes"],
 };
 
 /** Optional editable fields an empty string CLEARS (drops the key). */
-const CLEARABLE_FIELDS = new Set(["user", "notes"]);
+const CLEARABLE_FIELDS = new Set(["user", "remoteShell", "rigPath", "notes"]);
 
 export type UpdateHostResult =
   | { ok: true; path: string; entry: HostEntry; previous: HostEntry }

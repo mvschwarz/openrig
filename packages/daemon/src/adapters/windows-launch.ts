@@ -44,7 +44,13 @@ export function renderWindowsArgvForwarder(executable: string, prefix: readonly 
 }
 
 export function renderWindowsLaunch(command: string, env: Readonly<Record<string, string>> = {}, options: { remove?: readonly string[]; beforeStart?: string; prependPath?: string } = {}): string {
-  const [executable, ...args] = parseLiteralLaunchWords(command);
+  return renderWindowsLaunchArgv(parseLiteralLaunchWords(command), env, options);
+}
+
+/** Structured native callers already have argv and must not reparse shell syntax. */
+export function renderWindowsLaunchArgv(argv: readonly string[], env: Readonly<Record<string, string>> = {}, options: { remove?: readonly string[]; beforeStart?: string; prependPath?: string } = {}): string {
+  const [executable, ...args] = argv;
+  if (!executable || argv.some(word => word.includes("\0"))) throw new Error("Invalid native launch argv");
   const assignments = Object.entries(env).map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error("Invalid environment name");
     return `$openrigStart.EnvironmentVariables[${powershellQuote(key)}]=${powershellQuote(value)}\n`;

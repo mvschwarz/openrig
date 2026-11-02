@@ -79,6 +79,9 @@ export interface SshHostEntry {
   transport: "ssh";
   target: string;
   user?: string;
+  remoteShell?: "posix" | "powershell";
+  /** Absolute remote JavaScript entry, required for native PowerShell rig calls. */
+  rigPath?: string;
   notes?: string;
 }
 
@@ -247,12 +250,18 @@ export function validateHostRegistry(parsed: unknown, sourcePath: string): HostR
       if (user !== undefined && (typeof user !== "string" || user.trim() === "")) {
         return { ok: false, error: `${prefix}.user: optional, but if present must be a non-empty string` };
       }
+      const remoteShell = entry["remoteShell"], rigPath = entry["rigPath"];
+      if (remoteShell !== undefined && remoteShell !== "posix" && remoteShell !== "powershell") return { ok: false, error: `${prefix}.remoteShell: expected posix or powershell` };
+      if (rigPath !== undefined && (typeof rigPath !== "string" || !/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/])/.test(rigPath) || /[\x00-\x1f]/.test(rigPath) || !/\.(?:cjs|mjs|js)$/i.test(rigPath))) return { ok: false, error: `${prefix}.rigPath: expected an absolute Windows JavaScript entry` };
+      if (remoteShell === "powershell" && rigPath === undefined) return { ok: false, error: `${prefix}.rigPath: required for powershell remote execution` };
       validated.push({
         id,
         ...(hostId !== undefined ? { hostId: hostId as string } : {}),
         transport: "ssh",
         target,
         ...(user !== undefined ? { user: user as string } : {}),
+        ...(remoteShell !== undefined ? { remoteShell } : {}),
+        ...(rigPath !== undefined ? { rigPath: rigPath as string } : {}),
         ...(notes !== undefined ? { notes: notes as string } : {}),
       });
     } else if (transport === "http") {
@@ -406,12 +415,12 @@ export function addHostEntry(rawEntry: Record<string, unknown>, path: string = d
 
 /** Fields an edit may touch, per transport. id/transport never appear here. */
 const EDITABLE_FIELDS: Record<"ssh" | "http", readonly string[]> = {
-  ssh: ["target", "user", "notes"],
+  ssh: ["target", "user", "remoteShell", "rigPath", "notes"],
   http: ["url", "notes"],
 };
 
 /** Optional editable fields an empty string CLEARS (drops the key). */
-const CLEARABLE_FIELDS = new Set(["user", "notes"]);
+const CLEARABLE_FIELDS = new Set(["user", "remoteShell", "rigPath", "notes"]);
 
 export type UpdateHostResult =
   | { ok: true; path: string; entry: HostEntry; previous: HostEntry }

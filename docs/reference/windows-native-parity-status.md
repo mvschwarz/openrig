@@ -2485,3 +2485,46 @@ follow-up also confirms ordinary SSH execution unconditionally uses `sh -lc`;
 the earlier real Windows SSH scripts did not cover that CLI front door. An
 explicit native remote execution route remains required. Remote real-Pi OAuth
 continuity is deferred at the user's request pending a fresh interactive login.
+
+### Explicit Windows SSH command execution (2026-11-02)
+
+SSH registry entries may now select `remoteShell: powershell` and an absolute
+remote JavaScript `rigPath`. `rig host add/edit` expose `--remote-shell` and
+`--rig-path`; CLI and daemon registry readers/writers preserve and validate the
+same fields. An absent selection retains the original POSIX login-shell path.
+The remote OS is never inferred from the caller's platform.
+
+The native route uses a fixed encoded PowerShell bootstrap and structured
+CreateProcess arguments. A rig command runs `node.exe` with the configured
+entry, avoiding npm/cmd shim argument loss; Node must be on the remote SSH
+process PATH. Native executable resolution is explicit and an unavailable
+executable exits 127. Derived origin identity is supplied only to the child,
+stdin remains available to it, and its actual exit code is preserved. The SSH
+authentication/configuration and host-verification behavior is unchanged.
+
+For example, an owned Windows entry can contain:
+
+```yaml
+id: windows-test
+transport: ssh
+target: your-existing-ssh-alias
+remoteShell: powershell
+rigPath: C:/your-install/node_modules/@openrig/cli/dist/bin-wrapper.js
+```
+
+Use the actual installed JavaScript entry on that host; the sample path is not
+discovered or installed automatically. This does not translate arbitrary POSIX
+programs used by separate host-posture checks into Windows commands.
+
+The native SSH/registry/paired-launch set passes 47 tests with three remote
+opt-in skips. A subsequent explicit missing-executable native test also passes;
+the complete native command file is 5/5. These run real local PowerShell while
+substituting the SSH process, proving exact empty/Unicode/quote/newline argv,
+stdin, origin and exit 0/7/127 behavior. The existing POSIX SSH and registry
+regression set passes 135/135; CLI type checks and daemon compilation pass.
+
+Actual remote opt-in tests are prepared for the owned Windows endpoint. The
+synthetic receiver upload did not complete: SSH to the existing host timed out
+before authentication (exit 255). Therefore no real remote command or remote
+rig-version pass is claimed for this change. The failed upload did not start a
+daemon or team. This is a separate dependency from the user's deferred Pi login.
