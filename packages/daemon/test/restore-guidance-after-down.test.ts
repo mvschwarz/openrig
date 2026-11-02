@@ -61,7 +61,7 @@ const nodeFs = {
 
 interface SeatOptions {
   podAware?: boolean;
-  runtime?: "claude-code" | "codex";
+  runtime?: "claude-code" | "codex" | "pi";
   claudeManagedBlockFile?: "CLAUDE.md" | "CLAUDE.local.md";
   userText?: string;
   /** An extra "auto" startup file whose content marks it as a skill. */
@@ -73,6 +73,10 @@ interface SeatOptions {
   /** The saved selection carries the seat-skills bootstrap file, as for every seat with skill storage. */
   seatSkillsLine?: boolean;
 }
+
+/** The resume type each runtime records for its native session. */
+const resumeTypeOf = (runtime: NonNullable<SeatOptions["runtime"]>): string =>
+  runtime === "codex" ? "codex_id" : runtime === "pi" ? "pi_session_file" : "claude_id";
 
 const SEAT_SKILLS_ASSET = path.join(import.meta.dirname, "../assets/guidance/openrig-seat-skills.md");
 
@@ -128,7 +132,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const sess = sessionRegistry.registerSession(node.id, sessionName);
     sessionRegistry.updateStatus(sess.id, "running");
     if (opts.podAware) {
-      sessionRegistry.updateResumeToken(sess.id, runtime === "codex" ? "codex_id" : "claude_id", TOKEN);
+      sessionRegistry.updateResumeToken(sess.id, resumeTypeOf(runtime), TOKEN);
     } else {
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
         .run("claude_name", TOKEN, "resume_if_possible", sess.id);
@@ -165,7 +169,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     const actions = [{ type: "send_text", value: "STARTUP-PROMPT-MUST-NOT-REPLAY", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true }];
     db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
       .run(node.id, JSON.stringify(entries), JSON.stringify(files), JSON.stringify(actions), runtime);
-    const guidanceFile = path.join(cwd, runtime === "codex" ? "AGENTS.md" : (opts.claudeManagedBlockFile ?? "CLAUDE.md"));
+    const guidanceFile = path.join(cwd, runtime === "claude-code" ? (opts.claudeManagedBlockFile ?? "CLAUDE.md") : "AGENTS.md");
     if (opts.userText) fs.writeFileSync(guidanceFile, opts.userText);
     mergeManagedBlock(nodeFs, guidanceFile, "lead-role", "You lead this team.");
     mergeManagedBlock(nodeFs, guidanceFile, "SOP.md", "How work flows here.");
@@ -199,7 +203,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       checkReady: vi.fn(async () => ({ ready: true })),
       launchHarness: vi.fn(async () => {
         observe();
-        return { ok: true as const, resumeToken: TOKEN, resumeType: runtime === "codex" ? "codex_id" : "claude_id" };
+        return { ok: true as const, resumeToken: TOKEN, resumeType: resumeTypeOf(runtime) };
       }),
     };
     const restore = new RestoreOrchestrator({
@@ -210,7 +214,7 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
       // The pane's process tree shows the same native session resumed (the joined-resume proof).
       listProcesses: async () => [
         { pid: 1234, ppid: 1, command: "zsh" },
-        { pid: 1235, ppid: 1234, command: runtime === "codex" ? `codex resume ${TOKEN}` : `claude --resume ${TOKEN}` },
+        { pid: 1235, ppid: 1234, command: runtime === "codex" ? `codex resume ${TOKEN}` : runtime === "pi" ? `pi --session ${TOKEN}` : `claude --resume ${TOKEN}` },
       ],
     });
     const up = await restore.restore(down.snapshotId!, { adapters: { [runtime]: adapter as never } });
@@ -270,6 +274,20 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     for (const other of ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"].filter((f) => f !== file)) {
       expect(fs.existsSync(path.join(cwd, other)), `${other} must not be written`).toBe(false);
     }
+  });
+
+  // #875: a Pi seat's blocks live in AGENTS.md. Down takes them out like a Codex seat's, and the exact resume puts them back.
+  it("a Pi seat's exact resume puts back the blocks down took out of its AGENTS.md, and writes no other file", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi", userText: "Person notes\n" });
+    let afterDown: string | null = null;
+    const { result, fileAtHarnessStart } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      betweenDownAndUp: () => { afterDown = fs.readFileSync(guidanceFile, "utf-8"); } });
+    expect(afterDown, "AGENTS.md after rig down").toBe("Person notes\n");
+    expect(fileAtHarnessStart).toContain("Person notes\n");
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(fileAtHarnessStart).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
+    for (const other of ["CLAUDE.md", "CLAUDE.local.md"]) expect(fs.existsSync(path.join(cwd, other)), other).toBe(false);
   });
 
   it("only a missing block is put back: an existing block keeps its content, and user text is preserved", async () => {
