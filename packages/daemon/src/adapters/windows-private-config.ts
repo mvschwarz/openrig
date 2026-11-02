@@ -42,7 +42,7 @@ export async function writeWindowsPrivateConfig(content: string): Promise<Privat
 /** psmux's quoted parser decodes only quote/backslash. Its explicit T modifier
  * creates LF after physical config-line parsing; ## prevents format execution. */
 export function psmuxPrivateEnvironmentLine(key: string, value: string): string {
-  if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
   const format = value.replaceAll("#", "##").replaceAll("\n", "#{T:#{l:%n}}");
   const quoted = '"' + format.replaceAll("\\", "\\\\").replaceAll('"', '\\"') + '"';
   return `set-environment -F ${key} ${quoted}\n`;

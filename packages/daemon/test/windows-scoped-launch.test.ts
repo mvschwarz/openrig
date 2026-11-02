@@ -30,7 +30,19 @@ describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", (
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("retains the diagnostic fallback for unsupported shell semantics", () => {
-    expect(() => windowsScopedLaunch("bash.exe", "", {}, "unused")).toThrow("Unsupported native scoped shell");
+    expect(() => windowsScopedLaunch("unknown-shell.exe", "", {}, "unused")).toThrow("Unsupported native scoped shell");
+  });
+  it.skipIf(!existsSync("C:/Program Files/Git/bin/bash.exe"))("preserves a configured Git Bash shell and inherited environment without value argv", () => {
+    const dir = mkdtempSync(join(tmpdir(), "openrig-private-bash-"));
+    try {
+      const file = join(dir, "launch.ps1"), value = "synthetic ' 中文\nline";
+      const launch = windowsScopedLaunch('"C:/Program Files/Git/bin/bash.exe" --noprofile --norc', 'printf "%s\\n%s" "$SELECTED" "$INHERITED_OWNED"', { SELECTED: value }, file, true);
+      writeFileSync(file, launch.content);
+      expect(launch.argv.join(" ")).not.toContain(value);
+      const output = execFileSync(launch.argv[0]!, launch.argv.slice(1), { cwd: dir, env: { SystemRoot: process.env.SystemRoot, HOME: dir, INHERITED_OWNED: "server value" }, encoding: "utf8", timeout: 15000, windowsHide: true });
+      expect(output.replaceAll("\r\n", "\n")).toBe(value + "\nserver value");
+      expect(existsSync(file)).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   it("reports an unavailable selected shell and consumes only its owned bootstrap", () => {
     const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-missing-"));

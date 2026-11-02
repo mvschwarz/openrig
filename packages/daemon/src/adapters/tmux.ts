@@ -670,7 +670,7 @@ export class TmuxAdapter {
    * Values stay in tmux's session environment, including for later panes. No global mutation.
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
-  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false): Promise<string> {
+  private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false, protectedLaunch = false): Promise<string> {
     // Stock psmux 3.4 cannot bootstrap new-session through source-file. A
     // versioned candidate accepts file references without serializing values.
     if (this.terminalKind === "psmux") {
@@ -683,7 +683,7 @@ export class TmuxAdapter {
         // is not evidence of an unsupported protocol and must not trigger retry.
         if (!/unknown command: openrig-private-environment-capability/i.test(String(error))) throw error;
       }
-      if (!supported) return this.run(argv, legacy);
+      if (!supported) return this.runStockPrivateEnvironmentCommand(argv, protectedLaunch);
       if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
       const entries: [string, string][] = [];
       const rewritten: string[] = [];
@@ -715,6 +715,57 @@ export class TmuxAdapter {
     const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);
     await this.fileOps.unlink(file).catch(() => {});
     return output;
+  }
+
+  /** Stock psmux has no file-valued -e. Supply the first child through a private
+   * bootstrap, then persist session values through its existing source-file API. */
+  private async runStockPrivateEnvironmentCommand(argv: string[], protectedLaunch: boolean): Promise<string> {
+    const entries: Record<string, string> = {}, rewritten: string[] = [];
+    let command: string[] = [];
+    for (let index = 0; index < argv.length; index++) {
+      const arg = argv[index]!;
+      if (arg === "--") { command = argv.slice(index); break; }
+      if (arg !== "-e") { rewritten.push(arg); continue; }
+      const assignment = argv[++index] ?? "", separator = assignment.indexOf("=");
+      const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
+      if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+      entries[key] = value;
+    }
+    if (!Object.keys(entries).length) return this.run(argv);
+    if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
+    const creating = argv[1] === "new-session";
+    const targetIndex = rewritten.indexOf(creating ? "-s" : "-t");
+    const target = rewritten[targetIndex + 1];
+    if (targetIndex < 0 || !target) throw new Error("Native environment command lacks its exact target");
+    let bootstrap: string | undefined;
+    if (!protectedLaunch) {
+      // A respawn's legacy raw command is the last argument after its options.
+      let userCommand = "";
+      if (!creating && !command.length) {
+        const last = rewritten.at(-1)!;
+        const previous = rewritten.at(-2);
+        if (previous !== "-t" && previous !== "-c" && rewritten.length > 2) userCommand = rewritten.pop()!;
+      }
+      let shell = await this.getDefaultShell();
+      if (!shell && (await this.startServer()).ok) shell = await this.getDefaultShell();
+      if (!shell) throw new Error("Default shell unavailable for private environment launch");
+      if (command.length) throw new Error("Unrecognized native command boundary for private environment launch");
+      bootstrap = this.fileOps.tmpName();
+      const launch = windowsScopedLaunch(shell, userCommand, entries, bootstrap, true);
+      await this.fileOps.writeFile(bootstrap, launch.content, { mode: 0o600, flag: "wx" });
+      command = ["--", ...launch.argv];
+    }
+    const config = await this.fileOps.privateConfig(Object.entries(entries).map(([key, value]) => psmuxPrivateEnvironmentLine(key, value)).join(""));
+    try {
+      const output = await this.run([...rewritten, ...command]);
+      await this.run(["tmux", "source-file", "-t", creating ? exactTarget(target, "session") : target, config.path]);
+      await config.dispose().catch(() => {});
+      return output;
+    } catch (error) {
+      await this.discardUnstartedScopedBootstrap(bootstrap, error, creating);
+      // A command may have launched. Never repeat it or expose values in argv.
+      throw error;
+    }
   }
 
   /** Ends the daemon's tmux control client, and with it its session (tmux-control.ts), when tmux is driven through one. */
@@ -977,7 +1028,7 @@ export class TmuxAdapter {
     if (scopedCommand) { argv.push(...scopedCommand); legacyParts.push(...scopedCommand.map(tmuxConfigQuote)); }
     let created: string;
     try {
-      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true)).trim();
+      created = (await this.runEnvironmentCommand(argv, legacyParts.join(" "), true, !!scopedCommand)).trim();
     } catch (err) {
       await this.discardUnstartedScopedBootstrap(bootstrap, err, true);
       return classifyWriteError(err);
@@ -1528,7 +1579,7 @@ export class TmuxAdapter {
       warnings.push(parentSessionEnvWarning(exact, err));
     }
     try {
-      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "));
+      if (opts?.env && Object.keys(opts.env).length) await this.runEnvironmentCommand(argv, legacyRespawn.join(" "), false, !!scopedCommand);
       else await this.run(argv, legacyRespawn.join(" "));
       return warnings.length ? { ok: true, warnings } : { ok: true };
     } catch (err) {

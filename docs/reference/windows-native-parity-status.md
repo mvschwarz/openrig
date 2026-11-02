@@ -15,8 +15,10 @@ and ordinary Windows file-copy planning for binary SFTP Unicode/space paths and
 absolute `/C:/` roots. These are implementation and scoped verification, not a
 full same-head platform acceptance result. The corresponding receipts are below.
 
-Remaining implementation/contract work includes terminal-backend behavior mapping, stock psmux
-initial/respawn environment privacy, and file-transfer archive metadata semantics.
+Remaining implementation/contract work includes terminal-backend behavior mapping
+and file-transfer archive metadata semantics. Stock initial/respawn privacy now
+has the scoped passing implementation below; arbitrary shell/hook behavior and
+complete same-head runtime acceptance remain separate requirements.
 Remaining acceptance includes same-head full Windows/Linux comparison, remote
 real-provider continuity after renewed Pi OAuth login, other harness lifecycles,
 foreign-user daemon access, supported runtime/architecture/job-policy matrices
@@ -2394,3 +2396,35 @@ Authenticode signature; nothing was installed as a service or added to PATH.
 The earlier installed-server five-case SFTP receipt remains independently valid.
 CLI type checking passes. Full archive owner/group/execute, ACL and special-file
 semantics, and renewed cross-host ordinary-command acceptance remain open.
+
+### Stock psmux initial/respawn environment privacy (2026-11-02)
+
+The stock-backend path no longer falls back to literal `-e KEY=value` arguments
+after an explicit unsupported-capability reply. It stages the initial child
+environment in the native private bootstrap, strips the assignments from the
+psmux command, then persists session values with a protected source-file. The
+existing scoped bootstrap is reused when present; inherited launches use a
+bootstrap that retains their normal server environment. The versioned candidate
+protocol remains supported. No unavailable/uncertain capability reply authorizes
+literal transport, and uncertain launch/update calls retain files without retry.
+
+The bootstrap handles PowerShell, pwsh, cmd and named POSIX-style shells such as
+Git Bash with their respective command switches. Actual Git Bash inheritance
+and literal Unicode/newline values pass on Windows. Unsupported shell semantics
+fail private environment launch instead of exposing values in argv.
+
+An owned stock psmux 3.4.0 witness verifies the first child and a dead-pane
+respawn receive exact synthetic values, normal inheritance survives, session
+values persist, mixed-case keys work, and recorded production client arguments
+contain neither literal values nor `-e` assignments. The complete five-file
+native set passes 22 tests without skips; two subsequently added uncertainty
+cases also pass. Daemon type checking passes. A wider four-file environment
+regression observation has 30 passes and five failures: two hardcoded `/bin/bash`
+spawns and three separate-interpreter adapter fixtures. They remain open leads,
+not waived regressions or evidence of complete platform equivalence.
+
+Session values are committed after child creation: arbitrary creation hooks
+requiring them before launch have not been qualified. Additional user panes,
+external respawn commands, other shell implementations, existing live fleets
+and the rebased installed runtime still require acceptance. No running instance
+or stock psmux binary was changed by this source repair.

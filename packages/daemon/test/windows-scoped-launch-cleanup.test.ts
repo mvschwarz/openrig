@@ -20,6 +20,7 @@ it.runIf(process.platform === "win32").each([
   try {
     const adapter = new TmuxAdapter(async () => { throw Error("No shell transport expected"); }, {
       tmpName: () => bootstrap, bufferName: () => "unused",
+      privateConfig: async () => ({ path: path.join(root, "environment.conf"), dispose: async () => {} }),
       writeFile: async (file, content) => { fs.writeFileSync(file, content, { flag: "wx" }); },
       unlink: async file => {
         unlinked.push(file);
