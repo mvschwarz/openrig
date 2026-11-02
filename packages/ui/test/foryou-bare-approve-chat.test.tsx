@@ -152,12 +152,25 @@ describe("For-You quick actions — bare APPROVE + CHAT only (N-1, BR-12)", () =
     expect(raw).toHaveLength(0);
   });
 
+  it.each([undefined, "remote"])("keeps Approve for runner permission questions on host %s", async (hostId) => {
+    const raw = stubActionFetch();
+    const card = actionCard();
+    card.hostId = hostId;
+    card.source.payload.humanQuestions = [{ id: "permission", question: "Allow this tool?" }];
+    card.source.payload.tags = ["runner-permission"];
+    const view = withQuery(<FeedCard card={card} />);
+    fireEvent.click(view.getByTestId("mc-verb-approve"));
+    await waitFor(() => expect(raw).toHaveLength(1));
+    expect(JSON.parse(raw[0]!.body).verb).toBe("approve");
+  });
+
   it("does not offer approval before queue details establish whether there are questions", () => {
     stubActionFetch();
     const card = actionCard();
     delete card.source.payload.humanQuestions;
     const view = withQuery(<FeedCard card={card} />);
     expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.queryByText(/unavailable/i)).toBeNull();
   });
 
   it.each([null, []])("keeps one-click approval for hydrated asks without questions (%j)", (humanQuestions) => {
