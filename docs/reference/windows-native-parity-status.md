@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Parent-environment removal ordering regression (2026-11-02)
+
+The respawn fixture now checks the actual ordering contract: inspect global environment first, remove exactly the three inherited identity names, then respawn without `-k`. Independent removals may enumerate differently on Windows and POSIX. The full adapter file passed 160/160 on Windows and 159 with one native-only skip on WSL. Production behavior is unchanged.
+
+The separate exhaustive argv/legacy validation remains incomplete. Its pending local follow-up adds probe creation/rollback and identifies explicit legacy overrides through the TypeScript syntax tree, but its synthetic advertised-native-protocol fixture lacks the required privateConfig writer. That failing experiment is not a passing acceptance result and has not been included in this commit.
+
 ## Scoped psmux targets versus literal command data (2026-11-02)
 
 The native routing mapper now reads only the command's first target operand and rewrites only that operand. Previously it searched every argument and replaced every matching scoped identifier: a user option value could select an unrelated server, or be shortened to a bare pane ID. Boolean `-s` flags remain distinct from detach-client's source-session operand, and an explicit `--` bounds target parsing.

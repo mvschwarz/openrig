@@ -1405,13 +1405,16 @@ describe("TmuxAdapter", () => {
     it("respawnPane marks the names removed on the pane's session before the respawn, without -k", async () => {
       const exec = execWithGlobal(POLLUTED);
       await adapterFor(exec).respawnPane("%3", "codex", { env: { OPENRIG_NODE_ID: "n" } });
-      expect(exec.mock.calls.map((c) => c[0])).toEqual([
-        "tmux show-environment -g",
+      const commands = exec.mock.calls.map((c) => c[0]);
+      expect(commands[0]).toBe("tmux show-environment -g");
+      expect(commands.at(-1)).toBe("tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'");
+      // Each inherited name must be removed before respawn; independent
+      // removals need not share an enumeration order across host platforms.
+      expect(commands.slice(1, -1).sort()).toEqual([
         "tmux set-environment -t %3 -r CLAUDECODE",
         "tmux set-environment -t %3 -r CLAUDE_EFFORT",
         "tmux set-environment -t %3 -r HERDR_PANE_ID",
-        "tmux respawn-pane -t '%3' -e 'OPENRIG_NODE_ID=n' 'codex'",
-      ]);
+      ].sort());
     });
 
     // An unreadable global environment can't show whether the seat inherits an identity: the launch
