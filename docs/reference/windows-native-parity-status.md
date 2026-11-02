@@ -5207,6 +5207,22 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Physical-name phase 2 now restores verified logical names in session/client
+listings, active-window maps and scoped pane identifiers. A scoped pane obtained
+from a mapped session resolves back to its verified physical server rather than
+being encoded again. Batch capture validates and translates every requested
+session; a missing binding produces an unknown capture without guessing a
+target. Probe rollback compares the physical name under its identity condition.
+Matching-looking names without a valid marker are not decoded as logical names.
+
+Six related controlled files passed all 261 tests; daemon build passed. The
+existing ordinary two-server stock-psmux batch-capture acceptance also passed
+after the batch-path change with successful cleanup. The constrained-name real
+fixture was not retried because its cleanup remains blocked by EBUSY. External
+attach, legacy reserved-prefix lookup, mapped-name lifecycle cleanup and full
+same-version/real acceptance remain unfinished; this is not complete arbitrary
+session-name support.
+
 Physical-name phase 1 now intercepts constrained native creation names and
 exact/scoped target lookup. Creation requires a positive absent-name probe and
 an explicit new-session identity receipt; the logical marker is installed under

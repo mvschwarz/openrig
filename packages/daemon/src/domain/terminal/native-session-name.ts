@@ -3,6 +3,7 @@ import { isUtf8 } from "node:buffer";
 
 const PREFIX = "openrig-native-v1-";
 export const NATIVE_LOGICAL_SESSION_OPTION = "@openrig-logical-session-v1";
+export function isEncodedNativeSessionName(name: string): boolean { return /^openrig-native-v1-[a-f0-9]{64}$/.test(name); }
 
 /** A binding is metadata, never authority to operate on an existing session.
  * Callers must observe the marker on the exact physical session before reusing

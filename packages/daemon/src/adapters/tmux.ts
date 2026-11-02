@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { bindNativeSessionName, logicalNameFromNativeBinding, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
+import { bindNativeSessionName, isEncodedNativeSessionName, logicalNameFromNativeBinding, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
 import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
@@ -541,8 +541,9 @@ export class TmuxAdapter {
   /** #188: kill the session this adapter created only while its id still names that session. tmux checks
    *  the name and creation time and kills in one command, so a later server that reuses the id is safe. */
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
-    const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
     try {
+      const physical = this.terminalKind === "psmux" ? await this.nativeBoundName(name) : name;
+      const same = `#{&&:#{==:#{session_name},${physical}},#{==:#{session_created},${created.at}}}`;
       const out = await this.run(["tmux", "if-shell", "-F", "-t", created.id, same, `kill-session -t '${created.id}'`, "display-message -p kept"],
         `tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`, name);
       if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
@@ -645,6 +646,12 @@ export class TmuxAdapter {
     const marker = (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${binding.physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
     if (logicalNameFromNativeBinding(binding.physical, marker) !== logical) throw new Error("Native session name has no matching logical identity marker");
     return binding.physical;
+  }
+
+  private async nativeObservedName(physical: string): Promise<string> {
+    if (this.terminalKind !== "psmux" || !isEncodedNativeSessionName(physical)) return physical;
+    const marker = (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
+    return logicalNameFromNativeBinding(physical, marker) ?? physical;
   }
 
   private async nativeBoundTarget(target: string): Promise<string> {
@@ -914,7 +921,7 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
         `tmux list-sessions -F "${SESSION_FORMAT}"`);
-      return parseLines(output, parseSessionLine);
+      return await Promise.all(parseLines(output, parseSessionLine).map(async session => ({ ...session, name: await this.nativeObservedName(session.name) })));
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
@@ -945,7 +952,7 @@ export class TmuxAdapter {
       const output = await this.run(["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format],
         `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`);
       if (this.terminalKind === "psmux") {
-        return parseLines(output, line => {
+        const rows = parseLines(output, line => {
           const separator = line.indexOf("|");
           if (separator <= 0) return null;
           const session = line.slice(0, separator);
@@ -953,8 +960,13 @@ export class TmuxAdapter {
           if (!pane || !/^%\d+$/.test(pane.id)) return null;
           // psmux has one server per session: %1 is NOT globally unique.
           // Persist its scope with the immutable pane id, never its mutable index.
-          return { ...pane, id: `psmux:${Buffer.from(session).toString("base64url")}:${pane.id}` };
+          return { pane, session };
         });
+        const names = new Map<string, Promise<string>>();
+        return await Promise.all(rows.map(async ({ pane, session }) => {
+          if (!names.has(session)) names.set(session, this.nativeObservedName(session));
+          return { ...pane, id: `psmux:${Buffer.from(await names.get(session)!).toString("base64url")}:${pane.id}` };
+        }));
       }
       return parseLines(output, parsePaneLine);
     } catch (err) {
@@ -2181,17 +2193,27 @@ export class TmuxAdapter {
    */
   async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
     const listing = this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'")
-      .then((output) => new Set(output.split(/\r?\n/).filter(Boolean)), () => null);
+      .then(async output => new Set(await Promise.all(output.split(/\r?\n/).filter(Boolean).map(name => this.nativeObservedName(name)))), () => null).catch(() => null);
     const out = new Map<string, PaneCapture>();
     let unlisted = false;
     /** Capture one chunk with a single chained tmux call into `out`; on failure, retry it without the unlisted targets
      *  or split it in half. */
     const captureChunk = async (chunk: string[]): Promise<void> => {
+      let physical = chunk;
+      if (this.terminalKind === "psmux") {
+        const bindings = await Promise.all(chunk.map(async logical => {
+          try { return { logical, physical: await this.nativeBoundName(logical) }; }
+          catch { out.set(logical, { text: null, capturedAt: now() }); return undefined; }
+        }));
+        const known = bindings.filter((binding): binding is { logical: string; physical: string } => binding !== undefined);
+        chunk = known.map(binding => binding.logical); physical = known.map(binding => binding.physical);
+        if (!chunk.length) return;
+      }
       const nonce = randomUUID().replace(/-/g, "");
       const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
       const argv = ["tmux", ...chunk.flatMap((t, k) => [
         ...(k > 0 ? [";"] : []),
-        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+        "display-message", "-p", "-t", `=${physical[k]}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${physical[k]}:`, "-S", `-${lines}`,
       ])];
       const legacy = "tmux " + chunk.map((t, k) =>
         `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
@@ -2199,7 +2221,7 @@ export class TmuxAdapter {
       let output: string;
       let capturedAt: Date;
       try {
-        output = await this.run(argv, legacy);
+        output = this.terminalKind === "psmux" ? await this.nativeRaw(argv) : await this.run(argv, legacy);
         capturedAt = now(); // when THIS chunk's panes were read, not when the sweep ends
       } catch (err) {
         const live = await listing;
@@ -2446,7 +2468,7 @@ export class TmuxAdapter {
         if (f1 < 0 || f2 < 0 || f3 < 0) continue;
         const activity = line.slice(f1 + 1, f2).trim(), session = line.slice(f3 + 1);
         if (!session || line.slice(0, f1) !== "1" || !/^\d+$/.test(activity) || Number(activity) <= 0) continue;
-        out.set(session, { activity: Number(activity), size: line.slice(f2 + 1, f3) });
+        out.set(await this.nativeObservedName(session), { activity: Number(activity), size: line.slice(f2 + 1, f3) });
       }
       return out;
     } catch {
@@ -2469,7 +2491,7 @@ export class TmuxAdapter {
         const active = line.slice(0, first), activity = line.slice(first + 1, second).trim(), session = line.slice(second + 1);
         if (!session || active !== "1" || !/^\d+$/.test(activity)) continue;
         const n = Number(activity);
-        if (Number.isFinite(n) && n > 0) out.set(session, n);
+        if (Number.isFinite(n) && n > 0) out.set(await this.nativeObservedName(session), n);
       }
       return out;
     } catch {
@@ -2534,7 +2556,7 @@ export class TmuxAdapter {
     try {
       const output = await this.run(["tmux", "list-clients", "-F", CLIENT_FORMAT],
         `tmux list-clients -F "${CLIENT_FORMAT}"`);
-      return parseLines(output, parseClientLine);
+      return await Promise.all(parseLines(output, parseClientLine).map(async client => ({ ...client, session: await this.nativeObservedName(client.session) })));
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
       throw err;
