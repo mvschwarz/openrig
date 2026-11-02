@@ -16,6 +16,8 @@ import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
 import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
 import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../domain/windows-cmd-bridge.js";
 import { windowsScopedLaunch } from "./windows-scoped-launch.js";
+import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "../domain/native-runtime-switch-exchange.js";
+import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-journal.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -949,6 +951,49 @@ export class TmuxAdapter {
 
   /** The committed binding now owns identity; this is not filesystem cleanup. */
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
+
+  /** Backend for the durable native name-exchange coordinator. It does not
+   * retire servers, update bindings, or pretend that a rename preserves scope IDs. */
+  nativeRuntimeExchangeTerminal(nodeId: string, identity: NativeExchangeIdentity): NativeExchangeTerminal {
+    if (!this.isNativeWindows || !/^[A-Za-z0-9_-]{1,128}$/.test(nodeId)
+      || nextNativeRuntimeExchangeStep(identity, {
+        canonical: {state:"present",generation:identity.predecessorGeneration},
+        staging: {state:"present",generation:identity.successorGeneration}, parking:{state:"absent"},
+      }, "forward").state !== "rename") throw new Error("Invalid native runtime exchange backend or identity");
+    const ownsLifecycle = () => !this.deliveryGuard || this.deliveryGuard.ownsLifecycle(nodeId);
+    const observe = async (session: string): Promise<NativeExchangeSlot> => {
+      try {
+        const probe = await this.probeSession(session);
+        if (probe.state === "absent") return {state:"absent"};
+        if (probe.state !== "present") return {state:"unknown"};
+        const panes = await this.listPanes(session), windows = await this.listWindows(session);
+        if (panes.length !== 1 || windows.length !== 1 || await this.getSessionEnv(session,"OPENRIG_NODE_ID") !== nodeId) return {state:"unknown"};
+        const generation = await this.getSessionEnv(session,"OPENRIG_OCCUPANT_GENERATION");
+        const dead = (await this.run(["tmux","display-message","-p","-t",panes[0]!.id,"#{pane_dead}"])).trim();
+        return generation && dead === "0" ? {state:"present",generation} : {state:"unknown"};
+      } catch { return {state:"unknown"}; }
+    };
+    return {
+      ownsLifecycle,
+      observe: async () => ({canonical:await observe(identity.canonical),staging:await observe(identity.staging),parking:await observe(identity.parking)}),
+      rename: async (from,to,generation) => {
+        const names=[identity.canonical,identity.staging,identity.parking];
+        if (!ownsLifecycle() || !names.includes(from) || !names.includes(to) || from===to
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) throw new Error("Native exchange rename is outside its custody");
+        if ((await this.probeSession(to)).state !== "absent") throw new Error("Native exchange destination is not proven absent");
+        if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
+        const refused=`openrig-native-exchange-refused-${randomUUID()}`;
+        const condition=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${generation}}}`;
+        const output=await this.run(["tmux","if-shell","-F","-t",`=${from}`,condition,
+          `rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(to)}`,`display-message -p ${refused}`]);
+        if(output.includes(refused))throw new Error("Native exchange source occupant changed; no rename was performed");
+        const destination=await observe(to), source=await observe(from);
+        if(destination.state!=="present" || destination.generation!==generation || source.state!=="absent") {
+          throw new Error("Native exchange rename outcome is unknown; reobserve before another write");
+        }
+      },
+    };
+  }
 
   /** Runtime switch (slice 16, from #1214 by Aschenbath): exchange the staged successor's pane with the seat's bound
    *  pane, so the seat's session keeps its name and the staging session holds the predecessor. Both memberships are

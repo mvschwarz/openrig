@@ -10,7 +10,7 @@ import { renderWindowsLaunch } from "../src/adapters/windows-launch.js";
 import { pathToFileURL } from "node:url";
 import { verifyPaneIdleShell, verifyCodexPaneProcess } from "../src/domain/native-process-lineage.js";
 import { verifyWindowsPaneReceiver } from "../src/domain/windows-pane-receiver.js";
-import { nextNativeRuntimeExchangeStep, type NativeExchangeSlot } from "../src/domain/native-runtime-switch-exchange.js";
+import { nextNativeRuntimeExchangeStep } from "../src/domain/native-runtime-switch-exchange.js";
 
 const execFileAsync = promisify(execFile);
 const enabled = process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX;
@@ -40,13 +40,13 @@ function ownedInvoker(dir: string) {
 describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
   it("exchanges owned session names without moving or killing either ConPTY",async()=>{
     const dir=mkdtempSync(path.join(os.tmpdir(),"openrig-native-name-exchange-"));
-    const suffix=randomUUID(),canonical=`owned-canonical-${suffix}`,staging=`owned-staging-${suffix}`,parked=`owned-parked-${suffix}`;
+    const suffix=randomUUID(),canonical=`owned-canonical-${suffix}`,staging=`owned-staging-${suffix}`,parked=`owned-parked-${suffix}`,nodeId=`owned-node-${suffix}`;
     const invoke=ownedInvoker(dir);
     const adapter=new TmuxAdapter(async()=>{throw Error("No POSIX transport");},undefined,invoke,"psmux");
     try{
       const identity={canonical,staging,parking:parked,predecessorGeneration:randomUUID(),successorGeneration:randomUUID()};
       for(const [name,generation] of [[canonical,identity.predecessorGeneration],[staging,identity.successorGeneration]]){
-        const created=await adapter.createSession(name!,dir,{OPENRIG_OCCUPANT_GENERATION:generation!});expect(created.ok,created.message).toBe(true);
+        const created=await adapter.createSession(name!,dir,{OPENRIG_NODE_ID:nodeId,OPENRIG_OCCUPANT_GENERATION:generation!});expect(created.ok,created.message).toBe(true);
       }
       const before=async(name:string)=>{
         const panes=await adapter.listPanes(name);expect(panes).toHaveLength(1);
@@ -54,30 +54,24 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       };
       const predecessor=await before(canonical),successor=await before(staging);
       expect(predecessor.pid).toBeGreaterThan(0);expect(successor.pid).toBeGreaterThan(0);expect(predecessor.pid).not.toBe(successor.pid);
-      const observe=async(name:string):Promise<NativeExchangeSlot>=>{
-        const probe=await adapter.probeSession(name);
-        if(probe.state==="absent")return {state:"absent"};
-        if(probe.state!=="present")return {state:"unknown"};
-        const generation=await adapter.getSessionEnv(name,"OPENRIG_OCCUPANT_GENERATION");
-        return generation?{state:"present",generation}:{state:"unknown"};
-      };
+      const backend=adapter.nativeRuntimeExchangeTerminal(nodeId,identity);
       const exchange=async(direction:"forward"|"rollback")=>{
         for(let attempt=0;attempt<4;attempt++){
-          const step=nextNativeRuntimeExchangeStep(identity,{canonical:await observe(canonical),staging:await observe(staging),parking:await observe(parked)},direction);
+          const slots=await backend.observe();
+          const step=nextNativeRuntimeExchangeStep(identity,slots,direction);
           if(step.state==="complete")return;
           if(step.state!=="rename")throw Error(step.reason);
-          const source=await observe(step.from);if(source.state!=="present")throw Error("Owned source identity changed");
-          const result=await invoke(["tmux","if-shell","-F","-t",`=${step.from}`,
-            `#{==:#{OPENRIG_OCCUPANT_GENERATION},${source.generation}}`,
-            `rename-session -t =${step.from} ${step.to}`,"display-message -p owned-exchange-generation-mismatch"]);
-          expect(result).not.toContain("owned-exchange-generation-mismatch");
+          const source=step.from===canonical?slots.canonical:step.from===staging?slots.staging:slots.parking;
+          if(source.state!=="present")throw Error("Owned source identity changed");
+          await backend.rename(step.from,step.to,source.generation);
         }
         throw Error("Owned exchange did not reach its observed terminal state");
       };
-      expect(await invoke(["tmux","if-shell","-F","-t",`=${canonical}`,
-        "#{==:#{OPENRIG_OCCUPANT_GENERATION},wrong-generation}",
-        `rename-session -t =${canonical} ${parked}`,"display-message -p owned-exchange-generation-mismatch"]))
-        .toContain("owned-exchange-generation-mismatch");
+      await expect(backend.rename(canonical,staging,identity.predecessorGeneration)).rejects.toThrow("destination is not proven absent");
+      const foreign=adapter.nativeRuntimeExchangeTerminal(`foreign-${suffix}`,identity);
+      expect((await foreign.observe()).canonical.state).toBe("unknown");
+      await expect(foreign.rename(canonical,parked,identity.predecessorGeneration)).rejects.toThrow("source occupant changed");
+      await expect(backend.rename(canonical,parked,identity.successorGeneration)).rejects.toThrow("source occupant changed");
       expect(await before(canonical)).toEqual(predecessor);
       await exchange("forward");
       const active=await before(canonical),retired=await before(staging);

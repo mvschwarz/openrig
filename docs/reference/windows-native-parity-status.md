@@ -27,6 +27,30 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native adapter exchange backend qualified (2026-11-02)
+
+`TmuxAdapter.nativeRuntimeExchangeTerminal` now supplies the coordinator's native
+backend. Its observations require a positively present session, one window, one
+pane, the expected node identity and an explicit nondead pane. It reads occupant
+generation independently of the mutable scoped pane ID. Transport failures or
+foreign node identities remain unknown, not absent.
+
+Each rename checks lifecycle custody, allowed source/destination slots and a
+positively absent destination. The psmux server itself checks node and generation
+inside `if-shell` before executing the rename. Afterward both source absence and
+the destination's occupant are observed; an unproved outcome returns pending
+rather than silently retrying.
+
+The actual adapter path passes an owned stock psmux forward/reverse exchange,
+retaining both original PIDs. Occupied destinations, wrong node identity and
+wrong generation are refused without moving the occupants. The existing adapter
+and complete planner/journal files pass 185 tests; daemon TypeScript checking
+passes. Four unrelated native cases were not selected in the native run.
+
+Runtime-switch service orchestration is still not connected to this backend.
+Commit/recovery binding remapping, attached-client following and retirement
+remain open; the backend result does not qualify complete Windows `set-runtime`.
+
 ### Native exchange custody journal and uncertain-result recovery (2026-11-02)
 
 The native exchange coordinator now persists its schema, three session names,
