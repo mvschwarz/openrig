@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Out-of-range native-local link acceptance now passed all four combinations of
+file/directory link and -1/2^32 seconds: initial copy, dry-run drift detection,
+repair without file retransmission, unchanged referent timestamps and contents.
+The complete time-range test file passed six checks without skips. Installed
+package gate at `941b7143f331e1874d76c2593d4a1472ab9552e1` passed in 69 seconds
+with unchanged HEAD and tracked diff. It exercised installed local-copy code
+and compiled native helper, independently reading back the copied 1969 time
+through Windows .NET, plus the existing terminal/SFTP transport, SQLite and
+resource checks. This was an isolated-prefix install, not deployment or publish.
+
 Native-local copy now uses the identity-checked Windows time reader for source
 and destination comparisons and restoration. It explicitly applies captured
 times after copying bytes, avoiding `fs.cp`'s own wrapped `stat` timestamps.
