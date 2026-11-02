@@ -27,6 +27,18 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Local directory case-collision refusal (2026-11-02)
+
+Native local directory copies now perform the same destination-capability check
+as SFTP before copying a directory's case-colliding child entries. A default
+case-insensitive NTFS directory refuses the operation instead of overwriting or
+silently skipping the second file; an enabled directory retains both names and
+their different bytes. Real preview and copy fixtures prove the refused target
+stays empty and preview never writes file data. The local identity/local copy/
+SFTP run passed 24 tests; CLI TypeScript checking passed. This directory-level
+check is not a whole-tree transaction or qualification of every filesystem's
+Unicode case table.
+
 ### SFTP case-distinct names on qualified NTFS directories (2026-11-02)
 
 SFTP now queries the actual destination directory's FileCaseSensitiveInfo through
