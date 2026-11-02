@@ -242,11 +242,14 @@ async function launch(label, { scenario = {}, env = {}, asks } = {}) {
 // An ordinary send arrives inside an envelope, so a line in it that reads /abort is still just text.
 const message = (h, body) => `From: checker@runner-check\nTo: ${h.session}\n---\n${body}`;
 const nonExitStops = (h, after = 0) => h.hooks("Stop").filter((p) => p.at >= after && !String(p.body?.subtype ?? "").endsWith("_exited"));
-// Non-exit Stops the runner posted after `post` in its own order: by `sequence` when both carry one, otherwise by arrival.
-// An idle report from before the turn began (a runner may report idle at startup) is never one made during it, however
-// late its POST arrives.
-const stopsAfter = (h, post) => nonExitStops(h).filter((p) => Number.isFinite(p.body?.sequence) && Number.isFinite(post?.body?.sequence)
-  ? p.body.sequence > post.body.sequence : p.at >= (post?.at ?? 0));
+// Whether post `a` comes before post `b` in the runner's own order, as OpenRig orders them: by `occurredAt`, or by its arrival
+// when that isn't a valid time, as OpenRig dates it; then by `sequence`, when both carry one.
+const postedAt = (p) => { const t = Date.parse(p?.body?.occurredAt ?? ""); return Number.isFinite(t) ? t : p?.at ?? 0; };
+const precedes = (a, b) => postedAt(a) !== postedAt(b) ? postedAt(a) < postedAt(b)
+  : !!Number(a?.body?.sequence) && !!Number(b?.body?.sequence) && Number(a.body.sequence) < Number(b.body.sequence);
+// Non-exit Stops the runner posted after `post` in that order. An idle report from before the turn began (a runner may report
+// idle at startup) is never one made during it, however late its POST arrives.
+const stopsAfter = (h, post) => nonExitStops(h).filter((p) => !post || !precedes(p, post));
 const ready = (h, ms) => waitFor(() => h.record()?.nativeRef && h.record(), ms);
 
 function result(id, title, { proposed = false } = {}) {

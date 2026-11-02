@@ -480,7 +480,9 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     const resolved = openrig.hooks.filter((hook) => hook.body.subtype === "permission_resolved");
     expect(resolved.map((hook) => hook.body.turnId)).toEqual(["1"]);
     expect(resolved[0]!.at - openrig.submits[1]!.at).toBeGreaterThanOrEqual(2_000); // after the later ask's answer
-    const between = openrig.hooks.filter((hook) => hook.at > openrig.submits[0]!.at && hook.at < resolved[0]!.at);
+    // From the first ask on (the submit isn't one of the runner's ordered posts, so it can arrive before the accepted prompt).
+    const from = Math.max(openrig.submits[0]!.at, has(openrig.hooks, "UserPromptSubmit/accepted")!.at);
+    const between = openrig.hooks.filter((hook) => hook.at > from && hook.at < resolved[0]!.at);
     expect(between.map((hook) => `${String(hook.body.hookEvent)}/${String(hook.body.subtype)}`)).toEqual([]);
   });
 

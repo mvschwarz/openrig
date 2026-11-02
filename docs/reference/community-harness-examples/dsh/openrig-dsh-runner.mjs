@@ -257,7 +257,7 @@ async function main() {
   const child = spawn(env.OPENRIG_DSH || "dsh", ["--profile", "acp"], { cwd, env: agentEnv, stdio: ["pipe", "pipe", "inherit"] });
   child.stdin.on("error", () => {});
   const peer = new AgentPeer(child, (line) => say(`[dsh] ${line}`));
-  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0, asking: 0 };
+  const state = { sessionId: null, turn: 0, running: false, cancelRequestedAt: null, holding: false, refused: false, queue: [], asks: new Set(), lastActive: 0, asking: 0, waiting: 0, resolvedAsk: null };
   const inflight = new Set();
   const track = (promise) => { inflight.add(promise); promise.finally(() => inflight.delete(promise)); return promise; };
   let agentExited = false;
@@ -352,7 +352,7 @@ async function main() {
     const allow = options.find((option) => option.kind === "allow_once") ?? options.find((option) => option.kind === "allow_always");
     const permit = (why) => {
       if (!allow) return refuse(`${why}, and the agent offered no allow option`);
-      state.holding = false;
+      state.holding = state.refused || state.waiting > 0; // another ask may still wait on a person
       say(`[permission] permitted: ${why} (${allow.optionId})`);
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
     };
@@ -373,9 +373,12 @@ async function main() {
         : submitted.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't ask anyone (${submitted.body?.code ?? submitted.status})`);
     }
     state.holding = true; // OpenRig recorded the seat's permission prompt when it opened the ask
+    state.waiting += 1;
     say(`[permission] OpenRig asked a person (${askId}); waiting for their answer`);
-    // After giving the agent an answer or a permit for this ask, the turn goes on: say so, which clears needs input.
-    const resolved = () => activity.post("active", "permission_resolved", { turnId: String(turn), askId });
+    // This ask no longer waits on a person; the seat still needs input while another one does, or after its own refusal.
+    const stopWaiting = () => { state.waiting -= 1; state.holding = state.refused || state.waiting > 0; };
+    // The agent got an answer or a permit for this ask: once nothing else waits, permission_resolved says the turn goes on.
+    const resolved = () => { state.resolvedAsk = { turn, askId }; };
     return new Promise((resolve) => {
       let done = false; // the agent has its answer
       let ended = false; // OpenRig was told the request is over
@@ -386,7 +389,7 @@ async function main() {
         withdraw(askId, reason);
         if (done) return;
         done = true;
-        if (!state.refused) state.holding = false; // the turn ended the person's ask: no one is still being asked
+        stopWaiting(); // the turn ended the person's ask
         resolve(CANCELLED);
       } };
       state.asks.add(ask);
@@ -402,7 +405,7 @@ async function main() {
           // A person's option, or OpenRig's permit when they closed it without one.
           if ((answer.state === "answered" || answer.state === "permitted") && offered(answer.optionId) && live()) {
             state.asks.delete(ask);
-            state.holding = false;
+            stopWaiting();
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
             resolved();
@@ -410,11 +413,12 @@ async function main() {
           } else if (live() && (read.status === 200 ? !ENDED.includes(answer.state) : !NOT_LIVE.includes(answer.code))) {
             // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked. The ask stays
             // tracked, so the turn's end still withdraws it.
+            stopWaiting();
             resolve(permit(read.status === 0 ? "OpenRig couldn't be reached" : `OpenRig couldn't answer (${answer.code ?? read.status})`));
-            if (!state.holding) resolved(); // permitted, not refused for want of an allow option
+            if (!state.refused) resolved(); // permitted, not refused for want of an allow option
           } else {
             state.asks.delete(ask);
-            state.holding = false; // a person said no, or the request is over: no one is still waiting
+            stopWaiting(); // a person said no, or the request is over
             say(`[permission] not answered (${answer.reason ?? answer.state ?? answer.code ?? read.status}); answered cancelled`);
             resolve(CANCELLED);
             passOn(answer.said);
@@ -431,8 +435,17 @@ async function main() {
     say(`\n[permission] dsh asks: ${toolCall.title} (${toolCall.kind}); options ${options.map((option) => option.optionId).join(", ")}`);
     if (!state.running || state.cancelRequestedAt) return CANCELLED;
     state.asking += 1; // no beat while a permission request is open: it may be waiting on a person
-    return askOwner(requestId, toolCall, options).finally(() => { state.asking -= 1; });
+    return askOwner(requestId, toolCall, options).finally(() => { state.asking -= 1; setImmediate(settle); });
   });
+
+  // Once nothing waits on a person or is being submitted, and the seat holds no refusal of its own, say the turn goes on.
+  // It goes out after the agent has its answer, and before the next beat.
+  const settle = () => {
+    const done = state.resolvedAsk;
+    if (!done || state.holding || state.asking > 0) return;
+    state.resolvedAsk = null;
+    if (state.running && state.turn === done.turn) activity.post("active", "permission_resolved", { turnId: String(done.turn), askId: done.askId });
+  };
 
   const abort = () => {
     if (!state.running) { say("[openrig-dsh] no turn is running"); return; }
@@ -449,6 +462,8 @@ async function main() {
     state.turn += 1;
     state.holding = false;
     state.refused = false;
+    state.waiting = 0;
+    state.resolvedAsk = null;
     state.cancelRequestedAt = null;
     state.lastActive = 0;
     const turnId = String(state.turn);
@@ -544,7 +559,7 @@ async function main() {
   heartbeat = setInterval(() => { if (!state.running && !state.holding && !agentExited) postIdle("idle_heartbeat"); }, BEAT_MS);
   // While a turn runs and nothing waits on a person: the turn is still outstanding and dsh is alive. Not progress.
   workBeat = setInterval(() => {
-    if (state.running && !state.holding && state.asking === 0 && !agentExited) {
+    if (state.running && !state.holding && state.asking === 0 && !state.resolvedAsk && !agentExited) {
       activity.post("active", "liveness", { turnId: String(state.turn), livenessSeconds: WORK_LIVENESS_SECONDS });
     }
   }, WORK_BEAT_MS);
