@@ -213,7 +213,10 @@ describe("live seat runtime switch", () => {
     expect(panes.size).toBe(1);expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%0"));expect(native.renames()).toBe(6);
   });
 
-  it.skipIf(process.platform!=="win32" || !process.env.OPENRIG_TEST_PSMUX).each([false,true])("runs the complete switch service through real native terminals and its lifecycle guard with controlled receivers (reject commit=%s)",async rejectCommit=>{
+  it.skipIf(process.platform!=="win32" || !process.env.OPENRIG_TEST_PSMUX).each([
+    {label:"commit",rejectCommit:false,interrupt:0},{label:"commit-failure",rejectCommit:true,interrupt:0},
+    ...[1,2,3].map(interrupt=>({label:`interrupt-${interrupt}`,rejectCommit:false,interrupt})),
+  ])("runs the complete switch service through real native terminals and its lifecycle guard with controlled receivers ($label)",async({rejectCommit,interrupt})=>{
     db.exec(outboxEntriesSchema.sql);db.exec(seatDeliveryGuardSchema.sql);db.exec(typingGuardModesSchema.sql);
     const invoke=ownedWindowsTerminalInvoker(home);
     const live=new TmuxAdapter(invoke.hostExec,undefined,invoke,"psmux");
@@ -232,11 +235,22 @@ describe("live seat runtime switch", () => {
       const original=(await live.listPanes(SEAT))[0]!;sessionRegistry.updateBinding(nodeId,{tmuxSession:SEAT,tmuxPane:original.id});
       await launch(SEAT,readyOld,inputOld);
       const predecessor=JSON.parse(fs.readFileSync(readyOld,"utf8")) as {pid:number;generation:string};
-      live.deliveryGuard=new SeatDeliveryGuard(db,target=>{
+      const resolveTarget:ConstructorParameters<typeof SeatDeliveryGuard>[1]=target=>{
         const binding=sessionRegistry.getBindingForNode(nodeId);
         if(!binding?.tmuxSession || ![nodeId,binding.tmuxSession,binding.tmuxPane].includes(target))return null;
         return {nodeId,session:binding.tmuxSession,pane:binding.tmuxPane,occupant:sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid??null};
-      });
+      };
+      live.deliveryGuard=new SeatDeliveryGuard(db,resolveTarget);
+      if(interrupt){
+        const backend=live.nativeRuntimeExchangeTerminal.bind(live);let applied=0;
+        vi.spyOn(live,"nativeRuntimeExchangeTerminal").mockImplementation((node,identity)=>{
+          const original=backend(node,identity);
+          return {...original,rename:async(from,to,generation)=>{
+            await original.rename(from,to,generation);applied++;
+            if(applied===interrupt)throw Error("Controlled result unknown after applied native rename");
+          }};
+        });
+      }
       const work=await queueRepo.create({sourceSession:"owned-source@seat-rig",destinationSession:SEAT,body:"owned native switch acceptance"});
       queueRepo.claim({qitemId:work.qitemId,destinationSession:SEAT});
       const targetAdapter:RuntimeAdapter={...adapter("claude-code"),
@@ -258,6 +272,30 @@ describe("live seat runtime switch", () => {
       }});
       if(rejectCommit)db.exec("CREATE TRIGGER reject_real_native_switch BEFORE UPDATE OF runtime ON nodes BEGIN SELECT RAISE(ABORT,'controlled native commit failure'); END");
       const result=await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"Controlled real-terminal acceptance",confirmTimeoutMs:10000});
+      if(interrupt){
+        expect(result,JSON.stringify(result)).toMatchObject({ok:false,committed:false,recoveryPending:true});
+        const successor=JSON.parse(fs.readFileSync(readyNew,"utf8")) as {pid:number};
+        expect(()=>process.kill(predecessor.pid,0)).not.toThrow();expect(()=>process.kill(successor.pid,0)).not.toThrow();
+        expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(predecessor.generation);
+        // A fresh adapter and guard have none of the original staging custody.
+        const recovered=new TmuxAdapter(invoke.hostExec,undefined,invoke,"psmux");
+        recovered.deliveryGuard=new SeatDeliveryGuard(db,resolveTarget);
+        const factory=recovered.nativeRuntimeExchangeTerminal.bind(recovered);let reversed=0;
+        vi.spyOn(recovered,"nativeRuntimeExchangeTerminal").mockImplementation((node,identity)=>{
+          const original=factory(node,identity);
+          return {...original,rename:async(from,to,generation)=>{await original.rename(from,to,generation);reversed++;}};
+        });
+        const recovery=service({tmuxAdapter:recovered,now:()=>new Date(),sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))});
+        const resumed=await recovery.recover(nodeId);expect(resumed,JSON.stringify(resumed)).toMatchObject({ok:true});
+        expect(reversed).toBe(interrupt);expect(openSwitch()?.phase).toBe("abandoned");
+        expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxPane).toBe(original.id);
+        expect(sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid).toBe(predecessor.generation);
+        expect((db.prepare("SELECT claimed_by_generation_uuid g FROM queue_items WHERE qitem_id=?").get(work.qitemId) as {g:string}).g).toBe(predecessor.generation);
+        expect((await recovered.listSessions()).map(session=>session.name)).toEqual([SEAT]);
+        expect(()=>process.kill(predecessor.pid,0)).not.toThrow();expect(()=>process.kill(successor.pid,0)).toThrow();
+        recovered.deliveryGuard=undefined;
+        return;
+      }
       if(rejectCommit){
         expect(result,JSON.stringify(result)).toMatchObject({ok:false,committed:false});
         expect(result).not.toHaveProperty("recoveryPending",true);expect(openSwitch()?.phase).toBe("abandoned");

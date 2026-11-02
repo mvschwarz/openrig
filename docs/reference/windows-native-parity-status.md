@@ -27,6 +27,26 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Real native exchange interruption recovery (2026-11-02)
+
+Three additional complete-service cases inject an unknown client result after
+the first, second or third real stock psmux rename has already been applied. The
+service returns recovery-pending and leaves both controlled receiver processes
+alive. A newly constructed adapter, lifecycle guard and switch service then read
+the existing SQLite switch record without the original adapter's staging custody.
+
+Each case reverses exactly the number of applied renames: it does not replay the
+unknown-result forward operation. The predecessor process, canonical pane binding,
+occupant generation and queue claim are retained. The uncommitted successor is
+terminated, and the observed namespace contains only the canonical session after
+recovery. All three cases pass in an 86-second run; 86 unrelated cases in that
+file were unselected. Daemon TypeScript checking passes.
+
+This verifies real terminal operations and fresh service/adapter recovery with
+injected unknown outcomes. The database remains available to the new instances;
+this is not an actual daemon/OS crash, disk-loss or power-failure experiment and
+does not establish provider conversation continuity.
+
 ### Complete service on real native terminals with controlled receivers (2026-11-02)
 
 Two new opt-in cases exercise the complete runtime-switch service with stock
