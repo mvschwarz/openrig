@@ -79,3 +79,12 @@ except Exception as error: print(type(error).__name__+":"+str(error))
   const result = await run("python3", ["-c", script, helper, root, file], { timeout: 5000 });
   expect(result.stdout.trim()).toBe("selected context");
 });
+
+it("preserves rejection of a symlink in the selected root's ancestors", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "openshell-root-link-"))); roots.push(root);
+  mkdirSync(join(root, "real")); mkdirSync(join(root, "real", "workspace"));
+  writeFileSync(join(root, "real", "workspace", "role.md"), "preserved");
+  symlinkSync(join(root, "real"), join(root, "link"));
+  expect(await command(join(root, "link", "workspace"), "--read", "role.md"))
+    .toMatchObject({ ok: false, code: "environment_root_invalid" });
+});

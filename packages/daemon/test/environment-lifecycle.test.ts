@@ -87,6 +87,35 @@ describe("owned and attached environment effects", () => {
     expect(f.counts()).toMatchObject({ creates: 0, deleteCalls: 0, stopCalls: 0 });
   });
 
+  it("requires the exact resource for pre-generation cleanup and never infers a native generation", async () => {
+    const f = await failedProjection();
+    for (const body of [
+      { effect: "delete-owned", generation: null },
+      { effect: "delete-owned", generation: null, resourceId: "another-resource" },
+      { effect: "stop-compute", generation: null, resourceId: f.resource.id },
+    ]) {
+      const result = await f.request("/binding-one/effect", { operationId: "bad-selection", ...body });
+      expect(result.status).toBeGreaterThanOrEqual(400);
+    }
+    expect(f.counts()).toMatchObject({ deleteCalls: 0, stopCalls: 0 });
+  });
+  it("refuses generation-free cleanup once a generation exists", async () => {
+    const f = await fixture();
+    const result = await f.request("/binding-one/effect", { operationId: "bad-selection", effect: "delete-owned", generation: null, resourceId: f.resource.id });
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
+    expect(f.counts().deleteCalls).toBe(0);
+  });
+  it("does not dispatch pre-generation deletion if projection establishes a generation during observation", async () => {
+    const f = await failedProjection(), list = f.driver.list;
+    vi.spyOn(f.driver, "list").mockImplementationOnce(async () => {
+      const result = await list();
+      f.db.prepare("UPDATE environment_bindings SET generation='new-generation' WHERE binding_id='binding-one'").run();
+      return result;
+    });
+    const result = await f.cleanup();
+    expect(result.status).toBe(409); expect(result.body.code).toBe("environment_generation_changed");
+    expect(f.counts().deleteCalls).toBe(0);
+  });
   it("stops only the selected native and reconciles a lost acknowledgement without a second signal", async () => {
     const f = await fixture(); f.loseStop();
     const first = await f.effect("stop-native"); expect(first.body.state).toBe("confirmed");
