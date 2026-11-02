@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Dotdot-prefixed child path handling (2026-11-02)
+
+Home-isolation advisory checks, the native Pi npm entry resolver, and the dependency-root gate now distinguish an actual parent segment from a legal child whose name begins with two dots. Consistently isolated `..seat` and `..codex` paths no longer produce false advisories; a recognized npm shim can launch its package-owned `..dist/cli.js`. Actual parent and sibling traversal remains rejected. The gate accepts a lock-derived `packages/..cli` workspace target while rejecting its parent and outside sibling.
+
+Validation: both complete daemon test files passed 17/17 on Windows and 16 passed with one Windows-only skip on WSL. The complete native dependency hermeticity file passed 9/9; its new filesystem boundary case also passed under WSL. Daemon typecheck passed. Startup fixtures logged blocked external plugin fetches with vendored fallback; the Windows run also logged a closed-database degradation callback during fixture teardown. These runs qualify the stated path behaviour, not clean daemon lifecycle acceptance or full parity.
+
 ## Operating posture project boundary (2026-11-02)
 
 The operating posture reader now checks parent traversal using the native path separator. Previously its POSIX-only `../` comparison missed Windows `..\` relative paths when an authored mission root pointed outside its selected project. A filesystem regression selects the neighbouring project's mission directory and requires an unknown posture with the explicit escape reason. Test roots and canonical expectations use native realpath on Windows to preserve actual disk spelling.

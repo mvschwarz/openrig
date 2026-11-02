@@ -20,7 +20,7 @@ export function resolveWindowsPiCommand(searchPath: string, nodeExecutable: stri
         throw new Error("Windows Pi requires a native executable or a recognized npm installation");
       const entry = path.resolve(pkg, bin);
       const relative = path.relative(pkg, entry);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Pi npm entry escapes its package");
+      if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("Pi npm entry escapes its package");
       const needle = `%dp0%\\${local ? ".." : "node_modules"}\\@earendil-works\\pi-coding-agent\\${bin.replace(/\//g, "\\")}`;
       if (!readFileSync(shim, "utf8").includes(needle)) throw new Error("Unrecognized Windows Pi shim");
       return { command: nodeExecutable, prefix: [realpathSync(entry)] };

@@ -30,6 +30,12 @@ describe("Windows Pi executable resolution", () => {
       expect(() => resolveWindowsPiCommand(dir, process.execPath, dir, "")).toThrow("Pi was not found");
       const args = ["中文 space", "a'b", 'double"quote', "", "%PATH%", "amp&word", "tail\\"];
       expect(JSON.parse(execFileSync(resolved.command, [...resolved.prefix, ...args], { encoding: "utf8", windowsHide: true, timeout: 5000 }))).toEqual(args);
+      mkdirSync(path.join(pkg, "..dist"));
+      writeFileSync(path.join(pkg, "..dist", "cli.js"), "process.stdout.write('dotdot-child');");
+      writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "..dist/cli.js" } }));
+      writeFileSync(path.join(dir, "pi.cmd"), '"%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\..dist\\cli.js" %*');
+      const dotdot = resolveWindowsPiCommand(dir, process.execPath);
+      expect(execFileSync(dotdot.command, dotdot.prefix, { encoding: "utf8", windowsHide: true, timeout: 5000 })).toBe("dotdot-child");
       writeFileSync(path.join(dir, "pi.cmd"), "unknown custom launcher");
       expect(() => resolveWindowsPiCommand(dir, process.execPath)).toThrow("Unrecognized");
       writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "../outside.js" } }));

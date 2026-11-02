@@ -15,6 +15,27 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { writeNativeGateNpm } from "./gate-test-fixtures.mjs";
 import { fileURLToPath } from "node:url";
+import { checkDependencyRoot } from "./gate-lane-hermeticity.mjs";
+
+test("dependency path segments: dotdot-prefixed child is owned, parent and sibling targets escape", () => {
+  const root = mkdtempSync(join(tmpdir(), "gate-path-segments-"));
+  try {
+    mkdirSync(join(root, "node_modules/@openrig"), { recursive: true });
+    mkdirSync(join(root, "packages/..cli"), { recursive: true });
+    mkdirSync(join(root, "outside"));
+    const link = join(root, "node_modules/@openrig/cli");
+    symlinkSync(join(root, "packages/..cli"), link, process.platform === "win32" ? "junction" : "dir");
+    const lock = resolved => writeFileSync(join(root, "package-lock.json"), JSON.stringify({ packages: {
+      "node_modules/@openrig/cli": { resolved, link: true },
+    } }));
+    lock("packages/..cli");
+    assert.equal(checkDependencyRoot(root, { log() {} }).checked, 1);
+    for (const target of ["packages/..", "packages/../outside"]) {
+      lock(target);
+      assert.throws(() => checkDependencyRoot(root, { log() {} }), /lock-derived target escapes/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 const GATE_SCRIPT = fileURLToPath(new URL("./gate-lane.mjs", import.meta.url));
 const CONSUMER_SCRIPT = fileURLToPath(new URL("./gate-lane-consume.mjs", import.meta.url));

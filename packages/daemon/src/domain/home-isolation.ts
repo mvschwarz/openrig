@@ -21,7 +21,7 @@ function canonical(p: string): string {
 
 function isInside(child: string, parent: string): boolean {
   const rel = nodePath.relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !nodePath.isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + nodePath.sep) && !nodePath.isAbsolute(rel));
 }
 
 /**
