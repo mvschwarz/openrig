@@ -11,6 +11,7 @@ import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
 import { ensureWindowsPrivateDirectory } from "../windows-owned-text.js";
 import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
 import { nativeViewerShellCommand } from "./native-viewer-command.js";
+import { execWindowsJobFile } from "../windows-job-exec.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -28,7 +29,9 @@ interface Entry {
   phase: "creating" | "created" | "starting"; pane?: Pane;
 }
 interface Journal { version: 1; entries: Record<string, Entry> }
-const runFile = promisify(execFile);
+const posixRunFile = promisify(execFile);
+const runFile = (file: string, args: string[], options: { env?: NodeJS.ProcessEnv; encoding: "utf8"; timeout?: number; maxBuffer?: number }) =>
+  process.platform === "win32" ? execWindowsJobFile(file, args, options) : posixRunFile(file, args, options);
 
 /** The supported CLI, never guessed socket RPC method parity. Its reported
  * endpoint must match the adapter's selected socket before any mutation. */

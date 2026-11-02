@@ -27,6 +27,30 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Herdr finite native CLI custody (2026-11-02)
+
+Herdr viewer control commands and local seat identity inspection now execute
+inside the existing atomic Windows Job launcher. The bounded native exec wrapper
+retains captured environment, stdout/stderr and exit codes; timeout or output
+overflow ends the owned Job and reports that command outcome may be unknown.
+The POSIX execFile path remains unchanged. Persistent viewer/server launch is
+not routed through this finite-command wrapper.
+
+Five viewer/follow/native-process files pass 63 Windows tests. Four real owned
+native CLI fixtures cover acknowledged detached-child cleanup on exit 0, exit
+7, timeout and output overflow, plus literal argv and selected-socket isolation.
+The CLI-runner/native-process pair passes three POSIX runner cases in the ordinary
+WSL mirror, with four Windows process cases skipped. Daemon TypeScript passes.
+
+An additional installed Herdr 0.9.5 pipe/CLI test completed its operational
+assertions and server-exit checks but failed Node synchronous temporary-root
+cleanup with EPERM; its overall result remains failed. A subsequent process
+query found no Herdr processes, the exact residual tree contained no reparse
+points, and native PowerShell removed that owned tree successfully. The cleanup
+cause remains unproven. Source hashes and the failed result are retained in
+the local herdr-cli-job-followup receipt. This does not close real Herdr overall
+acceptance or its existing nested-console limitation.
+
 ### Rex Windows environment-key semantics (2026-11-02)
 
 Rex executable and server selection now use the shared platform environment
