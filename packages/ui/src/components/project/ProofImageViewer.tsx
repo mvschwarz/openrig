@@ -28,16 +28,16 @@ export function ProofImageViewer({
       onClick={onClose}
     >
       <div
-        className="max-h-full max-w-[92vw] border border-white/20 bg-stone-950/70 p-2 backdrop-blur-sm"
+        className="flex max-h-full max-w-[92vw] flex-col border border-white/20 bg-stone-950/70 p-2 backdrop-blur-sm"
         onClick={(event) => event.stopPropagation()}
       >
         <img
           src={proofAssetUrl(sliceName, relPath)}
           alt={relPath}
           data-testid={imageTestId}
-          className="max-h-[78vh] max-w-full object-contain"
+          className="min-h-0 max-h-[78vh] max-w-full object-contain"
         />
-        <div className="mt-2 flex items-center justify-between gap-3 font-mono text-[10px] text-stone-50">
+        <div className="mt-2 flex shrink-0 items-center justify-between gap-3 font-mono text-[10px] text-stone-50">
           <span className="truncate">{relPath}</span>
           <button
             type="button"
