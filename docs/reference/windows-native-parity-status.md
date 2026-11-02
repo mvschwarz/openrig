@@ -27,6 +27,21 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### CRLF activity-batch equivalence (2026-11-02)
+
+Both batch window readers now split LF and CRLF transport records without
+retaining a carriage return in the session key. Before the fix, the CRLF fixture
+made the activity sweep lose every valid seat observation, while per-seat reads
+still reported the active/idle state correctly. The repaired sweep equals the
+per-seat result for both line endings, retaining the one-call batch behavior.
+Session names containing the field separator and meaningful trailing spaces
+remain unchanged; this does not use a blanket trim on identity fields.
+
+The complete batch-read and batch-capture files pass 37 tests, and daemon
+TypeScript checking passes. This proves the transport parsing and activity
+service behavior under the tested records, not that a particular stock psmux
+release emits CRLF or that the remaining interactive backend requirements pass.
+
 ### Qualified SFTP upload link timestamps (2026-11-02)
 
 The SFTP client now records extension versions and uses version 1 of

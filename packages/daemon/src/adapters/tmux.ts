@@ -2218,7 +2218,8 @@ export class TmuxAdapter {
       const format = ["#{window_active}", "#{window_activity}", "#{window_width}x#{window_height}:#{pane_id}:#{pane_pid}:#{pane_width}x#{pane_height}:#{history_size}:#{history_bytes}:#{cursor_x},#{cursor_y}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
       const out = new Map<string, { activity: number; size: string }>();
-      for (const line of output.split("\n")) {
+      // Strip the transport's CRLF boundary, not whitespace in the session name.
+      for (const line of output.split(/\r?\n/)) {
         const f1 = line.indexOf(TMUX_FIELD_SEPARATOR), f2 = line.indexOf(TMUX_FIELD_SEPARATOR, f1 + 1), f3 = line.indexOf(TMUX_FIELD_SEPARATOR, f2 + 1);
         if (f1 < 0 || f2 < 0 || f3 < 0) continue;
         const activity = line.slice(f1 + 1, f2).trim(), session = line.slice(f3 + 1);
@@ -2240,7 +2241,7 @@ export class TmuxAdapter {
       const format = ["#{window_active}", "#{window_activity}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
       const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
       const out = new Map<string, number>();
-      for (const line of output.split("\n")) {
+      for (const line of output.split(/\r?\n/)) {
         const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
         if (first < 0 || second < 0) continue;
         const active = line.slice(0, first), activity = line.slice(first + 1, second).trim(), session = line.slice(second + 1);
