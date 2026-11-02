@@ -356,13 +356,20 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+// Priority is matched exactly where it matters (the founder view, attention ranks), so "Critical" would quietly file
+// the row as ordinary work. The daemon stores what it's given, so a documented value is normalized here. Other values
+// are kept as given: `high`, `normal` and `background` are in real use, and the mission view ranks some of them.
+const QUEUE_PRIORITIES = ["routine", "urgent", "critical"];
+function queuePriorityArg(value: string): string {
+  const lower = value.toLowerCase();
+  if (QUEUE_PRIORITIES.includes(lower)) return lower;
+  console.error(`Note: --priority '${value}' is outside the documented choices (${QUEUE_PRIORITIES.join(", ")}); keeping it as given.`);
+  return value;
+}
+
 /** #2276: the daemon's checks of a new row's human-facing fields (missing summary or evidence for a person,
  *  notification, questions, reply-to). The queue repository raises them before the row's first write, inside the
  *  create's transaction. A remote host's refusal arrives as remote_queue_write_failed instead, so it isn't one of these. */
-// Priority is matched exactly where it matters (the founder view, attention ranks), so a typo like "Critical" would
-// quietly file the row as ordinary work. The daemon stores what it's given, so the documented values are checked here.
-const queuePriorityArg = enumArg(["routine", "urgent", "critical"]);
-
 const PRE_WRITE_CREATE_REFUSALS = new Set([
   "human_route_fields_required", "invalid_human_notification", "invalid_human_questions", "reply_to_requires_update", "reply_to_not_found",
 ]);

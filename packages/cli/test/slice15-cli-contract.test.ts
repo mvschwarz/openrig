@@ -18,8 +18,8 @@ vi.mock("../src/daemon-lifecycle.js", async () => {
   };
 });
 
-function makeQueueDeps(): { deps: QueueDeps; calls: Array<{ method: string; path: string }> } {
-  const calls: Array<{ method: string; path: string }> = [];
+function makeQueueDeps(): { deps: QueueDeps; calls: Array<{ method: string; path: string; body?: Record<string, unknown> }> } {
+  const calls: Array<{ method: string; path: string; body?: Record<string, unknown> }> = [];
   return {
     calls,
     deps: {
@@ -27,7 +27,7 @@ function makeQueueDeps(): { deps: QueueDeps; calls: Array<{ method: string; path
       clientFactory: () => ({
         get: vi.fn(async (path: string) => { calls.push({ method: "GET", path }); return { status: 200, data: [] }; }),
         getText: vi.fn(async () => ({ status: 200, data: "" })),
-        post: vi.fn(async (path: string) => { calls.push({ method: "POST", path }); return { status: 201, data: {} }; }),
+        post: vi.fn(async (path: string, body?: Record<string, unknown>) => { calls.push({ method: "POST", path, body }); return { status: 201, data: {} }; }),
         delete: vi.fn(async () => ({ status: 204, data: null })),
         postText: vi.fn(async () => ({ status: 200, data: "" })),
         postExpectText: vi.fn(async () => ({ status: 200, data: "" })),
@@ -64,22 +64,57 @@ describe("Slice 15 — CLI contract honesty", () => {
       expect(parsed.error.message).toMatch(/positive integer/);
     });
 
-    it.each([
-      ["create", ["--source", "a@r", "--destination", "b@r", "--summary", "s", "--body", "x"]],
-      ["handoff", ["qitem-x", "--to", "b@r"]],
-      ["handoff-and-complete", ["qitem-x", "--to", "b@r"]],
-    ])("queue %s --priority refuses a value it doesn't document, before anything is sent", async (verb, args) => {
-      const { deps, calls } = makeQueueDeps();
-      const { err, exitCode } = await runCli(["queue", verb, ...args, "--priority", "Critical"], { queueDeps: deps });
-      expect(exitCode).toBe(1);
-      expect(err).toContain("must be one of: routine, urgent, critical; got 'Critical'");
-      expect(calls).toHaveLength(0);
+    const PRIORITY_VERBS: Array<[string, string[], string]> = [
+      ["create", ["--source", "a@r", "--destination", "b@r", "--summary", "s", "--body", "x"], "/api/queue/create"],
+      ["handoff", ["qitem-x", "--to", "b@r"], "/api/queue/qitem-x/handoff"],
+      ["handoff-and-complete", ["qitem-x", "--to", "b@r"], "/api/queue/qitem-x/handoff-and-complete"],
+    ];
+
+    async function sentPriority(verb: string, args: string[], path: string, flag: string[]) {
+      vi.stubEnv("OPENRIG_SESSION_NAME", "seat@rig"); // handoff verbs act as the calling seat
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const { deps, calls } = makeQueueDeps();
+        const run = await runCli(["queue", verb, ...args, ...flag, "--json"], { queueDeps: deps });
+        const call = calls.find((c) => c.path === path);
+        expect(call, JSON.stringify({ calls, run })).toBeDefined();
+        return { body: call!.body!, notes: stderr.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("--priority")) };
+      } finally {
+        stderr.mockRestore();
+        stdout.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    }
+
+    describe.each(PRIORITY_VERBS)("queue %s --priority", (verb, args, path) => {
+      it.each([["Critical", "critical"], ["URGENT", "urgent"], ["Routine", "routine"], ["critical", "critical"]])(
+        "normalizes the documented value %s without a note", async (given, expected) => {
+          const { body, notes } = await sentPriority(verb, args, path, ["--priority", given]);
+          expect(body.priority).toBe(expected);
+          expect(notes).toEqual([]);
+        });
+
+      it.each(["high", "normal", "background", "P1-Hot"])("keeps %s as given, with one note", async (given) => {
+        const { body, notes } = await sentPriority(verb, args, path, ["--priority", given]);
+        expect(body.priority).toBe(given);
+        expect(notes).toHaveLength(1);
+        expect(notes[0]).toContain("outside the documented choices");
+        expect(notes[0]).not.toContain("invalid");
+      });
     });
 
-    it.each(["routine", "urgent", "critical"])("queue create --priority accepts %s", async (priority) => {
-      const { deps, calls } = makeQueueDeps();
-      await runCli(["queue", "create", "--source", "a@r", "--destination", "b@r", "--summary", "s", "--body", "x", "--priority", priority, "--json"], { queueDeps: deps });
-      expect(calls.filter((c) => c.path === "/api/queue/create")).toHaveLength(1);
+    it("omitting --priority keeps create's routine default, without a note", async () => {
+      const [verb, args, path] = PRIORITY_VERBS[0]!;
+      const { body, notes } = await sentPriority(verb, args, path, []);
+      expect(body.priority).toBe("routine");
+      expect(notes).toEqual([]);
+    });
+
+    it.each(PRIORITY_VERBS.slice(1))("omitting --priority on %s sends none, so the priority is inherited", async (verb, args, path) => {
+      const { body, notes } = await sentPriority(verb, args, path, []);
+      expect(body.priority).toBeUndefined();
+      expect(notes).toEqual([]);
     });
 
     it("without --json, the same failure is plain text on stderr (no JSON on stdout) + nonzero exit", async () => {
