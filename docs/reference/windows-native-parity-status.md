@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Bundle archive-relative manifest paths (2026-11-02)
+
+The shared archive-relative path predicate now rejects Windows drive-qualified/drive-relative paths and NUL in addition to its existing forward-slash archive grammar, parent/dot/empty-segment and backslash restrictions. Both legacy and pod-aware manifest validation use the corrected predicate. Archive paths remain distinct from host-native paths.
+
+Validation: complete bundle-type, archive and pod-assembler files passed 177 with one platform skip on Windows and 178/178 on ordinary-user WSL; daemon typecheck passed. New cases verify legacy rig/package/integrity-key and pod rig/agent fields. This does not qualify a newly installed tarball or a complete daemon suite at this source version.
+
 ## Manifest and library relative file paths (2026-11-02)
 
 Agent-image and context-pack manifest parsers, the agent-image install content map, and context-pack file resolution now reuse the existing authored-relative-path validator. Drive-absolute, drive-relative, UNC/rooted-backslash and NUL paths receive the existing structured domain errors rather than passing a partial slash-only check. Parent-segment rejection and ordinary dotted relative filenames remain supported. Invalid install content paths are rejected before creating the image directory.

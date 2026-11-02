@@ -621,7 +621,7 @@ interface ValidateOptions {
  * empty segments (//), empty string.
  */
 export function isRelativeSafePath(p: string): boolean {
-  if (!p || p.length === 0) return false;
+  if (!p || p.includes("\0") || /^[A-Za-z]:/.test(p)) return false;
   if (p.startsWith("/")) return false;
   if (p.includes("\\")) return false;
   const segments = p.split("/");
