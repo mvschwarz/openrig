@@ -53,6 +53,18 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("isol
     for (let i = 0; i < selected.length; i++) {
       await invoke([...selected[i]!.executionArgs, "new-session", "-d", "-s", name, "--", process.execPath, receiver, `marker-${i}`]);
     }
+    const globalKey = "OPENRIG_SYNTHETIC_HOME_GLOBAL";
+    const globalReceiver = path.join(root, "global-receiver.cjs");
+    fs.writeFileSync(globalReceiver, "require('fs').writeFileSync(process.argv[2],JSON.stringify({value:process.env.OPENRIG_SYNTHETIC_HOME_GLOBAL}));setInterval(()=>{},1000);");
+    for (let i = 0; i < selected.length; i++) {
+      await invoke([...selected[i]!.executionArgs, "set-environment", "-g", "-t", "=" + name, globalKey, `home-global-${i}`]);
+    }
+    for (let i = 0; i < selected.length; i++) {
+      expect(await invoke([...selected[i]!.executionArgs, "show-environment", "-g", globalKey])).toBe(`${globalKey}=home-global-${i}\n`);
+      const output = path.join(root, `global-result-${i}.json`);
+      await invoke([...selected[i]!.executionArgs, "new-window", "-d", "-t", "=" + name + ":", "--", process.execPath, globalReceiver, output]);
+      await expect.poll(() => { try { return JSON.parse(fs.readFileSync(output, "utf8")); } catch { return null; } }, { timeout: 5000 }).toEqual({ value: `home-global-${i}` });
+    }
     for (let i = 0; i < adapters.length; i++) {
       await expect.poll(() => adapters[i]!.capturePaneContent(name, 20), { timeout: 5000 }).toContain(`marker-${i}`);
       expect(await adapters[i]!.capturePaneContent(name, 20)).not.toContain(`marker-${1 - i}`);
@@ -70,6 +82,7 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("isol
     expect(pending).toMatchObject({ mode: "isolated", migrationPending: true, blockingSessions: [name], executionArgs: selected[0]!.executionArgs });
     await invoke([...selected[0]!.executionArgs, "kill-session", "-t", `=${name}`]);
     expect(await adapters[1]!.capturePaneContent(name, 20)).toContain("marker-1");
+    expect(await invoke([...selected[1]!.executionArgs, "show-environment", "-g", globalKey])).toBe(`${globalKey}=home-global-1\n`);
   } finally {
     for (const selection of selected) await invoke([...selection.executionArgs, "kill-session", "-t", `=${name}`]).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

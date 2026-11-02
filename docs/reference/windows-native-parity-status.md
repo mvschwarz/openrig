@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Real stock psmux 3.4.0 cross-home global-environment acceptance passed using
+two `selectTmuxServer(mode: isolated)` homes and equal session names. After
+setting distinct synthetic global values in both namespaces, each home read
+its own value and a newly created direct Node window inherited that same value.
+Stopping one home's exact session left the other home's pane marker and global
+value intact. The existing isolation/migration checks in that selected test also
+passed and owned resources were cleaned. One selected real test passed; the
+other test in that file was excluded by the name filter, not covered by this
+run. No product change, deployment, publication or team restart was needed.
+
 Real stock psmux 3.4.0 parent-environment suppression acceptance passed under
 an owned private registry: a synthetic global `CLAUDECODE` value remained set,
 the selected session's override was removed through a lowercase alias with a
