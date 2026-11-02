@@ -98,11 +98,11 @@ describe("Windows desktop terminal view", () => {
     expect(f.launch).toHaveBeenCalledOnce();
     expect((f.deps.exec as ReturnType<typeof vi.fn>).mock.calls.some(([,args])=>args.includes('herdr.exe'))).toBe(false);
   });
-  it("refuses explicit Rex on Windows before any native or POSIX subprocess", async () => {
+  it("refuses an unavailable explicit native Rex before any subprocess", async () => {
     const f = fixture();
     const result = await openTerminalWindow(f.client, "saved", "rex", f.deps);
     expect(result).toMatchObject({ ok: false, provider: "rex", windowAttempted: false });
-    expect(result.error).toContain("Rex is unavailable on Windows");
+    expect(result.error).toContain("rex command was not found here");
     expect(f.deps.exec).not.toHaveBeenCalled(); expect(f.launch).not.toHaveBeenCalled(); expect(f.get).not.toHaveBeenCalled();
   });
   it("opens the composed pages in a new Windows Terminal without a Unix shell or source mutations", async () => {

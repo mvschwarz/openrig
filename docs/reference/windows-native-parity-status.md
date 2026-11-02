@@ -4874,3 +4874,36 @@ skip, including the real stub-seat daemon migration scenario. Daemon TypeScript
 build and whitespace checks passed. This does not establish concurrent
 server-name/PID exchange atomicity or literal-pipe session-name support, and no
 running OpenRig instance or original team changed.
+
+### Explicit native Rex window entry (2026-11-03)
+
+The daemon's native Rex control mapping was previously unreachable through
+`rig terminal open --window --provider rex`: the CLI unconditionally rejected
+Windows before discovery. The explicit provider now uses the existing guarded
+Rex view workflow. Windows discovers rex.exe from REX_BIN_DIR or absolute PATH
+entries, including quoted entries, with case-insensitive environment lookup.
+It never invokes /bin/sh or searches the macOS app bundle. Missing native Rex
+still fails before any process or daemon request. Earlier relative/empty PATH
+entries do not permit selecting a later executable.
+
+Before opening a view, the CLI retains --autostart=false, explicit -S selection,
+caller/daemon instance identity agreement, preview/expected-plan validation and
+the existing uncertain-outcome behavior. The app switch is restricted to the
+one attributable selectable app. Native mixed-case server/session/block markers
+follow the child environment's lookup rule. Unrequested Windows Rex markers
+continue to use the existing Windows Terminal route; an explicit Rex request
+is required for this newly admitted path.
+
+New native-routing fixtures cover both discovery sources and refusal of a
+different or unconfirmed server before the open POST. Three complete Rex and
+native preview/reuse files passed 42/42 on Windows. The changed missing-native-
+Rex case passed separately; the known exhausted where.exe discovery case was
+not repeated or counted as passed. WSL passed all four complete files, 56 cases
+with one native-discovery skip, after four changed files were copied and
+byte-compared. CLI TypeScript noEmit checking passed.
+
+These are guarded CLI mapping/contract checks with synthetic Rex responses,
+not a real Rex GUI/server qualification or a claim that an official Windows
+Rex distribution is available. Native executable installation and real visible
+app acceptance remain external prerequisites. No existing Rex app, main OpenRig
+deployment or original team was contacted or changed.

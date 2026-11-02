@@ -398,10 +398,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     deps={...source,env,exec:(file,args,timeout)=>file!=="/usr/bin/env"?source.exec(file,args,timeout):source.exec(path.win32.join(env.SystemRoot??"C:\\Windows","System32/WindowsPowerShell/v1.0/powershell.exe"),["-NoProfile","-NonInteractive","-EncodedCommand",Buffer.from(windowsHerdrEnvironmentCommand(args),"utf16le").toString("base64")],timeout)};
   }
   const session = requestedSession?.trim();
-  if (deps.platform === "win32" && requestedProvider === "rex") {
-    return { ...failure("rex", "Rex is unavailable on Windows; use --provider tmux --window."), windowAttempted: false };
-  }
-  if (deps.platform !== "win32" && !following && session === undefined && (requestedProvider === "rex" || (requestedProvider === undefined && inRex(deps.env)))) {
+  if (!following && session === undefined && (requestedProvider === "rex" || (deps.platform !== "win32" && requestedProvider === undefined && inRex(deps.env)))) {
     return openRexView(client, view, deps, expectedPlan);
   }
   const nativeCurrentHerdr = deps.platform === "win32" && (deps.env.TERM_PROGRAM === "herdr" || inHerdrPane(deps.env));
