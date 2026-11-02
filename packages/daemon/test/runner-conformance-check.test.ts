@@ -111,7 +111,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
-    ["idle-on-exit", "7", "no idle Stop after the exit"],
+    ["idle-on-exit", "7", "no idle report for the turn it died in"],
     ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],
