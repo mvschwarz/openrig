@@ -210,7 +210,7 @@ export class SftpClient {
   }
   async remove(file: string): Promise<void> { await this.request(13, str(file), 101); }
   async rename(src: string, dst: string, replacing: boolean): Promise<void> {
-    if (this.extensions.has("posix-rename@openssh.com")) {
+    if (replacing && this.extensions.has("posix-rename@openssh.com")) {
       await this.request(200, Buffer.concat([str("posix-rename@openssh.com"), str(src), str(dst)]), 101);
     } else {
       if (replacing) throw new Error("Remote SFTP server needs atomic replacement support; staged copy retained");

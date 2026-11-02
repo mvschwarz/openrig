@@ -27,14 +27,37 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Remote SFTP directory-exchange fault qualification (2026-11-02)
+
+SFTP no-replace renames now use the standard RENAME request even when the
+server advertises posix-rename; the replacing extension is reserved for explicit
+replacement. This prevents recovery from overwriting a new file occupying the
+destination. The original recovery path is recorded before its first move is
+dispatched, with existence marked unconfirmed until acknowledged. Later recovery
+or cleanup dispatches invalidate that confirmation. Failed transfers always have
+a nonzero result code, including a transport that closes cleanly before its reply.
+
+A test-only framed proxy wraps actual owned OpenSSH subsystems and injects
+seven file-backed upload cases: backup refusal, lost backup success reply,
+install refusal, lost install success reply, a newly occupied recovery target,
+lost restore success reply, and lost cleanup success reply. All seven pass on
+Windows and on ordinary-user WSL. Assertions read actual filesystem state,
+retained original bytes, staged/installed directory bytes, and recovery hints.
+The occupied target remains unchanged. Five-case Windows SFTP/protocol regression
+ran 34 passing checks before the last two scenarios were added; the final seven
+fault checks pass separately. WSL's final recovery/staging pair passes 20 tests.
+CLI TypeScript checking passes. These are local subsystem tests, not network
+SSH, OS-crash durability, all link types or local-endpoint exchange qualification.
+
 ### Staged source-directory replacement of files and links (2026-11-02)
 
 Local and SFTP copies now stage a complete source directory before replacing
 a conflicting ordinary file or link. The original entry is moved to a unique
 recovery name for the final exchange, then removed after the staged directory
 is installed. Failed final exchange attempts restore the original; unresolved
-exchange/cleanup exposes retained paths and remains a failed result. The final
-rename/recovery branches still need real fault-injection qualification. A failed
+exchange/cleanup exposes retained paths and remains a failed result. Local-endpoint
+rename/recovery still needs fault qualification; remote file-backed SFTP phases
+have the scoped follow-up above. A failed
 source staging pass leaves the original file unchanged and retains the partial
 stage. Successful itemized output uses logical destination paths, not stage names.
 
