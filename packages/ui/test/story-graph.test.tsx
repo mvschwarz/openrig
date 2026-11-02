@@ -105,6 +105,18 @@ describe("StoryGraph", () => {
     expect(queryByTestId("story-artifact-packages/ui/rel.ts")).toBeNull();
   });
 
+  it.each(["C:\\work\\proof.png", "\\\\host\\share\\proof.png", "C:\\工作 目录\\proof.png", "/books/with spaces/proof.png"])("opens the exact native artifact path %s", artifact => {
+    const setSelection = vi.fn();
+    const reference = artifact.includes(" ") ? `"${artifact}"` : artifact;
+    const forest = buildStoryForest([qitem({ qitemId: "native-art", body: `Created ${reference} alongside C:relative.md and https://example.invalid/proof.png` })]);
+    const { getByTestId, queryByTestId } = render(<DrawerSelectionContext.Provider value={{ selection: null, setSelection }}><StoryGraph forest={forest} /></DrawerSelectionContext.Provider>);
+    fireEvent.click(getByTestId("story-row-native-art"));
+    fireEvent.click(getByTestId(`story-artifact-${artifact}`));
+    expect(setSelection).toHaveBeenCalledWith({ type: "file", data: { path: artifact, absolutePath: artifact } });
+    expect(queryByTestId("story-artifact-C:relative.md")).toBeNull();
+    expect(queryByTestId("story-artifact-https://example.invalid/proof.png")).toBeNull();
+  });
+
   // Guard B2 (round 2) — through the DRAWER PATH: "Open full queue item" must carry
   // the full detail (chain + the omitted non-row fields claimedAt/targetRepo + fullDetail).
   it("Open full queue item carries the full detail into the drawer selection", () => {

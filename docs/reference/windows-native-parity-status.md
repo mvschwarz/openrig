@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Review media and StoryGraph native artifact paths (2026-11-02)
+
+Review composition and frozen exports now share a bounded media-reference mapper. Drive/drive-relative and UNC refs, NUL and parent traversal beyond the slice are rejected consistently. A native absolute ref is rejected even when it names a real image inside the slice: authored media remains relative. Windows relative separators normalize to the transport form; ordinary POSIX literal-backslash filenames retain their actual filename semantics. Existing artifact-relative parent refs that stay inside the slice remain supported.
+
+StoryGraph now extracts complete drive/UNC and Unicode artifact paths instead of dropping drive letters and backslashes. Quoted paths can contain spaces. Its existing file drawer opens the original absolute path; drive-relative refs remain inert, and HTTP/file URLs are not mistaken for local artifacts.
+
+Validation: four complete composer, freeze, StoryGraph and server-path files passed 134 with one platform-specific skip on both Windows and ordinary-user WSL. The skipped cases differ by platform. Actual freeze routes refuse non-relative media, the POSIX run inlines a real literal-backslash filename, and component clicks retain exact native artifact targets. Daemon and UI typechecks passed. This is newer source than the `5d74d11` complete UI run and is not a renewed full-directory or deployment claim.
+
 ## Complete UI directory regression follow-up (2026-11-02)
 
 The complete UI directory at `319eb4e` reported 1,822 passed, ten failed and one pending natively, and 1,826 passed, six failed and one pending on WSL. All 545 tracked UI files matched across the two runs; the WSL source hashes stayed unchanged. Failures exposed current-directory assumptions in source/asset tests, an LF-only route assertion, direct execution of the extensionless tsx shim on Windows, and English-only calendar assertions on a Chinese-locale host.

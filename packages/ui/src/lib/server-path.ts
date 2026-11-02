@@ -22,6 +22,10 @@ export function serverPathBasename(value: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
+export function serverPathIsAbsolute(value: string): boolean {
+  return !value.includes("\0") && (windowsRoot(value) !== null || value.startsWith("/"));
+}
+
 export function resolveServerFileReference(source: string | null | undefined, ref: string): string | null {
   if (!source || !ref || source.includes("\0") || ref.includes("\0")) return null;
   const sourceRoot = windowsRoot(source);

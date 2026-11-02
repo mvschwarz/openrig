@@ -289,6 +289,31 @@ describe("POST /api/review/freeze", () => {
     expect(html).not.toContain('href="../../outside-secret.mp4"'); // no escaping link either
   });
 
+  it("refuses native non-relative media even when an absolute ref names a real image inside the slice", async () => {
+    const dir = approvedSlice("36-native-media");
+    const bytes = Buffer.from("owned native media witness");
+    const inside = path.join(dir, "inside.png");
+    writeFileSync(inside, bytes);
+    const refs = [inside, "C:inside.png", "\\\\host\\share\\inside.png", "..\\outside.png"];
+    writeFileSync(path.join(dir, "PROOF.md"), "# Proof\n\n" + refs.map(ref => `![ref](${ref})`).join("\n\n"));
+    const res = await freeze("36-native-media");
+    expect(res.status).toBe(200);
+    const html = fs.readFileSync((await res.json()).path, "utf8");
+    expect(html).not.toContain(bytes.toString("base64"));
+    expect((html.match(/media outside slice dir/g) ?? []).length).toBe(refs.length);
+  });
+
+  it.runIf(process.platform !== "win32")("keeps a real POSIX media filename containing a literal backslash", async () => {
+    const dir = approvedSlice("36-literal-media");
+    const bytes = Buffer.from("owned literal backslash image");
+    writeFileSync(path.join(dir, "plot\\baseline.png"), bytes);
+    writeFileSync(path.join(dir, "PROOF.md"), "# Proof\n\n![plot](plot\\baseline.png)\n");
+    const res = await freeze("36-literal-media");
+    expect(res.status).toBe(200);
+    const html = fs.readFileSync((await res.json()).path, "utf8");
+    expect(html).toContain("data:image/png;base64," + bytes.toString("base64"));
+  });
+
   it("a symlink inside the slice pointing outside is refused (realpath containment)", async () => {
     const dir = approvedSlice("37-symlink");
     const outside = path.join(ws.root, "outside-symlinked.png");

@@ -20,6 +20,7 @@ import type { FileWriteService } from "../files/file-write-service.js";
 import { FileWriteError } from "../files/file-write-service.js";
 import type { AllowlistRoot } from "../files/path-safety.js";
 import type { ComposedSliceReview, LockState, VerdictCell } from "./types.js";
+import { sliceRelativeMediaPath } from "./media-path.js";
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]);
 const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov"]);
@@ -67,9 +68,10 @@ function verdictChip(cell: VerdictCell): string {
  * unavailable branch — never silent, never inlined).
  */
 function containedMediaPath(sliceDir: string, ref: string): string | null {
-  if (ref.startsWith("/")) return null;
+  const relative = sliceRelativeMediaPath(ref, "");
+  if (relative === null) return null;
   const rootResolved = path.resolve(sliceDir);
-  const resolved = path.resolve(sliceDir, ref);
+  const resolved = path.resolve(sliceDir, relative);
   if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) return null;
   try {
     const real = fs.realpathSync(resolved);
