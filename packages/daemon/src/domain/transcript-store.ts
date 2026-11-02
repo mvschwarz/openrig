@@ -410,15 +410,21 @@ export class TranscriptStore {
     try {
       const stat = fstatSync(fd);
       const CHUNK_SIZE = 64 * 1024;
-      let remainder = "";
+      let remainder: string[] = [];
 
       for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE) {
         const readSize = Math.min(CHUNK_SIZE, stat.size - offset);
         const buf = readTranscriptChunk(fd, readSize, offset);
         // StringDecoder handles incomplete multibyte sequences at chunk boundaries
-        const chunk = remainder + decoder.write(buf);
-        const lines = chunk.split("\n");
-        remainder = lines.pop() ?? "";
+        const lines = decoder.write(buf).split("\n");
+        // Scan only the new chunk. Joining and splitting the growing remainder
+        // on every read makes a long captured line quadratic.
+        if (lines.length === 1) {
+          remainder.push(lines[0]!);
+          continue;
+        }
+        lines[0] = remainder.join("") + lines[0];
+        remainder = [lines.pop() ?? ""];
 
         for (const rawLine of lines) {
           const stripped = this.stripAnsi(rawLine);
@@ -432,7 +438,7 @@ export class TranscriptStore {
       }
 
       // Flush any remaining bytes from the decoder
-      const finalChunk = remainder + decoder.end();
+      const finalChunk = remainder.join("") + decoder.end();
       if (finalChunk) {
         const stripped = this.stripAnsi(finalChunk);
         for (const subLine of stripped.split("\n")) {
