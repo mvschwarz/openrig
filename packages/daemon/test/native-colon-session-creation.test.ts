@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { TmuxAdapter, type ArgvExecFn } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 it.each([true, false])("persists a colon-bearing created session on the verified server (file protocol=%s)", async advertised => {
   // The simulated native bootstrap constructs system binary paths; it never
@@ -21,17 +21,25 @@ it.each([true, false])("persists a colon-bearing created session on the verified
     if (command === "if-shell") { marker = binding.marker!; return ""; }
     if (command === "source-file") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
     if (command === "list-panes") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return `${binding.physical}|%1|0|C:/owned|80|24|1\n`; }
-    if (command === "show-environment") return "";
+    if (command === "show-environment") return "CLAUDECODE=synthetic-parent\n";
+    if (command === "set-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
+    if (command === "respawn-pane") {
+      expect(argv.slice(0, 3)).toEqual(["tmux", "-t", "=" + binding.physical + ":.%1"]);
+      expect(argv.slice(3)).toEqual(["respawn-pane", "-k", "-t", "%1"]); return "";
+    }
     throw new Error("Unexpected command: " + command);
   }, { supportsEnvironment: true as const });
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, {
     tmpName: () => "C:/owned/bootstrap.cmd", bufferName: () => "owned", writeFile: async () => {}, unlink: async () => {},
     privateConfig: async () => ({ path: "C:/owned/private.conf", dispose: async () => {} }),
   }, invoke, [], "psmux");
+  vi.spyOn(adapter, "isNativeWindows", "get").mockReturnValue(true);
   const created = await adapter.createSession(name, undefined, { "OTHER-KEY": "synthetic" });
-  expect(created, JSON.stringify(created)).toMatchObject({ ok: true });
+  expect(created, JSON.stringify(created)).toEqual({ ok: true });
   expect(await adapter.probeSession(name)).toEqual({ state: "present" });
   expect(await adapter.listSessionPanes(name)).toHaveLength(1);
   expect(calls.some(argv => argv.includes("source-file"))).toBe(true);
+  expect(calls.some(argv => argv.includes("set-environment") && argv.includes("-r") && argv.includes("CLAUDECODE"))).toBe(true);
+  expect(calls.some(argv => argv.includes("respawn-pane"))).toBe(true);
   expect(calls.flat()).not.toContain("=owned");
 });

@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Creation parent-identity removal and respawn retain server identity (2026-11-03)
+
+Creation's exclusion of inherited parent-session identities now retains its
+pure logical session name when selecting the native physical server. Respawn's
+already-resolved pane target remains on its existing contract. The subsequent
+fresh-pane respawn after creation now carries a session-scoped native pane ID;
+a bare `%N` is only unique within one psmux server and cannot select the correct
+server independently. Explicit seat environment values are still kept by the
+existing exclusion policy.
+
+The expanded controlled creation fixture exposed the original wrong-target
+warning, then reached the follow-on respawn path. It now checks the selected
+physical server, pane ID and parent-removal flag in both file-protocol branches.
+Five complete creation/parent-environment/argv/routing/launch-identity files passed
+19 with two skips on Windows. Daemon build and whitespace checks passed. The
+fixture supplies inert Windows environment/path facts and restores them afterward;
+it does not start stock psmux or a provider. Current installed/cross-platform/full
+directory receipts predate this repair. No deployment, user-team operation or
+public push occurred.
+
 ## Session options keep logical binding and explicit scoped compatibility (2026-11-03)
 
 Session option read/write and targeted native-server option writes now resolve

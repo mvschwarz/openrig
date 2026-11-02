@@ -1338,9 +1338,10 @@ export class TmuxAdapter {
     // and restart the fresh pane so its shell starts without it. The session
     // exists either way, so a failure here is a warning, never a failed launch.
     try {
-      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv)) && !scopedCommand) {
+      if (await this.excludeParentSessionEnv(exactTarget(name, "session"), Object.keys(seatEnv), name) && !scopedCommand) {
         if (!/^%\d+$/.test(created)) throw new Error(`new-session reported no pane id ("${created}"), so no pane was restarted`);
-        const respawn = ["tmux", "respawn-pane", "-k", "-t", created];
+        const paneTarget = this.terminalKind === "psmux" ? `psmux:${Buffer.from(name).toString("base64url")}:${created}` : created;
+        const respawn = ["tmux", "respawn-pane", "-k", "-t", paneTarget];
         if (cwd != null) respawn.push("-c", cwd);
         await this.run(respawn, posixJoinArgv(respawn));
       }
@@ -1376,14 +1377,15 @@ export class TmuxAdapter {
    * values stay. Returns whether anything was marked. Throws when the global
    * environment can't be read: the caller can't tell whether the seat inherits
    * an identity, so it reports a warning (the launch still goes ahead). */
-  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = []): Promise<boolean> {
+  private async excludeParentSessionEnv(sessionTarget: string, keep: readonly string[] = [], sessionName?: string): Promise<boolean> {
     const inherited = await this.globalEnvironment();
     const compare = (key: string) => process.platform === "win32" ? key.toUpperCase() : key;
     const kept = new Set(keep.map(compare));
     const keys = parentSessionEnvKeys(inherited).filter((key) => !kept.has(compare(key)));
     for (const key of keys) {
       const argv = ["tmux", "set-environment", "-t", sessionTarget, "-r", key];
-      await this.run(argv, posixJoinArgv(argv));
+      if (sessionName !== undefined) await this.runNamedSession(argv, sessionName, posixJoinArgv(argv));
+      else await this.run(argv, posixJoinArgv(argv));
     }
     return keys.length > 0;
   }
