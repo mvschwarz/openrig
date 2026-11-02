@@ -1,5 +1,28 @@
 # Native Windows parity: implementation and evidence
 
+## Encoded runtime-exchange names and attached-client mapping (2026-11-03)
+
+The planner now validates names through the native codec and checks distinct
+physical slots, permitting representable logical colons, pipes, reserved device
+names and trailing dots/spaces. The journal preserves the logical names exactly.
+Both intent-driven and direct adapter rename paths use the qualified physical
+transition; the previous node/generation-only direct rename was removed.
+
+Attached-client rows are decoded only through observed binding markers. Client
+following resolves both physical targets again, reobserves the successor, and
+checks the predecessor's node, generation, physical name and marker in the
+server-side switch predicate. Foreign markers or refused predicates retain the
+predecessor and return pending. Controlled production-adapter tests cover mapped
+rename with a lost reply, marker repair without replay, and client following.
+Seven selected files passed 158 tests with five skips; daemon build and whitespace
+checks passed. These are controlled transport and SQLite tests, not real PTY runs.
+
+This supersedes the earlier planner/client-mapping implementation limitation,
+but is not real stock-psmux acceptance. Existing unmarked legacy prefix-like
+sessions explicitly require a separate physical-name migration and remain an
+implementation gap. The exhausted mapped-name fixture is not rerun. No runtime
+deployment, paused-team operation or public push occurred.
+
 ## Runtime exchange transport now opts into durable intents (2026-11-03)
 
 The production native runtime-exchange adapter now supplies prepare/recovery

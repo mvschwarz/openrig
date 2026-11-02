@@ -42,7 +42,7 @@ export class NativeNameTransition {
     const session = source.session;
     if (session.nodeId !== this.nodeId || session.generation !== generation || this.marker(session.marker) !== sourceName.marker
       || !/^[1-9]\d*$/.test(session.serverPid) || !/^\$\d+$/.test(session.sessionId) || !/^\d+$/.test(session.sessionCreated)) {
-      throw new Error("Native name transition source identity is not qualified");
+      throw new Error("Native name transition source occupant changed or identity is not qualified");
     }
     return { schema: "openrig.native-runtime-rename/v1", from, to, generation,
       serverPid: session.serverPid, sessionId: session.sessionId, sessionCreated: session.sessionCreated };

@@ -1,3 +1,5 @@
+import { bindNativeSessionName } from "./terminal/native-session-name.js";
+
 /** One observed native server slot. Unknown transport/identity is not absence. */
 export type NativeExchangeSlot =
   | { state: "absent" }
@@ -32,8 +34,11 @@ export function nextNativeRuntimeExchangeStep(
 ): NativeExchangeStep {
   const { canonical, staging, parking, predecessorGeneration: predecessor, successorGeneration: successor } = identity;
   const blocked = (reason: string): NativeExchangeStep => ({ state: "blocked", reason });
-  if ([canonical, staging, parking].some(name => !name || /[\x00-\x1f<>:"/\\|?*]/.test(name) || /[. ]$/.test(name))
-    || new Set([canonical, staging, parking]).size !== 3
+  let physical: string[];
+  try { physical = [canonical,staging,parking].map(name => bindNativeSessionName(name).physical); }
+  catch { return blocked("Native exchange names cannot be represented"); }
+  if ([canonical, staging, parking].some(name => !name)
+    || new Set(physical).size !== 3
     || !/^[A-Za-z0-9_-]{1,128}$/.test(predecessor) || !/^[A-Za-z0-9_-]{1,128}$/.test(successor)
     || predecessor === successor) return blocked("Native exchange identities are missing or ambiguous");
   const role = (slot: NativeExchangeSlot): string => slot.state === "absent" ? "-"

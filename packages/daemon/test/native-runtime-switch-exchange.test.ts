@@ -28,4 +28,10 @@ describe("native runtime exchange recovery planning", () => {
     expect(nextNativeRuntimeExchangeStep({...identity,parking:identity.canonical},observe("ps-"),"forward").state).toBe("blocked");
     expect(nextNativeRuntimeExchangeStep({...identity,successorGeneration:identity.predecessorGeneration},observe("ps-"),"forward").state).toBe("blocked");
   });
+  it.each(["seat:rig","seat|rig","seat?rig","seat. ","CON","openrig-native-v1-old"])("plans exchange using the codec for %s",canonical=>{
+    expect(nextNativeRuntimeExchangeStep({...identity,canonical},observe("ps-"),"forward")).toEqual({state:"rename",from:canonical,to:identity.parking});
+  });
+  it.each(["bad\u0000name","bad\ud800name"])("refuses names the codec cannot represent",canonical=>{
+    expect(nextNativeRuntimeExchangeStep({...identity,canonical},observe("ps-"),"forward").state).toBe("blocked");
+  });
 });

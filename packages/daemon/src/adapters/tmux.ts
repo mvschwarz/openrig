@@ -1143,6 +1143,9 @@ export class TmuxAdapter {
         const output=await this.runNamedSession(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT], identity.staging);
         const rows=parseLines(output,parseClientLine);
         if(output.split(/\r?\n/).filter(line=>line.trim()!=="").length!==rows.length)throw new Error("Native attached-client listing is malformed");
+        // Client formats expose physical names. Decode only after verifying the
+        // observed session's marker, as with the normal native inventory.
+        for (const row of rows) row.session = await this.nativeObservedName(row.session);
         const rawCount=(await this.runNamedSession(["tmux","display-message","-p","-t",`=${identity.staging}:`,"#{session_attached}"], identity.staging, undefined, true)).trim();
         // Stock psmux reports this format as a boolean, unlike tmux's count.
         if(!/^\d+$/.test(rawCount) || (Number(rawCount)>0)!==(rows.length>0))throw new Error("Native attached-client observation changed or is incomplete");
@@ -1152,10 +1155,17 @@ export class TmuxAdapter {
       if(attached.some(client=>client.session!==identity.staging))throw new Error("Native client listing contains an unexpected session");
       for(const client of attached){
         if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost");
+        const source = await this.nativeBoundName(identity.staging), destination = await this.nativeBoundName(identity.canonical);
+        const current = await backend.observe();
+        if (current.canonical.state !== "present" || current.canonical.generation !== identity.successorGeneration
+          || current.parking.state !== "absent") throw new Error("Native successor identity changed before client following");
         const refused=`openrig-native-client-refused-${randomUUID()}`;
-        const condition=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${identity.predecessorGeneration}}}`;
-        const output=await this.run(["tmux","if-shell","-F","-t",`=${identity.staging}`,condition,
-          `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${identity.canonical}`)}`,`display-message -p ${refused}`]);
+        const marker = bindNativeSessionName(identity.staging).marker ?? "";
+        const occupant=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${identity.predecessorGeneration}}}`;
+        const name=`#{&&:#{==:#{session_name},${tmuxFormatLiteral(source)}},#{==:#{${NATIVE_LOGICAL_SESSION_OPTION}},${tmuxFormatLiteral(marker)}}}`;
+        const condition=`#{&&:${occupant},${name}}`;
+        const output=await this.nativeRaw(["tmux","if-shell","-F","-t",`=${source}:`,condition,
+          `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${destination}`)}`,`display-message -p ${refused}`]);
         if(output.includes(refused))throw new Error("Native predecessor identity changed before client following");
       }
       // The native client reconnects asynchronously. Do not retire a server
@@ -1214,6 +1224,13 @@ export class TmuxAdapter {
         ? `set-option -u -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION}`
         : `set-option -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION} ${shellQuote(marker)}`),
     });
+    const rejectLegacyCollision = async (from: string,to: string) => {
+      for (const logical of [from,to]) {
+        if (bindNativeSessionName(logical).marker && await this.nativeLegacyName(logical)) {
+          throw new Error("Native exchange legacy session needs an explicit physical-name migration");
+        }
+      }
+    };
     const observe = async (session: string): Promise<NativeExchangeSlot> => {
       try {
         const probe = await this.probeSession(session);
@@ -1234,6 +1251,7 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) {
           throw new Error("Native exchange preparation is outside its custody");
         }
+        await rejectLegacyCollision(from,to);
         return transition.prepare(from,to,generation);
       },
       resumeRename: async intent => {
@@ -1242,6 +1260,7 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(intent.generation)) {
           throw new Error("Native exchange recovery intent is outside its custody");
         }
+        await rejectLegacyCollision(intent.from,intent.to);
         await transition.resume(intent);
       },
       observe: async () => ({canonical:await observe(identity.canonical),staging:await observe(identity.staging),parking:await observe(identity.parking)}),
@@ -1251,20 +1270,13 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) throw new Error("Native exchange rename is outside its custody");
         if (intent) {
           if (intent.from !== from || intent.to !== to || intent.generation !== generation) throw new Error("Native exchange rename intent differs from its command");
+          await rejectLegacyCollision(from,to);
           await transition.resume(intent);
           return;
         }
         if ((await this.probeSession(to)).state !== "absent") throw new Error("Native exchange destination is not proven absent");
-        if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
-        const refused=`openrig-native-exchange-refused-${randomUUID()}`;
-        const condition=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${generation}}}`;
-        const output=await this.run(["tmux","if-shell","-F","-t",`=${from}`,condition,
-          `rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(to)}`,`display-message -p ${refused}`]);
-        if(output.includes(refused))throw new Error("Native exchange source occupant changed; no rename was performed");
-        const destination=await observe(to), source=await observe(from);
-        if(destination.state!=="present" || destination.generation!==generation || source.state!=="absent") {
-          throw new Error("Native exchange rename outcome is unknown; reobserve before another write");
-        }
+        await rejectLegacyCollision(from,to);
+        await transition.resume(await transition.prepare(from,to,generation));
       },
     };
   }

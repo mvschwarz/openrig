@@ -118,8 +118,16 @@ describe("durable native runtime exchange",()=>{
     const db=new Database(":memory:");seed(db);
     try{
       const journal=new NativeRuntimeSwitchJournal(db,"switch","node");
-      expect(()=>journal.prepare({...identity,parking:"invalid|name"},"forward")).toThrow("Invalid");
+      expect(()=>journal.prepare({...identity,parking:"invalid\0name"},"forward")).toThrow("Invalid");
       expect(journal.read()).toBeNull();
+    }finally{db.close();}
+  });
+  it("persists logical names requiring native encoding without replacing their identity",()=>{
+    const db=new Database(":memory:");seed(db);
+    try{
+      const journal=new NativeRuntimeSwitchJournal(db,"switch","node"),mapped={...identity,canonical:"seat:rig",parking:"parking|owned"};
+      db.prepare("UPDATE seat_runtime_switches SET canonical_session = ? WHERE id = ?").run(mapped.canonical,"switch");
+      journal.prepare(mapped,"forward");expect(journal.read()?.identity).toEqual(mapped);
     }finally{db.close();}
   });
 });
