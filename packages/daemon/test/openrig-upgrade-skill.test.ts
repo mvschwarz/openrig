@@ -379,13 +379,20 @@ describe("refresh-managed-plugin helper", () => {
 
 describe("backup-sqlite helper", () => {
   it("creates a verified backup without changing the source database", () => {
-    const sqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" });
-    if (sqlite.status !== 0) return;
+    const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
+    const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
+    if (!hasSqlite && !DatabaseSync) return;
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
     const destination = path.join(root, "openrig.backup.sqlite");
-    execFileSync("sqlite3", [source, "CREATE TABLE proof(value TEXT); INSERT INTO proof VALUES ('kept');"]);
+    if (hasSqlite) {
+      execFileSync("sqlite3", [source, "CREATE TABLE proof(value TEXT); INSERT INTO proof VALUES ('kept');"]);
+    } else {
+      const db = new DatabaseSync(source);
+      db.exec("CREATE TABLE proof(value TEXT); INSERT INTO proof VALUES ('kept');");
+      db.close();
+    }
     const before = fs.readFileSync(source);
 
     const receipt = runJson("backup-sqlite.mjs", [
@@ -395,17 +402,31 @@ describe("backup-sqlite helper", () => {
     expect(receipt.integrity).toBe("ok");
     expect(receipt.destination).toBe(destination);
     expect(fs.readFileSync(source)).toEqual(before);
-    expect(execFileSync("sqlite3", [destination, "SELECT value FROM proof;"], { encoding: "utf8" }).trim()).toBe("kept");
+    if (hasSqlite) {
+      expect(execFileSync("sqlite3", [destination, "SELECT value FROM proof;"], { encoding: "utf8" }).trim()).toBe("kept");
+    } else {
+      const verifyDb = new DatabaseSync(destination, { readOnly: true });
+      const row = (verifyDb.prepare("SELECT value FROM proof;").get() as { value: string })?.value;
+      verifyDb.close();
+      expect(row).toBe("kept");
+    }
   });
 
   it("refuses to overwrite an existing destination", () => {
-    const sqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" });
-    if (sqlite.status !== 0) return;
+    const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
+    const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
+    if (!hasSqlite && !DatabaseSync) return;
 
     const root = temporaryRoot();
     const source = path.join(root, "openrig.sqlite");
     const destination = path.join(root, "existing.sqlite");
-    execFileSync("sqlite3", [source, "CREATE TABLE proof(value TEXT);"]);
+    if (hasSqlite) {
+      execFileSync("sqlite3", [source, "CREATE TABLE proof(value TEXT);"]);
+    } else {
+      const db = new DatabaseSync(source);
+      db.exec("CREATE TABLE proof(value TEXT);");
+      db.close();
+    }
     fs.writeFileSync(destination, "keep this");
 
     const result = spawnSync(process.execPath, [
