@@ -347,7 +347,9 @@ for(const map of ['complete','removed'])it(`manual route classifies an idle-wait
  const idle=vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(_session,remaining)=>{
   expect(remaining).toBeGreaterThan(0);
   const a=f.e.getPreparationState(seat)!;
-  if(map==='removed')rmSync(a.mapPath,{force:true});
+  if(map==='removed')for(const path of [a.mapPath,a.mapPath+'.tmp']){
+   rmSync(path,{force:true});expect(existsSync(path)).toBe(false);
+  }
   return {ok:false,reason:'wait_for_idle_timeout',waitedMs:remaining,attempts:1} as any;
  });
  const response=await routeFixture(f)();const body=await response.json();
