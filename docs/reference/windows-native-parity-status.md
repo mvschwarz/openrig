@@ -27,6 +27,26 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### File/link replacement of empty conflicting directories (2026-11-02)
+
+Local and SFTP copies now replace an empty conflicting directory with a source
+file; local copies also cover source links. The complete replacement entry is
+staged first. Nonrecursive RMDIR is the final emptiness check, so a directory
+that gained a child during staging is retained. A subsequent rename failure
+attempts to reconstruct the original empty directory and its metadata; recovery
+failure remains explicit and the stage is retained for inspection. The rename
+failure recovery branch is not claimed as real fault-injection qualification.
+
+Real rsync 3.2.7 confirms successful empty-directory replacement and preservation
+of nonempty directories (exit 23). Windows local/SFTP/protocol runs cover four
+local file/link cases and six SFTP upload/download cases, including adding a real
+child after staging begins: the new child and complete staged bytes survive the
+refused removal. The three final Windows files pass 27 tests; the preceding
+four-file run passed 39 before those six new cases. The current three focused
+WSL files pass 16 tests against an ordinary-user OpenSSH subsystem. CLI
+TypeScript checking passes. Directory-over-file replacement and broader special
+file/archive semantics remain separate requirements.
+
 ### Existing readonly-directory merge permissions (2026-11-02)
 
 Local and SFTP recursive copies now temporarily add required owner access to

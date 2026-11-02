@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { chmod, link, lstat, lutimes, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -10,6 +10,36 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it.each([
+    ['upload','empty'],['upload','nonempty'],['upload','race'],
+    ['download','empty'],['download','nonempty'],['download','race'],
+  ] as const)('replaces only an empty destination directory (%s, %s)',async(direction,mode)=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),'sftp-directory-replace-'));
+    const source=path.join(root,'source'),destination=path.join(root,'destination'),entry=path.join(destination,'file');
+    let injected=false;
+    try{
+      await mkdir(source);await mkdir(destination);await mkdir(entry);await writeFile(path.join(source,'file'),'owned staged bytes');
+      if(mode==='nonempty')await writeFile(path.join(entry,'retained'),'retain data');
+      const remote=(file:string)=>({kind:'remote' as const,path:'/'+file.replaceAll('\\','/'),host:{id:'owned',target:'owned',transport:'ssh' as const}});
+      const local=(file:string)=>({kind:'local' as const,path:file});
+      const plan:CopyPlan={src:direction==='upload'?local(source+path.sep):remote(source+'/'),dst:direction==='upload'?remote(destination):local(destination),dryRun:false};
+      const start=()=>{
+        const child=spawn(server,[],{stdio:'pipe',windowsHide:true});
+        if(mode==='race')child.stdout.on('data',()=>{
+          if(!injected&&existsSync(entry)&&readdirSync(destination).some(name=>name.startsWith('.openrig-copy-'))){writeFileSync(path.join(entry,'retained'),'retain data');injected=true;}
+        });
+        return child;
+      };
+      const result=await runNativeSftpCopy(plan,start);expect(result.ok,result.stderr).toBe(mode==='empty');
+      if(mode==='empty')expect(await readFile(entry,'utf8')).toBe('owned staged bytes');
+      else expect(await readFile(path.join(entry,'retained'),'utf8')).toBe('retain data');
+      if(mode==='race'){
+        expect(injected).toBe(true);expect(result.hint).toContain('inspect the destination');
+        const stages=(await readdir(destination)).filter(name=>name.startsWith('.openrig-copy-'));expect(stages).toHaveLength(1);
+        expect(await readFile(path.join(destination,stages[0]!),'utf8')).toBe('owned staged bytes');
+      }
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it.each([false,true])("qualifies advertised no-follow metadata before touching the referent (dangling=%s)",async dangling=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-upload-linktime-"));
     const source=path.join(root,"source"),destination=path.join(root,"destination"),target=path.join(root,"target");

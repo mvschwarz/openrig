@@ -9,6 +9,18 @@ import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
 import type { CopyPlan } from "../src/lib/file-transfer.js";
 
 const server=process.env.OPENRIG_TEST_SFTP_SERVER ?? '/usr/lib/openssh/sftp-server';
+it.skipIf(process.platform==='win32'||!existsSync(server)).each(['upload','download'] as const)('replaces an empty conflicting directory over SFTP (%s)',async direction=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-empty-directory-'));
+  const source=path.join(root,'source'),destination=path.join(root,'destination');
+  try{
+    await mkdir(source);await mkdir(destination);await mkdir(destination+'/file');await writeFile(source+'/file','owned bytes');
+    const local=(file:string)=>({kind:'local' as const,path:file});
+    const remote=(file:string)=>({kind:'remote' as const,path:file,host:{id:'owned',target:'owned',transport:'ssh' as const}});
+    const plan:CopyPlan={src:direction==='upload'?local(source+'/'):remote(source+'/'),dst:direction==='upload'?remote(destination):local(destination),dryRun:false};
+    const result=await runNativeSftpCopy(plan,()=>spawn(server,[],{stdio:'pipe'}));expect(result.ok,result.stderr).toBe(true);
+    expect(await readFile(destination+'/file','utf8')).toBe('owned bytes');
+  }finally{await rm(root,{recursive:true,force:true});}
+});
 it.skipIf(process.platform==='win32'||!existsSync(server))('creates owner-accessible SFTP staging entries before bytes, independent of server umask',async()=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-staging-mode-'));
   const child=spawn('/bin/sh',['-c','umask 000; exec "$1"','owned-sftp',server],{stdio:'pipe'});

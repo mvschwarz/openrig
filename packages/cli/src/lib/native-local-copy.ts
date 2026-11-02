@@ -1,4 +1,4 @@
-import { chmod, cp, lstat, lutimes, mkdir, readdir, readlink, realpath, rename, stat, symlink, utimes } from "node:fs/promises";
+import { chmod, cp, lstat, lutimes, mkdir, readdir, readlink, realpath, rename, rmdir, stat, symlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
@@ -41,6 +41,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
   let bytesTransferred = 0;
   const changes: string[] = [];
   let staged: string | undefined;
+  let directoryReplacementAttempted = false;
   const stat = async (p: string) => lstat(p).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined;
     throw error;
@@ -95,7 +96,8 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       return;
     }
     if (!source.isFile() && !source.isSymbolicLink()) throw new Error(`Unsupported special file: ${src}`);
-    if (destination?.isDirectory()) throw new Error(`Cannot replace directory with file: ${dst}`);
+    const replacingDirectory = destination?.isDirectory() === true;
+    if (replacingDirectory && (await readdir(dst)).length) throw new Error(`Cannot replace nonempty directory with file: ${dst}`);
     const directoryLink = source.isSymbolicLink() && process.platform === "win32" ? isWindowsDirectoryLink(src) : undefined;
     const same = source.isSymbolicLink()
       ? destination?.isSymbolicLink() && await readlink(src) === await readlink(dst)
@@ -120,6 +122,28 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     changes.push(`${source.isSymbolicLink() ? "cL" : ">f"} ${dst}`);
     if (!source.isSymbolicLink()) { filesTransferred++; bytesTransferred += source.size; }
     if (!plan.dryRun) {
+      if (replacingDirectory) {
+        staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
+        if (source.isSymbolicLink()) {
+          await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
+          await lutimes(staged, source.atime, source.mtime);
+        } else await cp(src, staged, { force: false, errorOnExist: true, preserveTimestamps: true });
+        // Nonrecursive removal is the final emptiness check; a newly added
+        // child makes it fail without deleting that child's data.
+        directoryReplacementAttempted = true;
+        await rmdir(dst);
+        try { await rename(staged, dst); }
+        catch (error) {
+          try {
+            await mkdir(dst, { mode: 0o700 });
+            if (process.platform !== "win32") await chmod(dst, destination!.mode & 0o7777);
+            await utimes(dst, destination!.atime, destination!.mtime);
+          } catch (restore) { throw new AggregateError([error, restore], `Replacement failed and empty directory recovery is unconfirmed: ${dst}`); }
+          throw error;
+        }
+        staged = undefined;
+        return;
+      }
       if (directoryLink !== undefined) {
         staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
         await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
@@ -152,6 +176,6 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     return { ok: true, failedStep: "none", exitCode: 0, stdout: changes.join("\n"), stderr: "", filesTransferred, bytesTransferred, transport: "native-local" };
   } catch (error) {
     return { ok: false, failedStep: "local-copy-failed", exitCode: 1, stdout: changes.join("\n"), stderr: error instanceof Error ? error.message : String(error), transport: "native-local",
-      ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; existing destination was not removed.` } : {}) };
+      ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; ${directoryReplacementAttempted ? "inspect the destination after the attempted empty-directory replacement." : "existing destination was not removed."}` } : {}) };
   }
 }

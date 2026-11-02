@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { chmod, lstat, lutimes, stat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
+import { chmod, lstat, lutimes, stat, mkdir, open, readdir, readlink, rename, rmdir, symlink, utimes } from "node:fs/promises";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -15,6 +15,7 @@ interface Endpoint {
   names(file: string): Promise<string[]>;
   link(file: string): Promise<string>;
   mkdir(file: string): Promise<void>;
+  rmdir(file: string): Promise<void>;
   symlink(target: string, file: string, directory?: boolean): Promise<void>;
   read(file: string): AsyncIterable<Buffer>;
   write(file: string, data: AsyncIterable<Buffer>): Promise<void>;
@@ -31,6 +32,7 @@ const local: Endpoint = {
   names: readdir, link: readlink,
   async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } },
   async mkdir(file) { await mkdir(file, { mode: 0o700 }); },
+  rmdir,
   async symlink(target, file, directory) { await symlink(target, file, directory ? "dir" : "file"); },
   read: file => createReadStream(file),
   async write(file, data) {
@@ -80,6 +82,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
   let stderr = "", staged: string | undefined, filesTransferred = 0, bytesTransferred = 0;
   let spawnError: NodeJS.ErrnoException | undefined;
   let transportExit: number | null = null;
+  let directoryReplacementAttempted = false;
   const changes: string[] = [];
   try {
     const child = start(buildSftpArgv(plan));
@@ -92,7 +95,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     const remote: Endpoint = {
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
       followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
-      link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), symlink: (target, file) => client!.symlink(target, file),
+      link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), symlink: (target, file) => client!.symlink(target, file),
       read: file => client!.read(file), write: (file, data) => client!.write(file, data),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
       ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
@@ -149,7 +152,8 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       }
       const isLink = kind(attrs) === 0o120000;
       if (!isLink && kind(attrs) !== 0o100000) throw new Error(`Unsupported special file: ${src}`);
-      if (existing && kind(existing) === 0o040000) throw new Error(`Cannot replace directory with file: ${dst}`);
+      const replacingDirectory = kind(existing) === 0o040000;
+      if (replacingDirectory && (await destination.names(dst)).length) throw new Error(`Cannot replace nonempty directory with file: ${dst}`);
       const target = isLink ? await source.link(src) : undefined;
       const directory = isLink && destination === local && process.platform === "win32" ? await source.followsDirectory(src) : undefined;
       if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) {
@@ -180,7 +184,16 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         await destination.linkTimes?.(staged, attrs);
       }
       else { await destination.write(staged, source.read(src)); await destination.times(staged, attrs); }
-      await destination.rename(staged, dst, existing !== undefined);
+      if (replacingDirectory) {
+        directoryReplacementAttempted = true;
+        await destination.rmdir(dst);
+        try { await destination.rename(staged, dst, false); }
+        catch (error) {
+          try { await destination.mkdir(dst); await destination.times(dst, existing!); }
+          catch (restore) { throw new AggregateError([error, restore], `Replacement failed and empty directory recovery is unconfirmed: ${dst}`); }
+          throw error;
+        }
+      } else await destination.rename(staged, dst, existing !== undefined);
       staged = undefined;
     };
     const src = source.paths.normalize(plan.src.path), dst = destination.paths.normalize(plan.dst.path);
@@ -198,6 +211,6 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     const localFilesystemFailure = typeof localError?.path === "string"
       && typeof localError.syscall === "string" && !localError.syscall.startsWith("spawn");
     const failedStep = spawnError?.code === "ENOENT" ? "ssh-missing" : localFilesystemFailure ? "local-copy-failed" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
-    return { ok: false, failedStep, transport: "sftp", exitCode: transportExit ?? 1, stdout: changes.join("\n"), stderr: [stderr, message].filter(Boolean).join("\n"), ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; existing destination was not removed.` } : {}) };
+    return { ok: false, failedStep, transport: "sftp", exitCode: transportExit ?? 1, stdout: changes.join("\n"), stderr: [stderr, message].filter(Boolean).join("\n"), ...(staged ? { hint: `Staging path may contain incomplete data: ${staged}; ${directoryReplacementAttempted ? "inspect the destination after the attempted empty-directory replacement." : "existing destination was not removed."}` } : {}) };
   } finally { await client?.close(); }
 }

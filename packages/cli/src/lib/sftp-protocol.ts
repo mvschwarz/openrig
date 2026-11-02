@@ -131,6 +131,7 @@ export class SftpClient {
     return names;
   }
   async mkdir(file: string): Promise<void> { await this.request(14, Buffer.concat([str(file), u32(4), u32(0o700)]), 101); }
+  async rmdir(file: string): Promise<void> { await this.request(15, str(file), 101); }
   async readlink(file: string): Promise<string> {
     const packet = await this.request(19, str(file), 104);
     if (packet.uint() !== 1) throw new Error("Invalid SFTP link target");
