@@ -31,6 +31,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
+      else if(args[0]=="move-no-replace") { if(!MoveFileEx(args[1],args[2],8))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
       else if(args[0]=="names-collide")NamesCollide();
@@ -504,6 +505,13 @@ export function replaceWindowsFilePreservingMetadata(target: string, staging: st
  * preserving the destination DACL and restoring any retained hardlink inode. */
 export function replaceWindowsCopiedFile(target: string, staging: string): void {
   execFileSync(nativeHelper(), ["replace-copy", toNamespacedPath(target), toNamespacedPath(staging)], {
+    windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** Same-volume move without MOVEFILE_REPLACE_EXISTING; never clobbers a new occupant. */
+export function moveWindowsEntryNoReplace(source: string, destination: string): void {
+  execFileSync(nativeHelper(), ["move-no-replace", toNamespacedPath(source), toNamespacedPath(destination)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
 }

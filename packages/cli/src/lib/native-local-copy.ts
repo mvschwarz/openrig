@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
+import { moveLocalEntryNoReplace } from './local-entry-move.js';
 
 /** Resolve existing parents too: a destination need not exist yet, but its
  * junction/short-name parent can already name a child of the source. */
@@ -36,13 +37,14 @@ async function rejectOverlap(src: string, target: string, directory: boolean): P
 }
 
 /** Archive-style local copies without a shell or rsync. Extra destination files are retained. */
-export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult> {
+export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEntryNoReplace): Promise<FileCopyResult> {
   let filesTransferred = 0;
   let bytesTransferred = 0;
   const changes: string[] = [];
   let staged: string | undefined;
   let directoryReplacementAttempted = false;
   let retainedOriginal: string | undefined;
+  let originalConfirmed = false;
   const stat = async (p: string) => lstat(p).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined;
     throw error;
@@ -62,13 +64,16 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         if (plan.dryRun) return;
         staged = directoryStage;
         const original = path.join(path.dirname(dst), `.openrig-replaced-${randomUUID()}`);
-        await rename(dst, original); retainedOriginal = original;
-        try { await rename(directoryStage, dst); staged = undefined; }
+        retainedOriginal = original; originalConfirmed = false;
+        await moveEntry(dst, original); originalConfirmed = true;
+        try { await moveEntry(directoryStage, dst); staged = undefined; }
         catch (error) {
-          try { await rename(original, dst); retainedOriginal = undefined; }
+          originalConfirmed = false;
+          try { await moveEntry(original, dst); retainedOriginal = undefined; }
           catch (restore) { throw new AggregateError([error, restore], `Directory replacement failed and original recovery is unconfirmed: ${dst}`); }
           throw error;
         }
+        originalConfirmed = false;
         await unlink(original); retainedOriginal = undefined;
         return;
       }
@@ -152,7 +157,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         // child makes it fail without deleting that child's data.
         directoryReplacementAttempted = true;
         await rmdir(dst);
-        try { await rename(staged, dst); }
+        try { await moveEntry(staged, dst); }
         catch (error) {
           try {
             await mkdir(dst, { mode: 0o700 });
@@ -197,6 +202,6 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
   } catch (error) {
     return { ok: false, failedStep: "local-copy-failed", exitCode: 1, stdout: changes.join("\n"), stderr: error instanceof Error ? error.message : String(error), transport: "native-local",
       ...(staged || retainedOriginal ? { hint: [staged ? `Staging path may contain incomplete data: ${staged}; ${directoryReplacementAttempted ? "inspect the destination after the attempted empty-directory replacement." : "inspect the destination before retrying."}` : "",
-        retainedOriginal ? `Original entry retained at: ${retainedOriginal}` : ""].filter(Boolean).join(" ") } : {}) };
+        retainedOriginal ? `${originalConfirmed ? "Original entry retained at" : "Original recovery path (existence unconfirmed)"}: ${retainedOriginal}` : ""].filter(Boolean).join(" ") } : {}) };
   }
 }

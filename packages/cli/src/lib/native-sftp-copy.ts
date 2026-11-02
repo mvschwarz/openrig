@@ -7,6 +7,7 @@ import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
 import { looksLikePermissionGate } from "../cross-host-executor.js";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
+import { moveLocalEntryNoReplace } from './local-entry-move.js';
 
 interface Endpoint {
   paths: typeof path.posix;
@@ -63,6 +64,11 @@ const local: Endpoint = {
     if (attrs.atime !== undefined && attrs.mtime !== undefined) await lutimes(file, attrs.atime, attrs.mtime);
   },
   async rename(src, dst, replacing) {
+    if(!replacing){
+      try { await moveLocalEntryNoReplace(src,dst); }
+      catch(error){throw Object.assign(error as Error,{path:dst,syscall:'rename'});}
+      return;
+    }
     if (process.platform === "win32" && replacing && kind(await local.stat(src)) === 0o100000 && kind(await local.stat(dst)) === 0o100000) {
       try { replaceWindowsCopiedFile(dst, src); }
       catch (error) { throw Object.assign(error as Error, {path: dst, syscall: "replace"}); }

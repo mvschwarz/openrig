@@ -27,6 +27,31 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native local type-exchange recovery and no-clobber moves (2026-11-02)
+
+Windows local exchanges now use MoveFileEx without REPLACE_EXISTING for backup,
+installation and recovery, including the local SFTP endpoint's no-replace moves.
+This avoids ordinary Node rename overwriting a new occupant during recovery.
+Recovery paths are retained before dispatch and their existence is marked
+unconfirmed after ambiguous later operations. Local SFTP move failures retain
+their local path/syscall classification. The paired daemon helper export is
+compiled successfully and CLI TypeScript checking passes.
+
+Six controlled local move-boundary faults pass on Windows and WSL: install
+refusal, occupied file, occupied empty directory, post-backup failure,
+post-install failure and post-restore failure. They perform actual filesystem
+moves/occupant creation and assert original/staged bytes, directory inode and
+recovery hints. Pre/post-operation errors are injected at the move boundary,
+not actual kernel or OS-crash failures. Windows's preceding three-file run
+passed 37 checks with one POSIX-only skip; the final six faults pass separately.
+The current four WSL recovery/type/staging files pass 35 tests.
+
+The POSIX fallback uses exclusive hardlinks for non-directories and a mkdir
+reservation for directories. It does not provide Windows's one-syscall
+directory no-replace guarantee; adversarial replacement of that reservation
+and OS-crash durability remain unqualified. These scoped recovery results do
+not close complete cross-platform filesystem or archive acceptance.
+
 ### Remote SFTP directory-exchange fault qualification (2026-11-02)
 
 SFTP no-replace renames now use the standard RENAME request even when the
@@ -47,7 +72,7 @@ The occupied target remains unchanged. Five-case Windows SFTP/protocol regressio
 ran 34 passing checks before the last two scenarios were added; the final seven
 fault checks pass separately. WSL's final recovery/staging pair passes 20 tests.
 CLI TypeScript checking passes. These are local subsystem tests, not network
-SSH, OS-crash durability, all link types or local-endpoint exchange qualification.
+SSH, OS-crash durability or all link types. Local-endpoint follow-up is above.
 
 ### Staged source-directory replacement of files and links (2026-11-02)
 
