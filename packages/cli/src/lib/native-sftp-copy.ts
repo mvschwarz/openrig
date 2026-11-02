@@ -120,15 +120,31 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           }
           if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
         }
-        for (const name of names) {
-          // A remote directory entry must remain exactly one native filename.
-          if (!name || name === "." || name === ".." || /[\/\\\0]/.test(name)
-            || (destination === local && process.platform === "win32" && (/[\x01-\x1f<>:"|?*]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)))) {
-            throw new Error(`Unrepresentable directory entry: ${JSON.stringify(name)}`);
+        const borrowedMode = !plan.dryRun && !(destination === local && process.platform === "win32")
+          && existing?.mode !== undefined && names.length && (existing.mode & 0o700) !== 0o700 ? existing.mode & 0o7777 : undefined;
+        if (borrowedMode !== undefined) await destination.times(dst, { mode: borrowedMode | 0o700 });
+        let childError: unknown;
+        try {
+          for (const name of names) {
+            // A remote directory entry must remain exactly one native filename.
+            if (!name || name === "." || name === ".." || /[\/\\\0]/.test(name)
+              || (destination === local && process.platform === "win32" && (/[\x01-\x1f<>:"|?*]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)))) {
+              throw new Error(`Unrepresentable directory entry: ${JSON.stringify(name)}`);
+            }
+            await copy(source.paths.join(src, name), destination.paths.join(dst, name));
           }
-          await copy(source.paths.join(src, name), destination.paths.join(dst, name));
+        } catch (error) { childError = error; }
+        try {
+          if (!plan.dryRun) await destination.times(dst, attrs);
+        } catch (error) {
+          if (borrowedMode !== undefined) {
+            try { await destination.times(dst, { mode: borrowedMode }); }
+            catch (restore) { throw new AggregateError([childError, error, restore].filter(Boolean), `Directory metadata failed and original permissions could not be restored: ${dst}`); }
+          }
+          if (childError) throw new AggregateError([childError, error], `Copy and directory metadata finalization failed: ${dst}`);
+          throw error;
         }
-        if (!plan.dryRun) await destination.times(dst, attrs);
+        if (childError) throw childError;
         return;
       }
       const isLink = kind(attrs) === 0o120000;

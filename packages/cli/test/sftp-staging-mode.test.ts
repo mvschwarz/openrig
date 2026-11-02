@@ -31,6 +31,27 @@ it.skipIf(process.platform==='win32'||!existsSync(server))('creates owner-access
   }finally{await client.close();await rm(root,{recursive:true,force:true});}
 });
 
+it.skipIf(process.platform==='win32'||!existsSync(server)).each([
+  ['upload',false],['upload',true],['download',false],['download',true],
+] as const)('merges an existing readonly SFTP directory (%s, failure=%s)',async(direction,fail)=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-readonly-merge-'));
+  const source=path.join(root,'source'),destination=path.join(root,'destination');
+  const start=()=>spawn('/bin/sh',['-c','umask 000; exec "$1"','owned-sftp',server],{stdio:'pipe'});
+  try{
+    await mkdir(source);await mkdir(destination);await writeFile(path.join(source,'file'),'new contents');
+    if(fail){await mkdir(path.join(destination,'file'));await writeFile(path.join(destination,'file','retained'),'retain conflict');}else await writeFile(path.join(destination,'retained'),'retain extra');
+    await chmod(source,fail?0o750:0o555);await chmod(destination,0o555);
+    const local=(file:string)=>({kind:'local' as const,path:file});
+    const remote=(file:string)=>({kind:'remote' as const,path:file,host:{id:'owned',target:'owned',transport:'ssh' as const}});
+    const plan:CopyPlan={src:direction==='upload'?local(source+'/'):remote(source+'/'),dst:direction==='upload'?remote(destination):local(destination),dryRun:true};
+    await runNativeSftpCopy(plan,start);expect((await lstat(destination)).mode&0o777).toBe(0o555);
+    const result=await runNativeSftpCopy({...plan,dryRun:false},start);expect(result.ok,result.stderr).toBe(!fail);
+    expect((await lstat(destination)).mode&0o777).toBe(fail?0o750:0o555);
+    if(fail)expect((await lstat(path.join(destination,'file'))).isDirectory()).toBe(true);
+    else{expect(await readFile(path.join(destination,'file'),'utf8')).toBe('new contents');expect(await readFile(path.join(destination,'retained'),'utf8')).toBe('retain extra');}
+  }finally{await chmod(source,0o700).catch(()=>{});await chmod(destination,0o700).catch(()=>{});await rm(root,{recursive:true,force:true});}
+});
+
 it.skipIf(process.platform==='win32'||!existsSync(server)).each(['upload','download'] as const)('finishes a readonly directory %s after staging its file restrictively',async direction=>{
   const root=await mkdtemp(path.join(os.tmpdir(),'openrig-sftp-readonly-directory-'));
   const source=path.join(root,'source'),destination=path.join(root,'destination');

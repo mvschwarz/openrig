@@ -27,3 +27,19 @@ it.skipIf(process.platform === "win32")("repairs directory mode without data tra
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.skipIf(process.platform === "win32").each([false,true])("merges into an existing readonly directory and finalizes source permissions after failure=%s",async fail=>{
+  const root=await mkdtemp(path.join(os.tmpdir(),'openrig-copy-readonly-merge-'));
+  const src=path.join(root,'source'),dst=path.join(root,'destination');
+  const copy=(dryRun:boolean)=>runNativeLocalCopy({src:{kind:'local',path:src+path.sep},dst:{kind:'local',path:dst},dryRun});
+  try{
+    await mkdir(src);await mkdir(dst);await writeFile(path.join(src,'file'),'new contents');
+    if(fail){await mkdir(path.join(dst,'file'));await writeFile(path.join(dst,'file','retained'),'retain conflict');}else await writeFile(path.join(dst,'retained'),'retain extra');
+    await chmod(src,fail?0o750:0o555);await chmod(dst,0o555);
+    await copy(true);expect((await lstat(dst)).mode&0o777).toBe(0o555);
+    const result=await copy(false);expect(result.ok,result.stderr).toBe(!fail);
+    expect((await lstat(dst)).mode&0o777).toBe(fail?0o750:0o555);
+    if(fail)expect((await lstat(path.join(dst,'file'))).isDirectory()).toBe(true);
+    else{expect(await readFile(path.join(dst,'file'),'utf8')).toBe('new contents');expect(await readFile(path.join(dst,'retained'),'utf8')).toBe('retain extra');}
+  }finally{await chmod(src,0o700).catch(()=>{});await chmod(dst,0o700).catch(()=>{});await rm(root,{recursive:true,force:true});}
+});

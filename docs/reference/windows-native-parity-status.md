@@ -27,6 +27,24 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Existing readonly-directory merge permissions (2026-11-02)
+
+Local and SFTP recursive copies now temporarily add required owner access to
+existing POSIX directories before merging children. They apply source directory
+metadata afterward even when a child fails, matching the observed rsync archive
+behavior rather than leaving temporary owner-write access behind. If final
+metadata itself fails, the original borrowed permission mode is restored where
+possible and failures remain explicit. Dry-run never changes directory modes.
+NTFS directory access is not represented by POSIX chmod bits and remains excluded.
+
+Ten ordinary-user WSL tests cover directory-mode repair, restrictive creation,
+existing readonly merge, source-mode finalization after a nonempty-directory
+conflict, retained extra entries and SFTP staging/upload/download. An independent
+real rsync 3.2.7 comparison confirms mode 0555 after successful merge and source
+mode 0750 after a child conflict (rsync exit 23). Native Windows's five complete
+local/SFTP/protocol/path files pass 49 tests; CLI TypeScript checking passes.
+These are scoped directory-permission results, not full archive equivalence.
+
 ### SFTP staging permissions and readonly-directory completion (2026-11-02)
 
 SFTP MKDIR and exclusive OPEN now request 0700 and 0600 respectively at creation;

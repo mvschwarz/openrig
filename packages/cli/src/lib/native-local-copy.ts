@@ -69,13 +69,29 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         }
         if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
       }
-      for (const name of names) await copy(path.join(src, name), path.join(dst, name));
-      if (!plan.dryRun) {
-        // Apply after recursion: restrictive source permissions must not prevent
-        // child creation, and mkdir's umask must not change the final mode.
-        if (process.platform !== "win32") await chmod(dst, source.mode & 0o7777);
-        await utimes(dst, source.atime, source.mtime);
+      const borrowedMode = !plan.dryRun && process.platform !== "win32" && destination && names.length
+        && (destination.mode & 0o700) !== 0o700 ? destination.mode & 0o7777 : undefined;
+      if (borrowedMode !== undefined) await chmod(dst, borrowedMode | 0o700);
+      let childError: unknown;
+      try {
+        for (const name of names) await copy(path.join(src, name), path.join(dst, name));
+      } catch (error) { childError = error; }
+      try {
+        if (!plan.dryRun) {
+          // Apply after recursion: restrictive source permissions must not prevent
+          // child creation, and mkdir's umask must not change the final mode.
+          if (process.platform !== "win32") await chmod(dst, source.mode & 0o7777);
+          await utimes(dst, source.atime, source.mtime);
+        }
+      } catch (error) {
+        if (borrowedMode !== undefined) {
+          try { await chmod(dst, borrowedMode); }
+          catch (restore) { throw new AggregateError([childError, error, restore].filter(Boolean), `Directory metadata failed and original permissions could not be restored: ${dst}`); }
+        }
+        if (childError) throw new AggregateError([childError, error], `Copy and directory metadata finalization failed: ${dst}`);
+        throw error;
       }
+      if (childError) throw childError;
       return;
     }
     if (!source.isFile() && !source.isSymbolicLink()) throw new Error(`Unsupported special file: ${src}`);
