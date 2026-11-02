@@ -14,6 +14,7 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { tmuxAttachCommand } from "../src/adapters/tmux-server.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { makeKernelHookReviewReader } from "../src/domain/kernel-hook-review.js";
+import { verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -528,6 +529,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     let pane = "%17";
     let changeBinding = false;
     const tmux = {
+      getPanePid: vi.fn(async () => 123),
       listPanes: vi.fn(async () => [{ id: pane, index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
       readAllPaneProcesses: vi.fn(async () => new Map([["%17", { pid: 123, command: "codex", dead }]])),
       capturePaneScreen: vi.fn(async () => {
@@ -559,6 +561,68 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect((await readHookReviews())[0]?.state).toBe("unknown");
     expect(posts).toHaveLength(1);
   });
+
+  function shellHookReaderFixture() {
+    const rigs = new RigRepository(db); const sessions = new SessionRegistry(db);
+    const rig = rigs.createRig("kernel"); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
+    const destination = "operator@kernel";
+    const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
+    sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
+    let screen = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
+    let panePid = 123, nativePid = 126;
+    const processes = (): NativeProcessRow[] => [
+      { pid: panePid, ppid: 1, pgid: panePid, tpgid: 124, executableName: "zsh", command: "-zsh", startedAt: "start" },
+      { pid: 124, ppid: panePid, pgid: 124, tpgid: 124, executableName: "sh", command: "/bin/sh /fixture/start.sh", startedAt: "start" },
+      { pid: 125, ppid: 124, pgid: 124, tpgid: 124, executableName: "node", command: "node /opt/bin/codex", startedAt: "start" },
+      { pid: nativePid, ppid: 125, pgid: 124, tpgid: 124, executableName: "codex", command: "/opt/native/codex",
+        argv: ["/opt/native/codex"], startedAt: "start" },
+    ];
+    const tmux = {
+      getPanePid: vi.fn(async () => panePid),
+      listPanes: vi.fn(async () => [{ id: "%17", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      readAllPaneProcesses: vi.fn(async () => new Map([["%17", { pid: panePid, command: "sh", dead: false }]])),
+      capturePaneScreen: vi.fn(async () => screen),
+    };
+    const listProcesses = vi.fn(async () => processes()); const now = new Date("2030-01-01T00:00:00Z");
+    const deps = { db, tmux, listProcesses, now: () => now };
+    return { tmux, listProcesses, processes, now, destination, read: makeKernelHookReviewReader(deps),
+      screen: (value: string) => { screen = value; }, changeNative: () => { nativePid++; },
+      changePanePid: () => { panePid += 1000; }, changeBinding: () => sessions.updateBinding(node.id, { tmuxPane: "%18" }) };
+  }
+
+  it("escalates a verified shell-backed kernel Codex and leaves its alert unresolved while lineage is unknown", async () => {
+    const f = shellHookReaderFixture();
+    expect(await verifyCodexPaneProcess({ target: "%17", tmux: f.tmux, listProcesses: f.listProcesses })).not.toBeNull();
+    expect((await f.read())[0]?.state).toBe("blocked");
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now: f.now, readHookReviews: f.read });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(alerts()[0]!.body).toContain(f.destination);
+    f.screen("OpenAI Codex (v0.164.0)\nmodel: gpt-5\n› ");
+    f.listProcesses.mockResolvedValue([]);
+    expect((await f.read())[0]?.state).toBe("unknown");
+    await tick(port, { now: f.now, readHookReviews: f.read });
+    expect(alerts()).toHaveLength(1); expect(posts).toHaveLength(1);
+    f.listProcesses.mockImplementation(async () => f.processes());
+    expect((await f.read())[0]?.state).toBe("clear");
+    await tick(port, { now: f.now, readHookReviews: f.read });
+    expect(alerts()).toHaveLength(0);
+  });
+
+  it.each(["missing", "unavailable", "changing", "capture-change", "pane-change", "binding-change"])(
+    "a shell-backed kernel observation stays unknown without a stable chain: %s", async kind => {
+      const f = shellHookReaderFixture();
+      if (kind === "missing") f.listProcesses.mockResolvedValue([]);
+      if (kind === "unavailable") f.listProcesses.mockRejectedValue(new Error("unavailable process table"));
+      if (kind === "changing") f.listProcesses.mockImplementation(async () => { f.changeNative(); return f.processes(); });
+      if (kind === "capture-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeNative(); return "Hooks need review"; });
+      if (kind === "pane-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changePanePid(); return "Hooks need review"; });
+      if (kind === "binding-change") f.tmux.capturePaneScreen.mockImplementation(async () => { f.changeBinding(); return "Hooks need review"; });
+      expect((await f.read())[0]?.state).toBe("unknown");
+      const posts: unknown[] = [];
+      await tick(engine(posts), { now: f.now, readHookReviews: f.read });
+      expect(alerts()).toHaveLength(0); expect(posts).toHaveLength(0);
+    });
 
   it("several rows share one alert, persisted acceptance and receipt across reconstructed ticks", async () => {
     await refusal(3); const posts: unknown[] = []; const port = engine(posts);
