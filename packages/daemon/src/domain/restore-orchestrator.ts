@@ -1424,6 +1424,9 @@ export class RestoreOrchestrator {
     launchResult: { session: import("./types.js").Session; binding: import("./types.js").Binding },
     warnings: string[] | undefined,
     activityHookGaps: string[] | undefined,
+    // The directory the seat was launched in (snapshot cwd, else live node
+    // cwd, else "." — resolved by the caller, which owns the live lookup).
+    launchCwd: string,
   ): Promise<void> {
     let desired: DesiredClaudeActivityHooks;
     try {
@@ -1458,9 +1461,9 @@ export class RestoreOrchestrator {
     };
     try {
       const result = await activityAdapter.project({
-        runtime: "claude-code", cwd: node.cwd ?? ".", entries: [marker],
+        runtime: "claude-code", cwd: launchCwd, entries: [marker],
         startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
-      }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+      }, { ...launchResult.binding, cwd: launchCwd });
       warnings?.push(...(result.warnings ?? []));
       if (result.projected.includes(marker.effectiveId)) {
         const detail = "saved startup context had no Claude activity-hook selection; the current seat specification selects it, so the current marker was re-applied without replaying startup content.";
@@ -1675,6 +1678,16 @@ export class RestoreOrchestrator {
     // deliberately skips the resume attempt; its launch reports `fresh-primed`.
     const liveRuntime = this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
       && (!selected || current.id === node.id))?.runtime ?? node.runtime;
+    // The seat was launched in the snapshot node's cwd when set; NodeLauncher
+    // otherwise falls back to the live node's cwd, and to the daemon's working
+    // directory when neither is set (tmux new-session without -c inherits it;
+    // "." is the codebase-wide convention for that case). Projecting hooks
+    // with the snapshot cwd alone would write another project's settings when
+    // the live node moved the seat.
+    const launchCwd = node.cwd
+      ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
+        && (!selected || current.id === node.id))?.cwd
+      ?? ".";
     const restorePolicy = effectiveRestorePolicy(seatFacts(data, node.id, node.runtime, liveRuntime), session?.restorePolicy);
     const noConversation = isOrdinaryTerminalSeat(seatFacts(data, node.id, node.runtime, liveRuntime));
     // A terminal's restore is its shell and its saved startup: one whose startup failed wasn't restored whole.
@@ -1711,11 +1724,11 @@ export class RestoreOrchestrator {
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
       if (entries.length > 0 && activityAdapter) try {
         const result = await activityAdapter.project({
-          runtime: "claude-code", cwd: node.cwd ?? ".",
+          runtime: "claude-code", cwd: launchCwd,
           entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
             mergeStrategy: e.mergeStrategy as import("./projection-planner.js").ProjectionEntry["mergeStrategy"] })),
           startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
-        }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+        }, { ...launchResult.binding, cwd: launchCwd });
         warnings?.push(...(result.warnings ?? []));
         for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
@@ -1723,7 +1736,7 @@ export class RestoreOrchestrator {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.
         warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
       } else if (entries.length === 0) {
-        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps);
+        await this.restoreCurrentActivityHooks(node, activityAdapter, launchResult, warnings, activityHookGaps, launchCwd);
       }
     }
 

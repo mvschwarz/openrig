@@ -99,10 +99,10 @@ describe("contained Claude restore activity resources", () => {
     return Object.values(s.hooks ?? {}).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks ?? []))
       .map((h: any) => h.command as string).filter(c => c.includes("state/claude-activity-hooks/activity-relay.cjs"));
   }
-  function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true) {
+  function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true, seedCwd: string | null = cwd) {
     const rig = rigs.createRig("restore");
     if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "P");
-    const node = rigs.addNode(rig.id, pod ? "p.seat" : "seat", { runtime, cwd, ...(pod ? { podId: "pod" } : {}) });
+    const node = rigs.addNode(rig.id, pod ? "p.seat" : "seat", { runtime, ...(seedCwd ? { cwd: seedCwd } : {}), ...(pod ? { podId: "pod" } : {}) });
     const session = registry.registerSession(node.id, "seat@restore");
     registry.updateStatus(session.id, "running");
     registry.updateResumeToken(session.id, runtime === "codex" ? "codex_id" : runtime === "pi" ? "pi_session_file" : "claude_id", token);
@@ -332,6 +332,57 @@ describe("contained Claude restore activity resources", () => {
     expect(otherRecovery).toBeUndefined();
     expect(owned()).toEqual([]);
     expect(writes).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // CodeRabbit follow-up on #2373: the snapshot node may have no cwd while
+  // the live node does. NodeLauncher launches the seat in the live node's
+  // directory (opts.cwd ?? live node cwd), so the hook projection must use
+  // that resolved directory — not "." (the daemon's working directory), which
+  // would write another project's hook settings. The snapshot is captured
+  // with no cwd; the live row gains one only after capture.
+  function liveProject() {
+    const liveCwd = path.join(root, "live-project");
+    const liveSettingsPath = path.join(liveCwd, ".claude/settings.local.json");
+    fs.mkdirSync(path.dirname(liveSettingsPath), { recursive: true });
+    fs.writeFileSync(liveSettingsPath, JSON.stringify(originalSettings));
+    return { liveCwd, liveSettingsPath };
+  }
+  function liveOwned(liveSettingsPath: string): string[] {
+    return owned(JSON.parse(fs.readFileSync(liveSettingsPath, "utf8")));
+  }
+
+  it("projects the current selection into the live seat directory when the snapshot node has no cwd", async () => {
+    const { liveCwd, liveSettingsPath } = liveProject();
+    const f = seed(false, false, "claude-code", false, null);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter, () => {}, () => ({ status: "known", selected: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const recoveryCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(recoveryCall).toBeDefined();
+    expect(recoveryCall![0].cwd).toBe(liveCwd);
+    expect(recoveryCall![1].cwd).toBe(liveCwd);
+    expect(liveOwned(liveSettingsPath).length).toBeGreaterThan(0);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it("projects saved hooks entries into the live seat directory when the snapshot node has no cwd", async () => {
+    const { liveCwd, liveSettingsPath } = liveProject();
+    const f = seed(false, true, "claude-code", true, null);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f, adapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const savedCall = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(savedCall).toBeDefined();
+    expect(savedCall![0].cwd).toBe(liveCwd);
+    expect(savedCall![1].cwd).toBe(liveCwd);
+    expect(liveOwned(liveSettingsPath).length).toBeGreaterThan(0);
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
