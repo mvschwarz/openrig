@@ -4528,3 +4528,22 @@ display-message attempt was not a valid oracle for that grammar and did not
 establish an attach result. No GUI attachment or stock psmux prefix behavior
 was qualified by the Linux oracle. Exact naming also does not close the
 existing concurrent same-name replacement/PID atomicity gap.
+
+### Literal recovery working directories (2026-11-03)
+
+Claude and Codex inventory recovery guidance previously interpolated cwd into
+an unquoted cd command. Two real PowerShell regressions reproduced parse
+failures for owned directories containing spaces, brackets, an apostrophe and
+Unicode. Windows guidance now uses Set-Location -LiteralPath with PowerShell
+literal quoting; POSIX guidance uses a quoted cd operand.
+
+The tests create both the intended bracket-bearing directory and a similarly
+named decoy, execute the served command in the actual platform shell, and
+compare filesystem identities. Both runtimes select the intended directory.
+The full inventory file passed 73/73 on Windows and 73/73 on WSL; daemon
+TypeScript checking passed. Receipts: recovery-cwd-before-20261103.json,
+recovery-cwd-native-final-20261103.json and recovery-cwd-wsl-final-20261103.json.
+Owned fixture directories were removed. No provider, existing session or main
+runtime was launched or changed. Provider recovery argv, including native
+PowerShell handling of inline MCP JSON, remains a separate unqualified scope;
+the shell-function witnesses above do not prove that native boundary.

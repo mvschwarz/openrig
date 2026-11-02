@@ -195,6 +195,32 @@ describe("Node Inventory Projection", () => {
   });
 
   // Test 6: resumeCommand is null when no resume token
+  it.each(["claude-code", "codex"])("recovery cwd is literal in the platform shell for %s", runtime => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "recovery-cwd-"));
+    const cwd = path.join(root, "work [1] ' 中文"), decoy = path.join(root, "work 1 ' 中文");
+    fs.mkdirSync(cwd); fs.mkdirSync(decoy);
+    try {
+      seedPodAwareRig(db);
+      db.prepare("UPDATE nodes SET runtime = ?, cwd = ? WHERE id = 'node-1'").run(runtime, cwd);
+      seedSession(db, "node-1", "dev-impl@test-rig", { resumeToken: "saved-history" });
+      const detail = getNodeDetail(db, "rig-1", "dev.impl")!;
+      const command = detail.recoveryGuidance!.commands.find(value => /^(?:cd |Set-Location )/.test(value))!;
+      expect(command).toBeTruthy();
+      let observed: string;
+      if (process.platform === "win32") {
+        const script = "$ErrorActionPreference='Stop'\n" + command + "\n[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).ProviderPath))";
+        const encoded = execFileSync(path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+          { cwd: root, encoding: "utf8", windowsHide: true, timeout: 15000, stdio: "pipe" }).trim();
+        observed = Buffer.from(encoded, "base64").toString("utf8");
+      } else {
+        observed = execFileSync("/bin/sh", ["-c", command + " && pwd -P"], { cwd: root, encoding: "utf8", timeout: 15000 }).trim();
+      }
+      const actual = fs.statSync(observed, { bigint: true }), wanted = fs.statSync(cwd, { bigint: true });
+      expect([actual.dev, actual.ino]).toEqual([wanted.dev, wanted.ino]);
+    } finally { fs.rmdirSync(cwd); fs.rmdirSync(decoy); fs.rmdirSync(root); }
+  });
+
   it("resumeCommand is null when no resume token", () => {
     seedPodAwareRig(db);
     seedSession(db, "node-1", "dev-impl@test-rig");
@@ -217,7 +243,7 @@ describe("Node Inventory Projection", () => {
     const detail = getNodeDetail(db, "rig-1", "dev.impl");
     expect(detail?.recoveryGuidance?.summary).toContain("native Claude resume");
     expect(detail?.recoveryGuidance?.commands).toContain("claude --permission-mode acceptEdits --resume 'abc-123-def' --name 'dev-impl@test-rig'");
-    expect(detail?.recoveryGuidance?.commands).toContain("cd /project");
+    expect(detail?.recoveryGuidance?.commands).toContain(process.platform === "win32" ? "Set-Location -LiteralPath '/project'" : "cd '/project'");
     expect(detail?.recoveryGuidance?.commands).toContain("claude --resume");
     expect(detail?.recoveryGuidance?.notes).toContain("Look for session name: dev-impl@test-rig");
     expect(detail?.recoveryGuidance?.notes).toContain("Choose the full conversation option, not summary.");
@@ -237,7 +263,7 @@ describe("Node Inventory Projection", () => {
     const detail = getNodeDetail(db, "rig-2", "dev.qa");
     expect(detail?.recoveryGuidance?.summary).toContain("codex -s workspace-write resume --last");
     expect(detail?.recoveryGuidance?.summary).toContain("explicit -s workspace-write floor flag");
-    expect(detail?.recoveryGuidance?.commands).toEqual(["cd /workspace/app", "codex -s workspace-write resume --last"]);
+    expect(detail?.recoveryGuidance?.commands).toEqual([process.platform === "win32" ? "Set-Location -LiteralPath '/workspace/app'" : "cd '/workspace/app'", "codex -s workspace-write resume --last"]);
     expect(detail?.recoveryGuidance?.notes).toContain("Use workspace and recent prompt text to identify the right conversation.");
     expect(detail?.recoveryGuidance?.notes).toContain("If the identity anchor was captured, the picker may include: dev-qa@test-rig");
   });

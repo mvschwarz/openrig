@@ -33,6 +33,7 @@ import { communityHarnessOf } from "./built-in-runtimes.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { claudeMcpArgs, readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import { powershellQuote } from "../adapters/windows-launch.js";
 
 // -- Row types for SQL results --
 
@@ -119,6 +120,10 @@ function computeResumeCommand(runtime: string | null, resumeToken: string | null
 const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
   + "add it right after `codex`, as the managed launch does.";
 
+function recoveryDirectoryCommand(cwd: string): string {
+  return process.platform === "win32" ? `Set-Location -LiteralPath ${powershellQuote(cwd)}` : `cd ${shellQuote(cwd)}`;
+}
+
 function computeRecoveryGuidance(input: {
   runtime: string | null;
   resumeToken: string | null;
@@ -140,7 +145,7 @@ function computeRecoveryGuidance(input: {
       if (cmd) commands.push(cmd);
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     commands.push(["claude --resume", ...claudeMcpArgs(claudeMcp).map(shellQuote)].join(" "));
 
@@ -167,7 +172,7 @@ function computeRecoveryGuidance(input: {
       commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
     }
     if (cwd) {
-      commands.push(`cd ${cwd}`);
+      commands.push(recoveryDirectoryCommand(cwd));
     }
     if (!resumeToken) {
       commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
