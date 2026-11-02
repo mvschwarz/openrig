@@ -5207,6 +5207,17 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Matching public-source WSL transfer checkpoint at `620a213`: the same ten
+explicit files selected on Windows ran with the isolated Linux SFTP subsystem
+enabled. WSL: 146 tests, 107 passed, zero failed, 39 skipped. Windows at the same
+production source: 127 passed, zero failed, 19 skipped. Counts differ by platform
+selection and do not establish coverage of skipped behaviors. The WSL daemon
+dependency build passed; 4,710 public regular-file hashes matched before/after,
+and the existing private dependency matched its indexed normalized Git blob
+before/after the build without being viewed or copied. Six documentation links
+and existing generated/untracked files were not reconciled. Windows Node
+24.14.1 and WSL Node 24.11.0 differ; no performance comparison is asserted.
+
 Integrated Windows file-transfer checkpoint at
 `c154d6c18b2a914d7c654c4b101af81d2a76e061`: ten explicit CLI test files,
 146 tests, 127 passed, zero failed, 19 skipped. This includes command/planner,
