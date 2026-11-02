@@ -25,6 +25,23 @@ foreign-user daemon access, supported runtime/architecture/job-policy matrices
 and reboot/suspend/power-loss behavior. Latest source changes are not deployed to
 the existing main instance. No overall parity claim is made.
 
+## Current open requirements (2026-11-02)
+
+These remain required by the parity goal. Later scoped passes do not close an
+entire row. This is a current work list, not proof that discovery is exhaustive.
+
+| Requirement group | Current missing or unverified scope | Evidence needed to close |
+| --- | --- | --- |
+| Terminal and engine behavior | Real Herdr/stock psmux in-pane attachment remains failed/unconfirmed; Git Bash subsequent command delivery is still unsupported; native Rex mapping is incomplete and its Windows builds are not in public testing; real rootless Podman/OpenShell is unverified. | Actual identity-bound attach/input/follow/reuse/stop and engine lifecycle effects on owned native instances, preserving source sessions and drafts. |
+| File and metadata behavior | POSIX owner/group/execute, directory ACL semantics and special-file equivalence remain incomplete. Readonly replacement and directory-time repair are scoped passes. | Explicit cross-platform metadata semantics plus bidirectional real transfer and failure/retention evidence; no unsupported field counted as preserved. |
+| Discovery and same-head verification | The latest safe static inventory at 51708ce inspected 1,638 production text files and selected 544 candidates: 137 unchanged against its older ledger, 73 changed, 334 outside that ledger; one private row was excluded before reads. Those classifications are not semantic reviews. Current complete Windows/Linux suites have not passed at a common frozen head. | Reconcile changed/outside-ledger behavior, run applicable complete suites on the same source, and retain exact failures/skips/coverage limits. |
+| Real harness and remote continuity | Remote Pi OAuth renewal is deferred by the operator; the owned SSH host is currently unreachable. The new Windows SSH front door, other harness lifecycles and current installed-runtime continuity remain unverified. | Owned real provider, SSH front-door, reconnect/restore and installed-runtime receipts after the external prerequisites return. |
+| Host/platform qualification | Foreign-user daemon endpoint access, supported runtime/architecture and Job policy combinations, reboot/suspend/power-loss behavior remain unverified; latest source is not deployed to the main instance. | Isolated real acceptance with explicit host conditions; deployment and disruptive host actions must respect existing runtime ownership and user boundaries. |
+
+The 72-second native build/pack/isolated-install gate at 686b954 is a passing
+package receipt, not a full-platform or current-deployment result. New loader
+attribution changes below have targeted validation and are newer than that gate.
+
 Initial map at source commit `c778b2a52` (2026-10-30), with later scoped,
 source-bound updates below. This is an implementation
 coverage map for Draft #1309, not a declaration of complete Windows support.
@@ -2658,3 +2675,7 @@ The installed tarball gate now checks exact regular-file bytes for the native ti
 At exact 686b95403deee7d20a4ac280b93f32cadb13444e, the strengthened native GATE passed in 72 seconds (05:17:44–05:18:56 UTC). HEAD and tracked-diff SHA256 were identical before/after, with the tracked tree clean. The owned source build, tarball, isolated-prefix npm install, exact regular-file bytes of windows-tile-attach.ps1/follow-events.mjs, installed following helper invocation, SQLite ABI, installed context/spec operations and actual rig.cmd daemon-subpath load passed. Receipt: pack-terminal-assets-686b954.json in the task resource directory. No deployment or publication occurred. The protected untracked diagnostic remains outside a clean-release claim.
 
 Third-party status check: https://www.superlogical.com/rex/docs/installation currently documents public testing for macOS and Linux/FreeBSD servers, while Windows server/client work is not yet included in public testing. Native Rex real acceptance therefore remains an external availability dependency, and its OpenRig native mapping is not declared implemented or accepted. This is distinct from Herdr, whose public Windows build exists but whose real psmux in-pane attachment remains unresolved.
+
+### Recovery-loader process attribution regression fixed — 2026-11-02
+
+The safe inventory follow-up found that native managed-parent attribution still recognized only the old one-time scoped loader after the recovery loader was added. It now shares a canonical loader recognizer with the generator: both old and recovery forms must round-trip exactly, retain an absolute owned staged-name path, and have one uniquely attributable later shell. Appended arbitrary PowerShell is rejected as a managed wrapper. No decoded source is evaluated by recognition. Three complete parent/scoped/cleanup files passed 16/16, including real stock scoped lifecycle execution with its opt-in enabled; daemon typecheck passed. This is newer source than the 686b954 installed gate.

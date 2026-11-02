@@ -2,6 +2,7 @@ import path from "node:path";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { powershellQuote } from "../adapters/windows-launch.js";
 import { isStagedSendName } from "../adapters/staged-send-name.js";
+import { readWindowsScopedLoader } from "../adapters/windows-scoped-launch.js";
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
 
 const samePath = (a: string, b: string) => a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
@@ -39,9 +40,9 @@ function isScopedBootstrap(row: ProcessRow): boolean {
   const words = parseWindowsCommandLine(row.command);
   if (words.length !== 5 || words[1] !== "-NoLogo" || words[2] !== "-NoProfile" || words[3] !== "-EncodedCommand") return false;
   const source = Buffer.from(words[4]!, "base64").toString("utf16le");
-  const match = /^\$s=\[IO\.File\]::ReadAllText\('((?:[^']|'')*)'\); Remove-Item -LiteralPath '((?:[^']|'')*)' -ErrorAction Stop; & \(\[ScriptBlock\]::Create\(\$s\)\)$/.exec(source);
-  if (!match || match[1] !== match[2]) return false;
-  const file = match[1]!.replaceAll("''", "'");
+  const parsed = readWindowsScopedLoader(source);
+  if (!parsed) return false;
+  const file = parsed.file;
   return path.win32.isAbsolute(file) && isStagedSendName(path.win32.basename(file))
     && words[4] === Buffer.from(source, "utf16le").toString("base64");
 }
