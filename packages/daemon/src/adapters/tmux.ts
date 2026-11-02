@@ -2439,7 +2439,11 @@ export class TmuxAdapter {
   async switchClient(client: string, target: string): Promise<TmuxResult> {
     const exact = exactTarget(target, "session");
     try {
-      await this.run(["tmux", "switch-client", "-c", client, "-t", exact],
+      // Keep the actual routing operand before a literal client name that may
+      // itself be "-t". Native routing must not interpret that value as a flag.
+      await this.run(this.terminalKind === "psmux"
+        ? ["tmux", "switch-client", "-t", exact, "-c", client]
+        : ["tmux", "switch-client", "-c", client, "-t", exact],
         `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(exact)}`);
       return { ok: true };
     } catch (err) {

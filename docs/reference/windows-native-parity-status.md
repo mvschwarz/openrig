@@ -5207,6 +5207,17 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Native psmux `switch-client` now places its actual destination operand before
+the literal client name. A client value equal to `-t` previously hid the real
+scoped destination from routing discovery, leaving its encoded identifier
+untranslated. Controlled argv regression checks now verify server namespace,
+decoded session destination, session id and preserved literal client data for
+both flag-shaped and ordinary client names. Four related adapter/exact-target/
+service files passed all 223 tests; daemon build passed. POSIX argv and legacy
+shell command order stay unchanged. This is controlled routing evidence, not
+real attached desktop-client acceptance; stock psmux physical-name limitations
+and earlier exhausted interactive experiments remain open.
+
 Full CLI/TUI/UI directory checkpoint at
 `c265738c7d853ef91d0f9217e7ed574cc699a6cf` selected 758 test files per platform.
 Windows: 9,620 total, 9,501 passed, one failed, 118 skipped, 11m27s. WSL: 9,619
