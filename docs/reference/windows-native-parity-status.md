@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### TUI native window preview/launch selection (2026-11-02)
+
+Windows TUI terminal previews now use the same Herdr-composed plan as the
+existing native CLI window launcher. Inherited Rex/cmux markers no longer
+select a different preview or route the Windows open action through cmux.
+The selected daemon, view and expected-plan token are preserved. This aligns
+the available native window path; it does not qualify Windows Rex/cmux GUIs.
+POSIX marker-based provider selection remains covered independently.
+
+The complete TUI opener and two Windows CLI window/preview files pass 57 tests
+on Windows, with nine real POSIX viewer cases skipped. The exact changed TUI
+source/test in the ordinary WSL mirror pass all 47 opener checks, including
+those POSIX cases. TUI TypeScript checking passes. Child CLI fixtures record
+literal argv and selected endpoint; no actual desktop window is opened by these
+tests. Windows last-active-client marker recovery remains unimplemented by
+viewerTerminalEnv, which still reads /proc only on Linux.
+
 ### Native local type-exchange recovery and no-clobber moves (2026-11-02)
 
 Windows local exchanges now use MoveFileEx without REPLACE_EXISTING for backup,

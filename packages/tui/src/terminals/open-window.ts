@@ -78,7 +78,11 @@ async function viewedFrom(viewer: () => Promise<NodeJS.ProcessEnv | undefined>):
 }
 
 /** The provider the terminal action will use from this TUI, so a preview's plan matches the open. */
-export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<"rex" | "herdr" | "cmux"> {
+export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv, platform: NodeJS.Platform = process.platform): Promise<"rex" | "herdr" | "cmux"> {
+  // The Windows CLI's native window path composes a Herdr plan even when it
+  // renders through Windows Terminal. Inherited POSIX viewer markers must not
+  // select an unsupported Rex/cmux preview and invalidate that expected plan.
+  if (platform === "win32") return "herdr";
   if (inRex(process.env)) return "rex";
   if (inCmux(process.env)) return "cmux";
   const viewed = await viewedFrom(viewer);
@@ -88,12 +92,12 @@ export async function windowProvider(viewer: () => Promise<NodeJS.ProcessEnv | u
 /** Reuse the installed CLI's desktop selection and fallback, preserving this TUI's daemon. In cmux, the view opens in that
  *  cmux, as `rig terminal open --provider cmux` does; cmux has no desktop window for `--window` to open. */
 export async function openTerminalInWindow(view: string, endpoint: string, cliEntry?: string, expectedPlan?: string, onUnavailable?: () => void,
-  viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv): Promise<TerminalOpenResult> {
+  viewer: () => Promise<NodeJS.ProcessEnv | undefined> = viewerTerminalEnv, platform: NodeJS.Platform = process.platform): Promise<TerminalOpenResult> {
   // Already in a Herdr, Rex or cmux itself: nothing to carry. Otherwise hand the child the one this TUI is being viewed from.
   const viewed = await viewedFrom(viewer);
   const base = { ...process.env };
   if (viewed) for (const key of MARKER_KEYS) delete base[key];
-  const cmux = inCmux(process.env);
+  const cmux = platform !== "win32" && inCmux(process.env);
   const placement = cmux ? ["--provider", "cmux"] : ["--window"];
   const args = ["terminal", "open", ...placement, "--json", ...(expectedPlan !== undefined ? ["--expected-plan", expectedPlan] : []), "--", view];
   let stdout: string;

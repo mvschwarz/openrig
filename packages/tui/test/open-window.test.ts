@@ -242,11 +242,11 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     ["with only cmux's workspace id, as the daemon's tmux keeps it", { TERM_PROGRAM: "tmux", CMUX_WORKSPACE_ID: "w" }, undefined, "herdr"],
   ] as const)("previews with the provider the window opener picks %s", async (_name, env, viewed, provider) => {
     ownEnv(env);
-    expect(await windowProvider(async () => viewed)).toBe(provider);
+    expect(await windowProvider(async () => viewed,"darwin")).toBe(provider);
     const previewed: string[] = [];
     const client = { baseUrl: "http://localhost:7433", terminalViews: async () => ({ saved: [], rigs: [] }),
       previewTerminal: async (_view: string, selected: string) => { previewed.push(selected); return null; } } as unknown as DaemonClient;
-    await readTerminals(client, "saved:kernel", () => windowProvider(async () => viewed));
+    await readTerminals(client, "saved:kernel", () => windowProvider(async () => viewed,"darwin"));
     expect(previewed).toEqual([provider]);
   });
 
@@ -270,7 +270,7 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     const inCmuxOpen = { ...opened, provider: "cmux" };
     const f = child(inCmuxOpen);
     const viewer = vi.fn(async () => viewerMarkers);
-    expect(await openTerminalInWindow("saved:kernel", "http://selected.example:7439", f.entry, "cmux-plan", undefined, viewer)).toEqual(inCmuxOpen);
+    expect(await openTerminalInWindow("saved:kernel", "http://selected.example:7439", f.entry, "cmux-plan", undefined, viewer,"darwin")).toEqual(inCmuxOpen);
     expect(viewer).not.toHaveBeenCalled();
     expect(f.calls()).toEqual([{ url: "http://selected.example:7439",
       args: ["terminal", "open", "--provider", "cmux", "--json", "--expected-plan", "cmux-plan", "--", "saved:kernel"] }]);
@@ -282,7 +282,7 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
       error: "cmux is not connected — install cmux from https://cmux.io and run: cmux ping",
       notes: ["In a new terminal on the daemon's host, attach directly using one of these commands:", "operator: env -u TMUX tmux attach -t '=operator@kernel'"] }, 1);
     let recoveries = 0;
-    await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; }))
+    await expect(openTerminalInWindow("saved:kernel", "http://localhost:7433", f.entry, undefined, () => { recoveries++; },undefined,"darwin"))
       .rejects.toThrow(/cmux is not connected[\s\S]*"Automation mode" for Socket Control Mode[\s\S]*rig doctor[\s\S]*operator: env -u TMUX tmux attach/);
     expect(recoveries).toBe(0);
     expect(f.calls()).toHaveLength(1);
@@ -303,6 +303,17 @@ console.log(${JSON.stringify(JSON.stringify(opened))});`);
     expect(inCmux({ CMUX_SURFACE_ID: "s", CMUX_WORKSPACE_ID: "w" })).toBe(false);
     expect(inCmux({ ...cmuxMarkers, TERM_PROGRAM: "herdr" })).toBe(false);
     expect(inCmux({ ...cmuxMarkers, REX_SESSION: "s", REX_BLOCK: "b", REX_SERVER: "x" })).toBe(false);
+  });
+  it.each([rexMarkers,cmuxMarkers])("uses the native Windows preview and window path despite inherited viewer markers %j",async markers=>{
+    ownEnv(markers);
+    const viewer=vi.fn(async()=>rexMarkers);
+    expect(await windowProvider(viewer,"win32")).toBe("herdr");expect(viewer).not.toHaveBeenCalled();
+    const previewed:string[]=[];
+    const client={baseUrl:"http://selected.example:7439",terminalViews:async()=>({saved:[],rigs:[]}),previewTerminal:async(_view:string,provider:string)=>{previewed.push(provider);return null;}} as unknown as DaemonClient;
+    await readTerminals(client,"saved:kernel",()=>windowProvider(viewer,"win32"));expect(previewed).toEqual(["herdr"]);
+    const f=child(opened);
+    expect(await openTerminalInWindow("saved:kernel",client.baseUrl,f.entry,"native-plan",undefined,viewer,"win32")).toEqual(opened);
+    expect(f.calls()).toEqual([{url:client.baseUrl,args:["terminal","open","--window","--json","--expected-plan","native-plan","--","saved:kernel"]}]);
   });
 });
 
