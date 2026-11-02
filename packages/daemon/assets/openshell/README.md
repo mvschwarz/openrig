@@ -6,6 +6,8 @@ The image recipe is an input recipe, not a published prebuilt image or a reprodu
 
 ## Install the reference and work connection
 
+Run the environment commands from your managed OpenRig seat. In a plain shell, set `OPENRIG_SESSION_NAME` to the actual acting `member@rig` address, for example `export OPENRIG_SESSION_NAME=operator@kernel` when operating as that member. The CLI uses this existing convention to stamp `X-OpenRig-Session`; it attributes requests within the daemon's trusted transport, and is not authentication. The work and activity credentials below are separate authorities, not replacements for this actor attribution.
+
 Start an MCP HTTP listener using `rig mcp serve --http --help` and the normal member-grant file on this daemon host. Select a guest-reachable address and explicit port. Setup adds one non-owner, one-seat, one-rig work grant in that existing file and stores its bearer credential in a private managed file. It prints only the file reference. Existing files/presets with different bytes are preserved.
 
 ```sh
@@ -15,7 +17,7 @@ rig environment setup --directory ./openshell-example --binding worker-one \
   --guest-base-url http://host.openshell.internal:7782 --json
 ```
 
-Enable the daemon's separate guest activity listener with `OPENRIG_GUEST_ACTIVITY_PORT=7782` and a guest-reachable `OPENRIG_GUEST_ACTIVITY_HOST` in the daemon launch environment. It is disabled by default; this is an explicit additional listener, not a change to the main API's binding. The listener serves only `POST /api/activity/hooks`, using the seat/generation grant. It exposes no queue, config, event-stream or parked-seat reads and refuses the install-wide token. Use the actual guest-reachable MCP and guest-activity ports. Setup generates `policy.yaml` for those two selected host/port pairs, without blanket egress. Never grant the guest access to the daemon's main API port (normally 7433). OpenShell's REST policy applies to a host and port: the dedicated listener confines the surface, while its activity grant and the separate MCP work grant authorize their respective requests. The activity rule names `/usr/bin/node`, matching the selected plugin hook interpreter. Qualify that path in your image. The separate read-only `platform.claude.com` rule is for the pinned native startup check and carries no inference credential.
+Enable the daemon's separate guest activity listener with `OPENRIG_GUEST_ACTIVITY_PORT=7782` and a guest-reachable `OPENRIG_GUEST_ACTIVITY_HOST` in the daemon launch environment. It is disabled by default; this is an explicit additional listener, not a change to the main API's binding. The bind host must be an address on the daemon host that the guest can actually reach; a listener bound only to `127.0.0.1` is not reachable through a host alias that maps to a different interface. Set `OPENRIG_GUEST_ACTIVITY_HOST` to that selected host address and use its guest-visible name in `--guest-base-url`. With rootless networking, verify the host alias's route rather than assuming it reaches loopback. Bind the MCP listener to its separately selected guest-reachable address as well. The listener serves only `POST /api/activity/hooks` and the three permission-request routes (`POST /api/activity/permission-requests`, `GET /api/activity/permission-requests/<askId>` and `POST /api/activity/permission-requests/<askId>/withdraw`), using the seat/generation grant. It exposes no queue, config, event-stream or parked-seat reads and refuses the install-wide token. Use the actual guest-reachable MCP and guest-activity ports. Setup generates `policy.yaml` for those two selected host/port pairs, without blanket egress. Never grant the guest access to the daemon's main API port (normally 7433). OpenShell's REST policy applies to a host and port: the dedicated listener confines the surface, while its activity grant and the separate MCP work grant authorize their respective requests. The activity rule names `/usr/bin/node`, matching the selected plugin hook interpreter. Qualify that path in your image. The separate read-only `platform.claude.com` rule is for the pinned native startup check and carries no inference credential.
 
 Import `claude-code-provider.yaml` using OpenShell's provider-profile commands, then create a provider with its `ANTHROPIC_API_KEY` environment lookup. See `openshell provider --help`; keep the master credential in provider custody, never an argument or source file. `create` passes that provider reference with `--no-auto-providers`. The guest helper saves only the provider-injected reference in a private file and uses Claude's `apiKeyHelper`. It does not copy an owner authentication home.
 
@@ -81,6 +83,15 @@ rig environment effect worker-one --effect stop-native --generation YOUR_OCCUPAN
 rig environment effect worker-one --effect stop-compute --generation YOUR_OCCUPANT_GENERATION --operation compute-stop-one --json
 rig environment effect worker-one --effect delete-owned --generation YOUR_OCCUPANT_GENERATION --operation delete-one --engine-socket /run/user/YOUR_UID/podman/podman.sock --json
 ```
+
+If create succeeded but projection failed before any execution generation was established, inspect the binding and select its exact immutable resource ID instead of inventing a generation:
+
+```sh
+rig environment inspect worker-one --json
+rig environment effect worker-one --effect delete-owned --resource-id YOUR_IMMUTABLE_RESOURCE_ID --operation delete-unstarted-one --engine-socket /run/user/YOUR_UID/podman/podman.sock --json
+```
+
+Omitting `--generation` is supported only for `delete-owned` with an explicit `--resource-id` while the binding still has no generation. A newly established generation or changed resource refuses this selection; inspect again and select the actual generation. Attached resources remain preserved.
 
 Use the actual local rootless Podman socket on the provider host. The observer is read-only; it never removes engine resources itself. Before deletion it records exact workload/supervisor container identities and their attributable workspace/control/channel volumes. After the single vendor request, a complete gateway listing must establish the immutable resource's absence, and independent queries on that same engine/socket must establish those components absent. Other engine resources are preserved. Transport/auth errors, changed sockets, incomplete lists or a remaining volume stay unconfirmed. A vendor Accepted/Completed response alone does not establish engine cleanup. Per-sandbox secret cleanup is not an observed component class here.
 

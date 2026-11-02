@@ -72,5 +72,5 @@ In an installed OpenRig, the check is at `$(npm root -g)/@openrig/cli/daemon/doc
 - **The model handoff:** `OPENRIG_MODEL` is mapped to your harness's own setting, with no wire this check can see.
 - **A resume for a preset without `resume`:** OpenRig doesn't pass `OPENRIG_RESUME_REF` to it.
 - **Restarting the agent after a failed handshake:** the contract doesn't rule on that.
-- **The chosen person's side of an ask:** who may answer, the Feed and Slack, and refusing another person's click or typed
-  words are OpenRig's side, and its own tests cover them. Routing an ask to a seat is a later change.
+- **The chosen person's side of an ask:** who may answer, the Feed and Slack are OpenRig's side, and its own tests
+  cover them. Routing an ask to a seat is a later change.
