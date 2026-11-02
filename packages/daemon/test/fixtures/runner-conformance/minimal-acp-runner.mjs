@@ -3,8 +3,10 @@
 // catches it.
 //   node minimal-acp-runner.mjs --agent <command> [--break <name>]... [--read-wait <seconds>|none] [--withdraw-after-stop]
 // --read-wait keeps the contract another way: it reads with that waitSeconds (or none) and sleeps between pending reads.
-// --read-retries <n> keeps it another way too: a read OpenRig answers with a status other than 200 is retried n times, 1.5 s apart, before the
-// runner acts on it; section 7 sets no time limit for that.
+// --read-retries <n> keeps it another way too: a read refusal the runner would permit on (a code section 7 marks "permits",
+// or one it doesn't list) is retried n times, 1.5 s apart, before the runner permits; section 7 sets no time limit for that.
+// A refusal section 7 cancels or holds on (a request that isn't the current occupant's, or the seat's opt-in to hold) is
+// acted on at once.
 // --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
 // posted, not before; the contract doesn't order the two posts.
 import { spawn } from "node:child_process";
@@ -179,7 +181,8 @@ async function onPermission(msg) {
   if (!busy || turn !== askedInTurn) { await withdrawLive("turn_ended"); return; }
   for (;;) {
     let read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
-    for (let tries = 0; read.status >= 300 && tries < readRetries && !ask.done; tries++) {
+    const permitsOn = (r) => r.status >= 300 && !NOT_CURRENT.has(r.body?.code) && !HOLDS.has(r.body?.code);
+    for (let tries = 0; permitsOn(read) && tries < readRetries && !ask.done; tries++) {
       await new Promise((done) => setTimeout(done, 1500));
       read = await api("GET", `/api/activity/permission-requests/${encodeURIComponent(ask.askId)}${readQuery}`);
     }
