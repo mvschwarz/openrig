@@ -4577,3 +4577,20 @@ not authenticated provider continuity or interactive console qualification.
 Custom non-npm script launchers, cmd guidance and cross-host copying of local
 helper paths remain unqualified. The installed gate now checks the new helper
 bytes and paired-module loading; that updated gate has not yet run.
+
+### Installed recovery bridge gate at 176f9cd (2026-11-03)
+
+The updated target-native package gate passed at
+176f9cd0247c463187a42405dd58003fee173309 with clean tracked source before
+and after, from 2026-11-02 18:18:41 through 18:19:52 UTC. It built and packed
+the current source, installed into an isolated prefix, compared the delivered
+provider recovery helper bytes with source and executed that helper to prove
+its paired launcher imports load before missing data is rejected. Existing
+native ABI, file/resource, terminal helper and rig.cmd load checks also passed.
+Receipt: pack-terminal-assets-176f9cd.json and its log.
+
+This installed check proves delivery and loading, alongside the source-side
+owned npm argv tests above. It does not execute a real authenticated provider,
+qualify interactive console continuity, or replace current-head complete
+Windows/WSL suites. No global install, runtime deployment, team restart,
+publication or public push was performed.
