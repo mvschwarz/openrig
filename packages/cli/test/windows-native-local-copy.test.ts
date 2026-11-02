@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, lstat, utimes, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { planFileCopy, runFileCopy } from "../src/lib/file-transfer.js";
@@ -22,6 +22,36 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await copy(src, dst)).toMatchObject({ ok: true, transport: "native-local", bytesTransferred: data.length, filesTransferred: 1 });
     expect(await readFile(dst)).toEqual(data);
     expect(await copy(src, dst)).toMatchObject({ ok: true, filesTransferred: 0, bytesTransferred: 0 });
+  }));
+
+  it("previews and repairs readonly drift without copying unchanged bytes", () => fixture(async root => {
+    const src=path.join(root,"source.txt"),dst=path.join(root,"destination.txt");
+    await writeFile(src,"owned metadata"); await writeFile(dst,"owned metadata");
+    await utimes(src,1400000000,1400000000); await utimes(dst,1400000000,1400000000);
+    try {
+      await chmod(src,0o444);
+      const preview=await copy(src,dst,true);
+      expect(preview).toMatchObject({ok:true,filesTransferred:0,bytesTransferred:0});
+      expect(preview.stdout).toContain(".f...p");
+      expect((await lstat(dst)).mode & 0o200).not.toBe(0);
+      expect(await copy(src,dst)).toMatchObject({ok:true,filesTransferred:0,bytesTransferred:0});
+      expect((await lstat(dst)).mode & 0o200).toBe(0);
+      await chmod(src,0o666);
+      expect(await copy(src,dst)).toMatchObject({ok:true,filesTransferred:0});
+      expect((await lstat(dst)).mode & 0o200).not.toBe(0);
+      expect((await copy(src,dst,true)).stdout).toBe("");
+    }finally{await chmod(src,0o666);await chmod(dst,0o666);}
+  }));
+
+  it("previews directory timestamp drift without mutation and repairs it", () => fixture(async root => {
+    const src=path.join(root,"source"),dst=path.join(root,"destination");
+    await mkdir(src);await mkdir(dst);
+    await utimes(src,1400000000,1400000000);await utimes(dst,1500000000,1500000000);
+    expect((await copy(src+path.sep,dst,true)).stdout).toContain(".d..t.");
+    expect(Math.floor((await lstat(dst)).mtimeMs/1000)).toBe(1500000000);
+    expect((await copy(src+path.sep,dst)).ok).toBe(true);
+    expect(Math.floor((await lstat(dst)).mtimeMs/1000)).toBe(1400000000);
+    expect((await copy(src+path.sep,dst,true)).stdout).toBe("");
   }));
 
   it.each([false, true])("merges directories and retains extra files, trailing separator=%s", contentsOnly => fixture(async root => {

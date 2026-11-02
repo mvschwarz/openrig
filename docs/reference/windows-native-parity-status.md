@@ -27,6 +27,16 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Local copy metadata drift (2026-11-02)
+
+Native local copies now report and repair representable file-mode drift even
+when size and second-resolution mtime match. On Windows this compares the owner
+write/read-only bit, not unsupported POSIX permission semantics. Dry-run reports
+the permission change without mutation; repair transfers zero content bytes.
+Directory mtime differences now appear in dry-run and remain restored after
+children are copied. Nine real native local-copy tests and 43 transfer tests
+passed (three existing platform skips); CLI TypeScript checking passed.
+
 ### SFTP directory symlink type (2026-11-02)
 
 Downloads to NTFS now query the source link's referent type with SFTP STAT and

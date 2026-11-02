@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, readlink, realpath, utimes } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, utimes } from "node:fs/promises";
 import path from "node:path";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 
@@ -31,6 +31,9 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         changes.push(`cd ${dst}`);
         if (!plan.dryRun) await mkdir(dst, { mode: source.mode });
       }
+      else if (Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000)) {
+        changes.push(`.d..t. ${dst}`);
+      }
       for (const name of await readdir(src)) await copy(path.join(src, name), path.join(dst, name));
       if (!plan.dryRun) await utimes(dst, source.atime, source.mtime);
       return;
@@ -40,7 +43,16 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       ? destination?.isSymbolicLink() && await readlink(src) === await readlink(dst)
       : destination?.isFile() && source.size === destination.size
         && Math.floor(source.mtimeMs / 1000) === Math.floor(destination.mtimeMs / 1000);
-    if (same) return;
+    if (same) {
+      if (source.isFile() && destination?.isFile()) {
+        const mask = process.platform === "win32" ? 0o200 : 0o7777;
+        if ((source.mode & mask) !== (destination.mode & mask)) {
+          changes.push(`.f...p ${dst}`);
+          if (!plan.dryRun) await chmod(dst, source.mode & 0o7777);
+        }
+      }
+      return;
+    }
     changes.push(`${source.isSymbolicLink() ? "cL" : ">f"} ${dst}`);
     if (!source.isSymbolicLink()) { filesTransferred++; bytesTransferred += source.size; }
     if (!plan.dryRun) {
