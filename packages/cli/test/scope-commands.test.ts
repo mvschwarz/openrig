@@ -396,6 +396,36 @@ describe("rig scope slice rollback snapshots", () => {
   });
 });
 
+describe("scope same-mission filesystem aliases", () => {
+  function snapshot(root: string): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    const walk = (dir: string, relative: string) => {
+      const stat = fs.statSync(dir); result[relative || "."] = { ino: stat.ino, mtime: stat.mtimeMs };
+      for (const name of fs.readdirSync(dir).sort()) {
+        const file = path.join(dir, name), key = path.join(relative, name), info = fs.lstatSync(file);
+        if (info.isDirectory()) walk(file, key);
+        else result[key] = { ino: info.ino, mtime: info.mtimeMs, bytes: fs.readFileSync(file).toString("hex") };
+      }
+    };
+    walk(root, ""); return result;
+  }
+  async function check(verb: string, alias: "link" | "case") {
+    const env = seedSubstrate();
+    try {
+      const mission = path.join(env.missionsRoot, "backlog");
+      seedMissionComposition(env.missionsRoot, "backlog", [{ ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true }]);
+      const target = alias === "case" ? "BACKLOG" : "same-mission-alias";
+      if (alias === "link") fs.symlinkSync(mission, path.join(env.missionsRoot, target), process.platform === "win32" ? "junction" : "dir");
+      const before = snapshot(mission);
+      const result = await run(["slice", verb, "01-debt-foo", target, "--mission", "backlog", "--json"], env.missionsRoot);
+      expect(result.exitCode).toBe(1); expect(result.stdout + result.stderr).toMatch(/same/i);
+      expect(snapshot(mission)).toEqual(before);
+    } finally { fs.rmSync(env.root, { recursive: true, force: true }); }
+  }
+  it.each(["move", "ship"])("%s refuses a physical mission alias before touching files or membership", async verb => { await check(verb, "link"); });
+  it.runIf(process.platform === "win32").each(["move", "ship"])("%s refuses native case aliases before touching files or membership", async verb => { await check(verb, "case"); });
+});
+
 describe("rig scope slice ship (HG-5)", () => {
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });

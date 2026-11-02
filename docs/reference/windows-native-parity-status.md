@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Scope moves compare mission directory identity (2026-11-03)
+
+Slice move/ship previously identified a same-mission destination by folder
+name alone. Owned native junction and case aliases reproduced that check being
+bypassed and composition handling reporting a changed-manifest conflict rather
+than refusing the same destination. Both commands now resolve the existing
+source mission and compare directory device/inode identities before allocating
+the target ordinal or planning membership edits. Unavailable directory identity
+refuses the operation; names are not blanket-lowercased, and the source mission
+is not guessed from a fixed slice-path depth.
+
+Four native regressions failed before the repair. They now refuse junction and
+case aliases for move and ship while preserving the mission tree's names,
+contents, inode observations and modification times. POSIX symlink aliases are
+also covered on WSL. Two complete related files passed 140/140 on Windows and
+137 with three native-only skips on ordinary-user WSL after the two changed
+source/test files were copied and byte-compared. CLI TypeScript noEmit and
+whitespace checks passed. Existing cross-mission moves and rollback scenarios
+remain covered in that complete command file.
+
+These use owned temporary mission/Git fixtures, not current user missions or
+running teams. They do not establish atomicity against concurrent filesystem
+replacement or qualify case-sensitive NTFS hosts. Full-directory and installed
+receipts below predate this repair; no public push or deployment occurred.
+
 ## Installed spec entry location identity (2026-11-03)
 
 The specs add receipt previously selected the first synchronized entry with
