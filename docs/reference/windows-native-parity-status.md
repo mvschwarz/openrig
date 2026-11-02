@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Legacy argument oracle follow-up (2026-11-02)
+
+The pending oracle fixture now advertises the required privateConfig capability and throws if the no-assignment native branch unexpectedly writes a file. Its coverage inventory uses the TypeScript syntax tree to require every explicit legacy override, rather than treating native-only argv calls as shell-string branches. Probe creation and guarded rollback, targeted native server options and native no-assignment forwarding are now driven too. Every recorded shell invocation is still unquoted by a real `/bin/sh` and compared word-for-word with argv.
+
+The six complete adapter/routing files now pass 261 with one Windows-only skip on ordinary-user WSL. This resolves the two scoped WSL failures above; it does not establish exhaustive branch coverage, renew the whole daemon suite or qualify native-only commands through a POSIX shell. Production source is unchanged by this test follow-up.
+
 ## Parent-environment removal ordering regression (2026-11-02)
 
 The respawn fixture now checks the actual ordering contract: inspect global environment first, remove exactly the three inherited identity names, then respawn without `-k`. Independent removals may enumerate differently on Windows and POSIX. The full adapter file passed 160/160 on Windows and 159 with one native-only skip on WSL. Production behavior is unchanged.
