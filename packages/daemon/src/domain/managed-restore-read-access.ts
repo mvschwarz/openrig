@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 /** Match the shipped compaction hook's output-root selection. */
 export function compactionPacketRoot(): string {
@@ -22,10 +22,17 @@ export interface RestoreReadContext {
 /** The two compaction settings a launch passes so the restore can read the files they name. */
 export type RestoreReadPolicy = Pick<RestoreReadContext, "extraInstructionFile" | "preparationRoot">;
 
-/** The configured extra instruction file as the restore request names it: trimmed, or none when blank. The enforcer's
+/** The configured extra instruction file as the restore request names it: home prefixes expanded, or none when blank. The enforcer's
  *  resolver reads the setting through this too, so the grant and the request name the same file. */
-export function postCompactExtraSetting(value: string | null | undefined): string | null {
-  return value?.trim() || null;
+export function postCompactExtraSetting(value: string | null | undefined, openrigHome?: string | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  for (const [prefix, base] of [["~", homedir()], ["${OPENRIG_HOME}", openrigHome], ["$OPENRIG_HOME", openrigHome]] as const) {
+    if (base && (trimmed.startsWith(`${prefix}/`) || (process.platform === "win32" && trimmed.startsWith(`${prefix}\\`)))) {
+      return path.join(base, trimmed.slice(prefix.length + 1));
+    }
+  }
+  return trimmed;
 }
 
 // These are permission patterns, not shell arguments. Keep literal path components
@@ -59,7 +66,7 @@ function spellings(value: string): string[] {
 export function withManagedRestoreReads(args: string[], context: RestoreReadContext): string[] {
   if (!context.openrigHome) return args;
   const seat = context.session.replace(/[^a-zA-Z0-9_.@-]/g, "_");
-  const extra = postCompactExtraSetting(context.extraInstructionFile);
+  const extra = postCompactExtraSetting(context.extraInstructionFile, context.openrigHome);
   const files = [
     ...spellings(context.openrigHome).flatMap(home => [
       `${home}/compaction/restore-pending/${seat}.json`,

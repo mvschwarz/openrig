@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Restore instruction selection, prompt and exact read grants (2026-11-02)
+
+Daemon extra-file selection, restore prompt construction and managed read grants now share the same explicit home-prefix resolver. It expands `~/` and the two OPENRIG_HOME forms, plus native backslash forms on Windows, using the selected daemon home rather than an unrelated cwd. POSIX backslashes remain literal. Arbitrary environment variables are not expanded. The permission remains an exact file grant; neighbouring files are not granted.
+
+Six new prefix cases reproduced the missing expansion and now verify the selected path, actual prompt text and exact permission pattern. Native prefix tests passed 6/6, the full enforcer file passed 61/61, and the previously qualified hook file passed 25/25. The expanded native managed-read test file still fails 18 of 19: it invokes `/bin/sh` or expects POSIX-only path/prompt spelling. These are retained failures, not skips or an all-green claim. Four complete corresponding WSL files passed 111/111; daemon typecheck passed. Native managed-read fixture adaptation, full same-head acceptance and actual provider continuity remain pending.
+
 ## Native compaction instruction paths and per-seat restore maps (2026-11-02)
 
 The shipped PreCompact hook now expands Windows backslash forms of `~`, `${OPENRIG_HOME}` and `$OPENRIG_HOME` prefixes. POSIX retains literal backslash semantics. Actual hook subprocess tests reproduced all three native failures before the change and now verify restored instruction bytes without launching a provider.

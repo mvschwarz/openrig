@@ -321,7 +321,7 @@ function resolvePostCompactExtra(
     }
     return { filePath: perSeatPath, ignoredWrongSeat: false };
   }
-  const trimmed = postCompactExtraSetting(globalPath);
+  const trimmed = postCompactExtraSetting(globalPath, openrigHome);
   if (!trimmed) return { filePath: null, ignoredWrongSeat: false };
   const global = readExtraDeclaredSeat(trimmed);
   // Configured-but-absent: keep the path (the operator may populate it before restore;
@@ -373,7 +373,7 @@ export function buildPostCompactRestorePrompt(input: {
     pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
-  const instructionFilePath = input.postCompactInstructionFilePath?.trim();
+  const instructionFilePath = postCompactExtraSetting(input.postCompactInstructionFilePath, input.openrigHome);
   if (inlineInstruction) {
     pieces.push(`Operator post-compaction instruction: ${inlineInstruction}`);
   }
