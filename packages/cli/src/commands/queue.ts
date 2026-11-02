@@ -639,6 +639,18 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// A misspelled state ("in_progress") would otherwise read as an empty queue, not as a mistake: the list route matches
+// names as given. Each name is checked and trimmed the way the route trims it. This warns rather than refuses, so the
+// CLI's copy of the list doesn't stop it working with a newer daemon that knows more states.
+const QUEUE_STATE_NAMES = ["pending", "in-progress", "done", "blocked", "failed", "denied", "canceled", "handed-off"];
+function warnIfUnknownStates(value?: string): void {
+  const names = (value ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  const unknown = names.filter((name) => !QUEUE_STATE_NAMES.includes(name));
+  if (unknown.length === 0) return;
+  const effect = unknown.length === names.length ? " Nothing is filed under these names, so an empty result doesn't mean an empty queue." : "";
+  console.error(`Warning: unrecognized --state '${unknown.join("', '")}'. Supported states: ${QUEUE_STATE_NAMES.join(", ")}.${effect}`);
+}
+
 // Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
 // renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
 const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
@@ -1772,6 +1784,7 @@ Examples:
       }
       if (opts.destination) params.set("destinationSession", opts.destination);
       if (opts.source) params.set("sourceSession", opts.source);
+      warnIfUnknownStates(opts.state);
       if (opts.state) params.set("state", opts.state);
       if (opts.targetRepo) params.set("targetRepo", opts.targetRepo);
       if (opts.limit) params.set("limit", String(opts.limit));

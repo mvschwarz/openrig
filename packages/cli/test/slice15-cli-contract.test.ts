@@ -72,6 +72,61 @@ describe("Slice 15 — CLI contract honesty", () => {
       expect(err).toMatch(/positive integer/);
     });
 
+    it.each([
+      ["pending, in_progress", ["in_progress"], "pending, in_progress"],
+      ["bogus,also_bogus", ["bogus", "also_bogus"], "bogus,also_bogus"],
+    ])("queue list --state %j warns on stderr and still runs the query as given", async (state, unknown, sent) => {
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const { deps, calls } = makeQueueDeps();
+        const { exitCode } = await runCli(["queue", "list", "--state", state, "--json"], { queueDeps: deps });
+        expect(exitCode).toBe(0);
+        const warning = stderr.mock.calls.map((c) => c.join(" ")).join("\n");
+        for (const name of unknown) expect(warning).toContain(`'${name}'`);
+        expect(warning).toContain("Supported states: pending, in-progress, done");
+        if (state.includes("pending")) expect(warning).not.toContain("empty queue");
+        else expect(warning).toContain("doesn't mean an empty queue");
+        const listCalls = calls.filter((c: { path: string }) => c.path.startsWith("/api/queue/list"));
+        expect(listCalls).toHaveLength(1);
+        expect(new URLSearchParams(listCalls[0]!.path.split("?")[1]).get("state")).toBe(sent);
+        expect(JSON.parse(stdout.mock.calls.map((c) => c.join(" ")).join("\n"))).toEqual([]);
+      } finally {
+        stderr.mockRestore();
+        stdout.mockRestore();
+      }
+    });
+
+    it.each(["pending", " pending , in-progress ", "done,handed-off,failed,denied,canceled,blocked", "pending,", " "])(
+      "queue list --state %j runs without a warning", async (state) => {
+        const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+        const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+        try {
+          const { deps, calls } = makeQueueDeps();
+          const { exitCode } = await runCli(["queue", "list", "--state", state, "--json"], { queueDeps: deps });
+          expect(exitCode).toBe(0);
+          expect(stderr).not.toHaveBeenCalled();
+          expect(calls.filter((c: { path: string }) => c.path.startsWith("/api/queue/list"))).toHaveLength(1);
+        } finally {
+          stderr.mockRestore();
+          stdout.mockRestore();
+        }
+      });
+
+    it("queue list without --state sends no state filter and no warning", async () => {
+      const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const { deps, calls } = makeQueueDeps();
+        await runCli(["queue", "list", "--json"], { queueDeps: deps });
+        expect(stderr).not.toHaveBeenCalled();
+        expect(calls.find((c: { path: string }) => c.path.startsWith("/api/queue/list"))!.path).not.toContain("state=");
+      } finally {
+        stderr.mockRestore();
+        stdout.mockRestore();
+      }
+    });
+
     it("the path is SHARED across families — a send-family error also emits JSON under --json", async () => {
       const { out, exitCode } = await runCli(["send", "--json", "--no-such-flag"]);
       expect(exitCode).toBe(1);
