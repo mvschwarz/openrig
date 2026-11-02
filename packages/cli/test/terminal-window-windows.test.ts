@@ -36,15 +36,20 @@ describe("Windows desktop terminal view", () => {
       const systemRoot = process.env.SystemRoot!;
       const f = fixture();
       f.deps.env = { systemroot: systemRoot, Path: root };
+      const lookupFailures: string[] = [];
       f.deps.exec = vi.fn(async (file, args) => {
-        const output = await real.exec(file, args, 10_000);
+        const output = await real.exec(file, args, 10_000).catch(error => {
+          lookupFailures.push(String(error));
+          throw error;
+        });
         if (file.endsWith("\\powershell.exe")) {
           expect(output.trim()).toMatch(/^\d+$/);
           return "1"; // Desktop eligibility is mocked; no window is opened.
         }
         return output;
       });
-      expect(await openTerminalWindow(f.client, "saved", "tmux", f.deps)).toMatchObject({ ok: true });
+      const result = await openTerminalWindow(f.client, "saved", "tmux", f.deps);
+      expect(result.ok, JSON.stringify({ result, lookupFailures })).toBe(true);
       expect(f.launch).toHaveBeenCalledOnce();
       const [binary] = f.launch.mock.calls[0]! as unknown as [string, string[]];
       expect(realpathSync.native(binary)).toBe(realpathSync.native(witness));

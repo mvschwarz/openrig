@@ -66,7 +66,8 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     db = createDb(":memory:");
     migrate(db, ALL_MIGRATIONS);
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-"));
-    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-shared-")));
+    const canonical = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+    shared = canonical(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-grant-shared-")));
     process.env.OPENRIG_HOME = home;
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });

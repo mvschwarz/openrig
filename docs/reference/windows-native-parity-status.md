@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Complete CLI directory result and canonical fixture follow-up (2026-11-02)
+
+The complete native CLI directory at `6a40322` reported 6,302 passed, four failed and 96 pending tests. Head and tracked diff remained unchanged throughout. Three failures supplied JavaScript-realpath fixture spelling to a native canonical file allowlist: protected file-editor access, MCP queue artifact reading, and MCP external-grant artifact reading. These fixture producers now use native realpath on Windows. Their three complete files passed 48/48 natively; WSL passed 25 and skipped the 23 native ACL cases.
+
+The remaining Windows Terminal system-discovery test is unresolved. Its real where.exe call cannot find an owned wt.exe witness under the test's otherwise empty PATH. A child Node process confirmed one matching PATH key and the witness's existence; independent native probes found the witness across PATH-key, directory-case and PATHEXT variants. No cause is established by that difference. The assertion now retains the actual lookup error rather than only an abbreviated failure object. No window is launched by this fixture, no production workaround or skip was added, and no whole-CLI green claim is made. Repeated undifferentiated attempts were stopped; further work needs new evidence about the fixture/native invocation difference.
+
 ## Review export allowlist mapping (2026-11-02)
 
 Review export directory mapping now canonicalizes Windows paths through native realpath, matching the file service's allowlist namespace. Its prefix boundary also preserves an existing terminal separator, so filesystem-root allowlists work instead of constructing a doubled separator. Different directories remain outside the mapping.

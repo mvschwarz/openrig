@@ -10,7 +10,7 @@ import { ConfigStore } from "../src/config-store.js";
 import { SettingsStore } from "../../daemon/src/domain/user-settings/settings-store.js";
 import { replaceArtifactFile } from "../src/commands/proof.js";
 import { FileWriteService, sha256Hex } from "../../daemon/src/domain/files/file-write-service.js";
-import { realpathSync } from "node:fs";
+import { realpathSync as fsRealpathSync } from "node:fs";
 import { registerBundleProject } from "../../daemon/src/domain/workspace/project-registration.js";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../../daemon/src/domain/codex-auth.js";
@@ -23,6 +23,7 @@ import { PluginDiscoveryService } from "../../daemon/src/domain/plugin-discovery
 import { reconcileSkillLoadout, resolveSkillLoadout } from "../../daemon/src/domain/skill-catalog.js";
 import { seatSkillPaths, writeInsideSeatStorage } from "../../daemon/src/domain/seat-skill-storage.js";
 
+const realpathSync = process.platform === "win32" ? fsRealpathSync.native : fsRealpathSync;
 let root: string | undefined;
 afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 function accessPolicy(file: string): string {

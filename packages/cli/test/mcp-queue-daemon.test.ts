@@ -40,7 +40,8 @@ describe("MCP queue tools on the daemon's queue routes", () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-queue-"));
     process.env.OPENRIG_HOME = home;
     // One shared root, canonical as the daemon resolves it at startup (a temp directory can sit behind a symlink).
-    shared = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-")));
+    const canonical = process.platform === "win32" ? fs.realpathSync.native : fs.realpathSync;
+    shared = canonical(fs.mkdtempSync(path.join(os.tmpdir(), "mcp-shared-")));
     const inert = async () => ({ ok: false, error: "inert fixture" });
     const queueRepo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
     // The wake store attached, as the daemon attaches it at startup: a handoff makes its successor's wake durable there.
