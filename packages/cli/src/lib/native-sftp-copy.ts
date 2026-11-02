@@ -8,6 +8,7 @@ import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
 import { looksLikePermissionGate } from "../cross-host-executor.js";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import { moveLocalEntryNoReplace } from './local-entry-move.js';
+import { spawnWindowsJobProcess } from "@openrig/daemon/windows-launch";
 
 interface Endpoint {
   paths: typeof path.posix;
@@ -85,7 +86,13 @@ export function buildSftpArgv(plan: CopyPlan): string[] {
 }
 
 /** Native OpenSSH subsystem transport. Never invokes a local or remote shell. */
-export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) => ChildProcessWithoutNullStreams = argv => spawn("ssh", argv, { stdio: "pipe", windowsHide: true })): Promise<FileCopyResult> {
+export function spawnSftpTransport(file: string, argv: string[]): ChildProcessWithoutNullStreams {
+  return (process.platform === "win32"
+    ? spawnWindowsJobProcess(file, argv, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+    : spawn(file, argv, { stdio: "pipe", windowsHide: true })) as ChildProcessWithoutNullStreams;
+}
+
+export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) => ChildProcessWithoutNullStreams = argv => spawnSftpTransport("ssh", argv)): Promise<FileCopyResult> {
   let client: SftpClient | undefined;
   let stderr = "", staged: string | undefined, filesTransferred = 0, bytesTransferred = 0;
   let spawnError: NodeJS.ErrnoException | undefined;
@@ -269,7 +276,8 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     const localError = error as NodeJS.ErrnoException | undefined;
     const localFilesystemFailure = typeof localError?.path === "string"
       && typeof localError.syscall === "string" && !localError.syscall.startsWith("spawn");
-    const failedStep = spawnError?.code === "ENOENT" ? "ssh-missing" : localFilesystemFailure ? "local-copy-failed" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
+    const missingSsh = spawnError?.code === "ENOENT" || localError?.code === "ENOENT" && localError.syscall?.startsWith("spawn");
+    const failedStep = missingSsh ? "ssh-missing" : localFilesystemFailure ? "local-copy-failed" : looksLikePermissionGate(stderr) ? "permission-gate" : transportExit === 255 ? "ssh-unreachable" : "remote-command-failed";
     return { ok: false, failedStep, transport: "sftp", exitCode: transportExit || 1, stdout: changes.join("\n"), stderr: [stderr, message].filter(Boolean).join("\n"), ...(staged || retainedOriginal ? { hint: [staged ? `Staging path may contain incomplete data: ${staged}; ${directoryReplacementAttempted || originalMoveAttempted ? "inspect the destination after the attempted type replacement." : "existing destination was not removed."}` : "",
       retainedOriginal ? `${originalConfirmed ? "Original entry retained at" : "Original recovery path (existence unconfirmed)"}: ${retainedOriginal}` : ""].filter(Boolean).join(" ") } : {}) };
   } finally { await client?.close(); }

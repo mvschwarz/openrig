@@ -1,5 +1,33 @@
 # Native Windows parity: implementation and evidence
 
+## SFTP native transport descendant custody (2026-11-03)
+
+The default native SFTP transport previously used ordinary spawn for ssh. A
+real owned receiver reproduced its detached descendant surviving successful
+parent exit. Windows now starts the transport in the existing atomically
+assigned kill-on-close Job, retaining binary pipes and shell-free native argv.
+SFTP handshake failure/request deadlines and normal transport close therefore
+retain custody of local SSH/ProxyCommand descendants. POSIX retains ordinary
+spawn. Synchronous native command-lookup ENOENT is now also classified as
+ssh-missing; it is not confused with a remote command or a local file error.
+
+Seven new checks cover real upload/download through the same transport helper
+with a local SFTP subsystem, parent success/exit 7/handshake timeout descendant
+exit, literal binary stdin/stdout/argv, and missing native command classification.
+Six complete related files passed 47 cases on Windows with 14 skips. After the
+three changed source/test files were copied and byte-compared and the paired
+daemon rebuilt, WSL passed 28 with 33 native-only skips using its pre-existing
+isolated SFTP executable. Native daemon build, CLI TypeScript noEmit and
+whitespace checks passed. The initial failing custody fixture explicitly
+stopped its surviving owned descendant during cleanup.
+
+The installed control probe now also imports the installed SFTP module and
+passes binary bytes through its transport helper, checking the paired spawn
+export. Its updated package gate is pending at this revision. These are local
+subsystem and process-custody proofs, not SSH authentication, an actual
+ProxyCommand configuration, remote continuity or full directory revalidation.
+No existing SSH connection, original team or running deployment was changed.
+
 ## SFTP source byte-count verification (2026-11-03)
 
 This repair is newer than the frozen whole-workspace checkpoint below. A real

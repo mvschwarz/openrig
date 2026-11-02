@@ -5,3 +5,4 @@ export { resolveWindowsProviderCommand } from "./domain/windows-provider-command
 export { readPlatformEnv } from "./domain/platform-env.js";
 export { readWindowsTileAttachArgv } from "./domain/terminal/windows-tile-attach.js";
 export { execWindowsJobFile } from "./domain/windows-job-exec.js";
+export { spawnWindowsJobProcess } from "./domain/windows-job-process.js";
