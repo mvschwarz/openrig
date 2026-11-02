@@ -1,8 +1,12 @@
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { TmuxAdapter, type ArgvExecFn } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
+afterEach(() => vi.unstubAllEnvs());
 
 it.each([true, false])("persists a colon-bearing created session on the verified server (file protocol=%s)", async advertised => {
+  // The simulated native bootstrap constructs system binary paths; it never
+  // executes them. Linux hosts have no SystemRoot unless this fixture supplies it.
+  if (!process.env.SystemRoot) vi.stubEnv("SystemRoot", "C:\\Windows");
   const name = "owned:logical", binding = bindNativeSessionName(name), calls: string[][] = [];
   let present = false, marker = "";
   const invoke: ArgvExecFn = Object.assign(async (argv: string[]) => {
@@ -24,7 +28,8 @@ it.each([true, false])("persists a colon-bearing created session on the verified
     tmpName: () => "C:/owned/bootstrap.cmd", bufferName: () => "owned", writeFile: async () => {}, unlink: async () => {},
     privateConfig: async () => ({ path: "C:/owned/private.conf", dispose: async () => {} }),
   }, invoke, [], "psmux");
-  expect(await adapter.createSession(name, undefined, { "OTHER-KEY": "synthetic" })).toMatchObject({ ok: true });
+  const created = await adapter.createSession(name, undefined, { "OTHER-KEY": "synthetic" });
+  expect(created, JSON.stringify(created)).toMatchObject({ ok: true });
   expect(await adapter.probeSession(name)).toEqual({ state: "present" });
   expect(await adapter.listSessionPanes(name)).toHaveLength(1);
   expect(calls.some(argv => argv.includes("source-file"))).toBe(true);

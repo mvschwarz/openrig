@@ -1,5 +1,34 @@
 # Native Windows parity: implementation and evidence
 
+## Current installed gate and paired terminal checkpoint at 0182c73 (2026-11-03)
+
+The complete native build/pack/isolated-prefix install gate passed at
+`0182c73ad6710cc8ea20e9b38f0e27755e2bc504` in 74 seconds, with unchanged HEAD
+and tracked diff. This refresh includes the installed real loopback SSE watcher,
+controlled mapped-command creation/stop, exact helper assets, binary transport,
+timestamps, SQLite/resources and CLI loading checks. It does not qualify real
+stock psmux or provider continuity.
+
+WSL matched 4,736 public regular files and compiled the paired daemon with public
+hashes unchanged and the existing private dependency's normalized Git identity
+matched before/after compilation, without viewing or copying its source. Six
+documentation links and other mirror files remain outside complete equivalence.
+The same 20 terminal/lifecycle/CLI test files selected 576 tests on both systems:
+Windows passed 571 with five skips; WSL passed 568, failed one and skipped seven.
+Public source hashes stayed matched after both runs. This is a selected-file
+checkpoint, not a full daemon/workspace run or a performance comparison; Node
+versions differ (24.14.1 native versus 24.11.0 WSL).
+
+The WSL failure was the controlled native stock-creation fixture reporting
+`Windows system root unavailable`. It constructs Windows bootstrap paths with
+an inert argv transport, but Linux does not supply SystemRoot. The fixture now
+provides a virtual system root only when missing and restores the environment
+after each case; no Windows binary is executed by it. Both complete fixture
+cases passed on Windows and WSL after the one public test file was overlaid and
+byte-matched. Production source did not change for that correction. The original
+WSL 20-file failure remains a failed checkpoint; the focused follow-up is not a
+new all-green paired run. No deployment, team operation or public push occurred.
+
 ## Recovery diagnostic geometry has explicit target identity (2026-11-03)
 
 All production resume-evidence callers now declare whether geometry belongs to
