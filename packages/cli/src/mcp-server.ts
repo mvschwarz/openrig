@@ -373,8 +373,9 @@ function externalScope(access: McpAccess, seatOf: () => string | undefined): Sco
   return {
     session: (value) => caller(value) || team(value),
     item,
-    // Only an item addressed to its exact seat is its own to change; the daemon's claim also checks the claimant.
-    owner: (row) => caller(field(row, "destinationSession")),
+    // Only an item addressed to its exact seat, and one it may read, is its own to change; the daemon's claim also checks
+    // the claimant.
+    owner: (row) => caller(field(row, "destinationSession")) && item(row),
     rig: (name) => typeof name === "string" && rigs.has(name),
     root: (name) => typeof name === "string" && access.roots.includes(name),
     // A task goes to another seat of its rigs: never to the caller itself, and without team/list never to another
@@ -1363,7 +1364,10 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId);
         if (denied) return denied;
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {}), undefined, { structured: true });
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
+        // An external caller's claimed item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1394,15 +1398,18 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
       try {
         const denied = await itemOutOfScope(qitemId, "owner");
         if (denied) return denied;
-        // An external caller waits only on an item it can read: parking on a person would ask them, and parking on
-        // another item would say whether it exists.
-        if (blockedOn && access?.external) {
-          const blocker = blockedOn.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
-          if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn}`);
+        // An external caller waits only on an item it names and can read: parking on a person would ask them, parking on
+        // another item would say whether it exists, and a park that names nothing would restore a blocker the team set.
+        if (access?.external && (blockedOn || state === "blocked")) {
+          const blocker = blockedOn?.startsWith("qitem-") ? await client.get(`/api/queue/${encodeURIComponent(blockedOn)}`) : null;
+          if (!blocker || blocker.status >= 400 || !scope?.item(blocker.data)) return outOfScope(`Blocker ${blockedOn ?? "(none named)"}`);
         }
-        return mapResult(await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
+        const res = await client.post(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state, closureReason, closureTarget, summary, evidenceRef, blockedOn, wakeAfterSeconds, transitionNote: note, resolution, reopen,
-        }), undefined, { structured: true });
+        });
+        // An external caller's updated item goes through the same projection as show and list.
+        const view = externalView(scope);
+        return mapResult(view && res.status < 400 ? { ...res, data: projectForExternal(res.data, view) } : res, undefined, { structured: true });
       } catch (err) {
         return caught(err);
       }
@@ -1537,7 +1544,9 @@ export function createMcpServer(client: DaemonClient, options: { seat?: string; 
           async (seat) => {
             const rows = await client.get(`/api/queue/list?${new URLSearchParams({ destinationSession: seat, compact: "1", limit: String(PRESENCE_ROWS) }).toString()}`)
               .then((res) => (res.status < 400 ? res.data : null), () => null);
-            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(rows, seat),
+            // An external caller sees a ring only on an item it may read, so another pair's item isn't named.
+            const visible = access?.external && Array.isArray(rows) ? rows.filter((row) => scope?.item(row)) : rows;
+            return { lastCallAt: readPresence(presenceFile())[seat]?.lastCallAt ?? null, lastWake: newestWake(visible, seat),
               lastWakeScope: `the latest ring among its ${PRESENCE_ROWS} most recent rows` };
           });
         return mapResult({ status: 200, data: { ...view, hostedMembers: hosted.members, ...(hosted.note ? { hostedMembersNote: hosted.note } : {}) } }, undefined, { structured: true });

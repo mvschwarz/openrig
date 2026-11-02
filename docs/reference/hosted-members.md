@@ -126,8 +126,8 @@ and nothing else is offered:
 - **What it reaches:**
   - It hands work to its rigs' other seats, never to a person or another host's seat.
   - It reads the items it sent and the items addressed to it from those seats, never the team's internal items.
-  - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat, and waits (blocked)
-    only on an item it can read.
+  - With `queue`/`claim` and `queue`/`update`, it claims and closes only items addressed to its own seat that it can read,
+    and waits (blocked) only on an item it names and can read. Its answers hide what reading the item hides.
 - **Two assistants together:** a grant with `team`/`list` sees its rigs' seats with `rig_team`, and may address and hear from
   another connected assistant's seat. A grant without it never reaches a seat in the service's caller form
   (`cus-<id>-<connection>@<rig>`), so an existing connection keeps the reach it had.
