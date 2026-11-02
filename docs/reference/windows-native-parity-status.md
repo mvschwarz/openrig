@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### OpenShell finite native CLI custody (2026-11-02)
+
+The default OpenShell driver now runs finite native CLI clients through the
+bounded Windows Job exec wrapper, retaining its 30-second deadline and 2-MiB
+output bound. POSIX execFile execution is retained. Unconfirmed replies still
+raise openshell_transport_unconfirmed and require reconciliation; the driver
+does not retry a possibly applied gateway operation.
+
+Three complete driver/observer/native-process files pass 18 Windows tests.
+An owned native CLI stand-in is found by its bare name through PATH and checks
+the default driver's literal list argv. Acknowledged detached children are
+gone after success, exit 7, timeout and output overflow. The exact changed
+driver and current three test files in the ordinary WSL mirror pass 13 tests,
+with five Windows-specific cases skipped. Daemon TypeScript checking passes.
+This is finite-client custody and existing contract coverage, not an installed
+OpenShell/Podman engine or full sandbox-lifecycle acceptance.
+
 ### Windows Job executable PATH lookup (2026-11-02)
 
 A direct-versus-Job native check reproduced a missing behavior: `node.exe`

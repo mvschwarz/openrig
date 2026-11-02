@@ -8,24 +8,23 @@ import { OpenShellPodmanObserver, type PodmanCleanupSelection } from "./openshel
 import type { NativeObservation } from "../domain/environment-lifecycle.js";
 import { EnvironmentError, regularBytes, sha256, type EnvironmentBinding, type EnvironmentDriver, type EnvironmentResource, type Placement } from "../domain/environment-platform.js";
 import { createWindowsPrivateDirectoryAsync, openPrivateTextHandle } from "../domain/private-text-file.js";
+import { execWindowsJobFile } from "../domain/windows-job-exec.js";
 
 const runFile = promisify(execFile);
 export type OpenShellCommand = (args: string[]) => Promise<string>;
+/** Only the finite CLI client is owned here; gateway operations may already
+ * have been applied when a reply is lost, so they are never retried here. */
+export async function runOpenShellCommand(args: string[], timeoutMs = 30_000): Promise<string> {
+  try {
+    return (await (process.platform === "win32"
+      ? execWindowsJobFile("openshell", args, { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 })
+      : runFile("openshell", args, { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }))).stdout;
+  } catch { throw new EnvironmentError("openshell_transport_unconfirmed", "OpenShell did not return a confirmed result; reconcile the saved operation", 503); }
+}
 /** Maintained OpenShell 0.1.6 CLI driver. No shell, dynamic plugin loader or credential copying. */
 export class OpenShellDriver implements EnvironmentDriver {
   readonly version = 1 as const;
-  constructor(private readonly command: OpenShellCommand = async args => {
-    try { return (await runFile("openshell", args, { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout; }
-    catch (error) {
-      const failure = error as { code?: unknown; stderr?: unknown };
-      const oldHelper = args.includes("/opt/openrig/guest.py") && args.includes("--prepare") && args.includes("--first-input-required")
-        && typeof failure?.code === "number" && failure.code !== 0 && typeof failure.stderr === "string"
-        && /^guest\.py: error: unrecognized arguments: --first-input-required[ \t\r]*$/m.test(failure.stderr);
-      throw new EnvironmentError("openshell_transport_unconfirmed", oldHelper
-        ? "The guest helper rejected --first-input-required and likely predates first input. Rebuild the maintained image with the guest.py shipped by this OpenRig version; see the OpenShell worker README. The saved launch remains unconfirmed; reconcile it before another launch."
-        : "OpenShell did not return a confirmed result; reconcile the saved operation", 503);
-    }
-  }) {}
+  constructor(private readonly command: OpenShellCommand = runOpenShellCommand) {}
   private prefix(place: Placement): string[] { return ["--gateway", place.gateway, "--workspace", place.workspace, "sandbox"]; }
   private resource(value: unknown): EnvironmentResource {
     const row = value as Record<string, any>;

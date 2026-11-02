@@ -600,12 +600,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .option("--bearer-file <path>", "File PATH holding the bearer token — http transport (optional pointer, never a value; at most one bearer flag)")
     .option("--notes <text>", "Free-form operator note")
     .option("--json", "JSON output")
-<<<<<<< HEAD
     .addHelpText("after", rewritesRegistry)
-    .action((opts: { id: string; transport: string; target?: string; user?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {
-=======
     .action((opts: { id: string; transport: string; target?: string; user?: string; remoteShell?: string; rigPath?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; json?: boolean }) => {
->>>>>>> a1d4f8d73 (feat(windows): add explicit native SSH command routing and registry fields)
       const rawEntry: Record<string, unknown> = { id: opts.id, transport: opts.transport };
       if (opts.target !== undefined) rawEntry["target"] = opts.target;
       if (opts.user !== undefined) rawEntry["user"] = opts.user;
@@ -739,12 +735,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
     .option("--url <url>", "Remote daemon base URL — http transport")
     .option("--notes <text>", "Free-form operator note (empty string clears the value)")
     .option("--json", "JSON output")
-<<<<<<< HEAD
     .addHelpText("after", rewritesRegistry)
-    .action((id: string, opts: { target?: string; user?: string; url?: string; notes?: string; json?: boolean }) => {
-=======
     .action((id: string, opts: { target?: string; user?: string; remoteShell?: string; rigPath?: string; url?: string; notes?: string; json?: boolean }) => {
->>>>>>> a1d4f8d73 (feat(windows): add explicit native SSH command routing and registry fields)
       const changes: Record<string, unknown> = {};
       if (opts.target !== undefined) changes["target"] = opts.target;
       if (opts.user !== undefined) changes["user"] = opts.user;
