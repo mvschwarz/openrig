@@ -58,17 +58,16 @@ The preset leaves `resume` out. The runner reopens a conversation by the method 
 
 **Telling a missing conversation from one that won't reopen.** dsh `0.2.1-rc.2` answers `-32602` both for a
 conversation it doesn't have and for one already active elsewhere, so the runner never reads that error as missing.
-- **When dsh advertises `session/list`** (it does), the runner first asks the list, from its own fresh dsh process and
-  following its pages. A conversation the list doesn't name is reported missing. One it names but can't reopen leaves
-  the resume unconfirmed.
-- **Without a list, or when the list fails,** only dsh's own not-found error (`-32002`) counts as missing.
-- **Any other failure** leaves the resume unconfirmed.
+- **Only dsh's own not-found error (`-32002`) counts as missing.** Any other failure leaves the resume unconfirmed.
+- **When dsh advertises `session/list`** (it does), the runner first asks the list, following its pages. A conversation
+  the list names but that won't reopen stays unconfirmed, even on a not-found.
+- **An unlisted conversation is still reopened.** dsh's list can leave out a conversation another running dsh holds
+  unsaved, so it can't show a conversation is gone.
 
-**Limit:** a conversation that another running dsh still holds, and hasn't saved, may not be listed yet, and would then
-read missing.
+**Limit:** dsh answers `-32602`, not `-32002`, for a conversation it doesn't have, so the runner can't report a missing
+dsh conversation as missing. It reads unconfirmed.
 
-Add `resume: true` after a real dsh has reopened a conversation, recalled what was said in it, and reported a missing one
-as missing.
+Add `resume: true` after a real dsh has reopened a conversation and recalled what was said in it.
 
 ## Check it without a model
 

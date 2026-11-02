@@ -474,16 +474,18 @@ async function main() {
   const capabilities = init?.agentCapabilities ?? {};
   const producer = `${RUNNER}; dsh ${init?.agentInfo?.version ?? "(version not reported)"}; ACP ${init?.protocolVersion ?? "?"}`;
   const resumeRef = env.OPENRIG_RESUME_REF;
-  // Whether dsh's own session list names a conversation, following its pages: true or false, or undefined when the list
-  // fails, answers in another shape, or runs past LIST_PAGES pages.
+  // Whether dsh's own session list names a conversation, following its pages: true, false when every page was read and
+  // none names it, or undefined when the list fails, answers in another shape, or runs past LIST_PAGES pages. An ACP
+  // cursor is an opaque string, possibly empty, passed back unchanged; an absent or null one ends the list.
   const listsConversation = async (id) => {
     let cursor;
     for (let page = 0; page < LIST_PAGES; page += 1) {
       let listing;
-      try { listing = await peer.request("session/list", cursor ? { cursor } : {}); } catch { return undefined; }
-      if (!Array.isArray(listing?.sessions)) return undefined;
-      if (listing.sessions.some((session) => session?.sessionId === id)) return true;
-      if (typeof listing.nextCursor !== "string" || !listing.nextCursor) return false;
+      try { listing = await peer.request("session/list", cursor === undefined ? {} : { cursor }); } catch { return undefined; }
+      if (!Array.isArray(listing?.sessions) || listing.sessions.some((session) => typeof session?.sessionId !== "string")) return undefined;
+      if (listing.sessions.some((session) => session.sessionId === id)) return true;
+      if (listing.nextCursor === undefined || listing.nextCursor === null) return false;
+      if (typeof listing.nextCursor !== "string") return undefined;
       cursor = listing.nextCursor;
     }
     return undefined;
@@ -491,20 +493,18 @@ async function main() {
   if (resumeRef) {
     // The method dsh advertises; with neither advertised, session/resume, the method dsh 0.2.1-rc.2 answered in its
     // maintainer's checks. dsh 0.2.1-rc.2 answers -32602 both for a conversation it doesn't have and for one active
-    // elsewhere, so that error can't mean missing. When dsh advertises session/list, its list, asked of this fresh dsh
-    // before anything else, says whether the conversation exists. Otherwise only dsh's own "not found" counts as missing.
-    // Anything else leaves the resume unconfirmed.
+    // elsewhere, so that error can't mean missing. Only dsh's own "not found" counts as missing, and not when dsh's list
+    // names the conversation. The list can't show a conversation is gone: one another running dsh holds unsaved may be
+    // left out, so an unlisted conversation is still reopened. Anything else leaves the resume unconfirmed.
     const method = capabilities.sessionCapabilities?.resume ? "session/resume" : capabilities.loadSession ? "session/load" : "session/resume";
-    const listed = capabilities.sessionCapabilities?.list ? await listsConversation(resumeRef) : undefined;
-    const missing = (why) => {
-      writeLaunchRecord({ error: "missing", producer });
-      return fatal(`dsh says conversation ${resumeRef} doesn't exist (${why}); no new one was started`, 3);
-    };
-    if (listed === false) return missing("its session list doesn't name it");
+    const listed = capabilities.sessionCapabilities?.list ? await listsConversation(resumeRef) === true : false;
     try {
       await peer.request(method, { sessionId: resumeRef, cwd, mcpServers: [] });
     } catch (error) {
-      if (error.code === ACP_RESOURCE_NOT_FOUND && listed !== true) return missing(error.message);
+      if (error.code === ACP_RESOURCE_NOT_FOUND && !listed) {
+        writeLaunchRecord({ error: "missing", producer });
+        return fatal(`dsh says conversation ${resumeRef} doesn't exist (${error.message}); no new one was started`, 3);
+      }
       return fatal(`dsh couldn't reopen conversation ${resumeRef} (${method}: ${error.message}); the resume is unconfirmed and no new conversation was started`, 4);
     }
     state.sessionId = resumeRef;
