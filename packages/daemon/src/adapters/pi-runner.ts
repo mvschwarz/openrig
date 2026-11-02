@@ -538,6 +538,7 @@ export class RunnerCore {
       const message = block.slice("/followup ".length);
       this.io.sendRpc({ type: "follow_up", message });
       this.io.mirrorLine(`you (follow-up) ▸ ${message}`);
+      this.acceptIntoOpenRun();
       return;
     }
     // The runtime decides, not the runner: with streamingBehavior "steer", Pi and OMP run the prompt when idle and,
@@ -546,6 +547,17 @@ export class RunnerCore {
     // when a prompt was consumed locally and started none. It labels the mirror line only.
     this.io.sendRpc({ type: "prompt", message: block, streamingBehavior: "steer" });
     this.io.mirrorLine(this.streaming ? `you (steer) ▸ ${block}` : `you ▸ ${block}`);
+    this.acceptIntoOpenRun();
+  }
+
+  /** A working beat counts only for the latest accepted turn, and each prompt the runner gives the agent is accepted with
+   *  its own number (contract section 4). One sent while a Pi run is open is posted as it's sent, and the run's end
+   *  closes it. One sent while idle is posted when its run opens (handleEvent), so a prompt Pi handles without a run opens
+   *  no turn. */
+  private acceptIntoOpenRun(): void {
+    if (this.runtime !== "pi" || !this.streaming) return;
+    this.turn += 1;
+    this.io.postActivity(this.activityPayload("UserPromptSubmit", "accepted", { turnId: String(this.turn) }));
   }
 
   /** Child process exit — honest, loud, durable. */
@@ -813,7 +825,8 @@ export class RunnerCore {
     }
     const mapped = mapPiEvent(event, this.runtime);
     // A working beat counts only for the latest accepted turn. Pi's runs start from this runner's prompts, so the run
-    // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none.
+    // that opens is posted as one, before its first event; a prompt Pi handles without a run opens none. A prompt sent
+    // into an open run is accepted as it's sent (acceptIntoOpenRun).
     const opening = this.runtime === "pi" && mapped.streaming === true && !this.streaming;
     if (mapped.streaming !== undefined) this.streaming = mapped.streaming;
     if (opening) {
