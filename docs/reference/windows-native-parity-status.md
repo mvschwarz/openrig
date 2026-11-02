@@ -46,8 +46,14 @@ and its rootless engine is a separate path requiring real qualification.
 An isolated source snapshot of windows commit
 e451bb390a3b463724ccf5547b46b9432428690d is retained locally (archive SHA-256
 83e13f426240b9f45fb7b75c950e823a97b4126c35c2767fd95207ed8349b049).
-The official native build task is being evaluated with existing MSVC/Rust and
-task-owned outputs; no build, gateway, sandbox or engine acceptance is claimed.
+The official native build task was run with existing MSVC/Rust and task-owned
+outputs. It failed twice with native Rust compiler exceptions: first idna
+1.1.0 with 0xc0000005, then opentelemetry_sdk/noyalib, including 0xc000001d.
+A separate same-toolchain idna build passed, so that bounded diagnostic does
+not establish the cause or completion. Both full attempt logs are retained;
+no third unchanged full-build retry is scheduled. No native client artifact,
+gateway, sandbox or engine acceptance is claimed. This is a separate compiler
+qualification dependency, not evidence of an OpenRig product test failure.
 
 ### OpenShell finite native CLI custody (2026-11-02)
 
