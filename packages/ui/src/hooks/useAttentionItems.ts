@@ -25,6 +25,8 @@
 import { useQuery } from "@tanstack/react-query";
 
 export interface AttentionQueueItem {
+  /** Structured questions already included in the queue API response. */
+  humanQuestions?: unknown[] | null;
   qitemId: string;
   tsCreated: string;
   tsUpdated: string;

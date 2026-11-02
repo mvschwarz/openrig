@@ -418,6 +418,13 @@ export function FeedCard({
     onDismiss(card);
   };
   const qitemViewerData = qitemViewerDataFromItem(card, queueItem);
+  const payload = card.source.payload ?? {};
+  // Remote cards must use their origin's payload, not a same-id local queue row.
+  const localItem = !card.hostId || card.hostId === "local" ? queueItem : undefined;
+  const hasQuestions = (Array.isArray(payload.humanQuestions) && payload.humanQuestions.length > 0)
+    || (Array.isArray(localItem?.humanQuestions) && localItem.humanQuestions.length > 0);
+  // Event cards can arrive before the queue read. Do not offer a closing action until it resolves.
+  const questionsKnown = localItem !== undefined || Object.hasOwn(payload, "humanQuestions");
   const body = compactQueueBody(queueItem?.body || card.body);
   const tags = queueItem?.tags ?? qitemViewerData?.tags ?? [];
   const source = qitemViewerData?.source ?? card.authorSession;
@@ -549,13 +556,8 @@ export function FeedCard({
             data-testid={`feed-card-actions-${card.id}`}
             className="mt-3 bg-background/40 p-3"
           >
-            {/* CORRECTIVE §7.1 + founder live-review 2026-07-05: JUST the two
-                buttons — APPROVE (one-tap, the existing verb + write path) and
-                CHAT (the shared terminal, preamble per BR-12). No "Your turn"
-                prose, no "Choose response" chrome (VerbActions `bare`) —
-                buttons are self-evident. Deny/route stay retired. */}
             <div className="flex flex-wrap items-center gap-2">
-              <VerbActions
+              {questionsKnown && !hasQuestions ? <VerbActions
                 qitemId={qitemViewerData.qitemId}
                 actorSession={actorSession}
                 bare
@@ -567,7 +569,13 @@ export function FeedCard({
                     ? (outcome) => onOptimisticOutcome(qitemViewerData.qitemId, outcome)
                     : undefined
                 }
-              />
+              /> : (
+                <span className="font-mono text-[10px] text-on-surface-variant break-words min-w-0">
+                  {hasQuestions
+                    ? `This ask has questions. Answer in the TUI (rig tui)${terminalSession ? `, or tell ${terminalSession} in Chat.` : "."}`
+                    : "Question details unavailable. Open Chat or the TUI (rig tui)."}
+                </span>
+              )}
               <button
                 type="button"
                 data-testid={`feed-card-chat-${card.id}`}
