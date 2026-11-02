@@ -18,7 +18,9 @@ export function recognizedWindowsClaudeScript(script: string): string | null {
     if (manifest.name !== "@anthropic-ai/claude-code" || typeof entry !== "string" || path.isAbsolute(entry)) return null;
     const file = path.resolve(root, entry), relative = path.relative(root, file);
     if (relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative) || !statSync(file).isFile()) return null;
-    return realpathSync(script) === realpathSync(file) ? realpathSync(file) : null;
+    const realpath = process.platform === "win32" ? realpathSync.native : realpathSync;
+    const declared = realpath(file);
+    return realpath(script) === declared ? declared : null;
   } catch { return null; }
 }
 

@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Native npm Claude entry identity (2026-11-02)
+
+Recognition of an already running declared npm Claude entry now compares native canonical paths on Windows. A real filesystem regression first reproduced rejection of `CLI.js` when the manifest declares the same file as `cli.js`; the corrected comparison accepts that filesystem identity while refusing a distinct script, a missing file and an unrelated package manifest. No broad case folding or provider authentication was added.
+
+Validation: four complete Windows test files passed five tests, including actual owned Node child process identity and native npm Codex argument/help execution. Daemon typecheck passed. These tests are Windows-specific; no Linux execution, real Claude provider conversation, deployed runtime or complete daemon suite is qualified by this result.
+
 ## Bundle archive-relative manifest paths (2026-11-02)
 
 The shared archive-relative path predicate now rejects Windows drive-qualified/drive-relative paths and NUL in addition to its existing forward-slash archive grammar, parent/dot/empty-segment and backslash restrictions. Both legacy and pod-aware manifest validation use the corrected predicate. Archive paths remain distinct from host-native paths.
