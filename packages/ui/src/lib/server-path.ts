@@ -17,6 +17,11 @@ function normalized(root: string, rest: string, windows: boolean): string {
   return windows ? result.replaceAll("/", "\\") : result;
 }
 
+export function serverPathBasename(value: string): string {
+  const path = (windowsRoot(value) ? value.replaceAll("\\", "/") : value).replace(/\/+$/, "");
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
 export function resolveServerFileReference(source: string | null | undefined, ref: string): string | null {
   if (!source || !ref || source.includes("\0") || ref.includes("\0")) return null;
   const sourceRoot = windowsRoot(source);

@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Native workspace mission discovery (2026-11-02)
+
+Filesystem mission discovery now reuses the scope allowlist resolver instead of a separate POSIX-only prefix implementation. A Windows workspace below an allowlist root, including UNC and mixed-separator/exact-root spellings, requests the correct relative missions directory. Workspace labels use the daemon path syntax for their basename and preserve literal backslashes in POSIX names. The existing remote-selection gate still disables local filesystem requests.
+
+Validation: complete ProjectTree mission-discovery, server-path and scope-markdown files passed 46/46 on Windows and 46/46 on ordinary-user WSL; UI typecheck passed. The actual ProjectTree tests assert discovered nodes and file-list request paths. This does not qualify a physical network share or deployed browser.
+
 ## Scope reading, file drawer and evidence path grammar (2026-11-02)
 
 Scope-markdown and the file drawer now share the browser-safe daemon-path mapper. Windows native child paths, mixed separators and UNC share roots resolve to slash-separated API read paths; POSIX literal backslashes remain filename content. Exact-root scope selection and the deepest matching root remain supported, while a file drawer does not attempt to read the root directory itself. Redundant POSIX-only scope prefix helpers were removed.

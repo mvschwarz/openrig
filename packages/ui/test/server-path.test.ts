@@ -1,5 +1,12 @@
 import { expect, it } from "vitest";
-import { resolveServerFileReference, serverPathIsWithin } from "../src/lib/server-path.js";
+import { resolveServerFileReference, serverPathIsWithin, serverPathBasename } from "../src/lib/server-path.js";
+
+it.each([
+  ["C:\\books\\workspace\\", "workspace"],
+  ["\\\\host\\share\\workspace", "workspace"],
+  ["/books/literal\\workspace", "literal\\workspace"],
+  ["/books/workspace/", "workspace"],
+])("displays the server basename of %s", (value, name) => expect(serverPathBasename(value)).toBe(name));
 
 it.each([
   ["/specs/agent/agent.yaml", "../guide.md", "/specs/guide.md"],
