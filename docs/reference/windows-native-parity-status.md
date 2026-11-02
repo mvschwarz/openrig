@@ -4847,3 +4847,30 @@ changed files were copied and byte-compared. Daemon TypeScript build and
 whitespace checking passed. The route fixture used an owned synthetic Rex
 responder; real Rex GUI/server acceptance remains unqualified. No original team
 or running deployment changed, and no public push occurred.
+
+### Native inherited server environment spelling (2026-11-03)
+
+The Windows server selector previously read only exact uppercase TMUX,
+PSMUX_DATA_DIR and USERPROFILE keys from a supplied environment object. Windows
+child processes resolve those names case-insensitively, so a mixed-case key
+could make inherited execution and the new-terminal attachment path disagree.
+The selector now uses the existing child-environment lookup helper, including
+its deterministic duplicate-key selection. The standalone attachment-metadata
+helper uses the same platform rule for TMUX and TMUX_TMPDIR; POSIX remains exact.
+No active server is migrated or stopped by these reads.
+
+The selection regression failed before the change and passed afterward for
+mixed-case inherited socket, data directory, user profile and duplicate keys.
+Final complete selection/attachment files passed 50 on Windows with two
+POSIX-only skips. A new real stock psmux 3.4.0 fixture launched a session using
+mixed-case private environment keys, then listed and captured that same session
+through the selected explicit attachment path; its receiver/session/root cleanup
+passed. The first fixture assertion differed only in TEMP/Temp physical spelling
+and was corrected by canonicalizing its owned root before the successful run.
+
+The five changed source/test files were copied and byte-compared into the WSL
+validation tree. Four complete related files passed 53 with one explicit opt-in
+skip, including the real stub-seat daemon migration scenario. Daemon TypeScript
+build and whitespace checks passed. This does not establish concurrent
+server-name/PID exchange atomicity or literal-pipe session-name support, and no
+running OpenRig instance or original team changed.

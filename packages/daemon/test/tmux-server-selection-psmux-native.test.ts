@@ -7,6 +7,29 @@ import { expect, it } from "vitest";
 import { inspectTmuxServer, selectTmuxServer } from "../src/domain/tmux-server-selection.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
+it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("mixed-case inherited environment routes new clients to the real stock server", async () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "openrig-inherited-case-")));
+  const registry = path.join(root, "registry"); fs.mkdirSync(registry);
+  const env: NodeJS.ProcessEnv = { SystemRoot: process.env.SystemRoot, WINDIR: process.env.SystemRoot,
+    PATH: path.dirname(process.execPath), HOME: root, UserProfile: root, APPDATA: root, LOCALAPPDATA: root,
+    TEMP: root, TMP: root, Psmux_Data_Dir: registry, PSMUX_CONFIG_FILE: "NUL" };
+  const execute = promisify(execFile);
+  const invoke = async (args: string[]) => (await execute(process.env.OPENRIG_TEST_PSMUX!, args,
+    { cwd: root, env, windowsHide: true, timeout: 10000, encoding: "utf8" })).stdout;
+  const selected = await selectTmuxServer({ home: path.join(root, "home"), mode: "inherit", registeredSessions: [], env, persist: false });
+  const name = "owned-case", receiver = path.join(root, "receiver.cjs");
+  fs.writeFileSync(receiver, "console.log('owned-case-receiver');setInterval(()=>{},1000);");
+  try {
+    expect(selected.serverArgs).toEqual(["-S", path.join(registry, "default")]);
+    await invoke(["new-session", "-d", "-s", name, "--", process.execPath, receiver]);
+    expect(await invoke([...selected.serverArgs, "list-sessions", "-F", "#{session_name}"])).toContain(name);
+    await expect.poll(() => invoke([...selected.serverArgs, "capture-pane", "-p", "-t", `=${name}`]), { timeout: 5000 }).toContain("owned-case-receiver");
+  } finally {
+    await invoke([...selected.serverArgs, "kill-session", "-t", `=${name}`]).catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}, 30000);
+
 it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("isolates equal session names across selected homes and preserves the surviving sibling", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-server-owned-"));
   const registry = path.join(root, "registry"); fs.mkdirSync(registry);

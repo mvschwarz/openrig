@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { execArgvCommand } from "../adapters/tmux-exec.js";
 import { tmuxServerArgs } from "../adapters/tmux-server.js";
+import { readPlatformEnv } from "./platform-env.js";
 
 export type TmuxServerMode = "inherit" | "isolated";
 
@@ -72,9 +73,9 @@ export function inheritedTmuxSocket(env: NodeJS.ProcessEnv, uid: number): string
 
 /** psmux accepts both its legacy TMUX path and a native -S path. */
 export function inheritedPsmuxSocket(env: NodeJS.ProcessEnv): string {
-  const inherited = env.TMUX?.replace(/,\d+,\d+$/, "");
+  const inherited = readPlatformEnv(env, "TMUX", "win32")?.replace(/,\d+,\d+$/, "");
   if (inherited && (path.isAbsolute(inherited) || path.win32.isAbsolute(inherited))) return inherited;
-  const root = env.PSMUX_DATA_DIR ?? path.join(env.USERPROFILE || homedir(), ".psmux");
+  const root = readPlatformEnv(env, "PSMUX_DATA_DIR", "win32") ?? path.join(readPlatformEnv(env, "USERPROFILE", "win32") || homedir(), ".psmux");
   return path.join(canonical(root || "."), "default");
 }
 

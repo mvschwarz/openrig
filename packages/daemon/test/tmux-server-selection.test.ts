@@ -387,6 +387,19 @@ describe("durable tmux server selection", () => {
       mode: "inherit", executionArgs: [], serverArgs: ["-S", path.join(data, "default")], migrationPending: false,
     });
   });
+  it("selects Windows inherited servers using the child environment's case-insensitive key rules", async () => {
+    const data = path.join(root, "psmux"), profile = path.join(root, "profile");
+    for (const [env, socket] of [
+      [{ Tmux: `${oldSocket},44,0` }, oldSocket],
+      [{ Psmux_Data_Dir: data }, path.join(data, "default")],
+      [{ UserProfile: profile }, path.join(profile, ".psmux", "default")],
+      [{ PSMUX_DATA_DIR: data, psmux_data_dir: profile }, path.join(data, "default")],
+    ] as Array<[NodeJS.ProcessEnv, string]>) {
+      expect(await selectTmuxServer({ ...options(), platform: "win32", persist: false, env })).toMatchObject({
+        executionArgs: [], serverArgs: ["-S", socket], socketPath: socket,
+      });
+    }
+  });
 
   it.each([
     ["no server running on /private/socket", "absent"],

@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
 import { nativeViewerCommand } from "../domain/terminal/native-viewer-command.js";
+import { readPlatformEnv } from "../domain/platform-env.js";
 
 function realpath(p: string): string {
   try {
@@ -26,10 +27,10 @@ function realpath(p: string): string {
  */
 export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined = process.getuid?.()): string[] {
   // tmux puts the socket path first, as is: keep any whitespace in it.
-  const socket = env["TMUX"]?.replace(/,\d+,\d+$/, "");
+  const socket = readPlatformEnv(env, "TMUX")?.replace(/,\d+,\d+$/, "");
   if (!socket?.trim()) return [];
   const socketPaths = socket.startsWith("/") ? path.posix : path;
-  const tmpdir = env["TMUX_TMPDIR"]?.trim() ?? "";
+  const tmpdir = readPlatformEnv(env, "TMUX_TMPDIR")?.trim() ?? "";
   const customTmpdir = tmpdir !== "" && realpath(tmpdir) !== realpath("/tmp");
   if (!customTmpdir && uid !== undefined) {
     const standardDirs = [socketPaths.join("/tmp", `tmux-${uid}`), socketPaths.join(realpath("/tmp"), `tmux-${uid}`)];
