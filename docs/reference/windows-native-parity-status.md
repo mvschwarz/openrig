@@ -27,6 +27,27 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Real tmux normalized-name recovery and hermetic ref failure (2026-11-02)
+
+tmux 3.4's printed name for a literal dollar can contain escaping that is not a
+usable exact session target. Chatroom watcher creation now requests the stable
+server-local session ID and quotes it in the attach guidance, retaining the
+original rig label and watcher argv. Real tmux tests verify the ID addresses the
+created session and the watcher receives the unchanged rig name; stock psmux
+also proves ID lookup, original argv and namespace-bound whoami routing. This
+fix does not claim server IDs remain stable across server restarts.
+
+The release-surface missing-ref test now initializes its own temporary Git
+repository, so an archive checkout tests the intended missing-ref error rather
+than accidentally testing absence of a surrounding .git. It checks that the
+error names the requested ref and retains the fact/consequence/action fields.
+
+The five files containing all eight failures from the a03de2d ordinary-user WSL
+run now pass 64 tests with five platform/tag skips after these and the terminal
+follow-ups. Windows chatroom tests pass 69 with 17 real-tmux skips, including
+real stock psmux; release-surface passes ten separately. These targeted receipts
+do not replace the still-required full run at a common final head.
+
 ### Windows nonidentifier environment persistence (2026-11-02)
 
 The private session transport now accepts and quotes representable native names

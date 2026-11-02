@@ -28,7 +28,9 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("rout
   fs.writeFileSync(receiver, `const fs=require('fs');fs.writeFileSync(process.argv[2],JSON.stringify({args:process.argv.slice(3),env:Object.fromEntries(['TMUX','TMUX_PANE','PSMUX_SESSION','PSMUX_TARGET_SESSION','PSMUX_SOCKET_NAME'].flatMap(k=>process.env[k]===undefined?[]:[[k,process.env[k]]]))}));setTimeout(()=>process.exit(0),20000);`);
   try {
     const created = invoke(chatroomWatchTmuxArgs(rig, [process.execPath, receiver, output])).trim();
-    expect(created).toBe(session);
+    expect(created).toMatch(/^\$\d+$/);
+    expect(invoke(["has-session", "-t", created])).toBe("");
+    expect(invoke(["display-message", "-p", "-t", created, "#{session_name}"]).trim()).toBe(session);
     const until = Date.now() + 5000;
     while (!fs.existsSync(output) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 50));
     expect(fs.existsSync(output), "owned watcher did not produce its receipt").toBe(true);
@@ -49,6 +51,7 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("rout
     expect(JSON.parse(identity)).toEqual({ nodeId: "owned-node" });
   } finally {
     try { invoke(["kill-session", "-t", `=${session}`]); } catch { /* Only this exact owned target is eligible. */ }
+    try { invoke(["kill-server"]); } catch { /* This fixture's private namespace only. */ }
     try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
     catch { throw new Error(`Owned psmux fixture retained after cleanup refusal: ${root}`); }
   }

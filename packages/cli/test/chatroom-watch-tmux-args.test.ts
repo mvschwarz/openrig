@@ -8,8 +8,8 @@ import { chatroomWatchTmuxArgs } from "../src/commands/chatroom.js";
 const sessionArg = (rig: string) => { const args = chatroomWatchTmuxArgs(rig); return args[args.indexOf("-s") + 1]; };
 
 describe("chatroom watch --tmux arguments", () => {
-  it("hands tmux the watcher as separate arguments, with the rig name after --, and asks for the name it used", () => {
-    expect(chatroomWatchTmuxArgs("my rig", ["rig"], "linux")).toEqual(["new-session", "-d", "-P", "-F", "#{session_name}", "-s", "chatroom@my rig",
+  it("hands tmux the watcher as separate arguments, with the rig name after --, and asks for its stable ID", () => {
+    expect(chatroomWatchTmuxArgs("my rig", ["rig"], "linux")).toEqual(["new-session", "-d", "-P", "-F", "#{session_id}", "-s", "chatroom@my rig",
       "rig", "chatroom", "watch", "--", "my rig"]);
   });
 
@@ -59,16 +59,18 @@ describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server 
   });
 
   // The exact arguments, with only the `rig` program swapped for the recorder; tmux prints the session it made.
-  function start(rig: string, out: string): string {
+  function start(rig: string, out: string): {id:string; name:string} {
     const args = chatroomWatchTmuxArgs(rig);
     const program = args.indexOf("-s") + 2;
-    return execFileSync("tmux", ["-L", TMUX_SOCKET, "-f", "/dev/null", ...args.slice(0, program), process.execPath, recorder, out,
+    const id = execFileSync("tmux", ["-L", TMUX_SOCKET, "-f", "/dev/null", ...args.slice(0, program), process.execPath, recorder, out,
       ...args.slice(program + 1)], { encoding: "utf8" }).trim();
+    expect(id).toMatch(/^\$\d+$/);
+    return {id,name:execFileSync("tmux",["-L",TMUX_SOCKET,"display-message","-p","-t",id,"#{session_name}"],{encoding:"utf8"}).trim()};
   }
 
   it.each(names.map((rig, i) => [rig, i] as const))("keeps the session chatroom@%s and hands the watcher the name as one argument", async (rig, i) => {
     const out = path.join(dir, `argv-${i}.json`);
-    expect(start(rig, out)).toBe(`chatroom@${rig}`);
+    expect(start(rig, out).name).toBe(`chatroom@${rig}`);
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
   });
 
@@ -76,14 +78,16 @@ describe.runIf(tmuxAvailable)("chatroom watch --tmux against a real tmux server 
   // The reported name must address the real session, while the watcher still gets the original rig name.
   it.each([
     ["release-0.7", ["chatroom@release-0.7", "chatroom@release-0_7"]],
-    ["a$HOME", ["chatroom@a$HOME", "chatroom@a\\$HOME"]],
+    // tmux 3.4 may preserve two escaping backslashes; addressability and the
+    // watcher's original argv are still checked against the actual server below.
+    ["a$HOME", ["chatroom@a$HOME", "chatroom@a\\$HOME", "chatroom@a\\\\$HOME"]],
   ] as const)("reports the name tmux used for %s", async (rig, expected) => {
     const out = path.join(dir, `argv-normalized-${rig}.json`);
     const reported = start(rig, out);
-    expect(expected).toContain(reported);
+    expect(expected).toContain(reported.name);
     expect(execFileSync("tmux", ["-L", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"], { encoding: "utf8" }).split("\n"))
-      .toContain(reported);
-    expect(spawnSync("tmux", ["-L", TMUX_SOCKET, "has-session", "-t", `=${reported}:`]).status).toBe(0);
+      .toContain(reported.name);
+    expect(spawnSync("tmux", ["-L", TMUX_SOCKET, "has-session", "-t", reported.id]).status).toBe(0);
     await vi.waitFor(() => expect(JSON.parse(readFileSync(out, "utf8"))).toEqual(["chatroom", "watch", "--", rig]), { timeout: 5000 });
   });
 });

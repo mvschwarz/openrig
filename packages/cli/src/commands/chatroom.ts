@@ -16,10 +16,11 @@ export function chatroomWatcherCommand(platform: NodeJS.Platform = process.platf
  *  reading as an option. tmux reads the `-s` value as a format, where `##` is one `#` and a run of `#` before `[` is a
  *  style it keeps as written, so every other `#` is doubled and the session is `chatroom@<rig>`. Some tmux versions
  *  still change a session name (3.5a writes `_` for `:` and `.`, and escapes a backslash or a control character such
- *  as a newline or tab), so `-P -F` prints the name tmux used. */
+ *  as a newline or tab). `-P -F` returns the stable session ID because a printed
+ *  escaped name is not necessarily usable as an exact target. */
 export function chatroomWatchTmuxArgs(rig: string, watcher: readonly string[] = ["rig"], platform: NodeJS.Platform = process.platform): string[] {
   const session = `chatroom@${rig}`.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
-  return ["new-session", "-d", "-P", "-F", "#{session_name}", "-s", tmuxArg(session),
+  return ["new-session", "-d", "-P", "-F", "#{session_id}", "-s", tmuxArg(session),
     // Stock psmux otherwise joins positional words into a shell command, losing
     // executable and script paths with spaces. `--` selects its direct argv mode.
     ...(platform === "win32" ? ["--"] : []),
@@ -200,11 +201,13 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
         try {
-          // The name tmux used, which differs from sessionName when tmux changed it (a `.` in a rig name, for example).
+          // Printed names can be escaped and cannot reliably address the session.
+          // Its server-local immutable ID avoids name normalization and shell expansion.
           const created = execFileSync("tmux", chatroomWatchTmuxArgs(rig, chatroomWatcherCommand()), { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-            .trim() || sessionName;
-          console.log(`Started watch in tmux session: ${created}`);
-          console.log(`Attach with: tmux attach -t ${created}`);
+            .trim();
+          if (!/^\$\d+$/.test(created)) throw new Error("No stable tmux session ID returned");
+          console.log(`Started watch in tmux session: ${sessionName} (${created})`);
+          console.log(`Attach with: tmux attach -t '${created}'`);
         } catch {
           console.error(`Failed to create tmux session '${sessionName}'. It may already exist.`);
           process.exitCode = 1;
