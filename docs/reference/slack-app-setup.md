@@ -207,7 +207,7 @@ rig slack channel-map remove pr@my-rig
     their routing also keeps the conversations separate: new messages in a seat's own channel
     still go to the inbound destination unless its entry names `--inbound`. A conversation shared
     on purpose is fine.
-  - Missed-message recovery (below) covers the default channel only.
+  - Missed-message recovery (below) covers the default channel and every mapped channel, except a channel relayed to another machine.
 
 Invite the app to every mapped channel (`/invite @OpenRig`). `rig slack verify` checks
 membership in the default channel and every mapped channel, and reports NOT ready until the
