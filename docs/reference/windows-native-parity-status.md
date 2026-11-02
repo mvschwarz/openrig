@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Contained launch selection and uncertain native custody (2026-11-02)
+
+Contained startup now refuses an initially invalid selection before issuing grants or writing a launch intent. After the native preparation request, it rechecks selection before viewer dispatch and passes the same guard to the viewer's transport write boundary. A late refusal reports viewer-unconfirmed and retains the original requested operation; it does not claim that native execution never started or try to undo/relaunch an uncertain effect.
+
+Three regressions reproduced the initial-grant and late-viewer omissions. They now verify zero viewer effects, retained requested state after a late cancellation, and a later same-ID identity reconciliation to confirmed with exactly one grant and one prepare request and no viewer replay. The complete environment-startup file passed 20/20 on Windows and 20/20 on ordinary-user WSL; daemon typecheck passed. The OpenShell CLI/guest boundary is supplied by a synthetic driver, so real OpenShell/Podman native lifecycle and all-engine parity remain unqualified.
+
 ## Community harness selection and dispatch receipts (2026-11-02)
 
 Ordinary and named-conversation community launches now check the existing selection callback before preparation and at their transport write boundary. Selection is checked before marking first input/model typing, so a refused launch does not report either as passed or confirmed. Twelve initial/staging/before-write regressions, with and without first-input/model metadata, reproduced the ignored callback and now pass. Unexpected errors and genuinely uncertain post-typing outcomes retain their existing handling.
