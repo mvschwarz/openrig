@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Scope reading, file drawer and evidence path grammar (2026-11-02)
+
+Scope-markdown and the file drawer now share the browser-safe daemon-path mapper. Windows native child paths, mixed separators and UNC share roots resolve to slash-separated API read paths; POSIX literal backslashes remain filename content. Exact-root scope selection and the deepest matching root remain supported, while a file drawer does not attempt to read the root directory itself. Redundant POSIX-only scope prefix helpers were removed.
+
+Evidence openers now reject Windows drive/drive-relative, UNC, backslash parent segments and NUL refs before constructing a viewer or asset URL. Ordinary dotted child names remain valid. The file service remains authoritative for physical containment and symlink checks.
+
+Validation: seven complete UI files passed 67/67 on Windows and 67/67 on ordinary-user WSL; UI typecheck passed. Tests verify actual scope-hook and file-drawer API requests, POSIX literal-backslash reads, native drive/UNC scope resolution, non-openable invalid evidence refs, prior Agent/library navigation, and existing scope loading/error states. React review found no new hooks, effects, requests or dependencies. This is component/request-level acceptance, not deployed browser, physical UNC-share or concurrent-filesystem acceptance.
+
 ## Complete CLI directory result and canonical fixture follow-up (2026-11-02)
 
 The complete native CLI directory at `6a40322` reported 6,302 passed, four failed and 96 pending tests. Head and tracked diff remained unchanged throughout. Three failures supplied JavaScript-realpath fixture spelling to a native canonical file allowlist: protected file-editor access, MCP queue artifact reading, and MCP external-grant artifact reading. These fixture producers now use native realpath on Windows. Their three complete files passed 48/48 natively; WSL passed 25 and skipped the 23 native ACL cases.

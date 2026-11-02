@@ -1,6 +1,7 @@
 /** Paths belong to the daemon host, regardless of the browser's operating system. */
 function windowsRoot(value: string): { root: string; rest: string } | null {
-  const path = value.replaceAll("\\", "/");
+  let path = value.replaceAll("\\", "/");
+  if (/^\/\/(?:\?\/UNC\/)?[^/?]+\/[^/]+$/i.test(path)) path += "/";
   const match = /^(\/\/\?\/UNC\/[^/]+\/[^/]+\/|\/\/\?\/[A-Za-z]:\/|\/\/[^/?]+\/[^/]+\/|[A-Za-z]:\/)(.*)$/i.exec(path);
   return match ? { root: match[1]!, rest: match[2]! } : null;
 }
@@ -33,15 +34,24 @@ export function resolveServerFileReference(source: string | null | undefined, re
   return normalized("/", source.slice(1, source.lastIndexOf("/") + 1) + ref, false);
 }
 
-/** Compare normalized server paths without inventing case-insensitive filesystem identity. */
-export function serverPathIsWithin(candidate: string, directory: string): boolean {
+/** Return a transport-relative path, preserving POSIX literal backslashes and case. */
+export function relativeServerPath(candidate: string, directory: string): string | null {
+  if (candidate.includes("\0") || directory.includes("\0")) return null;
   const win = windowsRoot(directory);
   const canonical = (value: string) => {
     const root = windowsRoot(value);
     return root ? normalized(root.root, root.rest, true) : value.startsWith("/") ? normalized("/", value.slice(1), false) : null;
   };
   const child = canonical(candidate), parent = canonical(directory);
-  if (!child || !parent || Boolean(windowsRoot(candidate)) !== Boolean(win)) return false;
+  if (!child || !parent || Boolean(windowsRoot(candidate)) !== Boolean(win)) return null;
   const sep = win ? "\\" : "/";
-  return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+  if (child === parent) return "";
+  const prefix = parent.endsWith(sep) ? parent : parent + sep;
+  if (!child.startsWith(prefix)) return null;
+  const relative = child.slice(prefix.length);
+  return win ? relative.replaceAll("\\", "/") : relative;
+}
+
+export function serverPathIsWithin(candidate: string, directory: string): boolean {
+  return relativeServerPath(candidate, directory) !== null;
 }
