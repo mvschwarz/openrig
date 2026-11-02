@@ -36,7 +36,7 @@ if (mode === "hang") {
   process.on("SIGTERM", () => {});
   process.on("SIGHUP", () => {});
   const ready = ${JSON.stringify(dir)} + "/ready-" + process.pid;
-  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});process.on('SIGHUP',()=>{});require('node:fs').writeFileSync(process.argv[1],'');setInterval(()=>{},1000)", ready], { stdio: "ignore" });
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});process.on('SIGHUP',()=>{});require('node:fs').writeFileSync(process.argv[1],'');setInterval(()=>{},1000)", ready], { stdio: "ignore", detached: process.platform === "win32", windowsHide: true });
   child.unref();
   const until = Date.now() + 5000;
   while (!fs.existsSync(ready) && Date.now() < until) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
@@ -126,7 +126,7 @@ describe("boundedProbeExec where a process group can't be signalled, and with a 
     // Prints its version, leaves a child (same group, inheriting stdout) that ignores TERM, and exits 0.
     writeExecutable(script, `#!${process.execPath}
 const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"], detached: process.platform === "win32", windowsHide: true });
 require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ pid: process.pid, child: child.pid }));
 process.stdout.write("holder 4.5.6\\n", () => process.exit(0));
 `);
@@ -148,7 +148,7 @@ describe("boundedProbeExec reads everything the probe wrote before closing the p
     const SIZE = 300_000; // larger than a pipe buffer: much of it is still in the pipe when the probe exits
     writeExecutable(script, `#!${process.execPath}
 const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"], detached: process.platform === "win32", windowsHide: true });
 require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ child: child.pid }));
 process.stdout.write("late 1.0.0 " + "x".repeat(${SIZE}) + "\\n", () => process.exit(0));
 `);
@@ -177,22 +177,30 @@ process.stdout.write("tail 2.0.0\\n", () => process.exit(0));
 });
 
 describe("boundedProbeExec leaves a descendant that closed its stdio alone, as main does", () => {
-  it("a probe that exits 0 leaving a descendant with its stdio closed answers at once, and the descendant keeps running", async () => {
+  it.each([0,7])("a probe that exits %i leaving an acknowledged background descendant with its stdio closed settles without ending it", async code => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-probe-bound-bg-"));
     const log = path.join(dir, "pids");
     const script = path.join(dir, "updater");
-    // Prints its version, starts a background child (same group, stdio closed: like an updater without setsid), exits 0.
+    // POSIX keeps the same group; Windows explicitly detaches, as required for
+    // a child to outlive its parent. Both close stdio and acknowledge startup.
     writeExecutable(script, `#!${process.execPath}
 const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+const ready = ${JSON.stringify(log + ".ready")};
+const child = spawn(process.execPath, ["-e", "require('node:fs').writeFileSync(process.argv[1],'ready');setInterval(()=>{},1000)", ready], { stdio: "ignore", detached: process.platform === "win32", windowsHide: true });
 child.unref();
 require("node:fs").writeFileSync(${JSON.stringify(log)}, JSON.stringify({ child: child.pid }));
-process.stdout.write("updater 7.8.9\\n", () => process.exit(0));
+const until=Date.now()+3000;
+while(!require("node:fs").existsSync(ready) && Date.now()<until)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20);
+if(!require("node:fs").existsSync(ready))throw Error("Owned background child did not start");
+process.stdout.write("updater 7.8.9\\n", () => process.exit(${code}));
 `);
     const started = performance.now();
-    expect(await boundedProbeExec(5_000, 300)(`${quote(script)} --version`)).toBe("updater 7.8.9\n");
+    const result=boundedProbeExec(5_000,300)(`${quote(script)} --version`);
+    if(code===0)expect(await result).toBe("updater 7.8.9\n");
+    else await expect(result).rejects.toMatchObject({code:7});
     expect(performance.now() - started).toBeLessThan(3_000);
     const { child } = JSON.parse(fs.readFileSync(log, "utf8")) as { child: number };
+    expect(fs.readFileSync(log+".ready","utf8")).toBe("ready");
     await new Promise((r) => setTimeout(r, 500));
     expect(exists(child), `background descendant ${child}`).toBe(true);
     process.kill(child, "SIGKILL");

@@ -27,6 +27,21 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Bounded-probe descendant lifetime follow-up (2026-11-02)
+
+The native probe now preserves descendants only after its root exits and both
+output streams reach EOF. Its helper owns separate output pipes and releases
+kill-on-close only after positively observing that condition. Timeout, excess
+output and descendants retaining output remain subject to Job cleanup. Installer
+and finite model-CLI calls retain their stricter default descendant cleanup.
+
+Real Windows detached-child fixtures cover root exit 0 and 7: a ready child with
+closed stdio survives, while a detached child retaining output is terminated.
+The six probe/Job/installer/Codex/Claude files pass 28 tests; two POSIX-specific
+signal mechanics cases remain skipped on Windows. Daemon TypeScript checking
+passes. This supersedes the background-lifetime gap immediately below, within
+this fixture scope; it does not establish real-provider continuity.
+
 ### Installer exit coverage and remaining probe background lifetime gap (2026-11-02)
 
 Native installer execution now has real exit-0 and exit-7 descendant coverage.

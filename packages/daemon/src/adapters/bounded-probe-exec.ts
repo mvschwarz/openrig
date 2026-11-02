@@ -93,8 +93,8 @@ export class ProbeStoppedError extends Error {
  * Otherwise it answers when the probe exits: what it wrote (after a short drain) on exit 0, or a rejection like
  * execCommand's on any other exit. Only if that 200 ms drain times out (the output pipes are still held open, by
  * a descendant) is the group ended then, so that descendant can't turn a finished probe into a timeout; a healthy
- * probe whose pipes end within the drain never reaches stopGroup. On POSIX a descendant that closed its stdio
- * is left running, as execCommand leaves it; the Windows Job ends all descendants of this temporary probe.
+ * probe whose pipes end within the drain never reaches stopGroup. A descendant that closed its stdio
+ * is left running, as execCommand leaves it; the native helper confirms root exit and output EOF before releasing its Job.
  */
 export function boundedProbeExec(
   timeoutMs = RUNTIME_PROBE_TIMEOUT_MS,
@@ -115,7 +115,7 @@ export function boundedProbeExec(
     try {
       const options = { stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"], detached: true, cwd: deps.cwd?.(cmd), env: deps.env };
       child = process.platform === "win32"
-        ? spawnWindowsJobProcess(process.env.ComSpec ?? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"), ["/d", "/s", "/c", `"${cmd}"`], { ...options, windowsVerbatimArguments: true })
+        ? spawnWindowsJobProcess(process.env.ComSpec ?? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"), ["/d", "/s", "/c", `"${cmd}"`], { ...options, windowsVerbatimArguments: true }, "preserve-closed-stdio")
         : spawn(cmd, { ...options, shell: true });
     } catch (err) {
       reject(err);

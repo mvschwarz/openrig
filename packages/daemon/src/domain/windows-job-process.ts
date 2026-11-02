@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// A background probe must not lose its descendants when its executable exits.
+// Finite commands retain custody of descendants when their executable exits.
 // PROC_THREAD_ATTRIBUTE_JOB_LIST assigns the new process atomically, before it
 // can run. The helper alone owns the non-inherited kill-on-close Job handle.
 const HELPER = String.raw`
@@ -15,6 +15,9 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 using System.ComponentModel;
+using System.IO;
+using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 public static class OpenRigProbeJob {
   [StructLayout(LayoutKind.Sequential)] struct STARTUPINFO {
     public int cb; public IntPtr reserved, desktop, title;
@@ -23,6 +26,7 @@ public static class OpenRigProbeJob {
   }
   [StructLayout(LayoutKind.Sequential)] struct STARTUPINFOEX { public STARTUPINFO startup; public IntPtr attributes; }
   [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr process,thread; public uint pid,tid; }
+  [StructLayout(LayoutKind.Sequential)] struct SECURITY_ATTRIBUTES { public int size; public IntPtr descriptor; public bool inherit; }
   [StructLayout(LayoutKind.Sequential)] struct BASIC_LIMITS {
     public long processTime,jobTime; public uint flags; public UIntPtr minWorking,maxWorking;
     public uint activeProcesses; public UIntPtr affinity; public uint priority,scheduling;
@@ -38,6 +42,7 @@ public static class OpenRigProbeJob {
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcessW(string app,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,bool inherit,uint flags,IntPtr env,string cwd,ref STARTUPINFOEX startup,out PROCESS_INFORMATION process);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read,out IntPtr write,ref SECURITY_ATTRIBUTES security,uint size);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
@@ -53,8 +58,14 @@ public static class OpenRigProbeJob {
     }
     result.Append('\\',slashes*2); return result.Append('"').ToString();
   }
-  public static int Run(string file,string[] args,string cwd,string environment,bool verbatim) {
+  static Task Pump(IntPtr read,Stream output) {
+    var input=new FileStream(new SafeFileHandle(read,true),FileAccess.Read,81920,false);
+    return Task.Run(() => { using(input) { input.CopyTo(output); output.Flush(); } });
+  }
+  public static int Run(string file,string[] args,string cwd,string environment,bool verbatim,bool preserveClosedStdio) {
     IntPtr job=IntPtr.Zero, list=IntPtr.Zero, jobValue=IntPtr.Zero, handleValue=IntPtr.Zero, env=IntPtr.Zero;
+    IntPtr outputRead=IntPtr.Zero,outputWrite=IntPtr.Zero,errorRead=IntPtr.Zero,errorWrite=IntPtr.Zero;
+    Task outputPump=null,errorPump=null;
     bool initialized=false; PROCESS_INFORMATION process=new PROCESS_INFORMATION();
     try {
       job=CreateJobObjectW(IntPtr.Zero,null); Check(job!=IntPtr.Zero);
@@ -65,6 +76,12 @@ public static class OpenRigProbeJob {
       jobValue=Marshal.AllocHGlobal(IntPtr.Size); Marshal.WriteIntPtr(jobValue,job);
       Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x2000D),jobValue,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
       var handles=new IntPtr[] {GetStdHandle(-10),GetStdHandle(-11),GetStdHandle(-12)};
+      if(preserveClosedStdio) {
+        var security=new SECURITY_ATTRIBUTES(); security.size=Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES)); security.inherit=true;
+        Check(CreatePipe(out outputRead,out outputWrite,ref security,0)); Check(SetHandleInformation(outputRead,1,0));
+        Check(CreatePipe(out errorRead,out errorWrite,ref security,0)); Check(SetHandleInformation(errorRead,1,0));
+        handles[1]=outputWrite; handles[2]=errorWrite;
+      }
       var unique=new System.Collections.Generic.List<IntPtr>();
       foreach(var h in handles) { Check(h!=IntPtr.Zero && h!=new IntPtr(-1)); Check(SetHandleInformation(h,1,1)); if(!unique.Contains(h))unique.Add(h); }
       handleValue=Marshal.AllocHGlobal(IntPtr.Size*unique.Count);
@@ -75,11 +92,33 @@ public static class OpenRigProbeJob {
       var command=new StringBuilder(Quote(file)); foreach(string arg in args)command.Append(' ').Append(verbatim ? arg : Quote(arg));
       env=Marshal.StringToHGlobalUni(environment);
       Check(CreateProcessW(file,command,IntPtr.Zero,IntPtr.Zero,true,0x08080400,env,cwd,ref startup,out process));
+      if(preserveClosedStdio) {
+        // Only the child tree owns the write ends. EOF therefore proves the
+        // surviving descendants no longer hold either probe output stream.
+        CloseHandle(outputWrite); outputWrite=IntPtr.Zero; CloseHandle(errorWrite); errorWrite=IntPtr.Zero;
+        outputPump=Pump(outputRead,Console.OpenStandardOutput()); outputRead=IntPtr.Zero;
+        errorPump=Pump(errorRead,Console.OpenStandardError()); errorRead=IntPtr.Zero;
+      }
       if(WaitForSingleObject(process.process,0xffffffff)!=0)throw new Win32Exception(Marshal.GetLastWin32Error());
-      uint code; Check(GetExitCodeProcess(process.process,out code)); return unchecked((int)code);
+      uint code; Check(GetExitCodeProcess(process.process,out code));
+      if(preserveClosedStdio && Task.WaitAll(new Task[] {outputPump,errorPump},200)) {
+        // Match POSIX's healthy-probe policy only after real root exit and EOF.
+        // Until this point an interrupted helper still kills its owned Job.
+        limits.basic.flags=0;
+        Check(SetInformationJobObject(job,9,ref limits,Marshal.SizeOf(typeof(EXTENDED_LIMITS))));
+      }
+      return unchecked((int)code);
     } finally {
-      // Closing the job ends any descendants still alive, even after root exit.
+      // The default and failure paths end descendants even after root exit.
+      // Only a positively drained normal probe clears kill-on-close above.
       if(job!=IntPtr.Zero)CloseHandle(job);
+      if(outputWrite!=IntPtr.Zero)CloseHandle(outputWrite);
+      if(errorWrite!=IntPtr.Zero)CloseHandle(errorWrite);
+      if(outputRead!=IntPtr.Zero)CloseHandle(outputRead);
+      if(errorRead!=IntPtr.Zero)CloseHandle(errorRead);
+      // If a descendant held output, closing the Job ends it. Forward already
+      // written bytes through EOF before the helper reports its own exit.
+      if(outputPump!=null && errorPump!=null)try { Task.WaitAll(new Task[] {outputPump,errorPump},1000); } catch { }
       if(process.thread!=IntPtr.Zero)CloseHandle(process.thread);
       if(process.process!=IntPtr.Zero)CloseHandle(process.process);
       if(initialized)DeleteProcThreadAttributeList(list);
@@ -98,12 +137,13 @@ try {
   }
   $launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
   $environment = ([string[]]$launch.environment -join [char]0) + [char]0 + [char]0
-  exit [OpenRigProbeJob]::Run($launch.file, [string[]]$launch.args, $launch.cwd, $environment, [bool]$launch.verbatim)
+  exit [OpenRigProbeJob]::Run($launch.file, [string[]]$launch.args, $launch.cwd, $environment, [bool]$launch.verbatim, [bool]$launch.preserveClosedStdio)
 } catch { [Console]::Error.WriteLine('OpenRig native probe job: ' + $_.Exception.Message); exit 125 }
 `;
 
 /** Finite Windows 10+ background CLI commands only. Never use this for persistent seats. */
-export function prepareWindowsJobProcess(file: string, args: string[], options: SpawnOptions) {
+export type WindowsJobExitPolicy = "terminate-descendants" | "preserve-closed-stdio";
+export function prepareWindowsJobProcess(file: string, args: string[], options: SpawnOptions, exitPolicy: WindowsJobExitPolicy = "terminate-descendants") {
   const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd();
   if ([file, cwd, ...args].some(value => value.includes("\0"))) throw new TypeError("Native probe arguments must not contain NUL");
   const scratch = mkdtempSync(join(tmpdir(), "openrig-probe-job-"));
@@ -122,7 +162,8 @@ export function prepareWindowsJobProcess(file: string, args: string[], options: 
     if (!seen.has(name) && process.env[name] !== undefined) environment.push(`${name}=${process.env[name]}`);
   }
   environment.sort((a, b) => a.toUpperCase() < b.toUpperCase() ? -1 : a.toUpperCase() > b.toUpperCase() ? 1 : 0);
-  const payload = Buffer.from(JSON.stringify({ file, args, cwd, environment, verbatim: options.windowsVerbatimArguments === true })).toString("base64");
+  const payload = Buffer.from(JSON.stringify({ file, args, cwd, environment, verbatim: options.windowsVerbatimArguments === true,
+    preserveClosedStdio: exitPolicy === "preserve-closed-stdio" })).toString("base64");
   // Individual Windows environment values are bounded; no payload enters argv
   // or the source-only helper file. The child gets the explicit original block.
   const chunks = payload.match(/.{1,8192}/g)!;
@@ -141,8 +182,8 @@ export function prepareWindowsJobProcess(file: string, args: string[], options: 
   return { file: executable, args: argv, options: launchOptions, dispose };
 }
 
-export function spawnWindowsJobProcess(file: string, args: string[], options: SpawnOptions) {
-  const launch = prepareWindowsJobProcess(file, args, options);
+export function spawnWindowsJobProcess(file: string, args: string[], options: SpawnOptions, exitPolicy: WindowsJobExitPolicy = "terminate-descendants") {
+  const launch = prepareWindowsJobProcess(file, args, options, exitPolicy);
   let child: ReturnType<typeof spawn>;
   try { child = spawn(launch.file, launch.args, launch.options); }
   catch (error) { launch.dispose(); throw error; }
