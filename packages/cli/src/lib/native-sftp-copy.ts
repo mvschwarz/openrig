@@ -6,12 +6,12 @@ import path from "node:path";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
 import { looksLikePermissionGate } from "../cross-host-executor.js";
-import { replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
+import { isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 
 interface Endpoint {
   paths: typeof path.posix;
   stat(file: string): Promise<SftpAttrs | undefined>;
-  followsDirectory(file: string): Promise<boolean>;
+  followsDirectory(file: string): Promise<boolean | undefined>;
   names(file: string): Promise<string[]>;
   link(file: string): Promise<string>;
   mkdir(file: string): Promise<void>;
@@ -28,7 +28,7 @@ const local: Endpoint = {
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   },
   names: readdir, link: readlink,
-  async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } },
+  async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } },
   async mkdir(file) { await mkdir(file); },
   async symlink(target, file, directory) { await symlink(target, file, directory ? "dir" : "file"); },
   read: file => createReadStream(file),
@@ -86,7 +86,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
     await client.ready;
     const remote: Endpoint = {
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
-      followsDirectory: async file => kind(await client!.stat(file)) === 0o040000,
+      followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), symlink: (target, file) => client!.symlink(target, file),
       read: file => client!.read(file), write: (file, data) => client!.write(file, data),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
@@ -124,7 +124,10 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       if (!isLink && kind(attrs) !== 0o100000) throw new Error(`Unsupported special file: ${src}`);
       if (existing && kind(existing) === 0o040000) throw new Error(`Cannot replace directory with file: ${dst}`);
       const target = isLink ? await source.link(src) : undefined;
-      if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) return;
+      const directory = isLink && destination === local && process.platform === "win32" ? await source.followsDirectory(src) : undefined;
+      if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) {
+        if (directory === undefined || directory === isWindowsDirectoryLink(dst)) return;
+      }
       if (!isLink && kind(existing) === 0o100000 && attrs.size === existing?.size && attrs.mtime === existing?.mtime) {
         const mask = destination === local && process.platform === "win32" ? 0o200 : 0o7777;
         if (attrs.mode !== undefined && existing?.mode !== undefined && (attrs.mode & mask) !== (existing.mode & mask)) {
@@ -140,7 +143,6 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       if (isLink) {
         // NTFS distinguishes directory and file links. Inspect only target type;
         // copy the original link text, never recursively copy its referent.
-        const directory = destination === local && process.platform === "win32" && await source.followsDirectory(src);
         await destination.symlink(target!, staged, directory);
       }
       else { await destination.write(staged, source.read(src)); await destination.times(staged, attrs); }

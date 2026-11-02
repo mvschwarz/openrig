@@ -31,6 +31,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
+      else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -476,6 +477,13 @@ export function replaceWindowsCopiedFile(target: string, staging: string): void 
   execFileSync(nativeHelper(), ["replace-copy", toNamespacedPath(target), toNamespacedPath(staging)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/** Inspect the link entry itself; following a file-typed link to a directory fails on NTFS. */
+export function isWindowsDirectoryLink(file: string): boolean {
+  return execFileSync(nativeHelper(), ["directory-link", toNamespacedPath(file)], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  }) === "true";
 }
 
 /** Synchronous append for existing synchronous receipt writers: native owner,

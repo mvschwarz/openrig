@@ -27,6 +27,37 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Repair previously mistyped NTFS links (2026-11-02)
+
+SFTP no longer skips an equal-text destination link when a known directory
+referent requires a directory-typed NTFS link. A native attribute probe inspects
+the link entry without traversing it; ordinary rename replaces the staged link
+while leaving its referent untouched. Preview reports the repair without changing
+the old entry. Repeated preview is clean after repair. Unknown dangling referent
+type retains an existing equal-text link rather than guessing its type. Eight
+real native SFTP copy tests pass, including broken legacy file-typed links,
+successful directory access, zero referent bytes copied and dangling inode
+retention. The protocol/local-copy regressions and daemon build/CLI typecheck
+also passed. New dangling links still cannot infer directory intent from SFTP v3.
+
+### Full native runner failure boundary at 5659e82 (2026-11-02)
+
+An isolated detached worktree installed dependencies and built all workspaces.
+The protected untracked diagnostic was absent and explicitly excluded from
+selection. A two-worker Node 24 run failed with a native N-API/V8 assertion before
+producing a report. A single-worker verbose run retained at least 1,732 passing
+events before worker IPC closed; the last printed pod-instantiator file passes
+75/75 independently. Node 22.14.0, downloaded into the task directory and checked
+against the official SHA256 manifest, also passes that file 75/75 but the complete
+single-worker comparison again exits with a closed IPC channel. All three
+attempts retained the exact HEAD and empty tracked diff, and none produced a
+complete JSON report. No matching Windows application-crash event was found in
+the inspected time window. Node 24 alone is therefore not an established cause.
+Stop further whole-suite parameter retries: the doubtful assumption is that a
+runtime-version/worker-count change can resolve this without a smaller reproducer.
+These incomplete attempts do not count as full validation or close implementation
+requirements; isolated diagnosis and other repair work remain open.
+
 ### Native instance-home identity in durable server records (2026-11-02)
 
 Windows server selection now uses native realpath spelling, including the
