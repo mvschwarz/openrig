@@ -998,6 +998,8 @@ effort, Codex profile and native permission choice are cleared, not mapped; two
 processes run until cutover; messages sent to the seat during the switch are
 held, not typed, and need sending again afterwards.
 Codex and Claude Code, single-pane seats only. --dry-run lists the details.
+A seat that has never started has no pane to switch: declare the other runtime for it in its rig spec and bring the team
+up again from that spec. That's a new generation of the seat, without this seat's edges, settings or queued work.
 --clear-account-home returns to configured member/rig/daemon/native selection; it does not restore historical credentials.
 It uses a fresh successor and clears an account-home token reference only after confirmation. Do not combine it with
 --account-home or a new token reference. Anthropic's global active/default profile is not isolated by CLAUDE_CONFIG_DIR.
