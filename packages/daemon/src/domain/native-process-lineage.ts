@@ -11,6 +11,7 @@ import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readWindowsConsoleProcesses } from "./windows-process-facts.js";
 import { recognizedWindowsClaudeScript } from "./windows-provider-command.js";
 import { sameSessionFile as sameNativeFile } from "../adapters/same-session-file.js";
+import { windowsManagedRunnerParent } from "./windows-cmd-bridge.js";
 
 
 export interface NativeProcessRow {
@@ -1022,9 +1023,16 @@ function idleShellRoot(rows: NativeProcessRow[], pid: number): NativeProcessRow 
  * and a kernel console census with no other receiver, including orphan children. */
 async function observedIdleShellRoot(rows: NativeProcessRow[], pid: number,
   consoleProcesses = readWindowsConsoleProcesses): Promise<NativeProcessRow | null> {
-  const root = rows.find(row => row.pid === pid);
+  let root = rows.find(row => row.pid === pid);
   if (root?.platform !== "win32") return idleShellRoot(rows, pid);
   if (new Set(rows.map(row => row.pid)).size !== rows.length || !root.startedAt || !root.executablePath) return null;
+  const allowed = [pid];
+  const scopedShell = windowsManagedRunnerParent(rows, pid);
+  if (scopedShell !== null && scopedShell !== pid) {
+    root = rows.find(row => row.pid === scopedShell);
+    if (!root?.startedAt || !root.executablePath) return null;
+    allowed.push(scopedShell);
+  }
   const argv = rowArgv(root);
   const name = executableName(root.executablePath);
   if (name !== executableName(root.executableName ?? "") || name !== executableName(argv[0] ?? "")) return null;
@@ -1034,7 +1042,8 @@ async function observedIdleShellRoot(rows: NativeProcessRow[], pid: number,
     if (!argv.slice(1).every(arg => /^\/(?:[dqak]|[vef]:(?:on|off))$/i.test(arg))) return null;
   } else return null;
   const members = await consoleProcesses(pid);
-  return members?.length === 1 && members[0] === pid ? root : null;
+  return members?.length === allowed.length && new Set(members).size === members.length
+    && allowed.every(member => members.includes(member)) ? root : null;
 }
 
 /** Whether the bound pane is a stable idle shell: in two samples the pane's own shell owns the foreground with

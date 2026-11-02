@@ -14,7 +14,7 @@ import { promisify } from "node:util";
 import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
 import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
 import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
-import { windowsCmdBridgeInvocation } from "../domain/windows-cmd-bridge.js";
+import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../domain/windows-cmd-bridge.js";
 import { windowsScopedLaunch } from "./windows-scoped-launch.js";
 const execFileAsync = promisify(execFile);
 
@@ -1323,14 +1323,16 @@ export class TmuxAdapter {
   }
 
   private async sendWindowsShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
-    const paneShell = (await this.getPaneCommand(target) ?? "").toLowerCase().replace(/\.exe$/, "");
-    if (!["pwsh", "powershell", "cmd"].includes(paneShell)) {
-      return { ok: false, code: "unsupported_windows_pane", message: "Experimental Windows launch requires a PowerShell or cmd pane; no command was typed." };
+    const paneShell = pathBaseName(await this.getPaneCommand(target) ?? "").toLowerCase().replace(/\.exe$/, "").replace(/^-/, "");
+    const posix = ["bash","sh","dash","zsh","ksh"].includes(paneShell);
+    if (!["pwsh", "powershell", "cmd"].includes(paneShell) && !posix) {
+      return { ok: false, code: "unsupported_windows_pane", message: "Native launch requires a PowerShell, cmd or supported POSIX pane shell; no command was typed." };
     }
     const script = this.fileOps.tmpName();
     let invocation: string;
     try {
       invocation = paneShell === "cmd" ? windowsCmdBridgeInvocation(script)
+        : posix ? windowsPosixBridgeInvocation(script)
         : `& ([scriptblock]::Create([IO.File]::ReadAllText(${powershellQuote(script)})))`;
     } catch (error) { return { ok: false, code: "unsupported_windows_launch", message: (error as Error).message }; }
     if (Buffer.byteLength(invocation, "utf8") > 512) {

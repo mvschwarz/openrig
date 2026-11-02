@@ -19,17 +19,19 @@ function ownedInvoker(dir: string) {
   mkdirSync(registry);
   const windows = process.env.SystemRoot ?? "C:\\Windows";
   const powershell = path.join(windows, "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const config=path.join(dir,"owned-psmux.conf");
+  writeFileSync(config,`set -g default-shell '"${powershell.replaceAll("\\","/")}" -NoLogo -NoProfile -NoExit'\n`);
   const namespace = `owned-${randomUUID()}`;
   const env: NodeJS.ProcessEnv = {
     SystemRoot: windows, WINDIR: windows, ComSpec: path.join(windows, "System32/cmd.exe"),
     PATH: [path.dirname(process.execPath), path.dirname(powershell), path.join(windows, "System32")].join(path.delimiter),
     HOME: dir, USERPROFILE: dir, APPDATA: dir, LOCALAPPDATA: dir, TEMP: dir, TMP: dir,
-    PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: "NUL",
+    PSMUX_DATA_DIR: registry, PSMUX_CONFIG_FILE: config,
   };
   return async (argv: string[]) => {
     const args = ["-L", namespace, ...argv.slice(1)];
-    // Exercise staging in a real interactive shell without loading host profiles.
-    if (argv.includes("new-session")) args.push("--", powershell, "-NoLogo", "-NoProfile", "-NoExit");
+    // The owned config selects a real profile-free shell. Do not append a
+    // second -- command over the adapter's private production bootstrap.
     return (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, args, { env, cwd: dir, windowsHide: true, timeout: 10000 })).stdout;
   };
 }
@@ -61,6 +63,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(await verifyPaneIdleShell({ target: pane.id, tmux: adapter })).toBe(false);
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      await invoke(["tmux", "kill-server"]).catch(() => {});
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 30000);
@@ -84,6 +87,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(await verifyWindowsPaneReceiver({ target: pane.id, getPanePid: target => adapter.getPanePid(target) })).toBe(true);
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      await invoke(["tmux", "kill-server"]).catch(() => {});
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 30000);
@@ -131,6 +135,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(JSON.parse(await waitForFile(output))).toBe(message);
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+      await invoke(["tmux", "kill-server"]).catch(() => {});
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 20_000);
@@ -167,6 +172,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
       await invoke(["tmux", "kill-session", "-t", `=${decoy}`]).catch(() => {});
+      await invoke(["tmux", "kill-server"]).catch(() => {});
       rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 20_000);
