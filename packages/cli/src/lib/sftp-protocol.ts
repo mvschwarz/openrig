@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { isUtf8 } from "node:buffer";
 
 // SFTP v3 packets over an already authenticated OpenSSH subsystem stream.
 // No SSH keys/config parsing and no remote shell or path interpolation here.
@@ -10,7 +11,11 @@ export class SftpStatusError extends Error {
 }
 const u32 = (value: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(value); return b; };
 const u64 = (value: number) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(value)); return b; };
-const str = (value: string | Buffer) => { const b = typeof value === "string" ? Buffer.from(value) : value; return Buffer.concat([u32(b.length), b]); };
+const str = (value: string | Buffer) => {
+  const b = typeof value === "string" ? Buffer.from(value) : value;
+  if (typeof value === "string" && b.toString("utf8") !== value) throw new Error("SFTP text cannot be encoded losslessly as UTF-8");
+  return Buffer.concat([u32(b.length), b]);
+};
 
 class Packet {
   private offset = 0;
@@ -26,7 +31,11 @@ class Packet {
     return Number(value);
   }
   bytes(): Buffer { return this.take(this.uint()); }
-  text(): string { return this.bytes().toString("utf8"); }
+  text(): string {
+    const bytes = this.bytes();
+    if (!isUtf8(bytes)) throw new Error("SFTP text is not valid UTF-8");
+    return bytes.toString("utf8");
+  }
   get remaining(): number { return this.data.length - this.offset; }
   attrs(): SftpAttrs {
     const flags = this.uint(), attrs: SftpAttrs = {};

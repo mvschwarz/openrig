@@ -1,5 +1,32 @@
 # Native Windows parity: implementation and evidence
 
+## SFTP text identity without lossy replacement (2026-11-03)
+
+SFTP text fields previously used replacement UTF-8 decoding. Controlled wire
+peers reproduced malformed, overlong, surrogate and truncated sequences being
+accepted as replacement-character names. A real isolated Linux SFTP directory
+containing both an invalid-byte filename and a distinct valid replacement-
+character filename then reproduced a successful copy that omitted the former.
+This was an integrity defect, not a complete-directory transfer.
+
+Text decoding now rejects invalid UTF-8 before path use. Outbound text also
+rejects unpaired UTF-16 surrogates rather than silently changing their wire
+identity. Valid Unicode, emoji, literal replacement characters and leading BOMs
+are preserved exactly; file contents remain arbitrary binary buffers. Refusal
+does not manufacture a filename mapping: full preservation of arbitrary POSIX
+byte names on Windows remains unimplemented, and this repair does not close
+that representability requirement.
+
+The controlled invalid-text cases and real Linux alias case failed before the
+repair. Seven complete related files then passed 57 cases on Windows with
+15 skips, and 39 on WSL with 33 native-only skips. WSL used the pre-existing
+isolated SFTP executable after the changed source/test files were copied and
+byte-compared. The real alias case now reports failure and leaves the existing
+destination entries unchanged. CLI TypeScript noEmit and whitespace checking
+passed. These checks use owned local peers/subsystems, not the remote SSH host
+or provider authentication. Whole-directory and installed receipts below
+predate this repair; no main runtime/team or public branch changed.
+
 ## Stable launch environment and native lease identity (2026-11-03)
 
 Session creation previously checked only the exact OPENRIG_NODE_ID property,
