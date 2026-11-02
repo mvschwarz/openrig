@@ -19,6 +19,12 @@ function requiresEncoding(name: string): boolean {
     || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
 }
 
+/** Prefix-like names were legal before the codec; only ordinary native
+ * filenames can be pre-existing unmarked legacy sessions. */
+export function nativeSessionNameMayBeLegacy(name: string): boolean {
+  return name.startsWith(PREFIX) && !/[<>:"/\\|?*\x00-\x1f]/.test(name) && !/[. ]$/.test(name);
+}
+
 /** Stable, bounded native filename; no lossy character replacement. */
 export function bindNativeSessionName(logical: string): NativeSessionNameBinding {
   const bytes = Buffer.from(logical, "utf8");

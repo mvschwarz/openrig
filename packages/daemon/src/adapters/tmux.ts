@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { bindNativeSessionName, isEncodedNativeSessionName, logicalNameFromNativeBinding, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
+import { bindNativeSessionName, isEncodedNativeSessionName, logicalNameFromNativeBinding, nativeSessionNameMayBeLegacy, NATIVE_LOGICAL_SESSION_OPTION } from "../domain/terminal/native-session-name.js";
 import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
@@ -640,12 +640,34 @@ export class TmuxAdapter {
     return env ? this.argvExec(targeted, { env }) : this.argvExec(targeted);
   }
 
+  private async nativeSessionExists(physical: string): Promise<boolean> {
+    try { await this.nativeRaw(["tmux", "has-session", "-t", `=${physical}`]); return true; }
+    catch (error) {
+      const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
+      if ((failure.code === 1 && failure.stdout === "" && failure.stderr === "" && !failure.signal && !failure.killed)
+        || isSessionAbsenceError(tmuxReportedError(error))) return false;
+      throw error;
+    }
+  }
+
+  private async nativeLegacyName(logical: string): Promise<boolean> {
+    if (!nativeSessionNameMayBeLegacy(logical) || !await this.nativeSessionExists(logical)) return false;
+    return !(await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${logical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
+  }
+
   private async nativeBoundName(logical: string): Promise<string> {
     const binding = bindNativeSessionName(logical);
     if (!binding.marker) return logical;
-    const marker = (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${binding.physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
-    if (logicalNameFromNativeBinding(binding.physical, marker) !== logical) throw new Error("Native session name has no matching logical identity marker");
-    return binding.physical;
+    const present = await this.nativeSessionExists(binding.physical);
+    const marker = present ? (await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${binding.physical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim() : undefined;
+    const legacy = await this.nativeLegacyName(logical);
+    if (logicalNameFromNativeBinding(binding.physical, marker) === logical) {
+      if (legacy) throw new Error("Ambiguous native logical session name; legacy and mapped sessions both exist");
+      return binding.physical;
+    }
+    if (legacy) return logical;
+    if (!present) throw new Error(`can't find session: ${logical}`);
+    throw new Error("Native session name has no matching logical identity marker");
   }
 
   private async nativeObservedName(physical: string): Promise<string> {
@@ -696,15 +718,7 @@ export class TmuxAdapter {
         if (nameFlag > 1 && logical) {
           const binding = bindNativeSessionName(logical);
           if (binding.marker) {
-            let present = true;
-            try { await this.nativeRaw(["tmux", "has-session", "-t", `=${binding.physical}`]); }
-            catch (error) {
-              const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; signal?: unknown; killed?: boolean };
-              if ((failure.code === 1 && failure.stdout === "" && failure.stderr === "" && !failure.signal && !failure.killed)
-                || isSessionAbsenceError(tmuxReportedError(error))) present = false;
-              else throw error;
-            }
-            if (present) throw new Error("duplicate session: mapped native name is already occupied; existing session was not modified");
+            if (await this.nativeLegacyName(logical) || await this.nativeSessionExists(binding.physical)) throw new Error("duplicate session: mapped native name is already occupied; existing session was not modified");
             const format = argv[argv.indexOf("-F") + 1];
             if (!argv.includes("-P") || !["#{pane_id}", "#{session_id} #{session_created}"].includes(format ?? "")) throw new Error("Mapped session creation requires an explicit creation receipt");
             createdBinding = binding; argv = [...argv]; argv[nameFlag + 1] = binding.physical; legacy = undefined;

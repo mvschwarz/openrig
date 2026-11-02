@@ -36,7 +36,50 @@ it("refuses an occupied physical name without creating or binding over it", asyn
 });
 it("refuses a logical lookup without an observed matching marker", async () => {
   const f = fixture(true); await expect(f.adapter.probeSession(f.logical)).rejects.toThrow("no matching logical identity marker");
-  expect(f.calls.map(argv => argv[1])).toEqual(["show-options"]);
+  expect(f.calls.map(argv => argv[1])).toEqual(["has-session", "show-options"]);
+});
+
+function legacyFixture(legacy: boolean, mapped: boolean, failure = false) {
+  const logical = "openrig-native-v1-legacy", binding = bindNativeSessionName(logical), calls: string[][] = [];
+  const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, undefined, async argv => {
+    calls.push(argv); const target = argv[argv.indexOf("-t") + 1]!.replace(/^=/, "").replace(/:$/, "");
+    if (failure) throw new Error("synthetic permission denied");
+    if (argv[1] === "has-session") {
+      if ((target === logical && legacy) || (target === binding.physical && mapped)) return "";
+      throw Object.assign(new Error("absent"), { code: 1, stdout: "", stderr: "" });
+    }
+    if (argv[1] === "show-options") return target === binding.physical && mapped ? binding.marker + "\n" : "\n";
+    throw new Error("Unexpected mutation");
+  }, [], "psmux");
+  return { adapter, logical, binding, calls };
+}
+
+it("retains exact lookup of an existing unmarked prefix-like legacy name", async () => {
+  const f = legacyFixture(true, false);
+  expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "present" });
+  expect(f.calls.at(-1)).toEqual(["tmux", "has-session", "-t", "=" + f.logical]);
+});
+
+it("refuses creation over an existing legacy logical name without a mutation", async () => {
+  const f = legacyFixture(true, false);
+  expect(await f.adapter.createProbeSession(f.logical)).toMatchObject({ ok: false, code: "duplicate_session" });
+  expect(f.calls.every(argv => ["has-session", "show-options"].includes(argv[1]!))).toBe(true);
+});
+
+it("refuses ambiguous legacy and mapped ownership rather than selecting one", async () => {
+  const f = legacyFixture(true, true);
+  await expect(f.adapter.probeSession(f.logical)).rejects.toThrow("Ambiguous native logical session name");
+});
+
+it("keeps a transport failure unknown rather than trying another legacy identity", async () => {
+  const f = legacyFixture(true, true, true);
+  await expect(f.adapter.probeSession(f.logical)).rejects.toThrow("permission denied");
+  expect(f.calls).toHaveLength(1);
+});
+
+it("classifies a positively absent mapped name as absent", async () => {
+  const f = legacyFixture(false, false);
+  expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "absent" });
 });
 it("retains an unconfirmed creation without writing identity metadata", async () => {
   const f = fixture(false, false); expect(await f.adapter.createProbeSession(f.logical)).toMatchObject({ ok: false });

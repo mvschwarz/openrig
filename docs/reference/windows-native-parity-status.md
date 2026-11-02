@@ -5207,6 +5207,18 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Physical-name phase 3 preserves existing ordinary native names beginning with
+the codec prefix: an exact positive presence probe and an absent logical marker
+qualify the legacy name. New creation refuses an already occupied legacy name.
+If both a valid mapped binding and that legacy logical name exist, lookup
+rejects ambiguity rather than preferring either. Transport/permission errors
+remain unknown and do not cause identity fallback. Positive absence of both
+candidates now produces the normal absent-session classification, including
+post-stop lookup. Four related controlled files passed 229 checks and daemon
+build passed. Real legacy-prefix, constrained-name cleanup, external attach and
+concurrent exchange acceptance remain unfinished; no blocked real fixture was
+retried in this phase.
+
 Physical-name phase 2 now restores verified logical names in session/client
 listings, active-window maps and scoped pane identifiers. A scoped pane obtained
 from a mapped session resolves back to its verified physical server rather than
