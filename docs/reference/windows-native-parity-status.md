@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Preflight configured directory permissions (2026-11-02)
+
+Preflight now checks the configured database parent and transcript directory even when they sit inside OpenRig home. The old POSIX-only prefix shortcut skipped child permissions on Linux while backslash paths typically caused Windows to check them. Parent writability does not establish child writability. Each resolved directory is checked once, and existing native create-without-overwrite probes remain in use.
+
+Validation: complete preflight, quiet-exec and native doctor-writability files passed 27/27 on Windows; ordinary-user WSL passed 24 with three Windows-specific cases skipped. Real fixture permissions deny each nested directory separately: preflight fails with its path, succeeds after restoring permissions, and leaves no write probes. CLI typecheck passed. This does not establish subsequent database or transcript operations against concurrent permission changes.
+
 ## Feed native evidence and project continuity (2026-11-02)
 
 Delivered-update evidence now recognizes fully qualified daemon Windows drive and UNC paths alongside POSIX paths, regardless of the TUI host. Drive-relative refs, relative paths and URLs are not invented as absolute file targets. Attention source navigation uses the existing server-path root mapper for project membership, replacing the POSIX-only string prefix. Exact served-source validation remains mandatory, sibling directories do not inherit the project, anchors are retained, and Back restores the caller. Queue project tags alone still do not create project authority.

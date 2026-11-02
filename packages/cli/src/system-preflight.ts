@@ -1,7 +1,7 @@
 import net from "node:net";
 import { execSync } from "node:child_process";
 import { accessSync, mkdirSync, constants, openSync, closeSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
@@ -90,16 +90,21 @@ export function buildWritableHomeCheck(
     { path: openrigHome, label: "OpenRig home" },
   ];
   const dbDir = dirname(config.db.path);
-  if (dbDir && dbDir !== openrigHome && !dbDir.startsWith(openrigHome + "/")) {
+  if (dbDir) {
     pathsToCheck.push({ path: dbDir, label: "Database directory" });
   }
   const transcriptPath = config.transcripts.path;
-  if (transcriptPath && transcriptPath !== openrigHome && !transcriptPath.startsWith(openrigHome + "/")) {
+  if (transcriptPath) {
     pathsToCheck.push({ path: transcriptPath, label: "Transcript directory" });
   }
 
   const writableErrors: string[] = [];
+  const checked = new Set<string>();
   for (const { path: dirPath, label } of pathsToCheck) {
+    // A writable parent says nothing about a configured child's permissions.
+    const normalized = resolve(dirPath);
+    if (checked.has(normalized)) continue;
+    checked.add(normalized);
     try {
       mkdirp(dirPath);
       checkWritable(dirPath);

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import { Command } from "commander";
-import { SystemPreflight } from "../src/system-preflight.js";
+import { SystemPreflight, buildWritableHomeCheck } from "../src/system-preflight.js";
 import { ConfigStore } from "../src/config-store.js";
 import { preflightCommand } from "../src/commands/preflight.js";
 import type { DaemonStatus } from "../src/daemon-lifecycle.js";
@@ -64,6 +64,21 @@ describe("SystemPreflight", () => {
   }
 
   // Test 1
+  it.each(["database", "transcripts"])("refuses an unwritable nested %s directory even when its home is writable", (kind) => {
+    const home = join(tmpDir, "nested-home"), database = join(home, "database"), transcripts = join(home, "transcripts");
+    mkdirSync(database, { recursive: true }); mkdirSync(transcripts);
+    const config = new ConfigStore(join(tmpDir, "config.json")).resolve();
+    config.db.path = join(database, "openrig.sqlite"); config.transcripts.path = transcripts;
+    const denied = kind === "database" ? database : transcripts;
+    const restore = denyDirectoryChildren(denied);
+    try {
+      expect(buildWritableHomeCheck(config, home)).toMatchObject({ ok: false, error: expect.stringContaining(denied) });
+      expect(readdirSync(denied)).toEqual([]);
+    } finally { restore(); }
+    expect(buildWritableHomeCheck(config, home)).toMatchObject({ ok: true });
+    expect(readdirSync(database)).toEqual([]); expect(readdirSync(transcripts)).toEqual([]);
+  });
+
   it("all checks pass → ready: true", async () => {
     const pf = createPreflight();
     // Use port 0 to avoid collisions with any running daemon
