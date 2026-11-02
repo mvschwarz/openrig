@@ -235,7 +235,7 @@ describe("a runner seat's answered permission path", () => {
     expect((await f.read(askId)).body).toEqual({ ok: true, state: "refused", reason: "no_allow_offered", said: "use the other file instead" });
   });
 
-  it("carries a colleague's words when the ask was routed to them, and bounds their length", async () => {
+  it("carries a colleague's words, whole, when the ask was routed to them", async () => {
     const f = fixture();
     const askId = String((await f.submit()).body.askId);
     await f.contract.act({ verb: "route", qitemId: askId, actorSession: PERSON, destinationSession: OTHER_PERSON, reason: "Dana decides", notify: false } as never);
@@ -244,10 +244,7 @@ describe("a runner seat's answered permission path", () => {
     expect(await f.answer(colleague.qitemId, { decision: words }, OTHER_PERSON)).toMatchObject({ status: 200 });
     const read = await f.read(askId, 1);
     expect(read.body).toMatchObject({ state: "permitted", optionId: "allow" });
-    const said = String(read.body.said);
-    expect(said.startsWith("only the tests folder;")).toBe(true);
-    expect(said.length).toBeLessThanOrEqual(2000);
-    expect(said.endsWith("…")).toBe(true);
+    expect(read.body.said).toBe(words.trim());
   });
 
   it.each([

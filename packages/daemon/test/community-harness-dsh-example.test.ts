@@ -356,7 +356,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(openrig.withdraws).toEqual([]);
   });
 
-  it("gives the agent its option, then passes the person's own words on as its next prompt, after the turn", async () => {
+  it("gives the agent its option, then queues the person's own words as a prompt, after the turn", async () => {
     const openrig = await fakeOpenRig("words");
     const seat = start(openrig);
     await waitFor(seat.launch, "the launch record");
@@ -365,7 +365,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
     const prompts = () => requests(seat.log(), "session/prompt")
       .map((entry) => (entry.params as { prompt: Array<{ text: string }> }).prompt.map((part) => part.text).join(""));
-    const next = await waitFor(() => prompts()[1], "the person's words as the next prompt");
+    const next = await waitFor(() => prompts()[1], "the person's words as a queued prompt");
     expect(next).toContain("Only a.txt, please.");
     expect(next).toContain("Edit a.txt");
     expect(prompts()).toHaveLength(2);

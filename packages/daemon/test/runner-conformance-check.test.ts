@@ -55,7 +55,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     const { code, report } = await check(["--cases", "4b,4c"], " --break drop-words");
     const words = report.results.find((r) => r.id === "4c")!;
     expect(words).toMatchObject({ status: "advisory", met: false });
-    expect(words.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("the person's words are the agent's next prompt"));
+    expect(words.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("the person's words are queued to the agent as a prompt"));
     expect(report.results.find((r) => r.id === "4b")!.status).toBe("pass");
     expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
     expect(code).toBe(0);
