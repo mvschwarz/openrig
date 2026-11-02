@@ -4204,3 +4204,10 @@ A separate owned-directory capability probe could not enable Windows per-directo
 At exact c96371a3ed069ac3258ad4e5843edb9796952d4f, the native target GATE passed in 70 seconds (16:15:28-16:16:38 UTC on 2026-11-02). Source HEAD and tracked-diff SHA256 matched before and after, with the tracked tree clean. The real source build, tarball, isolated-prefix npm installation, SQLite ABI, installed context/spec resource operations, exact native terminal helper files and installed following entry behavior, and rig.cmd daemon-subpath load passed. Node test result: one gate passed, zero failures and zero skips. Receipt: pack-terminal-assets-c96371a.json and its log in the task resource directory.
 
 This is installed-package acceptance for that source, not publication, actual deployment replacement, full daemon-suite acceptance, GUI qualification, remote SSH continuity or a clean-release claim over protected untracked material.
+
+
+### 2026-11-03: native host posture applicability is explicit
+
+The product-factory-vps profile is a POSIX VPS baseline (id, sshd -T, UFW and ss). A registry entry explicitly selecting PowerShell previously ran those commands anyway and could turn missing POSIX tools into false account/firewall failures. Such entries now receive all nine checks as unknown with Windows-native assessment guidance, without dispatching shell commands or public-address probes for an inapplicable profile. Absent/POSIX remote-shell selection retains the existing profile behavior. The new regression failed before the change; the complete host file passes on Windows and WSL, and CLI TypeScript noEmit passes.
+
+This is a diagnostic correction, not implementation or acceptance of an equivalent Windows security-posture baseline. Windows account/administrator, effective OpenSSH policy, firewall ingress and listener checks remain an explicit implementation/qualification gap. The broader parity goal is incomplete.

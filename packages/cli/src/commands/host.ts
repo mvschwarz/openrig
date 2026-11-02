@@ -400,6 +400,14 @@ export async function postureCheck(
       fix: "register an ssh-transport entry for this host (or run the checks on the host per the runbook)",
     }));
   }
+  if (host.remoteShell === "powershell") {
+    return POSTURE_ITEM_IDS.map((id) => ({
+      step: id,
+      status: "unknown" as const,
+      detail: `${POSTURE_PROFILE_ID} is a POSIX VPS baseline; its account, sshd, UFW and listener checks are not qualified for native Windows`,
+      fix: "Assess Windows account permissions, OpenSSH configuration, Windows Firewall, Tailscale and listener bindings on this host. This profile cannot certify the Windows equivalents.",
+    }));
+  }
 
   const rows: CheckRow[] = [];
   const sh = async (cmd: string) => deps.run(host, ["sh", "-c", cmd]);

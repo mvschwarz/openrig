@@ -327,6 +327,18 @@ describe("rig host doctor — stepwise distinct errors + three-valued posture", 
     expect(rows.every((r: CheckRow) => r.status === "unknown")).toBe(true);
   });
 
+  it("does not misdiagnose a native Windows host using the POSIX VPS posture profile", async () => {
+    const run = vi.fn(async () => ({ ok: false, failedStep: "remote-command-not-found", stdout: "", stderr: "sh unavailable", remoteExitCode: 127, hint: "" } as CrossHostResult));
+    const tcpProbe = vi.fn(async () => "closed" as const);
+    const rows = await postureCheck({ ...sshHost, remoteShell: "powershell", rigPath: "C:/OpenRig/bin.js" }, {
+      run, httpGet: async () => ({ status: 200, body: "" }), tcpProbe,
+    }, { publicAddr: "203.0.113.7" });
+    expect(rows).toHaveLength(9);
+    expect(rows.every(row => row.status === "unknown" && row.detail.includes("POSIX") && !!row.fix)).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(tcpProbe).not.toHaveBeenCalled();
+  });
+
   it("doctor over http: anonymous (URL-only) host with an answering daemon passes auth-neutrally (no 'authenticated' claim)", async () => {
     const anonHost: HostEntry = { id: "anon-h", transport: "http", url: "http://x" };
     const rows = await doctorLegs(anonHost, { run: async () => okRun(""), httpGet: async () => ({ status: 200, body: "ok" }), tcpProbe: async () => "closed" });
