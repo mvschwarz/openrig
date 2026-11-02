@@ -568,7 +568,7 @@ function AppShellInner({ children }: AppShellProps) {
             </header>
 
             {/* Main: rail + explore + center + drawer */}
-            <div className="flex flex-1 min-h-0 relative">
+            <div id="shell-content" className="flex flex-1 min-h-0 relative">
               {/* Rail — desktop only (lg:flex). Mobile rail surfaces inside the slide-over. */}
               <div className="hidden lg:flex">
                 <Rail pathname={pathname} vertical />
