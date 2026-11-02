@@ -1,7 +1,7 @@
-import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, utimes } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, rename, symlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
+import { isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 
 /** Resolve existing parents too: a destination need not exist yet, but its
@@ -42,8 +42,11 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       return;
     }
     if (!source.isFile() && !source.isSymbolicLink()) throw new Error(`Unsupported special file: ${src}`);
+    if (destination?.isDirectory()) throw new Error(`Cannot replace directory with file: ${dst}`);
+    const directoryLink = source.isSymbolicLink() && process.platform === "win32" ? isWindowsDirectoryLink(src) : undefined;
     const same = source.isSymbolicLink()
       ? destination?.isSymbolicLink() && await readlink(src) === await readlink(dst)
+        && (directoryLink === undefined || directoryLink === isWindowsDirectoryLink(dst))
       : destination?.isFile() && source.size === destination.size
         && Math.floor(source.mtimeMs / 1000) === Math.floor(destination.mtimeMs / 1000);
     if (same) {
@@ -59,6 +62,13 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     changes.push(`${source.isSymbolicLink() ? "cL" : ">f"} ${dst}`);
     if (!source.isSymbolicLink()) { filesTransferred++; bytesTransferred += source.size; }
     if (!plan.dryRun) {
+      if (directoryLink !== undefined) {
+        staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
+        await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
+        await rename(staged, dst);
+        staged = undefined;
+        return;
+      }
       if (process.platform === "win32" && source.isFile() && destination?.isFile()) {
         staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
         await cp(src, staged, { force: false, errorOnExist: true, preserveTimestamps: true });

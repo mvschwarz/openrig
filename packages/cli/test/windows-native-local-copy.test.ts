@@ -3,6 +3,7 @@ import { chmod, link, lstat, utimes, mkdtemp, mkdir, writeFile, readFile, readdi
 import os from "node:os";
 import path from "node:path";
 import { planFileCopy, runFileCopy } from "../src/lib/file-transfer.js";
+import { isWindowsDirectoryLink } from "@openrig/daemon/windows-owned-files";
 
 describe.skipIf(process.platform !== "win32")("native Windows local transfer", () => {
   const fixture = async (fn: (root: string) => Promise<void>) => {
@@ -22,6 +23,21 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await copy(src, dst)).toMatchObject({ ok: true, transport: "native-local", bytesTransferred: data.length, filesTransferred: 1 });
     expect(await readFile(dst)).toEqual(data);
     expect(await copy(src, dst)).toMatchObject({ ok: true, filesTransferred: 0, bytesTransferred: 0 });
+  }));
+
+  it.each([false,true])("preserves native directory-link type, including dangling links (dangling=%s)", dangling => fixture(async root => {
+    const src=path.join(root,"source-link"),dst=path.join(root,"destination-link"),target=path.join(root,"target");
+    if(!dangling){await mkdir(target);await writeFile(path.join(target,"witness"),"retain referent");}
+    await symlink("target",src,"dir");await symlink("target",dst,"file");
+    const preview=await copy(src,dst,true);
+    expect(preview.ok,preview.stderr).toBe(true);expect(preview.stdout).toContain("cL");
+    expect(isWindowsDirectoryLink(dst)).toBe(false);
+    const repaired=await copy(src,dst);
+    expect(repaired).toMatchObject({ok:true,filesTransferred:0,bytesTransferred:0});
+    expect(isWindowsDirectoryLink(dst)).toBe(true);
+    if(!dangling)expect(await readFile(path.join(dst,"witness"),"utf8")).toBe("retain referent");
+    expect((await copy(src,dst,true)).stdout).toBe("");
+    expect((await readdir(root)).filter(name=>name.startsWith(".openrig-copy-"))).toEqual([]);
   }));
 
   it.each([false,true])("replaces a readonly destination without mutating its retained hardlink, source readonly=%s", readonly => fixture(async root => {

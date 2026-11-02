@@ -27,6 +27,18 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native local-link type preservation and repair (2026-11-02)
+
+Local copies now compare the NTFS link-entry directory attribute as well as link
+text. Equal-text but mistyped links are repaired through an exclusive sibling
+symlink and rename; referents are not copied or traversed. Unlike SFTP v3, the
+native source entry supplies directory intent even for a dangling link, so local
+copies preserve that type. Ordinary destination directories remain refused when
+copying a file/link over them. Real existing and dangling directory-link fixtures
+verify preview without mutation, repaired type, retained referent bytes, zero
+content transfer, clean repeated preview and no successful staging leftovers.
+The local/SFTP copy run passed 21 tests; CLI TypeScript checking passed.
+
 ### Repair previously mistyped NTFS links (2026-11-02)
 
 SFTP no longer skips an equal-text destination link when a known directory
