@@ -206,7 +206,7 @@ describe("idle heartbeat", () => {
   });
 });
 
-// ── Streaming heartbeat ─────────────────────────────────────────────────────
+// ── Streaming heartbeat: the runner contract's working beat (section 4), `active` / `liveness` ──
 
 describe("streaming heartbeat", () => {
   function clocked(runtime?: "pi" | "omp") {
@@ -215,7 +215,7 @@ describe("streaming heartbeat", () => {
     f.io.now = () => new Date(t).toISOString();
     const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77" }, runtime ? { runtime } : undefined);
     core.start();
-    const beats = () => f.activity.filter(a => a.subtype === "streaming");
+    const beats = () => f.activity.filter(a => a.subtype === "liveness");
     return { core, f, beats, advance: (ms: number) => { t += ms; } };
   }
   const ready = (core: RunnerCore) => core.handlePiLine(JSON.stringify({
@@ -228,7 +228,8 @@ describe("streaming heartbeat", () => {
     ready(c.core);
     c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     c.advance(10_000); c.core.heartbeat();
-    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "active", subtype: "streaming", runtime: "pi" })]);
+    expect(c.beats()).toEqual([expect.objectContaining({ sessionName: SESSION, hookEvent: "active", subtype: "liveness", runtime: "pi",
+      turnId: "1", livenessSeconds: 30 })]);
     c.advance(10_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(2);
   });
@@ -239,7 +240,7 @@ describe("streaming heartbeat", () => {
     ready(c.core);
     c.core.handlePiLine(JSON.stringify({ type: "turn_start" }));
     c.advance(10_000); c.core.heartbeat();
-    expect(c.beats()).toEqual([expect.objectContaining({ subtype: "streaming" })]);
+    expect(c.beats()).toEqual([expect.objectContaining({ subtype: "liveness", turnId: "1" })]);
     c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
     c.advance(10_000); c.core.heartbeat();
     expect(c.beats()).toHaveLength(1); // closed: idle branch resumes
@@ -283,6 +284,57 @@ describe("streaming heartbeat", () => {
     c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
     c.advance(20_000); c.core.heartbeat();
     expect(c.beats()).toEqual([]);
+    expect(c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit")).toEqual([]);
+  });
+
+  // A beat counts only for the latest accepted turn (contract section 4). Pi's runs start from the runner's prompts, so
+  // each run that opens posts its accepted turn first; a prompt Pi handles without a run opens none.
+  it("posts one accepted turn per run, before the run's first post, and its beats name that turn", () => {
+    const c = clocked();
+    ready(c.core);
+    const turns = () => c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit");
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" })); // the same run's next model call opens no turn
+    expect(turns()).toEqual([expect.objectContaining({ subtype: "accepted", turnId: "1", runtime: "pi" })]);
+    const opened = c.f.activity.findIndex(a => a.hookEvent === "UserPromptSubmit");
+    expect(c.f.activity[opened + 1]).toMatchObject({ hookEvent: "active", subtype: "agent_start" });
+    c.advance(10_000); c.core.heartbeat();
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    c.core.handlePiLine(JSON.stringify({ type: "turn_start" })); // a run opened by turn_start alone
+    c.advance(10_000); c.core.heartbeat();
+    expect(turns().map(a => a.turnId)).toEqual(["1", "2"]);
+    expect(c.beats().map(a => a.turnId)).toEqual(["1", "2"]);
+    const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
+  // Section 4: each prompt the runner submits is accepted with its own number. One submitted while a run is open (a
+  // steer, or a follow-up) is posted as it's sent, and the open run's agent_end ends it.
+  it("posts an accepted turn for each prompt or follow-up submitted while a run is open, and its beats name it", () => {
+    const c = clocked();
+    ready(c.core);
+    const turns = () => c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit").map(a => a.turnId);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handleUserBlock("look at b.txt too");
+    expect(turns()).toEqual(["1", "2"]);
+    c.advance(10_000); c.core.heartbeat();
+    c.core.handleUserBlock("/followup then c.txt");
+    c.core.handleUserBlock("/abort");
+    expect(turns()).toEqual(["1", "2", "3"]);
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats().map(a => a.turnId)).toEqual(["2", "3"]);
+    const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
+  it("opens no turn for a prompt Pi handles without a run, so the idle beat goes on", () => {
+    const c = clocked();
+    ready(c.core);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_end" })); // idle, with a Stop posted
+    c.core.handleUserBlock("/model some-model");
+    c.advance(180_000); c.core.heartbeat();
+    expect(c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit")).toEqual([]);
+    expect(c.f.activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "idle_heartbeat" });
   });
 });
 
@@ -303,7 +355,7 @@ describe("heartbeat scheduler cadence", () => {
       data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
     }));
     const timer = startHeartbeatTimer(core, "pi");
-    const beats = () => f.activity.filter(a => a.subtype === "streaming");
+    const beats = () => f.activity.filter(a => a.subtype === "liveness");
     return { f, core, timer, beats, advance: (ms: number) => vi.advanceTimersByTime(ms) };
   }
   const after = (c: ReturnType<typeof scheduledCore>) => { c.timer.stop(); vi.useRealTimers(); };

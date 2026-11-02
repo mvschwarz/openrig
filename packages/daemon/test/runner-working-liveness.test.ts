@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -8,6 +8,7 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { SeatActivityService, HOOK_AUTHORITY_WINDOW_MS } from "../src/domain/seat-activity-service.js";
 import { activityRoutes, restoredRunnerHookEvidence } from "../src/routes/activity.js";
 import { runtimeRungInventory } from "../src/domain/activity-taxonomy.js";
+import { RunnerCore, type RunnerIo } from "../src/adapters/pi-runner.js";
 
 // The runner contract's working beat (section 4): `active` / `liveness` keeps a long, quiet turn reading working while
 // the runner says its prompt is outstanding and its agent alive. A beat counts only for the live generation's latest
@@ -43,14 +44,18 @@ function fixture() {
     return service;
   };
   let oracle = newOracle();
-  const app = new Hono();
-  app.use("*", async (c, next) => {
-    c.set("agentActivityStore" as never, store as never);
-    c.set("activityHookToken" as never, "fixture-token" as never);
-    c.set("seatActivityService" as never, oracle as never);
-    await next();
-  });
-  app.route("/api/activity", activityRoutes);
+  let app = new Hono();
+  const mount = (routes: typeof activityRoutes) => {
+    app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("agentActivityStore" as never, store as never);
+      c.set("activityHookToken" as never, "fixture-token" as never);
+      c.set("seatActivityService" as never, oracle as never);
+      await next();
+    });
+    app.route("/api/activity", routes);
+  };
+  mount(activityRoutes);
   let generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
   async function post(hookEvent: string, subtype: string | null, over: Record<string, unknown> = {}) {
     const response = await app.request("/api/activity/hooks", { method: "POST",
@@ -74,6 +79,12 @@ function fixture() {
     const evidence = restoredRunnerHookEvidence(store, { seatNodeId: node.id, sessionName: session.sessionName }, runtime);
     if (evidence) oracle.reportEvidence({ ...evidence, seq: 0 });
   };
+  // The same, with what the route module held in memory lost too, its working-liveness gate among it.
+  const restartDaemon = async () => {
+    vi.resetModules();
+    mount((await import("../src/routes/activity.js")).activityRoutes);
+    restart();
+  };
   // `rig seat clear-attention`: the operator's word that the prompt is gone, outside the hook route.
   const clearAttention = () => {
     store.recordHookEvent({ sessionName: session.sessionName, runtime, generation, hookEvent: "PermissionPromptCleared" });
@@ -88,7 +99,8 @@ function fixture() {
     generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
     return { previous, current: generation };
   };
-  return { post, accepted, beat, next, state, later, at, restart, clearAttention, replaceOccupant, oldGeneration, runtime };
+  return { post, accepted, beat, next, state, later, at, restart, restartDaemon, clearAttention, replaceOccupant, oldGeneration, runtime,
+    sessionName: session.sessionName, nodeId: node.id, generation: () => generation };
 }
 
 describe("the runner's working beat", () => {
@@ -249,6 +261,67 @@ describe("the runner's working beat", () => {
     const f = fixture();
     await f.post("UserPromptSubmit", "accepted", { turnId: "1", sequence: f.next(), generation: undefined });
     expect(await f.beat("1")).toMatchObject({ ignored: "stale_generation" });
+  });
+
+  // Pi's stream beat (#2336) on the contract's beat: the real Pi runner core, its posts sent through the real route.
+  it("keeps a real Pi runner's long, quiet run reading working, until its agent_end", async () => {
+    const f = fixture();
+    const sent: Array<Promise<unknown>> = [];
+    const io: RunnerIo = {
+      sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, writeSidecar: () => {}, now: () => f.at(),
+      // Activity posts only: the session-identity post goes to a recorder this fixture doesn't have.
+      postActivity: (payload) => { if (!payload.eventFamily) sent.push(f.post(String(payload.hookEvent), payload.subtype as string | null, payload)); },
+    };
+    const core = new RunnerCore(io, { sessionName: f.sessionName, nodeId: f.nodeId, launchId: "launch-1", generation: f.generation() });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: "/pi/session.jsonl", sessionId: "pi-1" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    await Promise.all(sent);
+    for (let i = 0; i < 12; i++) { // a minute with nothing from the model, the runner's 5 s tick beating
+      f.later(5_000);
+      core.heartbeat();
+      await Promise.all(sent);
+      expect(f.state(), `${(i + 1) * 5} s in`).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
+    }
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    await Promise.all(sent);
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt" });
+  });
+
+  // After a daemon restart mid-run its gate has no turn, so the run's beats are ignored until the runner's next accepted
+  // prompt (section 4's restart rule). A prompt or a follow-up submitted into the open run is that prompt.
+  it("counts a real Pi runner's beats again after a daemon restart, from its next prompt or follow-up into the open run", async () => {
+    const f = fixture();
+    const posts: Array<{ payload: Record<string, unknown>; result: Promise<{ ok: boolean; ignored?: string }> }> = [];
+    const io: RunnerIo = {
+      sendRpc: () => {}, mirrorLine: () => {}, mirrorAppend: () => {}, writeSidecar: () => {}, now: () => f.at(),
+      postActivity: (payload) => {
+        if (!payload.eventFamily) posts.push({ payload, result: f.post(String(payload.hookEvent), payload.subtype as string | null, payload) });
+      },
+    };
+    const settled = () => Promise.all(posts.map(p => p.result));
+    const lastBeat = async () => {
+      const beat = posts.filter(p => p.payload.subtype === "liveness").at(-1)!;
+      return { turnId: beat.payload.turnId, ...await beat.result };
+    };
+    const core = new RunnerCore(io, { sessionName: f.sessionName, nodeId: f.nodeId, launchId: "launch-1", generation: f.generation() });
+    core.start();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", data: { sessionFile: "/pi/session.jsonl", sessionId: "pi-1" } }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    await settled();
+    await f.restartDaemon();
+    f.later(5_000); core.heartbeat(); await settled();
+    expect(await lastBeat()).toMatchObject({ turnId: "1", ignored: "no_turn" });
+    for (const [block, turnId] of [["look at b.txt too", "2"], ["/followup then c.txt", "3"]] as const) {
+      core.handleUserBlock(block);
+      for (let i = 0; i < 6; i++) { // half a minute with nothing from the model
+        f.later(5_000); core.heartbeat(); await settled();
+        const beat = await lastBeat();
+        expect(beat, `${block}: ${(i + 1) * 5} s in`).toMatchObject({ turnId, ok: true });
+        expect(beat.ignored).toBeUndefined();
+        expect(f.state(), `${block}: ${(i + 1) * 5} s in`).toMatchObject({ activity: "working", decidedBy: "lifecycle-hooks" });
+      }
+    }
   });
 
   it("leaves a runner that sends no beats as before: a quiet turn falls to unknown after 15 s", async () => {
