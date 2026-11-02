@@ -127,3 +127,33 @@ it("does not mistake a deeper subsection for the requested H2 section", () => {
   expect(addProgressRow(source, { section: "Rail", text: "Release verified", status: "done" }).content)
     .toBe(source + "\n## Rail\n\n- [x] Release verified\n");
 });
+
+
+describe("progress edits preserve fenced examples", () => {
+  it.each(["```md", "~~~md", "````md", "   ```md"])("sets only the real row after %s", (opening) => {
+    const marker = opening.trimStart().startsWith("~") ? "~" : "`";
+    const closing = marker.repeat(5);
+    const example = [opening, "## Rail", "- [ ] Ship it", marker.repeat(2), "- [ ] Still an example", closing].join("\n");
+    const content = `# Progress\n${example}\n## Rail\n- [ ] Ship it\n`;
+    const result = setProgressRow(content, { text: "Ship it", status: "done" });
+    expect(result.content).toBe(`# Progress\n${example}\n## Rail\n- [x] Ship it\n`);
+  });
+
+  it("does not update a row that exists only in a code block", () => {
+    const content = "# Progress\n## Rail\n```md\n- [ ] Example\n```\n";
+    expect(() => setProgressRow(content, { text: "Example", status: "done" })).toThrow(/No progress row/);
+  });
+
+  it("ignores example headings and duplicates when adding a row", () => {
+    const example = "```md\n## Rail\n- [x] Ship it\n```";
+    const content = `# Progress\n${example}\n## Rail\n${example}\n\n## Notes\nKeep this.\n`;
+    const result = addProgressRow(content, { section: "Rail", text: "Ship it", status: "active" });
+    expect(result.content).toBe(`# Progress\n${example}\n## Rail\n${example}\n- [ ] Ship it\n\n## Notes\nKeep this.\n`);
+  });
+
+  it("inserts outside an unclosed example at the end of the section", () => {
+    const content = "# Progress\n## Rail\n- [ ] Existing\n\n```md\n## Example\n- [ ] Ship it\n";
+    const result = addProgressRow(content, { section: "Rail", text: "Ship it", status: "active" });
+    expect(result.content).toBe(content.replace("- [ ] Existing", "- [ ] Existing\n- [ ] Ship it"));
+  });
+});
