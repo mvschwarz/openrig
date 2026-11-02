@@ -4794,3 +4794,28 @@ These are real Podman engine and observer checks using synthetic OpenShell
 labels. They do not qualify an actual OpenShell CLI lifecycle, real provider
 continuity, the entire daemon suite or every Windows/Linux behavior. No running
 OpenRig deployment, original team, global installation or public push changed.
+
+### Long cmd viewer argv uses private one-shot staging (2026-11-03)
+
+The previous 8,190-character cmd viewer refusal is now covered by a staged
+launch path in both native tile provisioning and the following explanation
+strip. When the encoded command exceeds cmd's input limit, the already
+attributed viewer directory receives a randomly named, exclusively created
+private script. A bounded encoded bootstrap loads that script, removes its
+literal path before starting the child, then preserves the existing native
+argv bridge, observed cwd and child exit status. The foreground-shell identity
+guard executes before staging. A caller without an owned absolute staging
+directory still refuses; an unrepresentably long staging path refuses before
+writing. No uncertain pane-run result is retried. A not-yet-consumed script
+remains private in the original viewer attribution directory rather than being
+deleted while a delayed receiver might still need it.
+
+A real cmd process received a 10,000-character argument together with empty,
+quote, newline, expansion/operator and Unicode data unchanged, retained cwd,
+and returned exit status 7. Its dispatch command stayed below cmd's limit and
+the one-shot script was absent afterward. All six complete viewer/follow files
+passed 68/68 on Windows. WSL passed 61 with seven native-only skips after the
+four changed implementation/test files were copied and byte-compared. The
+daemon TypeScript build and whitespace check passed. This qualifies the native
+shell launch path, not the still-unconfirmed real Herdr GUI/foreground attach
+matrix, and does not raise Windows CreateProcess's own argv-size limit.

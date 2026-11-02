@@ -243,7 +243,7 @@ export class HerdrViewer {
         let command = entry.command;
         if (this.platform === "win32") {
           const observed = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
-          command = nativeViewerShellCommand(entry.argv, observed.process_info);
+          command = nativeViewerShellCommand(entry.argv, observed.process_info, entry.cwd);
         }
         entry.phase = "starting"; save();
         // pane run rc0/empty stdout is not proof. It is sent ONCE then checked.

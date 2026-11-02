@@ -140,7 +140,7 @@ export class HerdrFollowView {
         let command = `/usr/bin/tail -n 30 -F ${quote(log)}`;
         if (platform === "win32") {
           const observed = body(await this.deps.run(["pane", "process-info", "--pane", state.pane.pane_id]));
-          command = nativeViewerShellCommand(stripArgv, observed.process_info);
+          command = nativeViewerShellCommand(stripArgv, observed.process_info, state.cwd);
         }
         state.phase = "starting"; save();
         await this.deps.run(["pane", "run", state.pane.pane_id, command]);
