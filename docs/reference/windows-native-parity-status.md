@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### OpenShell private policy and binary result files (2026-11-02)
+
+The OpenShell driver no longer relies on POSIX `0600` mode bits to protect
+Windows policy staging or downloaded artifacts. Policy staging uses a verified
+current-SID-only directory, and both policy bytes and downloads are written
+through an exclusive private output handle whose DACL is established before
+content. Existing destinations remain untouched on `EEXIST`; binary payloads
+are never decoded/reencoded as text. The staging directory is removed after its
+command completes, while the selected source policy remains unchanged.
+
+The driver and observer files pass 14 tests on Windows, including real file
+owner/private-DACL checks during policy dispatch and after binary download.
+Daemon TypeScript checking passes. The same five-file driver dependency closure
+is recorded by SHA-256 and transpiled into an isolated probe artifact; ordinary
+WSL UID 1000 with Node 24.11.0 confirms private POSIX modes, exact policy/binary
+bytes, exclusive destination refusal and stage removal.
+
+These cases inject the OpenShell command responses while exercising actual
+local filesystem effects. They do not qualify a real OpenShell/Podman engine.
+The driver and rootless observer received explicit semantic review; that bounded
+review does not establish completion of the wider source inventory.
+
 ### Real native exchange interruption recovery (2026-11-02)
 
 Three additional complete-service cases inject an unknown client result after

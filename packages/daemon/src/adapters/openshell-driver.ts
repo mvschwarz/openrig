@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { randomUUID } from "node:crypto";
 import { OpenShellPodmanObserver, type PodmanCleanupSelection } from "./openshell-podman-observer.js";
 import type { NativeObservation } from "../domain/environment-lifecycle.js";
 import { EnvironmentError, regularBytes, sha256, type EnvironmentBinding, type EnvironmentDriver, type EnvironmentResource, type Placement } from "../domain/environment-platform.js";
+import { createWindowsPrivateDirectoryAsync, openPrivateTextHandle } from "../domain/private-text-file.js";
 
 const runFile = promisify(execFile);
 export type OpenShellCommand = (args: string[]) => Promise<string>;
@@ -43,9 +44,12 @@ export class OpenShellDriver implements EnvironmentDriver {
   async create(input: { operationId: string; placement: Placement }): Promise<EnvironmentResource> {
     const p = input.placement, bytes = regularBytes(p.policy);
     if (sha256(bytes) !== p.policySha256) throw new EnvironmentError("environment_policy_changed", "The selected provider policy changed before create");
-    const stage = mkdtempSync(join(tmpdir(), "openrig-policy-"));
-    const policy = join(stage, "policy.yaml"); writeFileSync(policy, bytes, { mode: 0o600 });
-    try { return this.resource(JSON.parse(await this.command([...this.prefix(p), "create", "--name", p.name, "--from", p.image,
+    const stage = process.platform === "win32" ? await createWindowsPrivateDirectoryAsync(tmpdir()) : mkdtempSync(join(tmpdir(), "openrig-policy-"));
+    const policy = join(stage, "policy.yaml");
+    try {
+      const handle=await openPrivateTextHandle(policy);
+      try { await handle.writeFile(bytes); } finally { await handle.close(); }
+      return this.resource(JSON.parse(await this.command([...this.prefix(p), "create", "--name", p.name, "--from", p.image,
       "--provider", p.provider, "--no-auto-providers", "--cpu", "1", "--memory", "2Gi", "--policy", policy,
       "--label", `openrigoperation=${input.operationId}`, "--tty", "--detach", "--restart-policy", "never", "--output", "json",
       "--", "python3", "/opt/openrig/guest.py"]))); } finally { rmSync(stage, { recursive: true }); }
@@ -86,7 +90,8 @@ export class OpenShellDriver implements EnvironmentDriver {
   }
   async download(binding: EnvironmentBinding, source: string, destination: string): Promise<void> {
     const bytes = await this.read(binding, source);
-    writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
+    const handle=await openPrivateTextHandle(destination);
+    try { await handle.writeFile(bytes); } finally { await handle.close(); }
   }
   async captureCleanup(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection> {
     await this.checked(binding, false);
