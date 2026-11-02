@@ -582,6 +582,11 @@ export class InboundRouter {
     const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked, clickedTs: action?.action_ts });
     if (!recorded || recorded.status !== "recorded") {
       const reason = recorded?.reason ?? "answers-unavailable";
+      // Another person's committed answer is the answer: a park on the person resumes with it through the resolver.
+      if (recorded?.answeredBy) {
+        try { await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: "", messageTs: action?.action_ts }); }
+        catch (e) { this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`); }
+      }
       // A closed decision holding this person's clicked answer: typically Slack's redelivery of the click that closed
       // it, after that click's own confirmation failed to post. It was recorded, so say that.
       if (live) {

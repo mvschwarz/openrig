@@ -3900,8 +3900,10 @@ export class QueueRepository {
           ...(decidedForThem ? { decidedForThem } : {}) };
       }
       if (!this.answersAsk(item, input.actorSession) && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
-      // One answer per ask: another person's committed return is the answer, so nothing of this person's is recorded.
-      const winner = item.state === "pending" ? this.committedAnswerFromAnother(item.qitemId, input.actorSession) : null;
+      // One answer per question: another person's committed return is the answer (a park's, for its current question), so
+      // nothing of this person's is recorded.
+      const episodeKey = item.state === "pending" ? undefined : this.currentHumanRequiredEpisode(item.qitemId)?.key;
+      const winner = item.state === "pending" || episodeKey ? this.committedAnswerFromAnother(item.qitemId, input.actorSession, episodeKey) : null;
       if (winner) return { status: "not-applicable" as const, reason: "answered", answeredBy: winner.sourceSession };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
@@ -3914,7 +3916,7 @@ export class QueueRepository {
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
-    // That answer's close may have been interrupted: finish it, as theirs.
+    // A pending ask's interrupted close finishes here, as theirs; a park resumes with it through the reply resolver.
     if (result.status === "not-applicable" && result.answeredBy) {
       this.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser: input.primaryUser });
     }
@@ -4618,6 +4620,8 @@ export class QueueRepository {
       : item.state === "blocked"
         ? resolveRegisteredHumanAddress(item.blockedOn, registry.entities)
         : resolveRegisteredHumanAddress(item.destinationSession, registry.entities);
+    // A person with no connector is reached in the Feed and Steering only: nothing is posted to them, so nothing is owed.
+    if (humanAddress && registry.entities.find((entity) => entity.address === humanAddress)?.connectorBindings.length === 0) return "inactive";
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
     // dial set to RECORD posts it) and never a missing one.
     return humanAddress
