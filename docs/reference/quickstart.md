@@ -105,7 +105,8 @@ The daemon starts and boots the kernel with the coding agents you're signed in t
 **What starting OpenRig changes, for the coding agents you use** (paths are the usual defaults):
 - **For Codex:** hooks and trust in `~/.codex/config.toml`, when OpenRig or a Codex agent starts.
 - **For Claude Code:** workspace trust in `~/.claude.json`, and activity hooks in the project's
-  `.claude/settings.local.json`, plus a status line unless you already have your own.
+  `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks and
+  status line back out once no Claude seat uses that directory.
 - **For both:** small discovery skills in `~/.claude/skills` and `~/.agents/skills`.
 - **Kernel access:** by default the kernel gets broader permissions than a project team gets by default. On Codex
   that's full access with no approval prompts. On Claude Code, its file tools, web fetches and operational commands,

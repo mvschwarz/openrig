@@ -724,8 +724,8 @@ export interface SkillRouterFootprint {
  * Slice 20 seam: the exact preview of the bootstrap line's footprint, before any write: the line verbatim, the exact text
  * written (the line between OpenRig's markers) and where it goes, and each file
  * it would go into (a Claude seat's rig file, `CLAUDE.md` or `CLAUDE.local.md`; a Codex seat's `AGENTS.md`), one entry
- * per file with every seat sharing it. Pure: no filesystem or settings read. The file rule is main's
- * `seatGuidanceFile` (restore-guidance.ts), repeated here until this branch carries it.
+ * per file with every seat sharing it. Pure: no filesystem or settings read. The file rule is `seatGuidanceFile`'s
+ * (restore-guidance.ts) for the two runtimes that get the line, Claude and Codex, repeated here.
  */
 export function describeSkillRouterFootprint(seats: FootprintSeat[]): SkillRouterFootprint {
   const byPath = new Map<string, { path: string; runtime: "claude-code" | "codex"; seats: string[] }>();

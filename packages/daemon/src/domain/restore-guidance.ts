@@ -47,7 +47,8 @@ export interface SeatGuidance {
 }
 
 /** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
- *  Claude file for Claude, `AGENTS.md` for Codex, or null for a runtime this doesn't know. */
+ *  Claude file for Claude, `AGENTS.md` for Codex, Pi and omp, or null for a runtime this doesn't know. Teardown, its
+ *  live-file protection, exact resume and node inventory all read the target from here. */
 export function seatGuidanceFile(
   runtime: string | null | undefined,
   cwd: string,
@@ -55,7 +56,7 @@ export function seatGuidanceFile(
 ): string | null {
   const fileName = runtime === "claude-code"
     ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
-    : runtime === "codex" ? "AGENTS.md" : null;
+    : runtime === "codex" || runtime === "pi" || runtime === "omp" ? "AGENTS.md" : null;
   return fileName ? nodePath.join(cwd, fileName) : null;
 }
 
