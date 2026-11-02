@@ -1,5 +1,23 @@
 # Native Windows parity: implementation and evidence
 
+## Native display reads use pane-qualified session targets (2026-11-03)
+
+Real WSL tmux distinguished a session target from a pane target: display-message
+with `=name` returned empty for the tested hash-bearing session names, while
+`=name:` and an immutable ID selected the expected session. The native stop
+identity read and runtime-exchange attachment-count read now use the pane-qualified
+form. Most other pane reads already use the shared exact pane/window target helper.
+This repair retains exact matching rather than falling back to a bare prefix.
+
+The mapped-stop regression failed twice before the change; the complete mapped
+stop/adapter/exact-target files passed 62/62 afterward. Native exchange/journal
+files and daemon TypeScript/assets build also passed. These controlled native
+transports and the real POSIX target-grammar comparison do not prove actual
+stock psmux runtime exchange. Colon-bearing logical native names still need a
+separate target-parser audit; they are not qualified by this check. Installed
+and full-directory receipts predate this repair. No deployment, original-team
+operation or public push occurred.
+
 ## Private-environment session creation preserves literal hashes (2026-11-03)
 
 Ordinary managed-session creation still passed names directly to tmux's

@@ -1113,7 +1113,7 @@ export class TmuxAdapter {
         const output=await this.run(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT]);
         const rows=parseLines(output,parseClientLine);
         if(output.split(/\r?\n/).filter(line=>line.trim()!=="").length!==rows.length)throw new Error("Native attached-client listing is malformed");
-        const rawCount=(await this.run(["tmux","display-message","-p","-t",`=${identity.staging}`,"#{session_attached}"])).trim();
+        const rawCount=(await this.run(["tmux","display-message","-p","-t",`=${identity.staging}:`,"#{session_attached}"])).trim();
         // Stock psmux reports this format as a boolean, unlike tmux's count.
         if(!/^\d+$/.test(rawCount) || (Number(rawCount)>0)!==(rows.length>0))throw new Error("Native attached-client observation changed or is incomplete");
         return rows;
@@ -1742,7 +1742,7 @@ export class TmuxAdapter {
       try {
         const scoped = /^psmux:([A-Za-z0-9_-]+):(\$\d+)$/.exec(name);
         sessionName = scoped ? Buffer.from(scoped[1]!, "base64url").toString("utf8") : name.replace(/^=/, "");
-        id = scoped?.[2] ?? (await this.run(["tmux", "display-message", "-p", "-t", `=${sessionName}`, "#{session_id}"])).trim();
+        id = scoped?.[2] ?? (await this.run(["tmux", "display-message", "-p", "-t", `=${sessionName}:`, "#{session_id}"])).trim();
         if (!/^\$\d+$/.test(id)) return { ok: false, code: "guard_target_unknown", message: "Native session identity unavailable; nothing killed." };
       } catch (error) { return classifyWriteError(error); }
       beforeEffect?.();

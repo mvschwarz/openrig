@@ -10,7 +10,10 @@ function fixture(mode: "stop" | "changed" | "lost-marker" | "rollback" | "rollba
     if (command === "has-session") { if (present) return ""; throw Object.assign(new Error("absent"), { code: 1, stdout: "", stderr: "" }); }
     if (command === "show-options") return marker + "\n";
     if (command === "new-session") { present = true; return "$7 123\n"; }
-    if (command === "display-message") { if (mode === "lost-marker") marker = ""; return "$7\n"; }
+    if (command === "display-message") {
+      expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":");
+      if (mode === "lost-marker") marker = ""; return "$7\n";
+    }
     if (command === "list-panes") return ""; // forces rollback of this newly allocated probe
     if (command === "if-shell") {
       if (argv.some(value => value.startsWith("set-option "))) { marker = binding.marker!; return ""; }
