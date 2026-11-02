@@ -2,7 +2,20 @@ import { expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnRex, createRexCliTransport } from "../src/domain/terminal/rex-transport.js";
+import { spawnRex, createRexCliTransport, resolveRexBinary } from "../src/domain/terminal/rex-transport.js";
+
+it.skipIf(process.platform !== 'win32')('Rex respects native case-insensitive environment keys for discovery and server selection', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'openrig-rex-env-'));
+  try {
+    const binary=path.join(root,'rex.exe');fs.writeFileSync(binary,'discovery fixture');
+    expect(resolveRexBinary({Path:root})).toBe(binary);
+    expect(resolveRexBinary({rex_bin_dir:root,Path:''})).toBe(binary);
+    const calls:string[][]=[];
+    const transport=createRexCliTransport({env:{rex_server:' selected server '},binary:()=>binary,run:async argv=>{calls.push(argv);return '{}';}});
+    await transport.request('server.status',{});
+    expect(calls[0]).toEqual([binary,'--autostart=false','-S','selected server','api','call','server.status','-']);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
 
 it.skipIf(process.platform !== "win32")("native Rex reports a missing resolved executable as unavailable before launching", async () => {
   const missing=path.join(os.tmpdir(),'openrig-rex-missing-'+Date.now(),'rex.exe');

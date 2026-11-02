@@ -27,6 +27,17 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Rex Windows environment-key semantics (2026-11-02)
+
+Rex executable and server selection now use the shared platform environment
+reader. Native `Path`, `rex_bin_dir` and `rex_server` spellings behave like their
+uppercase counterparts; POSIX keys remain case-sensitive. A native fixture
+checks real executable discovery and the selected server's exact CLI argv.
+The two transport/process files pass 28 tests on Windows (four POSIX cases
+skipped) and 26 in the ordinary WSL source mirror (six Windows cases skipped).
+Daemon TypeScript checking passes. This is configuration/transport coverage,
+not installed Rex GUI acceptance.
+
 ### Rex no-launch and incomplete-reply semantics (2026-11-02)
 
 A positively missing absolute Rex executable is now rejected before starting

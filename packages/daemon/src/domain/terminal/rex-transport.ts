@@ -5,6 +5,7 @@ import path from "node:path";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import { stopGroup } from "../codex-network-default.js";
 import { spawnWindowsJobProcess } from "../windows-job-process.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 /** A `rex` run that did not exit 0; `exitCode` is null when it never started or was ended. */
 export class RexRunError extends Error {
@@ -59,19 +60,20 @@ function executable(file: string): boolean {
 /** `$REX_BIN_DIR/rex`, then `rex` on PATH, then the binary inside the macOS app bundle. */
 export function resolveRexBinary(env: NodeJS.ProcessEnv, isExecutable: (file: string) => boolean = executable): string | null {
   const bundled = path.join(homedir(), "Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex");
-  const fromDir = env["REX_BIN_DIR"] ? path.join(env["REX_BIN_DIR"], process.platform === "win32" ? "rex.exe" : "rex") : null;
+  const directory = readPlatformEnv(env, "REX_BIN_DIR"), search = readPlatformEnv(env, "PATH");
+  const fromDir = directory ? path.join(directory, process.platform === "win32" ? "rex.exe" : "rex") : null;
   if (fromDir && isExecutable(fromDir)) return fromDir;
   if (process.platform === "win32") {
     // The shared POSIX resolver splits on ':', which splits a Windows drive.
     // Rex control calls require a native executable, never a shell shim.
-    for (const directory of (env["PATH"] ?? "").split(path.delimiter)) {
+    for (const directory of (search ?? "").split(path.delimiter)) {
       if (!path.isAbsolute(directory)) return null;
       const candidate = path.join(directory, "rex.exe");
       if (executable(candidate)) return candidate;
     }
     return null;
   }
-  return resolveOnPath("rex", env["PATH"]) ?? (isExecutable(bundled) ? bundled : null);
+  return resolveOnPath("rex", search) ?? (isExecutable(bundled) ? bundled : null);
 }
 
 /** Runs `rex` without a shell in its own process group, ended as a group on timeout. */
@@ -152,7 +154,7 @@ function classify(method: string, err: unknown): RexError {
  */
 export function createRexCliTransport(opts: { run?: RexRun; env?: NodeJS.ProcessEnv; binary?: () => string | null; timeoutMs?: number; probeTimeoutMs?: number } = {}): RexTransport {
   const env = { ...(opts.env ?? process.env) };
-  const server = env["REX_SERVER"]?.trim();
+  const server = readPlatformEnv(env, "REX_SERVER")?.trim();
   const run = opts.run ?? spawnRex;
   const binary = opts.binary ?? (() => resolveRexBinary(env));
   const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
