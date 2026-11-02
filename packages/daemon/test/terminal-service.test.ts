@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
-import { daemonTmuxServerArgs, daemonTmuxServerInfo, setDaemonTmuxServer } from "../src/adapters/tmux-server.js";
+import { daemonTmuxServerArgs, daemonTmuxServerInfo, setDaemonTmuxServer, setDaemonTmuxAttachCommand } from "../src/adapters/tmux-server.js";
 import { RexAdapter } from "../src/domain/terminal/rex-adapter.js";
 import { createRexCliTransport, type RexRun } from "../src/domain/terminal/rex-transport.js";
 import type {
@@ -91,6 +91,9 @@ describe("SSH tiles follow the viewing instance's effective server mode", () => 
         resolveHost: id => id === "edge" ? { id, transport: "ssh", target: "fixture" } : null,
       });
       const svc = new TerminalService(deps);
+      const attachCommand = ["C:/owned tools/psmux.exe", "--prefix"];
+      setDaemonTmuxAttachCommand(attachCommand);
+      expect((await svc.status()).tmux).toMatchObject({ command: attachCommand, mode, serverArgs: ["-S", "/local/only/socket"] });
       const preview = await svc.previewView({ view: "remote" }) as { planId: string };
       const result = await svc.openView({ view: "remote", expectedPlan: preview.planId });
       expect(result.ok).toBe(true);

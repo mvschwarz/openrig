@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Direct attachment retains daemon executable metadata (2026-11-03)
+
+Terminal status and bound-node inventory now report the daemon's attach
+executable and prefix arguments as structured data. Direct terminal attach and
+shared TUI preserve these arguments for ordinary names and the verified native
+mapped-name wrapper. They no longer discard an available daemon executable in
+favor of the caller's PATH lookup. Missing metadata retains compatibility with
+older daemons; malformed metadata refuses attachment without spawning. Existing
+host and isolated-instance locality checks still run before local attachment.
+
+Five complete CLI/inventory/server test files passed 124/124; the complete
+terminal-service and local-attachment files then passed 104/104, including
+status-to-command propagation. These sets overlap and are not a unique-test
+total. Daemon TypeScript/assets build, CLI noEmit and whitespace checks passed.
+The first entry-test run failed to transform because the added fixture reused
+a local variable name; the corrected complete files passed. Tests use controlled
+launches and provider responses, not a deployed daemon or real desktop attach.
+Production executable discovery remains best effort; no deployment, public
+push or full current Windows/WSL equivalence is claimed here.
+
 ## Mapped native session stop and probe rollback (2026-11-03)
 
 Native probe rollback now selects the verified physical psmux server and uses

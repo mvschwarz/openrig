@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { attachTmux, readTmuxServerArgs } from "../src/tmux-attachment.js";
+import { attachTmux, readTmuxAttachCommand, readTmuxServerArgs } from "../src/tmux-attachment.js";
 import { readWindowsTileAttachArgv } from "@openrig/daemon/windows-launch";
 
 vi.mock("node:child_process", async () => ({ ...await vi.importActual("node:child_process"), spawn: vi.fn() }));
@@ -9,6 +9,22 @@ vi.mock("node:child_process", async () => ({ ...await vi.importActual("node:chil
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
 describe("tmux attachment", () => {
+  it.each(["ordinary", "owned|logical"])("preserves the daemon executable and prefix for %s", async session => {
+    const command = ["C:/owned tools/terminal.exe", "--owned-prefix"];
+    const child = new EventEmitter(); vi.mocked(spawn).mockReturnValue(child as ReturnType<typeof spawn>);
+    const result = attachTmux({ session, serverArgs: ["-L", "owned"], command, readOnly: true });
+    const [file, args] = vi.mocked(spawn).mock.calls[0]!;
+    if (process.platform === "win32" && session.includes("|")) {
+      expect(readWindowsTileAttachArgv([String(file), ...args as string[]])).toMatchObject({ tmux: command[0], server: [command[1], "-L", "owned"], attachOnly: true });
+    } else {
+      expect(file).toBe(command[0]); expect(args).toEqual([command[1], "-L", "owned", "attach-session", "-r", "-t", "=" + session]);
+    }
+    child.emit("exit", 0); await expect(result).resolves.toBe(0);
+  });
+  it.each([null, [], [""], [7], ["tmux", "bad\0arg"], "tmux --flag"])("rejects invalid executable metadata %j", value => {
+    expect(() => readTmuxAttachCommand(value)).toThrow("invalid tmux executable metadata");
+    expect(spawn).not.toHaveBeenCalled();
+  });
   it.skipIf(process.platform !== "win32").each([false, true])("uses the verified single-attach wrapper for mapped native names (read-only=%s)", async readOnly => {
     const child = new EventEmitter(); vi.mocked(spawn).mockReturnValue(child as ReturnType<typeof spawn>);
     const result = attachTmux({ session: "owned|logical", serverArgs: ["-L", "owned-home"], readOnly });

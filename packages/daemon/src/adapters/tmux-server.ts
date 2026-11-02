@@ -73,6 +73,11 @@ export function daemonTmuxServerArgs(): readonly string[] {
   return daemonServerArgs;
 }
 
+/** Structured executable and prefix arguments; never a shell command. */
+export function daemonTmuxAttachCommand(): string[] {
+  return [...daemonAttachCommand];
+}
+
 function shellWord(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
   // Native recovery guidance is entered in PowerShell; its single-quote

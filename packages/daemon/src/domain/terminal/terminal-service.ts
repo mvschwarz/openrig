@@ -43,7 +43,7 @@ import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
 import { isAbsolute, win32 } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
-import { daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
+import { daemonTmuxAttachCommand, daemonTmuxServerArgs, daemonTmuxServerInfo } from "../../adapters/tmux-server.js";
 import type { TmuxServerSelection } from "../tmux-server-selection.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
@@ -116,7 +116,7 @@ export interface ProviderStatusReport {
 export interface TerminalStatusResult {
   following?: ReturnType<TerminalFollowing["list"]>;
   providers: ProviderStatusReport[];
-  tmux?: TmuxServerSelection;
+  tmux?: TmuxServerSelection & { command?: string[] };
   session?: string;
   error?: string;
   code?: string;
@@ -451,7 +451,8 @@ export class TerminalService {
 
   /** Provider availability + liveness (doctor). Unknown named provider → empty report for it. */
   async status(providerName?: string, session?: string): Promise<TerminalStatusResult> {
-    const tmux = daemonTmuxServerInfo();
+    const selection = daemonTmuxServerInfo();
+    const tmux = selection ? { ...selection, command: daemonTmuxAttachCommand() } : undefined;
     if (session !== undefined) {
       const selected = this.selectProvider({ provider: providerName, session });
       if ("ok" in selected) return { providers: [], error: selected.error, code: selected.code };
