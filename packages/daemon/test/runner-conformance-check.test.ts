@@ -140,6 +140,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["beat-after-stop", "no beat after the turn's Stop"],
     ["beat-during-ask", "asked: no beat while the ask waits on a person"],
     ["no-resolve", "asked: after the answer, active/permission_resolved names the turn and the ask, before any beat"],
+    ["beat-time-backwards", "sequence rises with the runner's own time across every post, beats included"],
   ])("catches %s in case 3b", async (broken, name) => {
     const { code, report } = await check(["--cases", "3b"], ` --beat --break ${broken}`);
     const result = report.results.find((r) => r.id === "3b")!;

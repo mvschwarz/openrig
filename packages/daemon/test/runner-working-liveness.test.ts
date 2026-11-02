@@ -179,6 +179,21 @@ describe("the runner's working beat", () => {
     expect(f.state()).toMatchObject({ activity: "working" });
   });
 
+  it("orders a beat sent without occurredAt by the time it was recorded, so a late older Stop still doesn't end the turn", async () => {
+    const f = fixture();
+    await f.accepted("A");
+    f.later(1_000);
+    const stopA = { turnId: "A", sequence: f.next(), occurredAt: f.at() }; // posted now, delivered late
+    f.later(1_000);
+    await f.accepted("B");
+    f.later(1_000);
+    expect(await f.beat("B", { occurredAt: undefined })).toEqual({ ok: true, activity: expect.anything() });
+    await f.post("Stop", "end_turn", stopA);
+    expect(await f.beat("B")).toEqual({ ok: true, activity: expect.anything() });
+    f.later(HOOK_AUTHORITY_WINDOW_MS + 5_000);
+    expect(f.state()).toMatchObject({ activity: "working" });
+  });
+
   it("counts again after an operator clears the seat's attention", async () => {
     const f = fixture();
     await f.accepted("1");

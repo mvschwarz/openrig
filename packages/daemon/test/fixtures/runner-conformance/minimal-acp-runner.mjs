@@ -22,7 +22,8 @@ const withdrawAfterStop = argv.includes("--withdraw-after-stop");
 const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
 // --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
 // every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
-// first. Breaks: beat-after-stop, beat-during-ask, no-resolve.
+// first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
+// before it did, so its sequence no longer rises with the runner's own time).
 const beatMode = argv.includes("--beat");
 let beatTurn = null;
 // With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
@@ -30,7 +31,8 @@ let deferredWithdraw = null;
 // --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
 let stoppedEarly = false;
 if (beatMode) setInterval(() => {
-  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
+  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30,
+    ...(breaks.has("beat-time-backwards") ? { occurredAt: new Date(Date.now() - 15_000).toISOString() } : {}) });
 }, 10_000).unref();
 const resolved = (ask) => { if (beatMode && !breaks.has("no-resolve")) void post("active", "permission_resolved", { turnId: String(turn), askId: ask.askId }); };
 const env = process.env;
