@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Native home-relative plugin references (2026-11-02)
+
+The plugin projection planner now expands `~\plugins\...` on Windows, matching its existing `~/plugins/...` behavior. Previously the native spelling resolved beneath the declaring spec's literal `~` directory. POSIX keeps backslashes as filename content, and explicit `~user` names are still not expanded. A new planner regression reproduced the Windows mismatch before the fix and checks both platform interpretations.
+
+The two complete plugin/general projection files passed 34/34 on Windows and 34/34 on ordinary-user WSL; daemon typecheck passed. Five existing Windows failures in these files were POSIX-only expected path spellings; their assertions now use native rooted paths while preserving the configured-home versus later-shell discriminator. The tests plan synthetic resources without installing plugins or changing any running seat. Actual native plugin installation and whole-daemon acceptance are not qualified by this result.
+
 ## Previously skipped seat-route interaction (2026-11-02)
 
 The empty skipped seat-route case is replaced with an actual memory-router render of SeatScopePage and LiveNodeDetails, a synthetic node-detail API response, and Overview/Details clicks that assert body replacement and an unchanged URL. It targets the current two-tab page rather than the retired outer three-tab definition. The old export-shape assertion is now labelled accurately instead of claiming a direct component render.
