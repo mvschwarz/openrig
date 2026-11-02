@@ -24,7 +24,8 @@ export function resolveBinEntry(invokedPath = process.argv[1], moduleUrl = impor
 export function isDirectRun(argv1 = process.argv[1], moduleUrl = import.meta.url): boolean {
   if (!argv1) return false;
   try {
-    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+    const canonical = process.platform === "win32" ? realpathSync.native : realpathSync;
+    return canonical(argv1) === canonical(fileURLToPath(moduleUrl));
   } catch {
     return false;
   }

@@ -3,9 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
+import { isDirectRun, resolveBinEntry, resolveNodeReexecBinary, run } from "../src/bin-wrapper.js";
 
 describe("bin-wrapper", () => {
+  it.runIf(process.platform === "win32")("recognizes a case alias of the same native wrapper without merging different files", () => {
+    const source = fileURLToPath(new URL("../src/bin-wrapper.ts", import.meta.url));
+    expect(isDirectRun(source.toUpperCase(), pathToFileURL(source).href)).toBe(true);
+    expect(isDirectRun(fileURLToPath(new URL("../src/index.ts", import.meta.url)), pathToFileURL(source).href)).toBe(false);
+  });
   let tempDir: string | null = null;
 
   afterEach(() => {

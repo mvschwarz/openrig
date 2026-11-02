@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Native CLI entry identity (2026-11-02)
+
+Both the source index and bin wrapper now use native realpath for their Windows direct-run identity check. A case alias of the same file previously compared unequal through the JavaScript realpath implementation and could leave the entry inert. POSIX resolution remains unchanged, and a different file still does not qualify as the current module.
+
+Validation: the two complete entry test files passed 12/12 on Windows and nine passed with three Windows-only cases skipped on WSL; CLI typecheck passed. Actual normal and uppercased-directory invocations of both source entries through tsx returned 0.7.1 under an owned synthetic home. The bin wrapper used its existing paired dist, so this is not a fresh installed-package qualification. An all-uppercase `.TS` extension was separately refused by the tsx/Node loader before entry execution; that loader behaviour is not claimed fixed.
+
 ## Preflight configured directory permissions (2026-11-02)
 
 Preflight now checks the configured database parent and transcript directory even when they sit inside OpenRig home. The old POSIX-only prefix shortcut skipped child permissions on Linux while backslash paths typically caused Windows to check them. Parent writability does not establish child writability. Each resolved directory is checked once, and existing native create-without-overwrite probes remain in use.
