@@ -20,6 +20,7 @@ import { windowsScopedLaunch } from "./windows-scoped-launch.js";
 import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "../domain/native-runtime-switch-exchange.js";
 import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-journal.js";
 import { readPlatformEnv } from "../domain/platform-env.js";
+import { tmuxFormatLiteral, tmuxSessionNameFormat } from "./tmux-format.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -508,9 +509,12 @@ export class TmuxAdapter {
     // uses. An id alone is unique only for one server's lifetime.
     let created: { id: string; at: string } | null;
     try {
-      const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", name];
+      const mapped = this.terminalKind === "psmux" && !!bindNativeSessionName(name).marker;
+      const formattedName = mapped ? name : tmuxSessionNameFormat(name);
+      const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", formattedName];
       if (cwd != null) argv.push("-c", cwd);
-      const out = await this.run(argv, `tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const out = this.terminalKind === "psmux" && !mapped ? await this.nativeRaw(argv)
+        : await this.run(argv, `tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(formattedName)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
       const match = /^(\$\d+) (\d+)$/.exec(out.trim());
       created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
@@ -543,7 +547,7 @@ export class TmuxAdapter {
   private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
     try {
       const physical = this.terminalKind === "psmux" ? await this.nativeBoundName(name) : name;
-      const same = `#{&&:#{==:#{session_name},${physical}},#{==:#{session_created},${created.at}}}`;
+      const same = `#{&&:#{==:#{session_name},${tmuxFormatLiteral(physical)}},#{==:#{session_created},${created.at}}}`;
       // Native session ids are local to one server and are not psmux client
       // selectors. Select its physical server, check the full create receipt,
       // then kill SELF inside that conditional, as the native stop path does.
@@ -1047,7 +1051,7 @@ export class TmuxAdapter {
     if (!name || !command[0] || [name, ...command].some(word => word.includes("\0"))) throw new Error("Invalid terminal command argv");
     const escape = (word: string) => word.endsWith(";") ? word.slice(0, -1) + "\\;" : word;
     const mapped = this.terminalKind === "psmux" && !!bindNativeSessionName(name).marker;
-    const formattedName = mapped ? name : name.replace(/#+(\[)?/g, (run, style?: string) => style ? run : run + run);
+    const formattedName = mapped ? name : tmuxSessionNameFormat(name);
     const argv = ["tmux", "new-session", "-d", "-P", "-F", "#{session_id} #{session_created}", "-s", mapped ? name : escape(formattedName),
       ...(this.terminalKind === "psmux" ? ["--"] : []), ...command.map(escape)];
     // Ordinary native names are already format-escaped; do not reinterpret

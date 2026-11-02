@@ -1,5 +1,31 @@
 # Native Windows parity: implementation and evidence
 
+## Literal session names in probe rollback format conditions (2026-11-03)
+
+Probe rollback previously inserted the session name directly into a nested
+tmux format comparison. Real tmux reproduced a same-session comparison failing
+for closing braces, format-looking `#{session_id}`, consecutive hashes and
+hash-delimiter combinations. Probe creation now escapes ordinary session-name
+hashes, and rollback uses a literal format operand that also escapes comma and
+closing-brace delimiters. Hash runs before style brackets retain tmux's existing
+semantics. Mapped native names continue through marker registration; this change
+does not expand the native filename codec or adopt existing unmarked sessions.
+Format delimiters follow the upstream [tmux manual](https://man.openbsd.org/tmux#FORMATS).
+
+Five complete related files passed 73/73 on Windows; additional native/legacy
+regression files passed eight with nine opt-in/platform skips, overlapping the
+first set. Daemon TypeScript/assets build passed. The actual compiled helper
+was then used against real WSL tmux for eight comma/brace/hash/style name cases:
+each session retained its expected literal name, each same-name comparison
+returned true, and each different-name comparison returned false. The fixture's
+owned sockets, sessions and files were cleaned. A first experimental escape
+that doubled every hash failed the style-bracket case and was not adopted.
+
+The real check qualifies format evaluation, not a concurrent hostile server
+replacement or actual stock psmux rollback. Installed and full-directory receipts
+above predate this repair. No deployment, original-team operation or public push
+occurred.
+
 ## Installed watcher reads a real owned SSE stream (2026-11-03)
 
 The complete native build/pack/isolated-prefix install gate passed at
