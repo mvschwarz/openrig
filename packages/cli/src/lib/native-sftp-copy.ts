@@ -30,11 +30,11 @@ const local: Endpoint = {
   },
   names: readdir, link: readlink,
   async followsDirectory(file) { try { return (await stat(file)).isDirectory(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } },
-  async mkdir(file) { await mkdir(file); },
+  async mkdir(file) { await mkdir(file, { mode: 0o700 }); },
   async symlink(target, file, directory) { await symlink(target, file, directory ? "dir" : "file"); },
   read: file => createReadStream(file),
   async write(file, data) {
-    const handle = await open(file, "wx");
+    const handle = await open(file, "wx", 0o600);
     try {
       for await (const chunk of data) {
         let offset = 0;

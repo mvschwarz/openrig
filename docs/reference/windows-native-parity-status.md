@@ -27,6 +27,25 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### SFTP staging permissions and readonly-directory completion (2026-11-02)
+
+SFTP MKDIR and exclusive OPEN now request 0700 and 0600 respectively at creation;
+the local endpoint uses the same initial modes. Final source permissions are
+still applied after file data or directory recursion completes. Previously a
+real OpenSSH server under umask 000 created a directory as 0777 before its final
+metadata pass. The regression reproduces that difference and now passes.
+
+Three ordinary-user WSL/OpenSSH tests check initial directory mode, file mode
+before the first data yield, final permission changes, and readonly-directory
+upload/download with complete bytes. Independent filesystem observations see
+0600 staging files in both directions before final 0640 files and 0555
+directories. Windows's complete SFTP/protocol/path files pass 29 tests; CLI
+TypeScript checking passes. A separate real Windows-source client to the owned
+WSL subsystem passes initial/final mode checks and cleanup, with source hash in
+the local sftp-staging-native receipt. This is subsystem protocol qualification,
+not a network SSH authentication test or POSIX access enforcement through NTFS
+mode bits. Owner/group, ACL and special-file archive equivalence remain open.
+
 ### OpenShell real-engine qualification boundary (2026-11-02)
 
 Live PATH checks find neither openshell.exe nor podman.exe on this host. The

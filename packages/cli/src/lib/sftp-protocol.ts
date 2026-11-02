@@ -130,7 +130,7 @@ export class SftpClient {
     } finally { await this.request(4, str(handle), 101); }
     return names;
   }
-  async mkdir(file: string): Promise<void> { await this.request(14, Buffer.concat([str(file), u32(0)]), 101); }
+  async mkdir(file: string): Promise<void> { await this.request(14, Buffer.concat([str(file), u32(4), u32(0o700)]), 101); }
   async readlink(file: string): Promise<string> {
     const packet = await this.request(19, str(file), 104);
     if (packet.uint() !== 1) throw new Error("Invalid SFTP link target");
@@ -153,7 +153,9 @@ export class SftpClient {
     } finally { await this.request(4, str(handle), 101); }
   }
   async write(file: string, chunks: AsyncIterable<Buffer>): Promise<void> {
-    const handle = (await this.request(3, Buffer.concat([str(file), u32(2 | 8 | 32), u32(0)]), 102)).bytes();
+    // Restrict at OPEN, before yielding source bytes. Final source permissions
+    // are installed only after the complete staged file has been written.
+    const handle = (await this.request(3, Buffer.concat([str(file), u32(2 | 8 | 32), u32(4), u32(0o600)]), 102)).bytes();
     try {
       let offset = 0;
       for await (const data of chunks) { await this.request(6, Buffer.concat([str(handle), u64(offset), str(data)]), 101); offset += data.length; }
