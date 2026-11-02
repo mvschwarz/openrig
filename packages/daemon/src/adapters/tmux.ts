@@ -751,8 +751,10 @@ export class TmuxAdapter {
       if (!shell) throw new Error("Default shell unavailable for private environment launch");
       if (command.length) throw new Error("Unrecognized native command boundary for private environment launch");
       bootstrap = this.fileOps.tmpName();
-      const launch = windowsScopedLaunch(shell, userCommand, entries, bootstrap, true);
+      const recoveryKey = `OPENRIG_LAUNCH_RECOVERY_${randomUUID().replace(/-/g, "")}`;
+      const launch = windowsScopedLaunch(shell, userCommand, entries, bootstrap, true, recoveryKey);
       await this.fileOps.writeFile(bootstrap, launch.content, { mode: 0o600, flag: "wx" });
+      if (launch.recovery) entries[launch.recovery.key] = launch.recovery.value;
       command = ["--", ...launch.argv];
     }
     const config = await this.fileOps.privateConfig(Object.entries(entries).map(([key, value]) => psmuxPrivateEnvironmentLine(key, value)).join(""));

@@ -13,6 +13,27 @@ const nativeShells = [join(process.env.SystemRoot ?? "C:\\Windows", "System32", 
   ...(process.env.OPENRIG_TEST_PWSH ? [process.env.OPENRIG_TEST_PWSH] : [])];
 
 describe.skipIf(process.platform !== "win32")("native scoped shell bootstrap", () => {
+  it("recovers without its consumed file using current allowed session values and hides recovery metadata", () => {
+    const dir=mkdtempSync(join(tmpdir(),"openrig-recover-"));
+    try {
+      const file=join(dir,"initial.ps1"), output=join(dir,"result.json"), key="OPENRIG_LAUNCH_RECOVERY_0123456789abcdef0123456789abcdef";
+      const command=`[IO.File]::WriteAllText(${powershellQuote(output)},(ConvertTo-Json @{selected=$env:SELECTED; unrelated=$env:UNRELATED; recovery=@(Get-ChildItem Env: | Where-Object Name -like 'OPENRIG_LAUNCH_RECOVERY_*').Count}))`;
+      const first="private initial ' 中文", latest="current session value";
+      const launch=windowsScopedLaunch(`"${nativeShells[0]}" -NoProfile`,command,{SystemRoot:process.env.SystemRoot,SELECTED:first},file,false,key);
+      expect(launch.recovery).toBeDefined();expect(Buffer.from(launch.recovery!.value,"base64").toString()).not.toContain(first);
+      expect(Buffer.from(launch.argv.at(-1)!,"base64").toString("utf16le")).not.toContain(first);
+      writeFileSync(file,launch.content);
+      const env={SystemRoot:process.env.SystemRoot,UNRELATED:"server-only",SELECTED:latest,[key]:launch.recovery!.value};
+      for(const expected of [first,latest]){
+        const result=spawnSync(launch.argv[0]!,launch.argv.slice(1),{cwd:dir,env,encoding:"utf8",windowsHide:true,timeout:15000});
+        expect(result.status,result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(output,"utf8"))).toEqual({selected:expected,unrelated:null,recovery:0});
+        expect(existsSync(file)).toBe(false);
+      }
+      const missing=spawnSync(launch.argv[0]!,launch.argv.slice(1),{cwd:dir,env:{SystemRoot:process.env.SystemRoot},encoding:"utf8",windowsHide:true,timeout:15000});
+      expect(missing.status).not.toBe(0);expect(missing.stderr).toContain("Native launch recovery is unavailable");
+    }finally{rmSync(dir,{recursive:true,force:true});}
+  });
   it.each(nativeShells)("clears unrelated inheritance, preserves pane identity and keeps values off bootstrap argv: %s", shell => {
     const dir = mkdtempSync(join(tmpdir(), "openrig-scoped-"));
     try {

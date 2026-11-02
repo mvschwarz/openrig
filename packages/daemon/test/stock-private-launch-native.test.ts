@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFile } from "node:child_process";
@@ -32,6 +32,13 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("keep
     expect(await adapter.respawnPane(pane.id, record(second), { cwd: root, env: { SELECTED: values[1]! } })).toEqual({ ok: true });
     await expect.poll(() => existsSync(second), { timeout: 5000 }).toBe(true);
     expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: values[1], inherited: "server value", lower: "mixed case" });
+    await expect.poll(() => adapter.isPaneDead(pane.id), { timeout: 5000 }).toBe(true);
+    unlinkSync(second);
+    await adapter.setSessionEnv("owned", "SELECTED", "updated before external respawn");
+    await invoke(["tmux", "respawn-pane", "-t", "=owned:0.0"]);
+    await expect.poll(() => existsSync(second), { timeout: 5000 }).toBe(true);
+    expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: "updated before external respawn", inherited: "server value", lower: "mixed case" });
+    await adapter.setSessionEnv("owned", "SELECTED", values[1]!);
     expect(await invoke(["tmux", "show-environment", "-t", "=owned", "SELECTED"])).toBe(`SELECTED=${values[1]}\n`);
     expect(calls.flat().some(arg => values.some(value => arg.includes(value)))).toBe(false);
     expect(calls.filter(argv => argv.includes("new-session") || argv.includes("respawn-pane")).every(argv => !argv.includes("-e"))).toBe(true);
