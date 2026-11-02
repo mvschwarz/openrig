@@ -5207,6 +5207,23 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Installed mapped-attach gate at `6ed95f6638191855bd8f7cc817c144e42e5af9d4`
+passed in 68 seconds with unchanged HEAD and tracked diff: actual native build,
+tarball assembly, isolated-prefix install, installed CLI attach-module import,
+and execution of the shipped helper against an owned controlled executable.
+The probe verified the physical target/marker exchange, read-only flag and one
+snapshot/attach in single-attach mode, alongside existing literal argv, SFTP
+binary transport, native time/file helpers, SQLite and resource checks. Fixture
+PATH was restored and temporary files removed. No real desktop or provider was
+attached, and no deployment/publication occurred.
+
+The preceding `412177e` gate failed because its strict receipt assertion still
+expected three fields while the probe now reports `mappedSingleAttach`; that
+contract was corrected and the complete gate rerun. The old failure remains
+historical evidence, not a pass. Source stability here concerns tracked content;
+the package build reports dirty identity with retained untracked diagnostics.
+Leak-guard term checks without a rules file remain skipped, not validated.
+
 `rig terminal attach` now uses the same verified binding wrapper for constrained
 Windows names. An explicit attach-only mode returns after the first attachment,
 preserving the manual command's semantics instead of following replacements.
