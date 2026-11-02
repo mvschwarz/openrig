@@ -5207,6 +5207,29 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Full CLI/TUI/UI directory checkpoint at
+`c265738c7d853ef91d0f9217e7ed574cc699a6cf` selected 758 test files per platform.
+Windows: 9,620 total, 9,501 passed, one failed, 118 skipped, 11m27s. WSL: 9,619
+total, 9,391 passed, zero failed, 228 skipped, 5m19s. The sole Windows failure
+remains `terminal-window-windows.test.ts` / system discovery with an owned PATH
+containing no system tools: Windows Terminal was reported unavailable and the
+native lookup returned no matching files. Earlier bounded investigation is
+exhausted; this checkpoint does not claim that failure fixed. No other test
+failed in this run. Skips remain unverified behavior, not completion.
+
+Windows HEAD and tracked diff remained unchanged. WSL paired daemon build
+passed, 4,712 public regular-file hashes matched before/after, and existing
+private dependency identity matched after the suite without source viewing or
+copying. Six documentation links and generated/untracked mirror entries remain
+outside equivalence. This is not a daemon full-suite, deployment, real-provider
+or stock-psmux acceptance result. Runtime versions differ, so elapsed times are
+test receipts and not a performance comparison.
+
+A separate owned native-local fixture also copied all six exact reserved and
+trailing names (`con`, `nul`, `aux.txt`, `trailing`, `trailing.`, `trailing `)
+with distinct correct bytes. It exercised the existing built module without
+changing frozen source; this scoped finding required no product change.
+
 Updated paired transfer checkpoint at `bf9500221851458d9611fcf0a22cd139a822d318`:
 the same sixteen explicit test files selected, 189 tests per platform. Windows:
 164 passed, zero failed, 25 skipped. WSL: 124 passed, zero failed, 65 skipped.
