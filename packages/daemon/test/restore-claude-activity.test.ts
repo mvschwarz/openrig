@@ -418,6 +418,8 @@ describe("contained Claude restore activity resources", () => {
     const f = seed(false, true, "claude-code", true, null);
     db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
     const project = vi.spyOn(adapter, "project");
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const startNode = vi.spyOn(StartupOrchestrator.prototype, "startNode");
     const result = await restore(f, adapter);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -426,6 +428,15 @@ describe("contained Claude restore activity resources", () => {
     expect(savedCall![0].cwd).toBe(liveCwd);
     expect(savedCall![1].cwd).toBe(liveCwd);
     expect(liveOwned(liveSettingsPath).length).toBeGreaterThan(0);
+    // The same restore's startup replay must use the live seat directory too:
+    // with the snapshot cwd absent it previously wrote the collector/status
+    // line into the daemon's own working folder ("."), polluting later tests.
+    const replayCalls = startNode.mock.calls.filter(([args]) => args.plan && args.binding);
+    expect(replayCalls.length).toBeGreaterThan(0);
+    for (const [{ plan: replayPlan, binding: replayBinding }] of replayCalls) {
+      expect(replayPlan.cwd).toBe(liveCwd);
+      expect(replayBinding.cwd).toBe(liveCwd);
+    }
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });

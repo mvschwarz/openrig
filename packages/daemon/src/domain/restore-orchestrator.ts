@@ -2007,7 +2007,7 @@ export class RestoreOrchestrator {
           // Build fresh projection plan (all safe_projection; replaySkip says which seat skills are left alone)
           const plan: import("./projection-planner.js").ProjectionPlan = {
             runtime: startupCtx.runtime,
-            cwd: node.cwd ?? ".",
+            cwd: launchCwd,
             entries: filteredEntries.map((e) => ({
               ...e,
               classification: "safe_projection" as const,
@@ -2024,7 +2024,7 @@ export class RestoreOrchestrator {
             ...launchResult.binding,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
-            cwd: node.cwd ?? ".",
+            cwd: launchCwd,
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
             // (both restore paths consume persisted provenance — preflight surface 3).
