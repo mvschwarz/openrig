@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { noServerTerminal } from "./helpers/no-server-terminal.js";
 import { kernelStatusRoutes } from "../src/routes/kernel-status.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type Database from "better-sqlite3";
@@ -58,7 +58,7 @@ function host(claimed = false) {
   const rig = rigRepo.createRig("kernel");
   db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("kernel-pod", rig.id, "Kernel");
   const nodes = SEATS.map((logicalId) => {
-    const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", podId: "kernel-pod" });
+    const node = rigRepo.addNode(rig.id, logicalId, { runtime: "claude-code", podId: "kernel-pod", cwd: "/workspace/stored" });
     const name = `${logicalId.replace(".", "-")}@kernel`;
     const session = claimed ? sessionRegistry.registerClaimedSession(node.id, name) : sessionRegistry.registerSession(node.id, name);
     sessionRegistry.updateStatus(session.id, "running");
@@ -102,7 +102,7 @@ function host(claimed = false) {
   const statuses = () => (db.prepare(
     "SELECT status FROM sessions WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?) ORDER BY created_at, id",
   ).all(rig.id) as Array<{ status: string }>).map((row) => row.status);
-  return { db, rigRepo, sessionRegistry, eventBus, tmux, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap };
+  return { db, rigRepo, sessionRegistry, eventBus, tmux, snapshotRepo, snapshotCapture, rig, nodes, live, reboot, down, reconcile, daemonStart, statuses, bootstrap, specsDir };
 }
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -118,6 +118,9 @@ describe("daemon start with an existing kernel rig", () => {
     expect(restore).toHaveBeenCalledWith(h.rig.id);
     expect(tracker.getStatus().kernelState).toBe("booting");
     expect(h.bootstrap.bootstrap).not.toHaveBeenCalled();
+    // An existing kernel comes back where it was created: no new kernel folder, and each seat's directory unchanged.
+    expect(h.rigRepo.getRig(h.rig.id)!.nodes.map((node) => node.cwd)).toEqual(["/workspace/stored", "/workspace/stored"]);
+    expect(existsSync(join(h.specsDir, "kernel"))).toBe(false);
   });
 
   it("doesn't bring back a kernel that was already down before this start, or its old conversations", async () => {
