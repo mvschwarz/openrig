@@ -95,6 +95,8 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), symlink: (target, file) => client!.symlink(target, file),
       read: file => client!.read(file), write: (file, data) => client!.write(file, data),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
+      ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
+        ? { linkTimes: (file: string, attrs: SftpAttrs) => client!.setLinkTimes(file, attrs) } : {}),
     };
     const source = plan.src.kind === "local" ? local : remote;
     const destination = plan.dst.kind === "local" ? local : remote;

@@ -8,6 +8,15 @@ import { SftpClient } from "../src/lib/sftp-protocol.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native OpenSSH SFTP protocol", () => {
+  it("rejects an unknown lsetstat version without sending a metadata request", async () => {
+    const script = `const u=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(n);return b},s=t=>Buffer.concat([u(Buffer.byteLength(t)),Buffer.from(t)]);let seen=false;process.stdin.on('data',()=>{if(seen){process.exit(9);return}seen=true;const body=Buffer.concat([Buffer.from([2]),u(3),s('lsetstat@openssh.com'),s('2')]);process.stdout.write(Buffer.concat([u(body.length),body]));});`;
+    const child=spawn(process.execPath,["-e",script],{stdio:"pipe",windowsHide:true});const client=new SftpClient(child);
+    try{
+      await client.ready;expect(client.extensionVersions.get("lsetstat@openssh.com")).toBe("2");
+      await expect(client.setLinkTimes("/unused",{atime:1400000000,mtime:1400000000})).rejects.toThrow("version 1");
+    }finally{await client.close();}
+    expect(child.exitCode).toBe(0);
+  });
   it("rejects malformed framing and terminates its owned transport", async () => {
     const child = spawn(process.execPath, ["-e", "process.stdout.write(Buffer.from([255,255,255,255]));setInterval(()=>{},1000)"], { stdio: "pipe" });
     const client = new SftpClient(child);

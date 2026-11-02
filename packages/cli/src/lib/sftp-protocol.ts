@@ -1,4 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 // SFTP v3 packets over an already authenticated OpenSSH subsystem stream.
 // No SSH keys/config parsing and no remote shell or path interpolation here.
@@ -39,10 +41,12 @@ class Packet {
 
 export class SftpClient {
   readonly extensions = new Set<string>();
+  readonly extensionVersions = new Map<string, string>();
   readonly ready: Promise<void>;
   private buffered: Buffer = Buffer.alloc(0);
   private nextId = 0;
   private failure?: Error;
+  private readonly linkTimeQualifications = new Map<string, Promise<void>>();
   private completeReady!: () => void;
   private rejectReady!: (error: Error) => void;
   private readonly pending = new Map<number, { resolve: (packet: { type: number; body: Packet }) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -62,7 +66,10 @@ export class SftpClient {
           const type = data[0]!, body = new Packet(data.subarray(1));
           if (type === 2) {
             if (body.uint() !== 3) throw new Error("Remote SFTP server does not support version 3");
-            while (body.remaining) { this.extensions.add(body.text()); body.text(); }
+            while (body.remaining) {
+              const name = body.text(), version = body.text();
+              this.extensions.add(name); this.extensionVersions.set(name, version);
+            }
             clearTimeout(this.handshake); this.completeReady(); continue;
           }
           const id = body.uint(), waiter = this.pending.get(id);
@@ -158,6 +165,47 @@ export class SftpClient {
     const flags = (mode.length ? 4 : 0) | (times.length ? 8 : 0);
     if (flags) await this.request(9, Buffer.concat([str(file), u32(flags), ...mode, ...times]), 101);
   }
+  async setLinkTimes(file: string, attrs: SftpAttrs): Promise<void> {
+    await this.ready;
+    if (this.extensionVersions.get("lsetstat@openssh.com") !== "1") {
+      throw new Error("Remote SFTP server needs lsetstat@openssh.com version 1 to preserve link timestamps");
+    }
+    const directory = path.posix.dirname(file);
+    let qualified = this.linkTimeQualifications.get(directory);
+    if (!qualified) {
+      qualified = this.qualifyLinkTimes(directory);
+      this.linkTimeQualifications.set(directory, qualified);
+    }
+    await qualified;
+    await this.writeLinkTimes(file, attrs);
+  }
+  private async writeLinkTimes(file: string, attrs: SftpAttrs): Promise<void> {
+    // Timestamp attributes only: chmod on symlinks is not portable and must not
+    // leak the synthetic Windows permissions onto a POSIX referent.
+    if (attrs.atime !== undefined && attrs.mtime !== undefined) {
+      await this.request(200, Buffer.concat([str("lsetstat@openssh.com"), str(file), u32(8), u32(attrs.atime), u32(attrs.mtime)]), 101);
+    }
+  }
+  private async qualifyLinkTimes(directory: string): Promise<void> {
+    // Some servers advertise lsetstat but implement it by following links.
+    // Qualify only against an exclusively created referent, never user data.
+    const basename = `.openrig-linktime-${randomUUID()}`;
+    const referent = path.posix.join(directory, basename), link = referent + "-link";
+    let fileCreated = false, linkCreated = false;
+    try {
+      await this.write(referent, (async function* () { yield Buffer.from("owned link timestamp probe"); })()); fileCreated = true;
+      await this.setTimes(referent, { atime: 1500000000, mtime: 1500000000 });
+      await this.symlink(basename, link); linkCreated = true;
+      await this.writeLinkTimes(link, { atime: 1400000000, mtime: 1400000000 });
+      if ((await this.lstat(link))?.mtime !== 1400000000 || (await this.lstat(referent))?.mtime !== 1500000000) {
+        throw new Error("Remote SFTP lsetstat does not preserve no-follow link timestamp semantics; existing referents were not modified");
+      }
+    } finally {
+      try { if (linkCreated) await this.remove(link); }
+      finally { if (fileCreated) await this.remove(referent); }
+    }
+  }
+  async remove(file: string): Promise<void> { await this.request(13, str(file), 101); }
   async rename(src: string, dst: string, replacing: boolean): Promise<void> {
     if (this.extensions.has("posix-rename@openssh.com")) {
       await this.request(200, Buffer.concat([str("posix-rename@openssh.com"), str(src), str(dst)]), 101);

@@ -10,6 +10,28 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it.each([false,true])("qualifies advertised no-follow metadata before touching the referent (dangling=%s)",async dangling=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-upload-linktime-"));
+    const source=path.join(root,"source"),destination=path.join(root,"destination"),target=path.join(root,"target");
+    try{
+      if(!dangling){await writeFile(target,"owned referent");await utimes(target,1500000000,1500000000);}
+      await symlink("target",source,"file");await lutimes(source,1400000000,1400000000);
+      const plan:CopyPlan={src:{kind:"local",path:source},dst:{kind:"remote",path:"/"+destination.replaceAll("\\","/"),host:{id:"fixture",target:"fixture",transport:"ssh"}},dryRun:false};
+      const start=()=>spawn(server,[],{stdio:"pipe",windowsHide:true});
+      const result=await runNativeSftpCopy(plan,start);
+      if(result.ok){
+        expect(Math.floor((await lstat(destination)).mtimeMs/1000)).toBe(1400000000);
+        expect(await readlink(destination)).toBe("target");
+      }else{
+        // Current Windows OpenSSH follows lsetstat links; it also cannot create
+        // a dangling link. A future corrected server must pass the safe path.
+        expect(result.stderr).toMatch(dangling ? /No such file|does not preserve no-follow/ : /does not preserve no-follow/);
+        expect(result.hint).toContain("existing destination was not removed");
+      }
+      expect((await readdir(root)).filter(name=>name.startsWith(".openrig-linktime-"))).toEqual([]);
+      if(!dangling)expect(Math.floor((await lstat(target)).mtimeMs/1000)).toBe(1500000000);
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("downloads and repairs link timestamps without mutating the referent",async()=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-linktime-"));
     const source=path.join(root,"source"),destination=path.join(root,"destination"),target=path.join(root,"target");

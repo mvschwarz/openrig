@@ -27,6 +27,34 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Qualified SFTP upload link timestamps (2026-11-02)
+
+The SFTP client now records extension versions and uses version 1 of
+[`lsetstat@openssh.com`](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL)
+for timestamp-only no-follow attributes. A per-directory, per-transport probe
+first creates an exclusive referent and relative symlink, applies distinct
+timestamps, checks both objects and removes the probe entries. Only a passing
+probe allows timestamp operations on the copy's staged or existing link. An
+unknown extension version never sends the request; ordinary SETSTAT is never a
+fallback for symlinks.
+
+Real Windows OpenSSH advertises this extension but follows the link: its link
+timestamp stays unchanged while its referent changes. The exclusive probe
+detects this without changing the copy's real referent. This server also refuses
+creation of a dangling link. The transfer reports failure and retains its
+staging hint rather than claiming archive-equivalent success. Windows remote
+link timestamp uploads therefore remain incomplete; an advertised capability is
+not qualification.
+
+The same Windows client successfully uploads and repairs link timestamps against
+the real Ubuntu 24.04 OpenSSH 9.6p1-3ubuntu13.20 subsystem running as an ordinary
+user. Dry-run leaves the link unchanged, metadata repair transfers no file bytes,
+the referent timestamp stays unchanged and no probe entries remain. The server
+package is extracted in a task-owned directory; no SSH service is installed or
+started. Four native copy/protocol files pass 37 tests and the CLI build passes.
+This supersedes the prior client-side missing-extension limitation for qualified
+servers only, not the full archive or cross-host acceptance requirements.
+
 ### Native symlink timestamp preservation (2026-11-02)
 
 Native local copies now preserve the link's own timestamps using `lutimes`,
