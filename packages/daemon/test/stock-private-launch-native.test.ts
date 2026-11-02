@@ -17,27 +17,33 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("keep
   const invoke = async (argv: string[]) => { calls.push(argv); return (await run(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { env, cwd: root, windowsHide: true, timeout: 10000 })).stdout; };
   const adapter = new TmuxAdapter(async () => { throw Error("No shell transport"); }, undefined, invoke, "psmux");
   const first = join(root, "first.json"), second = join(root, "second.json");
-  const record = (file: string) => `[IO.File]::WriteAllText(${q(file)},(ConvertTo-Json @{ value=$env:SELECTED; inherited=$env:INHERITED_OWNED; lower=$env:lowerCase }))`;
+  const unusual: Record<string,string> = { "Owned space": "space value", "owned.dot": "dot value", "owned-hyphen": "hyphen value", "变量": "Unicode value", 'owned"quote': "quoted value", "owned#{pid}": "literal format name" };
+  const record = (file: string) => `[IO.File]::WriteAllText(${q(file)},(ConvertTo-Json @{ value=$env:SELECTED; inherited=$env:INHERITED_OWNED; lower=$env:lowerCase; unusual=@{${Object.keys(unusual).map(key=>`${q(key)}=[Environment]::GetEnvironmentVariable(${q(key)},'Process')`).join(';')}} }))`;
   const values = ["synthetic private first ' 中文\nline", "synthetic private successor $ #{pid}\r\n"];
   try {
     expect(await adapter.startServer()).toEqual({ ok: true });
     await invoke(["tmux", "set-option", "-g", "remain-on-exit", "on"]);
     await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile -EncodedCommand ${Buffer.from(record(first), "utf16le").toString("base64")}`]);
-    expect(await adapter.createSession("owned", root, { SELECTED: values[0]!, lowerCase: "mixed case" })).toEqual({ ok: true });
+    expect(await adapter.createSession("owned", root, { SELECTED: values[0]!, lowerCase: "mixed case", ...unusual })).toEqual({ ok: true });
     await expect.poll(() => existsSync(first), { timeout: 5000 }).toBe(true);
-    expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ value: values[0], inherited: "server value", lower: "mixed case" });
+    expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ value: values[0], inherited: "server value", lower: "mixed case", unusual });
     const pane = (await adapter.listPanes("owned"))[0]!;
     await expect.poll(() => adapter.isPaneDead(pane.id), { timeout: 5000 }).toBe(true);
     await invoke(["tmux", "set-option", "-g", "default-shell", `"${shell}" -NoProfile`]);
     expect(await adapter.respawnPane(pane.id, record(second), { cwd: root, env: { SELECTED: values[1]! } })).toEqual({ ok: true });
     await expect.poll(() => existsSync(second), { timeout: 5000 }).toBe(true);
-    expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: values[1], inherited: "server value", lower: "mixed case" });
+    expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: values[1], inherited: "server value", lower: "mixed case", unusual });
     await expect.poll(() => adapter.isPaneDead(pane.id), { timeout: 5000 }).toBe(true);
     unlinkSync(second);
+    for (const [key,value] of Object.entries(unusual)) {
+      expect(await adapter.getSessionEnv("owned",key)).toBe(value);
+      await adapter.setSessionEnv("owned",key,value+" updated");
+      unusual[key]=value+" updated";
+    }
     await adapter.setSessionEnv("owned", "SELECTED", "updated before external respawn");
     await invoke(["tmux", "respawn-pane", "-t", "=owned:0.0"]);
     await expect.poll(() => existsSync(second), { timeout: 5000 }).toBe(true);
-    expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: "updated before external respawn", inherited: "server value", lower: "mixed case" });
+    expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ value: "updated before external respawn", inherited: "server value", lower: "mixed case", unusual });
     await adapter.setSessionEnv("owned", "SELECTED", values[1]!);
     expect(await invoke(["tmux", "show-environment", "-t", "=owned", "SELECTED"])).toBe(`SELECTED=${values[1]}\n`);
     expect(calls.flat().some(arg => values.some(value => arg.includes(value)))).toBe(false);

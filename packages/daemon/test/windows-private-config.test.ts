@@ -3,7 +3,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
+import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig } from "../src/adapters/windows-private-config.js";
+
+it.each(["", "-option", "name=value", "line\nbreak", "line\rbreak", "nul\0key"])("rejects an unrepresentable private environment name %j", key => {
+  expect(()=>psmuxPrivateEnvironmentLine(key,"synthetic")).toThrow("Invalid environment assignment");
+});
 
 describe.skipIf(process.platform !== "win32")("private native config DACL", () => {
   it("protects its parent before writing and removes its own file/directory", async () => {

@@ -27,6 +27,25 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Windows nonidentifier environment persistence (2026-11-02)
+
+The private session transport now accepts and quotes representable native names
+outside shell-identifier grammar instead of silently excluding them from scoped
+launch persistence. Its read/set/unset validation uses the same name boundary.
+Real stock psmux tests prove names containing spaces, dots, hyphens, Unicode,
+quotes and literal `#{pid}` survive initial launch, adapter respawn and raw
+external respawn. Session updates are read back and later respawn observes their
+new values. Values remain off launch argv. Twelve native private-environment/
+DACL/injection-boundary tests and daemon TypeScript checking passed. Names
+starting with a dash or containing control characters remain outside this
+private config grammar; this is not arbitrary Windows-name qualification.
+
+The correctly built WSL full CLI/TUI run under codexqa (uid 1000), still at
+a03de2d, finished with stable source hashes: 7,377 passed, eight failed, 132
+pending (7,517 counted). Six failures are the terminal/discovery issues repaired
+in the follow-ups above/below; real tmux special-name and release-surface failure
+classification still require diagnosis. This is not a passing full-suite result.
+
 ### Terminal composition across host platforms (2026-11-02)
 
 TerminalService now validates a resolved executable with the selected local

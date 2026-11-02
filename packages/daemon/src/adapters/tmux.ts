@@ -11,7 +11,7 @@ import type { TmuxControlExec } from "./tmux-control.js";
 import { powershellQuote, hasOnlyWindowsTerminalResponseDraft } from "./windows-launch.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
+import { isWindowsPrivateEnvironmentName, psmuxPrivateEnvironmentLine, writeWindowsPrivateConfig, type PrivateConfig } from "./windows-private-config.js";
 import { createPrivateTextFileAsync } from "../domain/private-text-file.js";
 import { isStagedSendName, SEND_SCRIPT_PREFIX, SEND_SCRIPT_SUFFIX } from "./staged-send-name.js";
 import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../domain/windows-cmd-bridge.js";
@@ -704,7 +704,7 @@ export class TmuxAdapter {
         const assignment = argv[++index] ?? "";
         const separator = assignment.indexOf("=");
         const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
-        if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_()]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+        if (separator < 1 || !isWindowsPrivateEnvironmentName(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
         entries.push([key, value]);
         if (referenceIndex < 0) { rewritten.push("-e", ""); referenceIndex = rewritten.length - 1; }
       }
@@ -747,7 +747,7 @@ export class TmuxAdapter {
       if (arg !== "-e") { rewritten.push(arg); continue; }
       const assignment = argv[++index] ?? "", separator = assignment.indexOf("=");
       const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
-      if (separator < 1 || !/^[A-Za-z_][A-Za-z0-9_()]*$/.test(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
+      if (separator < 1 || !isWindowsPrivateEnvironmentName(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
       entries[key] = value;
     }
     if (!Object.keys(entries).length) return this.run(argv);
@@ -1039,10 +1039,10 @@ export class TmuxAdapter {
     let bootstrap: string | undefined;
     const scopedCommand = await this.scopedLaunchCommand(seatEnv, undefined, warnings, (file, recoveryEnv) => { bootstrap = file; Object.assign(seatEnv,recoveryEnv); });
     // These assignments enter our private transport, not literal psmux -e.
-    // Identifier names use its versioned protocol; parenthesized Windows names
+    // Identifier names use its versioned protocol; other representable Windows names
     // use private source-file persistence and are available to later recovery.
     const transportEnv = Object.entries(seatEnv).filter(([key]) =>
-      !(this.isNativeWindows && scopedCommand) || /^[A-Za-z_][A-Za-z0-9_()]*$/.test(key));
+      !(this.isNativeWindows && scopedCommand) || isWindowsPrivateEnvironmentName(key));
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of transportEnv) argv.push("-e", `${k}=${v}`);
@@ -1817,7 +1817,7 @@ export class TmuxAdapter {
 
   /** A launch metadata read. Callers must never put credential values in terminal input. */
   async getSessionEnv(session: string, key: string): Promise<string | undefined> {
-    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     try {
       const output = await this.run(["tmux", "show-environment", "-t", target, key],
@@ -1840,7 +1840,7 @@ export class TmuxAdapter {
 
   /** Set one variable for later panes, through the same private-file channel as launch. */
   async setSessionEnv(session: string, key: string, value: string): Promise<void> {
-    if (!(this.terminalKind === "psmux" ? /^[A-Za-z_][A-Za-z0-9_()]*$/ : /^[A-Z_][A-Z0-9_]*$/).test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     if (this.terminalKind === "psmux") {
       if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
@@ -1859,7 +1859,7 @@ export class TmuxAdapter {
    *  identity in the server's environment (see parent-session-env) is marked removed instead, as a
    *  launch does, so the server's value does not come back. */
   async unsetSessionEnv(session: string, key: string): Promise<void> {
-    if (!(this.terminalKind === "psmux" ? /^[A-Za-z_][A-Za-z0-9_()]*$/ : /^[A-Z_][A-Z0-9_]*$/).test(key)) throw new Error("Invalid session environment key.");
+    if (!(this.terminalKind === "psmux" ? isWindowsPrivateEnvironmentName(key) : /^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid session environment key.");
     const target = exactTarget(session, "session");
     const parents = parentSessionEnvKeys(await this.globalEnvironment()).filter(name => process.platform === "win32" ? name.toUpperCase() === key.toUpperCase() : name === key);
     const flag = parents.length ? "-r" : "-u";
