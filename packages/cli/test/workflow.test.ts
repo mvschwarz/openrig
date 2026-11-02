@@ -184,6 +184,15 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
       unlinkSync(file);
     }
   });
+  it.each(["instantiate", "run"])("%s respects platform drive-relative paths even when the selected file is missing", async verb => {
+    const { deps, calls } = makeDeps();
+    const drive = process.platform === "win32" ? resolve(".").slice(0, 2) : "C:";
+    const source = `${drive}.workflow-missing-${randomUUID()}.md`;
+    const program = createProgram({ workflowDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", verb, source, "--json", "--root-objective", "ship", "--created-by", "orch@rig"]);
+    expect(calls.find(call => call.path === "/api/workflow/instantiate")?.body)
+      .toMatchObject({ specPath: process.platform === "win32" ? resolve(source) : source });
+  });
 
   it.each(["instantiate", "run"])("%s preserves a discovered name when a same-name directory exists", async (verb) => {
     const { deps, calls } = makeDeps();

@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Workflow drive-relative source selection (2026-11-03)
+
+The instantiate/run source selector previously recognized absolute paths,
+separator-bearing paths and existing bare files. A missing Windows drive-
+relative operand such as D:flow.yaml therefore fell through to discovered-name
+lookup instead of being resolved in the caller's drive context. Both commands
+now treat a native drive prefix as a path independently of file existence.
+POSIX retains the existing meaning of the same colon-bearing string; ordinary
+discovered names, existing extensionless files and same-name directories keep
+their previous selection rules.
+
+Two native command regressions failed before the repair. The complete workflow
+CLI file passed 24/24 on Windows and 24/24 on ordinary-user WSL after the two
+changed source/test files were copied and byte-compared. CLI TypeScript noEmit
+and whitespace checks passed. The fixtures inspect actual CLI request bodies
+with controlled daemon responses and unique missing filenames; they do not
+launch a workflow/provider, write the missing source or contact an original
+instance. Earlier full-directory and installed receipts predate this repair;
+the remaining parity requirements and aggregate push remain pending.
+
 ## Context install and serving share portable path validation (2026-11-03)
 
 A bounded reconciliation of five older path-inventory candidates found a
