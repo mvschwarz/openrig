@@ -2454,3 +2454,34 @@ supported Bash private loader also supersedes four old null-plan expectations;
 their no-credential-in-argv assertions remain. Daemon type checking passes.
 This closes the observed native PATH difference, not full same-head platform
 validation or real provider acceptance.
+
+### Complete CLI/TUI observation and remaining leads (2026-11-02)
+
+The complete CLI/TUI directory run at unchanged Git head `0b0df4c59ddde1af62ca8e7342afebb2b87c131b`
+finished from 03:46:55 to 03:56:24 UTC with 7,376 passes, three failed assertions
+and 92 pending tests (7,471 counted assertions), plus two collection failures.
+It includes the repaired ACP connector. No provider or stock-psmux opt-in was
+enabled. The tracked Git diff hash was empty before and after; this is Git
+source stability, not a hash of every physical checkout byte or dependency.
+
+All five failed files now pass their complete targeted run, 100/100:
+
+- The lazy loader's environment command was in a different position from the
+  complete command factory. Its order now matches without removing a command.
+- The real held-body doctor fixture registers only its own bound loopback
+  origin, preserving the fetch guard and bounded unknown-owner assertion.
+- The file command fixture retains POSIX charset refusal and explicitly checks
+  native SFTP space-path acceptance and transport-specific JSON. Its old mock
+  omitted the transport label; production native SFTP already supplies it.
+- Both collection failures imported check-abi.mjs from a stale CRLF worktree
+  despite the existing LF Git attribute. Node parsed it, but the test loader
+  rejected that checkout representation. Restoring LF makes both complete
+  files pass (30 checks); no ABI policy was changed. Git index/source bytes
+  were already LF, so this is a checkout correction, not a new script algorithm.
+
+The full directory run has not been repeated after these repairs and is still
+recorded as exit 1. Its scoped passes do not close the full goal. Read-only
+follow-up also confirms ordinary SSH execution unconditionally uses `sh -lc`;
+the earlier real Windows SSH scripts did not cover that CLI front door. An
+explicit native remote execution route remains required. Remote real-Pi OAuth
+continuity is deferred at the user's request pending a fresh interactive login.

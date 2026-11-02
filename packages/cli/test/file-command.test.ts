@@ -71,8 +71,18 @@ describe("rig file copy — rejection surfaces (spawn NEVER invoked)", () => {
     expect(process.exitCode).toBe(1);
 
     logs = [];
-    const { runs } = await runCopy(["--json", "./a.md", "vps-a:/srv/a b.md"]);
+    process.exitCode = 0;
+    const { runs } = await runCopy(["--json", "./a.md", "vps-a:/srv/a b.md"], async () => okResult({ transport: "sftp" }));
     const payload2 = JSON.parse(logs[0]!) as Record<string, unknown>;
+    if (process.platform === "win32") {
+      expect(payload2["ok"]).toBe(true);
+      expect(payload2["transport"]).toBe("sftp");
+      expect(payload2["dst"]).toBe("vps-a:/srv/a b.md");
+      expect(payload2["rsyncArgv"]).toBeNull();
+      expect(runs).toHaveLength(1);
+      expect(process.exitCode).toBe(0);
+      return;
+    }
     expect(payload2["code"]).toBe("denied_path");
     expect(String(payload2["error"])).toContain("a space");
     expect(runs).toHaveLength(0);

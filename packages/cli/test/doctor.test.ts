@@ -4,6 +4,7 @@ import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import { doctorCommand, runDoctorChecks, type DoctorDeps } from "../src/commands/doctor.js";
 import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
+import { allowFetchTarget } from "./fetch-guard.js";
 
 const CMUX_SETTINGS_PATH = resolveCmuxSettingsPath();
 
@@ -598,6 +599,7 @@ describe("runDoctorChecks", () => {
     const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
+    allowFetchTarget(`http://127.0.0.1:${port}`);
     try {
       const deps = makeDeps({ checkPort: async () => false, callerUid: 1002, ownerReportTimeoutMs: 100,
         configStore: { resolve: () => ({ ...defaultConfig, daemon: { port, host: "127.0.0.1" } }) } as DoctorDeps["configStore"] });
