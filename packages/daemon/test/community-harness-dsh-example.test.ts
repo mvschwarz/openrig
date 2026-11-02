@@ -21,7 +21,7 @@ const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", 
 log({ start: { argv: process.argv.slice(2), DSH_HOME: process.env.DSH_HOME ?? null, DSH_PERMISSION_MODE: process.env.DSH_PERMISSION_MODE ?? null,
   DSH_TELEMETRY_DISABLED: process.env.DSH_TELEMETRY_DISABLED ?? null, token: "OPENRIG_ACTIVITY_HOOK_TOKEN" in process.env } });
 process.stdout.write("dsh: a log line that isn't JSON\\n");
-let session = null; let held = null; let cancelled = false; const waiting = new Map();
+let session = null; let held = null; let cancelled = false; const waiting = new Map(); let listCalls = 0;
 const update = (u) => send({ method: "session/update", params: { sessionId: session, update: u } });
 const say = (text) => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -40,7 +40,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       session = message.params.sessionId; return reply({});
     }
     case "session/list": {
-      // FAKE_LIST: pages of saved session ids, as JSON; the cursor is the next page's index.
+      // FAKE_LIST_RAW: the exact results to answer, one per call, in order. FAKE_LIST: pages of saved session ids, as
+      // JSON; the cursor is the next page's index.
+      if (process.env.FAKE_LIST_RAW) { const raw = JSON.parse(process.env.FAKE_LIST_RAW); return reply(raw[listCalls++] ?? { sessions: [] }); }
       if (process.env.FAKE_LIST === "error") return fail(-32603, "the session index is locked");
       const pages = JSON.parse(process.env.FAKE_LIST ?? "[[]]");
       const page = Number(message.params?.cursor ?? 0);
@@ -440,19 +442,46 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
   });
 
   // dsh answers -32602 for a conversation it doesn't have and for one active elsewhere, so that error can't mean missing.
-  // When dsh advertises session/list, the list, asked before anything else, says whether the conversation exists.
+  // dsh's session list can show a conversation exists, never that it doesn't: one another running dsh holds unsaved can
+  // be left out. So the list is only positive evidence, and an unlisted conversation is still reopened.
   const listing = { sessionCapabilities: { list: {}, resume: {} } };
 
-  it("reports a conversation dsh doesn't list as missing, without reopening it or starting a new one", async () => {
+  it("still reopens a conversation dsh doesn't list, and resumes it when the reopen works", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing), FAKE_LIST: JSON.stringify([["sess-other"]]) });
+    expect(await waitFor(seat.launch, "the launch record")).toMatchObject({ nativeRef: "sess-old-7" });
+    expect(requests(seat.log(), "session/resume").map((entry) => (entry.params as { sessionId: string }).sessionId)).toEqual(["sess-old-7"]);
+    expect(requests(seat.log(), "session/new")).toEqual([]);
+  });
+
+  it("leaves an unlisted conversation that won't reopen (-32602) unconfirmed, never missing", async () => {
     const openrig = await fakeOpenRig("absent");
     const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-gone", FAKE_CAPS: JSON.stringify(listing),
       FAKE_LIST: JSON.stringify([["sess-other"]]), FAKE_RESUME: "notresumable" });
-    expect(await seat.exited).toBe(3);
-    expect(seat.launch()).toMatchObject({ format: 1, attempt: "attempt-1", harness: "dsh", error: "missing" });
-    const log = seat.log();
-    expect(requests(log, "session/list")).toHaveLength(1);
-    expect(requests(log, "session/resume")).toEqual([]);
-    expect(requests(log, "session/new")).toEqual([]);
+    expect(await seat.exited).toBe(4);
+    expect(seat.launch()).toBeUndefined();
+    expect(requests(seat.log(), "session/resume")).toHaveLength(1);
+    expect(requests(seat.log(), "session/new")).toEqual([]);
+  });
+
+  it("follows an empty-string cursor to the next page, unchanged, so a conversation listed there isn't reported missing", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing), FAKE_RESUME: "missing",
+      FAKE_LIST_RAW: JSON.stringify([{ sessions: [], nextCursor: "" }, { sessions: [{ sessionId: "sess-old-7", cwd: "/w" }] }]) });
+    expect(await seat.exited).toBe(4);
+    expect(seat.launch()).toBeUndefined();
+    expect(requests(seat.log(), "session/list").map((entry) => (entry.params as { cursor?: string }).cursor)).toEqual([undefined, ""]);
+  });
+
+  it.each([
+    ["a cursor that isn't a string", { sessions: [], nextCursor: 1 }],
+    ["an entry without a sessionId", { sessions: [{}] }],
+  ])("reads a list page with %s as deciding nothing, and still reopens", async (_case, page) => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { OPENRIG_RESUME_REF: "sess-old-7", FAKE_CAPS: JSON.stringify(listing), FAKE_LIST_RAW: JSON.stringify([page]) });
+    expect(await waitFor(seat.launch, "the launch record")).toMatchObject({ nativeRef: "sess-old-7" });
+    expect(requests(seat.log(), "session/list")).toHaveLength(1);
+    expect(requests(seat.log(), "session/resume")).toHaveLength(1);
   });
 
   it("follows the list's pages before deciding, and reopens a conversation it finds", async () => {
