@@ -349,6 +349,36 @@ describe("transport routes", () => {
     }
   });
 
+  it("a header-LESS broadcast carries the delivered-unsigned notice only when something was sent", async () => {
+    seedRig();
+    const post = (body: Record<string, unknown>) => sendApp().request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify(body),
+    });
+    const missed = (await (await post({ rig: "no-such-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(missed.sent).toBe(0);
+    expect(missed.warning).toBeUndefined();
+    const sent = (await (await post({ rig: "my-rig", text: "hi" })).json()) as { sent: number; warning?: string };
+    expect(sent.sent).toBeGreaterThan(0);
+    expect(sent.warning).toContain("Delivered without sender identity");
+  });
+
+  it.each([
+    [{ total: 2, sent: 0, retained: 2, failed: 0, results: [] }, "Held for delivery without sender identity"],
+    [{ total: 2, sent: 1, retained: 1, failed: 0, results: [] }, "Delivered without sender identity"],
+  ])("a header-LESS broadcast still advises signing when recipients retain the text (%#)", async (result, notice) => {
+    const app = createApp({ sessionTransport: { broadcast: async () => result } as unknown as SessionTransport });
+    const res = await app.request("/api/transport/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }, // no X-OpenRig-Session
+      body: JSON.stringify({ rig: "my-rig", text: "hi" }),
+    });
+    const body = (await res.json()) as { warning?: string };
+    expect(body.warning).toContain(notice);
+    expect(body.warning).toContain("Follow up and sign it");
+  });
+
   it("A3b — a header-LESS broadcast auto-records NO rows (no derived sender to attribute)", async () => {
     seedRig();
     const res = await sendApp().request("/api/transport/broadcast", {
