@@ -16,18 +16,21 @@ async function physicalDestination(file: string): Promise<string> {
 
 /** Filesystem identity respects case-sensitive NTFS directories and aliases alike. */
 async function rejectOverlap(src: string, target: string, directory: boolean): Promise<void> {
+  // rsync skips equal regular-file/hardlink operands; only directory recursion
+  // needs ancestor rejection. The ordinary same-file fast path performs no write.
+  if (!directory) return;
   const source = await lstat(src, { bigint: true });
   if (source.ino === 0n) throw new Error("Source filesystem identity is unavailable; overlap cannot be checked");
-  let candidate = directory ? await physicalDestination(target) : target;
+  let candidate = await physicalDestination(target);
   for (;;) {
     try {
-      const entry = directory ? await stat(candidate, { bigint: true }) : await lstat(candidate, { bigint: true });
+      const entry = await stat(candidate, { bigint: true });
       if (source.dev === entry.dev && source.ino === entry.ino) throw new Error("Source and destination overlap");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const parent = path.dirname(candidate);
-    if (!directory || parent === candidate) return;
+    if (parent === candidate) return;
     candidate = parent;
   }
 }

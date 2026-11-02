@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Equal regular-file inode copies match rsync (2026-11-02)
+
+The identity overlap guard now applies to directory recursion only. A real WSL
+`rsync -a` probe confirms that a regular file copied to another hardlink of the
+same inode succeeds without replacing it. Native local copy now does the same
+for identical-file and hardlink operands; the ordinary equality fast path writes
+nothing and preserves both inode identities. This corrects an overly broad
+rejection introduced by the prior filesystem-identity change. The local/SFTP/
+identity run passes 28 tests and CLI TypeScript checking passes; directory and
+junction recursive-overlap refusals remain covered.
+
+The exact-worker ProcDump run finishes the frozen nine-file diagnostic without
+an unhandled exception, generating no dump; temporary dependency changes restore
+to their original hash. No machine-wide crash handler is installed and the live
+daemon is untouched. The earlier 0xC0000005 remains unresolved; a debugger-assisted
+passing run is not proof that the native crash is fixed.
+
 ### Native Unicode filename collision comparison (2026-11-02)
 
 Local and SFTP collision checks now use Windows CompareStringOrdinal for names

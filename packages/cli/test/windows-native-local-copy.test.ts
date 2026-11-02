@@ -25,6 +25,15 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await copy(src, dst)).toMatchObject({ ok: true, filesTransferred: 0, bytesTransferred: 0 });
   }));
 
+  it.each([false,true])("skips a regular file's own inode without rejecting or replacing it (hardlink=%s)", hardlink=>fixture(async root=>{
+    const src=path.join(root,"source.txt"),dst=hardlink?path.join(root,"destination.txt"):src;
+    await writeFile(src,"owned shared inode");if(hardlink)await link(src,dst);
+    const before=await lstat(src);
+    expect(await copy(src,dst)).toMatchObject({ok:true,filesTransferred:0,bytesTransferred:0,stdout:""});
+    expect((await lstat(dst)).ino).toBe(before.ino);expect((await lstat(src)).ino).toBe(before.ino);
+    expect(await readFile(dst,"utf8")).toBe("owned shared inode");
+  }));
+
   it("preserves distinct Unicode names that JavaScript lowercase would merge",()=>fixture(async root=>{
     const src=path.join(root,"source"),dst=path.join(root,"destination");await mkdir(src);await mkdir(dst);
     await writeFile(path.join(src,"K.txt"),"Latin K");await writeFile(path.join(src,"K.txt"),"Kelvin sign");
