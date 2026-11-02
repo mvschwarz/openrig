@@ -645,7 +645,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!binding.tmuxPane || !launch) return looksReady ? "another" : "unknown";
     let rows: Awaited<ReturnType<NativeProcessLister>>;
-    try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true || !!launch.executable })))(); } catch { return "unknown"; }
+    try { rows = await (this.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: launch.scriptLaunch === true, frozenExecutable: launch.executable })))(); } catch { return "unknown"; }
     if (looksReady) return "another";
     const observation = { target: binding.tmuxPane, tmux: this.tmux, listProcesses: () => rows, selectedExecutable: launch.executable,
       scriptLaunch: launch.scriptLaunch };
