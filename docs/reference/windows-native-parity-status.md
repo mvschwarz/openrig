@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Complete UI comparison after native path fixes (2026-11-02)
+
+At `20e601f30915cd97c8947035d10adebc590432c3`, the complete UI directory passed 1,836 tests with zero failures and one pending scenario on both native Windows and ordinary-user WSL. All 545 tracked public UI files matched the selected native source and remained unchanged before/after; native head and tracked diff also remained unchanged. The retained reports have SHA-256 `317c199dd77dbce22010a9035f3d5f64036257a870de2c5b3b6f1dd195f91735` (Windows) and `7d3365585fddeb74ccb910b9c523dd7a0958f5866d3dcf2ff3d0075759e6d31e` (WSL).
+
+The pending topology seat-route scenario is not counted as accepted. This renews complete UI-directory evidence after the review-media and StoryGraph native-path changes; it does not qualify other packages, whole-checkout identity, a deployed browser or the running main instance. Both runs emitted the existing Browserslist-age and empty Tailwind-content warnings.
+
 ## Legacy argument oracle follow-up (2026-11-02)
 
 The pending oracle fixture now advertises the required privateConfig capability and throws if the no-assignment native branch unexpectedly writes a file. Its coverage inventory uses the TypeScript syntax tree to require every explicit legacy override, rather than treating native-only argv calls as shell-string branches. Probe creation and guarded rollback, targeted native server options and native no-assignment forwarding are now driven too. Every recorded shell invocation is still unquoted by a real `/bin/sh` and compared word-for-word with argv.
