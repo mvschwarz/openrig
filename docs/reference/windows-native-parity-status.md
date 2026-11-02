@@ -1,5 +1,32 @@
 # Native Windows parity: implementation and evidence
 
+## Context install and serving share portable path validation (2026-11-03)
+
+A bounded reconciliation of five older path-inventory candidates found a
+remaining contract mismatch: daemon context parsing/serving already rejected
+drive-relative references and NUL, while the CLI install validator accepted
+them. The CLI now consumes the same existing validateSafePath implementation
+through the paired context surface, rather than maintaining another native
+absolute/traversal predicate. Portable manifest acceptance therefore agrees
+across Windows and Linux, including C:notes.md, drive-absolute paths, separator
+variants and NUL; valid literal dots and supported text assets remain accepted.
+
+Two native regressions failed before the repair. Three complete context files
+then passed 37 cases on Windows with one POSIX permission skip, and 38/38 on
+ordinary-user WSL after the four changed source/test files were copied and
+byte-compared and its paired daemon rebuilt. Actual context add command tests
+confirm refusal before creating the local store or posting synchronization,
+while the source manifest remains unchanged. Native daemon build, CLI TypeScript
+noEmit and whitespace checks passed. Tests use owned files and controlled
+daemon responses, not a running original instance.
+
+The local context-path-batch-20261103.json binds the five selected review rows
+to source hashes. Four remain source-review-only; being outside the old 222-row
+public ledger is not proof they were never reviewed later. This is not an
+exhaustive file/path audit or a complete package/install receipt. Earlier whole-
+directory and installed evidence predates this shared-export repair; no public
+push, deployment or original-team change occurred.
+
 ## SFTP text identity without lossy replacement (2026-11-03)
 
 SFTP text fields previously used replacement UTF-8 decoding. Controlled wire
