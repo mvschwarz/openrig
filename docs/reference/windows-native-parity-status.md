@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Pi/OMP selected-history dispatch and fallback (2026-11-02)
+
+The shared Pi/OMP runner adapter now accepts the existing beforeNativeDispatch contract. It refuses an already changed selection before launch preparation, rechecks after Pi environment staging, passes the guard to the transport write boundary, and rechecks before a no-input path-length fallback. Previously the option was ignored by this implementation. Eighteen controlled fresh/fork/resume cases reproduced the omission and now require no typed command or Enter on refusal, including a selection change after the wrapped launch was refused as too long.
+
+The complete Pi runtime-adapter file passed 69/69 on Windows and 69/69 on ordinary-user WSL, with no skips. Four additional actual native PowerShell dispatch cases passed for Pi/OMP fresh/resume and Pi routing/fallback behavior; daemon typecheck passed. The cancellation cases use in-memory sidecars and controlled readiness, and the native cases use synthetic receivers. They do not qualify real Pi/OMP provider continuity, unchanged preparation metadata after late cancellation, or a full current-head runtime suite. Community/contained harness selection paths remain a separate follow-up.
+
 ## Codex fork selected-history dispatch parity (2026-11-02)
 
 The corresponding Codex audit found its fork branch omitted both selected-history checks used by fresh/resume: one after asynchronous command staging and one at the transport write boundary. Six deferred-staging/write regressions reproduced both fork failures while the four fresh/resume controls passed. Fork now uses the same pre-dispatch refusal and before-write callback. No text or keys are emitted when selection changed.

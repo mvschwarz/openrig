@@ -14,6 +14,7 @@ import { PiRuntimeAdapter, type PiAdapterFsOps } from "../src/adapters/pi-runtim
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import type { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
 import { runnerCommandArgument } from "./helpers/runner-command-arguments.js";
 import {
   piSeatPaths, buildPiRunnerCommand, buildPiChildArgs, buildPiChildEnv,
@@ -88,6 +89,41 @@ function adapterWith(fs: PiAdapterFsOps, tmux: TmuxAdapter, trust?: "approve" | 
     trustPosture: trust, sleep: async () => {},
   });
 }
+
+it.each(["pi", "omp"].flatMap(runtime => ["fresh", "fork", "resume"].flatMap(kind =>
+  (runtime === "pi" ? ["initial", "staging", "before-write", "fallback"] : ["initial", "before-write"])
+    .map(phase => ({ runtime, kind, phase })))))("$runtime $kind refuses changed history selection at $phase", async ({ runtime, kind, phase }) => {
+  const stateRoot = nodePath.resolve("owned-state"), sessionFile = nodePath.join(stateRoot, "owned.jsonl");
+  const files = memFs({ [sessionFile]: "owned synthetic session" });
+  let selected = phase !== "initial";
+  let release!: () => void;
+  let observed!: () => void;
+  const started = new Promise<void>(resolve => { observed = resolve; });
+  const staging = new Promise<void>(resolve => { release = resolve; });
+  const effects: string[] = [];
+  const tmux = mockTmux();
+  let calls = 0;
+  tmux.sendShellCommand = vi.fn(async (_session, command, beforeWrite) => {
+    calls++;
+    if (phase === "fallback" && calls === 1) { selected = false; return { ok: false, code: "launch_path_too_long", message: "owned refusal before input" }; }
+    if (phase === "before-write") selected = false;
+    try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+    effects.push(command); return { ok: true };
+  });
+  const environment = { command: async () => { observed(); if (phase === "staging") await staging; return "owned-wrapped-command"; } } as unknown as SeatLaunchEnvironment;
+  const Adapter = runtime === "pi" ? PiRuntimeAdapter : OmpRuntimeAdapter;
+  const adapter = new Adapter({ tmux, fsOps: files, stateRoot, runnerEntryPath: nodePath.resolve("owned-runner.js"),
+    platform: process.platform, seatLaunchEnvironment: environment, sleep: async () => {} });
+  vi.spyOn(adapter as any, "waitForRunnerReady").mockResolvedValue({ ok: true, value: JSON.parse(readyState(sessionFile)) });
+  const opts = { name: SESSION, beforeNativeDispatch: () => selected,
+    ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: sessionFile } } : {}),
+    ...(kind === "resume" ? { resumeToken: sessionFile } : {}) };
+  const pending = adapter.launchHarness({ tmuxSession: SESSION, cwd: nodePath.resolve("owned-work") } as never, opts);
+  if (phase === "staging") { await started; selected = false; release(); }
+  expect(await pending).toMatchObject({ ok: false });
+  expect(effects).toEqual([]);
+  expect(tmux.sendKeys).not.toHaveBeenCalled();
+});
 
 // ── protocol builders ─────────────────────────────────────────────────────────
 

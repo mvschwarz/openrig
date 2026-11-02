@@ -245,11 +245,16 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   async launchHarness(
     binding: NodeBinding,
-    opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
+    opts: { name: string; resumeToken?: string; forkSource?: ForkSource; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }
+    const changedSelection = () => ({ ok: false as const, error: "Selected history changed during runner launch preparation; no native command was sent.", recovery: "attention_required" as const });
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
+    const beforeInput = opts.beforeNativeDispatch ? () => {
+      if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before runner input");
+    } : undefined;
     if (opts.resumeToken && opts.forkSource) {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
@@ -329,10 +334,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ? await this.seatLaunchEnvironment.command(sessionName, runnerCommand, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
       : bareCommand;
     // Stage long commands without leaving a shell above the live runner.
-    let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
+    let textResult = await this.tmux.sendShellCommand(sessionName, command, beforeInput, { stageIfLong: true, execInScript: true });
     // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
     if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== bareCommand) {
-      textResult = await this.tmux.sendShellCommand(sessionName, bareCommand, undefined, { stageIfLong: true, execInScript: true });
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return changedSelection();
+      textResult = await this.tmux.sendShellCommand(sessionName, bareCommand, beforeInput, { stageIfLong: true, execInScript: true });
     }
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
