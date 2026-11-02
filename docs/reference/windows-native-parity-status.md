@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Windows Job executable PATH lookup (2026-11-02)
+
+A direct-versus-Job native check reproduced a missing behavior: `node.exe`
+resolved through the selected child PATH with execFile but returned helper exit
+125 through CreateProcess. The Job preparation now resolves bare native names
+before dispatch, preserving the requested argv0 separately from the resolved
+application path. Search follows native current-directory/PATH and .com/.exe
+rules rather than invoking a shell or interpreting PATHEXT batch shims; see
+[libuv's Windows process search](https://github.com/libuv/libuv/blob/v1.x/src/win/process.c).
+Explicit path operands retain their existing path behavior.
+
+Real Windows comparisons pass for `node`, `node.exe`, and a quoted PATH entry,
+including exact argv0 and executable identity. The complete Job, installer,
+Herdr native CLI and Rex native process files pass 24 tests, and daemon
+TypeScript checking passes. This closes the tested bare-name lookup gap; it
+does not establish a real package installation or OpenShell engine lifecycle.
+
 ### Herdr finite native CLI custody (2026-11-02)
 
 Herdr viewer control commands and local seat identity inspection now execute

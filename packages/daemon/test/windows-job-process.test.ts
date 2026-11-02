@@ -9,6 +9,18 @@ import { spawnWindowsJobProcess } from "../src/domain/windows-job-process.js";
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 describe.skipIf(process.platform !== "win32")("native background Job containment", () => {
+  it.each(['node.exe','node','quoted-path'])("resolves a bare native executable from the selected child PATH (%s)", async selected => {
+    const root=await mkdtemp(path.join(os.tmpdir(),'openrig-job-path-'));
+    try {
+      const file=selected==='quoted-path'?'node.exe':selected;
+      const env={Path:selected==='quoted-path'?'"'+path.dirname(process.execPath)+'"':path.dirname(process.execPath)},args=['-e','console.log(JSON.stringify({argv0:process.argv0,exe:process.execPath}))'];
+      const direct=await promisify(execFile)(file,args,{env,cwd:root});
+      const child=spawnWindowsJobProcess(file,args,{env,cwd:root,stdio:'pipe'});
+      let out='',err='';child.stdout!.on('data',chunk=>out+=chunk);child.stderr!.on('data',chunk=>err+=chunk);
+      expect(await new Promise(resolve=>child.once('close',resolve)),err).toBe(0);
+      expect(out).toBe(direct.stdout);
+    } finally {await rm(root,{recursive:true,force:true});}
+  });
   it("rejects NUL arguments before creating a helper", () => {
     expect(() => spawnWindowsJobProcess(process.execPath, ["bad\0argument"], {})).toThrow("NUL");
   });

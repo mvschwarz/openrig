@@ -1,9 +1,39 @@
 import { spawn, type SpawnOptions } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readPlatformEnv } from "./platform-env.js";
+
+/** Match libuv's native bare-name search before passing an explicit application
+ * path to CreateProcess. PATHEXT shell shims are not part of that search. */
+function resolveBareExecutable(file: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  if (process.platform !== "win32" || /[\\/:]/.test(file)) return file;
+  const search=readPlatformEnv(env,"PATH") ?? readPlatformEnv(process.env,"PATH") ?? "";
+  const directories:string[]=[];
+  if(readPlatformEnv(process.env,"NoDefaultCurrentDirectoryInExePath") === undefined)directories.push(cwd);
+  // A quoted PATH entry can itself contain a semicolon. Preserve spaces.
+  let start=0;
+  while(start<search.length){
+    let end=start;
+    if(search[start]==='"'||search[start]==="'"){
+      const closing=search.indexOf(search[start]!,start+1);end=closing<0?search.length:closing+1;
+    }
+    while(end<search.length&&search[end]!==';')end++;
+    let entry=search.slice(start,end);start=end+1;
+    if(entry.startsWith('"')||entry.startsWith("'"))entry=entry.slice(1);
+    if(entry.endsWith('"')||entry.endsWith("'"))entry=entry.slice(0,-1);
+    if(entry)directories.push(resolve(cwd,entry));
+  }
+  const dot=file.indexOf('.');
+  const names=[...(dot>=0&&dot<file.length-1?[file]:[]),file+(file.endsWith('.')?'':'.')+'com',file+(file.endsWith('.')?'':'.')+'exe'];
+  if(file&&file!=='.')for(const directory of directories)for(const name of names){
+    const candidate=join(directory,name);
+    try{if(statSync(candidate).isFile())return candidate;}catch{/* next candidate */}
+  }
+  throw Object.assign(new Error(`Native executable not found: ${file}`),{code:"ENOENT",syscall:"spawn",path:file});
+}
 
 // Finite commands retain custody of descendants when their executable exits.
 // PROC_THREAD_ATTRIBUTE_JOB_LIST assigns the new process atomically, before it
@@ -62,7 +92,7 @@ public static class OpenRigProbeJob {
     var input=new FileStream(new SafeFileHandle(read,true),FileAccess.Read,81920,false);
     return Task.Run(() => { using(input) { input.CopyTo(output); output.Flush(); } });
   }
-  public static int Run(string file,string[] args,string cwd,string environment,bool verbatim,bool preserveClosedStdio) {
+  public static int Run(string file,string argv0,string[] args,string cwd,string environment,bool verbatim,bool preserveClosedStdio) {
     IntPtr job=IntPtr.Zero, list=IntPtr.Zero, jobValue=IntPtr.Zero, handleValue=IntPtr.Zero, env=IntPtr.Zero;
     IntPtr outputRead=IntPtr.Zero,outputWrite=IntPtr.Zero,errorRead=IntPtr.Zero,errorWrite=IntPtr.Zero;
     Task outputPump=null,errorPump=null;
@@ -89,7 +119,7 @@ public static class OpenRigProbeJob {
       Check(UpdateProcThreadAttribute(list,0,new IntPtr(0x20002),handleValue,new IntPtr(IntPtr.Size*unique.Count),IntPtr.Zero,IntPtr.Zero));
       var startup=new STARTUPINFOEX(); startup.startup.cb=Marshal.SizeOf(typeof(STARTUPINFOEX)); startup.attributes=list;
       startup.startup.flags=0x100; startup.startup.input=handles[0]; startup.startup.output=handles[1]; startup.startup.error=handles[2];
-      var command=new StringBuilder(Quote(file)); foreach(string arg in args)command.Append(' ').Append(verbatim ? arg : Quote(arg));
+      var command=new StringBuilder(Quote(argv0)); foreach(string arg in args)command.Append(' ').Append(verbatim ? arg : Quote(arg));
       env=Marshal.StringToHGlobalUni(environment);
       Check(CreateProcessW(file,command,IntPtr.Zero,IntPtr.Zero,true,0x08080400,env,cwd,ref startup,out process));
       if(preserveClosedStdio) {
@@ -137,7 +167,7 @@ try {
   }
   $launch = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
   $environment = ([string[]]$launch.environment -join [char]0) + [char]0 + [char]0
-  exit [OpenRigProbeJob]::Run($launch.file, [string[]]$launch.args, $launch.cwd, $environment, [bool]$launch.verbatim, [bool]$launch.preserveClosedStdio)
+  exit [OpenRigProbeJob]::Run($launch.file, $launch.argv0, [string[]]$launch.args, $launch.cwd, $environment, [bool]$launch.verbatim, [bool]$launch.preserveClosedStdio)
 } catch { [Console]::Error.WriteLine('OpenRig native probe job: ' + $_.Exception.Message); exit 125 }
 `;
 
@@ -145,10 +175,12 @@ try {
 export type WindowsJobExitPolicy = "terminate-descendants" | "preserve-closed-stdio";
 export function prepareWindowsJobProcess(file: string, args: string[], options: SpawnOptions, exitPolicy: WindowsJobExitPolicy = "terminate-descendants") {
   const cwd = options.cwd instanceof URL ? fileURLToPath(options.cwd) : options.cwd ?? process.cwd();
-  if ([file, cwd, ...args].some(value => value.includes("\0"))) throw new TypeError("Native probe arguments must not contain NUL");
+  const argv0=options.argv0 ?? file;
+  if ([file, argv0, cwd, ...args].some(value => value.includes("\0"))) throw new TypeError("Native probe arguments must not contain NUL");
+  const env = options.env ?? process.env;
+  file=resolveBareExecutable(file,cwd,env);
   const scratch = mkdtempSync(join(tmpdir(), "openrig-probe-job-"));
   const script = join(scratch, "launch.ps1");
-  const env = options.env ?? process.env;
   writeFileSync(script, HELPER, "utf8");
   // Match Node's first lexicographic spelling for case-insensitive Windows keys.
   const seen = new Set<string>();
@@ -162,7 +194,7 @@ export function prepareWindowsJobProcess(file: string, args: string[], options: 
     if (!seen.has(name) && process.env[name] !== undefined) environment.push(`${name}=${process.env[name]}`);
   }
   environment.sort((a, b) => a.toUpperCase() < b.toUpperCase() ? -1 : a.toUpperCase() > b.toUpperCase() ? 1 : 0);
-  const payload = Buffer.from(JSON.stringify({ file, args, cwd, environment, verbatim: options.windowsVerbatimArguments === true,
+  const payload = Buffer.from(JSON.stringify({ file, argv0, args, cwd, environment, verbatim: options.windowsVerbatimArguments === true,
     preserveClosedStdio: exitPolicy === "preserve-closed-stdio" })).toString("base64");
   // Individual Windows environment values are bounded; no payload enters argv
   // or the source-only helper file. The child gets the explicit original block.
