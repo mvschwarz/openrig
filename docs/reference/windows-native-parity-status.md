@@ -27,6 +27,25 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Installed native file effects verified (2026-11-02)
+
+The target-native package Gate passes at `e76b08e2967a5161ac72e135bfb66e015b99664f`
+with unchanged tracked-source hashes before and after its 67-second run. Besides
+building, packing and installing into an isolated prefix, the Gate executes the
+installed native helpers to compare Unicode filenames, query directory case
+sensitivity and replace a readonly destination while retaining the previous
+hardlink's bytes and readonly attribute. A repeated unchanged copy preserves the
+destination inode and leaves no staging entry. Installed resource operations,
+SQLite loading and the `rig.cmd` daemon-subpath check also pass.
+
+The first new fixture incorrectly used equal-size files created within one
+second, so archive quick checking legitimately skipped their content difference.
+The corrected fixture uses different sizes to force replacement. This was a
+fixture correction, not a change to copy comparison semantics. This installed
+scope does not clear the full-suite crash, terminal attachment or remaining
+archive metadata requirements. Remote real Pi OAuth continuity remains deferred
+at the user's request; no authentication retry is part of this result.
+
 ### Equal regular-file inode copies match rsync (2026-11-02)
 
 The identity overlap guard now applies to directory recursion only. A real WSL
