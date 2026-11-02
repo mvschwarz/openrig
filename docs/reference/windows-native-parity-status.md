@@ -4907,3 +4907,28 @@ not a real Rex GUI/server qualification or a claim that an official Windows
 Rex distribution is available. Native executable installation and real visible
 app acceptance remain external prerequisites. No existing Rex app, main OpenRig
 deployment or original team was contacted or changed.
+
+### Native terminal control descendant custody (2026-11-03)
+
+The CLI default terminal-window control executor still used ordinary execFile
+on Windows. A real owned regression reproduced a detached child surviving its
+parent's successful exit. Finite control calls now use the existing atomic
+Windows Job executor through the paired daemon public surface; detached GUI
+launches retain their separate lifecycle and POSIX control calls retain execFile.
+This covers the default executor used by native Rex and Herdr control requests,
+without changing their identity checks or retrying uncertain effects.
+
+Real native tests verify descendant exit after parent success, exit status 7
+and timeout, while retaining empty/quote/Unicode/operator argv, an explicit
+synthetic environment value and stderr on failure. All five complete related
+CLI files passed 143/143 on Windows. WSL's paired daemon was recompiled after
+copying and byte-comparing the three changed source/test files; the same files
+passed 140 with three native-custody skips. Daemon build, CLI TypeScript noEmit
+and whitespace checks passed. The reproduced surviving child was explicitly
+stopped during the failing fixture's cleanup; successful fixtures left none.
+
+The installed package gate now also imports the installed terminal-window entry
+and executes an owned literal-argv receiver through its default executor, to
+check delivery of the new paired public export. That updated installed gate is
+pending at this revision. The earlier installed receipts do not cover this
+new export. No original team, provider, real GUI or running deployment changed.

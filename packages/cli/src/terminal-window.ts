@@ -10,7 +10,7 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { assertLocalTmux, isLocalTmuxHost, readTmuxServerArgs } from "./tmux-attachment.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
-import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv } from "@openrig/daemon/windows-launch";
+import { readPlatformEnv, renderWindowsLaunch, renderWindowsLaunchArgv, readWindowsTileAttachArgv, execWindowsJobFile } from "@openrig/daemon/windows-launch";
 import { windowsHerdrEnvironmentCommand } from "./windows-herdr-command.js";
 import { detachedTerminalEnvironment } from "./terminal-environment.js";
 import { windowsHostingColumns } from "./windows-terminal-columns.js";
@@ -45,7 +45,9 @@ export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): W
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
-    exec: async (file, args, timeoutMs = 10_000) => (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
+    exec: async (file, args, timeoutMs = 10_000) => process.platform === "win32"
+      ? (await execWindowsJobFile(file, args, { env, timeout: timeoutMs })).stdout
+      : (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
     launch: (file, args) => new Promise((resolve, reject) => {
       const child = spawn(file, args, { env, detached: true, stdio: "ignore" });
       child.once("error", reject);

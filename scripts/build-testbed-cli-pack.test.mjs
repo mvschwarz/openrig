@@ -200,6 +200,10 @@ test("GATE (target-native): install the tarball + a cli command LOADS the daemon
         [join(HERE,"installed-native-file-probe.mjs"),installed,home],
         {cwd:home,env,encoding:"utf8",stdio:"pipe",windowsHide:true});
       assert.deepEqual(JSON.parse(nativeFileResult),{nativeFileReplacement:true,retainedHardlink:true,nativeFilenameComparison:true});
+      const terminalControlResult=execFileSync(process.execPath,
+        [join(HERE,"installed-terminal-control-probe.mjs"),installed],
+        {cwd:home,env,encoding:"utf8",stdio:"pipe",windowsHide:true});
+      assert.deepEqual(JSON.parse(terminalControlResult),{nativeControl:true,literalArgv:true});
     }
     const nativeHelper = join(installed, "daemon/context-packs/skills/process/systematic-debugging/find-polluter.mjs");
     assert.deepEqual(readFileSync(nativeHelper), readFileSync(join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills/process/systematic-debugging/find-polluter.mjs")), "installed native helper must match its authored source");
