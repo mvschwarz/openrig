@@ -173,6 +173,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 120_000);
 
+  // A runner may report idle at startup, before any turn: that's neither an idle report while an ask waits (4b) nor one
+  // for a turn the agent died in (7), even when its POST arrives after the agent's exit.
+  it("passes 4b and 7 for a runner that reports idle at startup, even when that report arrives late", async () => {
+    const { code, report } = await check(["--cases", "4b,7"], " --startup-idle 1500");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"], ["7", "pass"]]);
+    expect(code).toBe(0);
+  }, 150_000);
+
   // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
   it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
     const { code, report } = await check(["--cases", "4b"], " --withdraw-after-stop");

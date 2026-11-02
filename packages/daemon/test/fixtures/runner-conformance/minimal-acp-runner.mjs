@@ -9,6 +9,9 @@
 // acted on at once.
 // --withdraw-after-stop keeps it another way too: a cancelled or ended turn's ask is withdrawn after the turn's Stop is
 // posted, not before; the contract doesn't order the two posts.
+// --startup-idle <ms> keeps it another way too: with no first input, it reports idle once it's ready, as a runner may, and
+// that first POST goes out <ms> late, holding the posts behind it, as a slow first request does. The agent gets each
+// prompt without waiting on its accepted post, so it can die before the late report arrives.
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
@@ -20,6 +23,7 @@ const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait")
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
 const readRetries = argv.includes("--read-retries") ? Number(argv[argv.indexOf("--read-retries") + 1]) : 0;
+const startupIdleMs = argv.includes("--startup-idle") ? Number(argv[argv.indexOf("--startup-idle") + 1]) : null;
 // --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
 // every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
 // first. Breaks: beat-after-stop, beat-during-ask, no-resolve, and beat-time-backwards (each beat says it happened 15 s
@@ -41,12 +45,15 @@ const name = env.OPENRIG_RUNTIME ?? "runner";
 // Activity posts go one at a time, in order, and never hold up the agent.
 let sequence = 0;
 let posting = Promise.resolve();
+let holdNextPostMs = 0;
 function post(hookEvent, subtype, extra = {}) {
+  const hold = holdNextPostMs;
+  holdNextPostMs = 0;
   const body = JSON.stringify({ sessionName: env.OPENRIG_SESSION_NAME, nodeId: env.OPENRIG_NODE_ID, runtime: name,
     generation: breaks.has("wrong-generation") ? "gen-other" : env.OPENRIG_OCCUPANT_GENERATION,
     ...(breaks.has("no-sequence") ? {} : { sequence: ++sequence }), occurredAt: new Date().toISOString(), hookEvent, subtype, ...extra });
   const headers = { "content-type": "application/json", ...(breaks.has("no-token") ? {} : { authorization: `Bearer ${env.OPENRIG_ACTIVITY_HOOK_TOKEN}` }) };
-  posting = posting.then(() => new Promise((resolve) => {
+  posting = posting.then(() => hold && new Promise((resolve) => setTimeout(resolve, hold))).then(() => new Promise((resolve) => {
     const req = request(`${env.OPENRIG_URL}/api/activity/hooks`, { method: "POST", headers, timeout: 2000 }, (res) => { res.resume(); res.on("end", resolve); });
     req.on("error", resolve);
     req.on("timeout", () => { req.destroy(); resolve(); });
@@ -255,7 +262,8 @@ async function prompt(text) {
   beatTurn = turn;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
-  await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
+  const accepted = post("UserPromptSubmit", "accepted", { turnId: String(turn) });
+  if (startupIdleMs === null) await accepted; // with --startup-idle, the agent doesn't wait on the post, as in dsh's runner
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   await withdrawLive("turn_ended");
   if (!breaks.has("beat-after-stop")) beatTurn = null;
@@ -340,6 +348,10 @@ async function main() {
   process.stdout.write("\x1b[?2004h");
   process.stdin.on("data", onInput);
   show("ready");
+  if (startupIdleMs !== null && !env.OPENRIG_FIRST_INPUT) {
+    holdNextPostMs = startupIdleMs;
+    void post("Stop", "idle_heartbeat", { livenessSeconds: 30 });
+  }
   if (env.OPENRIG_FIRST_INPUT) {
     const text = readFileSync(env.OPENRIG_FIRST_INPUT, "utf8");
     void prompt(breaks.has("first-input-trim") ? text.trim() : text);
