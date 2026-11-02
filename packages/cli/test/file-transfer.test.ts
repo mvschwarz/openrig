@@ -198,6 +198,20 @@ describe("checkLocalPath — resolve-then-recheck deny wall", () => {
     }
   });
 
+  it("denies descendants when active OPENRIG_HOME is a filesystem root", () => {
+    const saved = process.env["OPENRIG_HOME"];
+    const root = path.parse(path.resolve(os.tmpdir())).root;
+    try {
+      process.env["OPENRIG_HOME"] = root;
+      const result = checkLocalPath(path.join(root, "owned-state-witness", "artifact.md"));
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("active OPENRIG_HOME");
+    } finally {
+      if (saved === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = saved;
+    }
+  });
+
   it("allows ordinary paths and returns the RESOLVED form (what rsync receives)", () => {
     const res = checkLocalPath("./some/dir/../file.md");
     expect(res.ok).toBe(true);

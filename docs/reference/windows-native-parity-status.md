@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## File-transfer state wall at filesystem roots (2026-11-02)
+
+The local transfer deny wall now preserves an existing trailing root separator when checking descendants. Previously a configured drive-root OPENRIG_HOME produced a doubled separator and allowed child paths through the lexical check. The new regression reproduced that failure and now requires the existing active-state refusal. Ordinary custom homes, credential-directory denials and directory-content trailing separators remain covered.
+
+Validation: the complete file-transfer test file passed 44 on Windows with three installed-rsync cases skipped, and 47/47 on ordinary-user WSL; CLI typecheck passed. The fixture changes OPENRIG_HOME only in its test process, restores it afterward, and creates no files at the filesystem root. This does not qualify native rsync availability, remote transfer metadata or installed runtime acceptance.
+
 ## Native npm Claude entry identity (2026-11-02)
 
 Recognition of an already running declared npm Claude entry now compares native canonical paths on Windows. A real filesystem regression first reproduced rejection of `CLI.js` when the manifest declares the same file as `cli.js`; the corrected comparison accepts that filesystem identity while refusing a distinct script, a missing file and an unrelated package manifest. No broad case folding or provider authentication was added.

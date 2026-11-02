@@ -124,7 +124,8 @@ export function checkLocalPath(raw: string): PathCheck {
   const activeHostsRegistry = path.resolve(getDefaultOpenRigPath("hosts.yaml"));
   // Windows paths are case-insensitive; spelling changes must not bypass the wall.
   const comparable = (p: string) => process.platform === "win32" ? p.toLowerCase() : p;
-  const within = (candidate: string, root: string) => comparable(candidate) === comparable(root) || comparable(candidate).startsWith(comparable(root) + path.sep);
+  const within = (candidate: string, root: string) => comparable(candidate) === comparable(root)
+    || comparable(candidate).startsWith(comparable(root.endsWith(path.sep) ? root : root + path.sep));
   if (comparable(resolved) === comparable(activeHostsRegistry)) {
     return {
       ok: false,
