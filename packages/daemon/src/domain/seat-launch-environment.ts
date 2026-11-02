@@ -1,3 +1,4 @@
+import { readNamedSessionCommand } from "../adapters/session-pane-lookup.js";
 import { ACCOUNT_HOME_PROVIDER_ENV, RUNTIME_HOME_VAR, type HomeRuntime } from "./seat-runtime-home.js";
 import { accessSync, closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -200,7 +201,7 @@ export class SeatLaunchEnvironment {
     const fallback = codexEnv.length ? `env ${codexEnv.join(" ")} ${command}` : command;
     try {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
-      const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
+      const shell = path.basename(await readNamedSessionCommand(this.tmux, session) ?? "").replace(/^-/, "");
       if (shell === "nu" || shell === "nu.exe" || (this.launchPlatform !== "win32" && (accountHome || clearing) && !["bash", "zsh", "sh", "dash", "ksh", "mksh"].includes(shell))) throw new Error("Non-POSIX pane");
       // Pi keeps its existing command on shells where this PATH expression is not supported.
       if (this.launchPlatform !== "win32" && target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {

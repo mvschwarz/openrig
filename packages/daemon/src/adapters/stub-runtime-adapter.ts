@@ -1,3 +1,4 @@
+import { readNamedSessionCommand } from "./session-pane-lookup.js";
 // OPR.0.5.1.1 — the stub runtime adapter (A5 / ContextMonitor settlement).
 //
 // Promotes the claude-stub seed to a first-class `runtime: stub`. Pi-shaped:
@@ -256,7 +257,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
         }
       }
       if (typeof this.tmux?.getPaneCommand === "function") {
-        const paneCommand = (await this.tmux.getPaneCommand(sessionName)) ?? "";
+        const paneCommand = (await readNamedSessionCommand(this.tmux, sessionName)) ?? "";
         if (SHELL_COMMANDS.has(paneCommand) && this.platform !== "win32") {
           return { ready: false, reason: "stub readiness is stale; the pane is back at a shell", code: "runner_exited" };
         }

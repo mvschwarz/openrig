@@ -1,3 +1,4 @@
+import { readNamedSessionPid, captureNamedSessionContent, captureNamedSessionScreen } from "../adapters/session-pane-lookup.js";
 import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
 import { restoreSessionUserHome } from "./managed-restore-read-access.js";
@@ -3762,7 +3763,7 @@ export class SessionTransport {
       if (!pane || panes.length === 0) return unknown;
       let panePid: number | null;
       if (panes.length === 1) {
-        const [sessionPid, observedPanePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
+        const [sessionPid, observedPanePid] = await Promise.all([readNamedSessionPid(this.tmuxAdapter, sessionName), this.tmuxAdapter.getPanePid(pane)]);
         if (sessionPid && observedPanePid && sessionPid !== observedPanePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
         panePid = observedPanePid;
       } else {
@@ -4183,7 +4184,7 @@ export class SessionTransport {
 
     const lines = opts?.lines ?? 20;
     const read = async (): Promise<CaptureResult> => {
-      const content = await this.tmuxAdapter.capturePaneContent(sessionName, lines);
+      const content = await captureNamedSessionContent(this.tmuxAdapter, sessionName, lines);
       if (content === null) {
         return {
           ok: false,
@@ -4299,7 +4300,7 @@ export class SessionTransport {
     let last: string | null = null;
     for (let look = 0; look < 12 && this.now().getTime() + 150 <= deadline; look++) {
       await this.sleep(150);
-      const screen = await this.tmuxAdapter.capturePaneScreen(sessionName).catch(() => null);
+      const screen = await captureNamedSessionScreen(this.tmuxAdapter, sessionName).catch(() => null);
       if (screen !== null && screen === last) return;
       last = screen;
     }
@@ -4341,7 +4342,7 @@ export class SessionTransport {
   private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
     try {
       const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
-      const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
+      const screen = await captureNamedSessionContent(this.tmuxAdapter, sessionName, 0, { escapeSequences: true });
       const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
       const steady = before && after && before.x === after.x && before.y === after.y
         && before.width === after.width && before.height === after.height ? after : null;

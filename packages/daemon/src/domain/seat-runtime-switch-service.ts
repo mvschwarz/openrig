@@ -1,3 +1,4 @@
+import { captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 import { listNamedSessionPanes, listNamedSessionWindows } from "../adapters/session-pane-lookup.js";
 import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
@@ -605,7 +606,7 @@ export class SeatRuntimeSwitchService {
 
   /** The successor's composer, as startup reads it; null when it can't be read. */
   private async readComposer(session: string): Promise<string | null> {
-    try { return await this.deps.tmuxAdapter.capturePaneContent(session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
+    try { return await captureNamedSessionContent(this.deps.tmuxAdapter, session, STARTUP_SUBMIT_CAPTURE_LINES); } catch { return null; }
   }
 
   /** Startup's check after its Enter: tmux accepting Enter doesn't prove Claude submitted a large paste. While the

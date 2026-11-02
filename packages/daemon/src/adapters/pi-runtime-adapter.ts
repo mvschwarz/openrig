@@ -1,3 +1,4 @@
+import { readNamedSessionCommand, captureNamedSessionContent } from "./session-pane-lookup.js";
 // OPR.0.4.6.PI1 — the Pi runtime adapter (RPC-first, runner-in-a-pane).
 //
 // The adapter launches the OpenRig-owned pi-runner inside the seat's normal
@@ -389,7 +390,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // pane at the shell; READY scrollback and a stale ready sidecar do not
     // make a stopped seat ready). Windows instead verifies the managed child:
     // its PowerShell pane label can remain unchanged while that child is live.
-    const paneCommand = (await this.tmux.getPaneCommand(binding.tmuxSession)) ?? "";
+    const paneCommand = (await readNamedSessionCommand(this.tmux, binding.tmuxSession)) ?? "";
     const atShell = SHELL_COMMANDS.has(paneCommand);
     const state = this.readRunnerState(binding.tmuxSession);
     if (state?.exited) {
@@ -457,7 +458,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       // record immediately at startup and exited on death).
       if (state?.launchId === launchId) {
         if (state.exited) {
-          const paneContent = (await this.tmux.capturePaneContent(sessionName, 40)) ?? "";
+          const paneContent = (await captureNamedSessionContent(this.tmux, sessionName, 40)) ?? "";
           return {
             ok: false,
             failure: {

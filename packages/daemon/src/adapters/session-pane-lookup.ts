@@ -18,3 +18,18 @@ export function listNamedSessionWindows(
 ) {
   return tmux.listSessionWindows ? tmux.listSessionWindows(session) : tmux.listWindows(exactLegacy ? "=" + session : session);
 }
+
+export function readNamedSessionPid(tmux: Pick<TmuxAdapter, "getPanePid"> & Partial<Pick<TmuxAdapter, "getSessionPanePid">>, session: string) {
+  return tmux.getSessionPanePid ? tmux.getSessionPanePid(session) : tmux.getPanePid(session);
+}
+export function readNamedSessionCommand(tmux: Pick<TmuxAdapter, "getPaneCommand"> & Partial<Pick<TmuxAdapter, "getSessionPaneCommand">>, session: string) {
+  return tmux.getSessionPaneCommand ? tmux.getSessionPaneCommand(session) : tmux.getPaneCommand(session);
+}
+export function captureNamedSessionContent(tmux: Pick<TmuxAdapter, "capturePaneContent"> & Partial<Pick<TmuxAdapter, "captureSessionContent">>, session: string,
+  lines = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }) {
+  return tmux.captureSessionContent ? tmux.captureSessionContent(session, lines, opts)
+    : opts ? tmux.capturePaneContent(session, lines, opts) : tmux.capturePaneContent(session, lines);
+}
+export function captureNamedSessionScreen(tmux: Pick<TmuxAdapter, "capturePaneScreen"> & Partial<Pick<TmuxAdapter, "captureSessionScreen">>, session: string, opts?: { escapeSequences?: boolean }) {
+  return tmux.captureSessionScreen ? tmux.captureSessionScreen(session, opts) : opts ? tmux.capturePaneScreen(session, opts) : tmux.capturePaneScreen(session);
+}

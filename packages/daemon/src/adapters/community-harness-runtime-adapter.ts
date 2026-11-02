@@ -1,3 +1,4 @@
+import { readNamedSessionCommand } from "./session-pane-lookup.js";
 import type { EnvironmentStartup } from "../domain/environment-startup.js";
 import type {
   RuntimeAdapter,
@@ -228,7 +229,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     }
     const contained = this.contained();
     if (contained) return contained.checkReady(binding);
-    const command = await this.deps.tmux.getPaneCommand(session);
+    const command = await readNamedSessionCommand(this.deps.tmux, session);
     if ((this.deps.tmux.isNativeWindows || process.platform === "win32") && command && isWindowsShellHost(command)) {
       if (this.deps.tmux.getPanePid && await verifyWindowsPaneReceiver({ target: binding.tmuxPane ?? session,
         getPanePid: async target => {

@@ -1,3 +1,4 @@
+import { readNamedSessionCommand, readNamedSessionPid } from "./session-pane-lookup.js";
 import { listNamedSessionPanes } from "./session-pane-lookup.js";
 import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
@@ -480,7 +481,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ready: false, reason: "tmux session not responsive" };
     }
 
-    const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+    const paneCommand = await readNamedSessionCommand(this.tmux, binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
     const historyProbe = await this.assessManagedProbe(binding, paneCommand, paneContent, options);
     const probe = await this.assessFreshInPlaceProbe(binding, historyProbe);
@@ -611,7 +612,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const currentPanes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
-        || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
+        || await readNamedSessionPid(this.tmux, binding.tmuxSession) !== native.panePid) return probe;
       if (!launch.fingerprint) pin();
       // Another check of this launch can pin while this one awaits; only the pinned process is verified.
       if (launch.fingerprint !== first.fingerprint) return probe;
@@ -633,7 +634,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!native) return false;
       const currentPanes = await listNamedSessionPanes(this.tmux, binding.tmuxSession);
       return currentPanes.length === 1 && currentPanes[0]?.id === binding.tmuxPane
-        && await this.tmux.getPanePid(binding.tmuxSession) === native.panePid;
+        && await readNamedSessionPid(this.tmux, binding.tmuxSession) === native.panePid;
     } catch { return false; }
   }
 

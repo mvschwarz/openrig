@@ -1268,7 +1268,7 @@ describe("Codex runtime adapter", () => {
         reason: "Codex is waiting for hook review before the session can become interactive. The hooks include OpenRig's own "
           + "(openrig-core@openrig): this seat's Codex config enables the plugin but records no approval for its hooks, as after "
           + "an older install or after continuing without trusting. To approve them, do it once in the seat's pane, through "
-          + "Codex's hook review (tmux attach -t r01-qa); a later launch on the same plugin version records that approval, and "
+          + "Codex's hook review (tmux attach -t =r01-qa); a later launch on the same plugin version records that approval, and "
           + "plugin updates after it renew it on their own.",
       });
       expect(fsOps.readFile("/codex-home/config.toml")).toBe(enabled);

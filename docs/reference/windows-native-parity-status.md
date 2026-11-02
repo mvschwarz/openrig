@@ -1,5 +1,33 @@
 # Native Windows parity: implementation and evidence
 
+## Named-session current-pane metadata and capture (2026-11-03)
+
+Explicit session-name APIs now read the current pane's PID, foreground command,
+scrollback and visible screen. They preserve the original current-pane semantics
+rather than requiring a sole pane. Native colon-bearing logical names resolve
+their marker before constructing the physical pane target. Capture flags, line
+count, styling, soft-wrap joining and null-on-unavailable behavior are retained;
+marker mismatch sends no metadata/capture command. Generic explicit pane/window
+operations keep their existing target API.
+
+Confirmed pure-session callers in Codex, Claude, Pi, community/stub runtimes,
+metadata refresh, structural activity, session transport, handover, runtime switch,
+launch environment and transcript rotation use these entries. Older injected
+adapters retain their established call arguments through the compatibility helper.
+Mixed sessionTarget fields and input/mutation target contracts are not inferred
+from variable names and remain separate audit work.
+
+Six initial contract/native/community files passed 125 with three skips; eight
+domain/runtime files passed 660 with 18 skips. The complete Codex/Claude/Pi/stub
+runtime files passed after correcting an old expected attach hint to its existing
+exact-match `=r01-qa` form. Daemon build and whitespace checks passed. These sets
+overlap and are not a unique-test total. A real WSL tmux fixture using the actual
+compiled adapter independently matched its owned Node child's PID, foreground
+command and capture/screen marker for a format-looking name; missing targets
+returned null and all owned resources were cleaned. This does not qualify real
+stock psmux, provider continuity or current installed/full-directory acceptance.
+No deployment, user-team operation or public push occurred.
+
 ## Repaired paired terminal checkpoint at 239daf4 (2026-11-03)
 
 The same 20 terminal/lifecycle/CLI files were rerun at

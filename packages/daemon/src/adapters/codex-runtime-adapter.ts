@@ -1,3 +1,4 @@
+import { readNamedSessionCommand } from "./session-pane-lookup.js";
 import { codexEnvelopeArgs } from "../domain/codex-rebuild-permissions.js";
 import { codexMemberEnvelope, observeCodexEnvelope, readProfileFingerprint, type CodexProfileObservation, type ProfileFingerprint } from "../domain/codex-member-permissions.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
@@ -1267,7 +1268,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ready: false, reason: "tmux session not responsive" };
     }
 
-    const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+    const paneCommand = await readNamedSessionCommand(this.tmux, binding.tmuxSession);
     const paneContent = await this.captureProbeScreen(binding.tmuxSession);
     let probe = assessNativeResumeProbe({
       runtime: "codex",
@@ -1279,7 +1280,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const process = await verifyCodexPaneProcess({ target: binding.tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
         listProcesses: this.listProcesses as never });
       if (process) {
-        const currentPaneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
+        const currentPaneCommand = await readNamedSessionCommand(this.tmux, binding.tmuxSession);
         const currentPaneContent = await this.captureProbeScreen(binding.tmuxSession);
         probe = assessNativeResumeProbe({ runtime: "codex", paneCommand: currentPaneCommand,
           paneContent: currentPaneContent, codexProcessVerified: true });

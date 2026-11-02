@@ -1,3 +1,4 @@
+import { readNamedSessionCommand, captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 import os from "node:os";
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -485,8 +486,8 @@ export class ResumeMetadataRefresher {
     const attempts = 16;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
-      const paneContent = (await this.tmuxAdapter.capturePaneContent(sessionName, 20)) ?? "";
+      const paneCommand = await readNamedSessionCommand(this.tmuxAdapter, sessionName);
+      const paneContent = (await captureNamedSessionContent(this.tmuxAdapter, sessionName, 20)) ?? "";
       const ready = this.tmuxAdapter.isNativeWindows
         ? await verifyPaneIdleShell({ target: sessionName, tmux: this.tmuxAdapter, listProcesses: this.listClaudeProcesses })
         : isProbeShellReady({ paneCommand, paneContent });

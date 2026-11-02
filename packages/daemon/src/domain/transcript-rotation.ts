@@ -1,3 +1,4 @@
+import { captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 // V1 pre-release CLI/daemon Item 1 — bounded-trail transcript rotation.
 //
 // Replaces the legacy `tmux pipe-pane` mechanism (infinite-growth file)
@@ -147,10 +148,10 @@ let pendingCaptures = new Map<TmuxAdapter, Map<number, CaptureRequest[]>>();
 function captureSoon(adapter: TmuxAdapter, sessionName: string, lines: number, isCurrent: () => boolean): Promise<string | null> {
   // The batch lists sessions by name, so pane, window and `session:window` targets read per target.
   if (typeof adapter.capturePanesContent !== "function" || /^[%@$]\d+$/.test(sessionName) || sessionName.includes(":")) {
-    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines));
+    return Promise.resolve().then(() => captureNamedSessionContent(adapter, sessionName, lines));
   }
   if (unlistedSessions.has(sessionName)) {
-    return Promise.resolve().then(() => adapter.capturePaneContent(sessionName, lines)).then((content) => {
+    return Promise.resolve().then(() => captureNamedSessionContent(adapter, sessionName, lines)).then((content) => {
       if (content !== null) unlistedSessions.delete(sessionName);
       return content;
     });

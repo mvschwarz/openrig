@@ -14,6 +14,8 @@ function fixture(valid = true) {
     if (command === "show-environment" && argv.includes("-g")) return "";
     if (command === "list-windows") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "2|owned|1|1\n"; }
     if (command === "list-panes") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":2"); return `${binding.physical}|%1|0|C:/owned|80|24|1\n`; }
+    if (command === "display-message") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return argv.at(-1) === "#{pane_pid}" ? "1234\n" : "owned-runtime\n"; }
+    if (command === "capture-pane") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return "owned capture\n"; }
     if (command === "show-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "OWNED_VALUE=literal\n"; }
     if (["source-file", "set-environment"].includes(command!)) { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
     throw new Error("Unexpected command: " + command);
@@ -31,6 +33,21 @@ it("looks up windows and indexed panes without splitting the logical session nam
   expect(await f.adapter.listSessionWindows(f.name)).toMatchObject([{ index: 2 }]);
   expect(await f.adapter.listSessionPanes(f.name, false, 2)).toHaveLength(1);
   expect(f.calls.flat()).not.toContain("=owned");
+});
+it("reads metadata and captures from the bound session's current pane", async () => {
+  const f = fixture();
+  expect(await f.adapter.getSessionPanePid(f.name)).toBe(1234);
+  expect(await f.adapter.getSessionPaneCommand(f.name)).toBe("owned-runtime");
+  expect(await f.adapter.captureSessionContent(f.name, 40, { escapeSequences: true, joinWrappedLines: true })).toBe("owned capture\n");
+  expect(await f.adapter.captureSessionScreen(f.name, { escapeSequences: true })).toBe("owned capture\n");
+  expect(f.calls.filter(argv => argv.includes("capture-pane"))[0]).toEqual(["tmux", "capture-pane", "-p", "-e", "-J", "-t", "=" + bindNativeSessionName(f.name).physical + ":", "-S", "-40"]);
+  expect(f.calls.flat()).not.toContain("=owned:");
+});
+it("keeps metadata and capture unknown after a binding-marker mismatch", async () => {
+  const f = fixture(false);
+  expect(await f.adapter.getSessionPanePid(f.name)).toBeNull(); expect(await f.adapter.getSessionPaneCommand(f.name)).toBeNull();
+  expect(await f.adapter.captureSessionContent(f.name)).toBeNull(); expect(await f.adapter.captureSessionScreen(f.name)).toBeNull();
+  expect(f.calls.some(argv => argv.includes("display-message") || argv.includes("capture-pane"))).toBe(false);
 });
 it("does not fall back to the name prefix when its marker is wrong", async () => {
   const f = fixture(false);

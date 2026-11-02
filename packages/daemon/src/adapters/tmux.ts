@@ -2022,11 +2022,13 @@ export class TmuxAdapter {
   }
 
   /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
-  async getPanePid(paneId: string): Promise<number | null> {
-    const target = exactTarget(paneId, "pane");
+  async getSessionPanePid(name: string): Promise<number | null> { return this.getPanePid(name, true); }
+
+  async getPanePid(paneId: string, literalSessionName = false): Promise<number | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
-        `tmux display-message -p -t ${shellQuote(target)} "#{pane_pid}"`);
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"], legacy = `tmux display-message -p -t ${shellQuote(target)} "#{pane_pid}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const trimmed = output.trim();
       const parsed = parseInt(trimmed, 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -2049,11 +2051,13 @@ export class TmuxAdapter {
   }
 
   /** Get the current foreground command in a pane. Returns null if unavailable. */
-  async getPaneCommand(paneId: string): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async getSessionPaneCommand(name: string): Promise<string | null> { return this.getPaneCommand(name, true); }
+
+  async getPaneCommand(paneId: string, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"],
-        `tmux display-message -p -t ${shellQuote(target)} "#{pane_current_command}"`);
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"], legacy = `tmux display-message -p -t ${shellQuote(target)} "#{pane_current_command}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const trimmed = output.trim();
       return trimmed || null;
     } catch {
@@ -2358,15 +2362,18 @@ export class TmuxAdapter {
     return unlisted && out.size === 0 ? null : out;
   }
 
-  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async captureSessionContent(name: string, lines = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }): Promise<string | null> { return this.capturePaneContent(name, lines, opts, true); }
+
+  async capturePaneContent(paneId: string, lines: number = 20, opts?: { escapeSequences?: boolean; joinWrappedLines?: boolean }, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     // `-e` keeps text styling, such as the faint rendering of a suggestion.
     const styled = opts?.escapeSequences === true;
     // Verification can recover mid-word soft wraps without erasing logical newlines.
     const joined = opts?.joinWrappedLines === true;
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), ...(joined ? ["-J"] : []), "-t", target, "-S", `-${lines}`],
-        `tmux capture-pane -p${styled ? " -e" : ""}${joined ? " -J" : ""} -t ${shellQuote(target)} -S -${lines}`);
+      const argv = ["tmux", "capture-pane", "-p", ...(styled ? ["-e"] : []), ...(joined ? ["-J"] : []), "-t", target, "-S", `-${lines}`];
+      const legacy = `tmux capture-pane -p${styled ? " -e" : ""}${joined ? " -J" : ""} -t ${shellQuote(target)} -S -${lines}`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       return output || null;
     } catch {
       return null;
@@ -2379,11 +2386,13 @@ export class TmuxAdapter {
    * screen, NOT `-S -<lines>` scrollback: scrollback reintroduces the row drift
    * the absolute-paint seed exists to eliminate.
    */
-  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }): Promise<string | null> {
-    const target = exactTarget(paneId, "pane");
+  async captureSessionScreen(name: string, opts?: { escapeSequences?: boolean }): Promise<string | null> { return this.capturePaneScreen(name, opts, true); }
+
+  async capturePaneScreen(paneId: string, opts?: { escapeSequences?: boolean }, literalSessionName = false): Promise<string | null> {
+    const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", ...(opts?.escapeSequences ? ["-e"] : []), "-t", target],
-        `tmux capture-pane -p${opts?.escapeSequences ? " -e" : ""} -t ${shellQuote(target)}`);
+      const argv = ["tmux", "capture-pane", "-p", ...(opts?.escapeSequences ? ["-e"] : []), "-t", target], legacy = `tmux capture-pane -p${opts?.escapeSequences ? " -e" : ""} -t ${shellQuote(target)}`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       return output || null;
     } catch {
       return null;
