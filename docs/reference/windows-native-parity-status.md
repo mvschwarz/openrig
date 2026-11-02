@@ -4317,3 +4317,12 @@ entry and requires the Windows profile, covering its paired parser import.
 Execution of that strengthened gate is pending on the committed source. Real
 remote SSH authentication, all user/group/host combinations, DNS-based matches,
 custom service working directories and full same-head suites remain unaccepted.
+
+The strengthened native installed-package GATE subsequently passed at exact
+c10a79be943cee17362b63e01d653dbc0d9bdabc in 68 seconds (17:00:49-17:01:57 UTC,
+2026-11-02). HEAD and clean tracked-diff hash matched before/after. In addition
+to the earlier build/tarball/isolated-prefix install, helper/resource/SQLite and
+rig.cmd checks, the installed `host doctor --help` loaded the new Windows posture
+module and its paired parser export. Receipt: pack-terminal-assets-c10a79b.json
+and its log. This is package loading acceptance, not remote-host or complete
+same-head test acceptance; no publication or deployment occurred.
