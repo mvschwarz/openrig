@@ -61,7 +61,7 @@ export interface DestroyDeps {
   mkdirp: (path: string) => void;
   listManagedTmuxSessions: (dbPath: string) => string[];
   resolveTmuxServerArgs?: (stateRoot: string) => string[];
-  killTmuxSession: (sessionName: string, serverArgs?: readonly string[]) => boolean;
+  killTmuxSession: (sessionName: string, serverArgs?: readonly string[]) => boolean | "stopped" | "missing" | "unknown" | Promise<boolean | "stopped" | "missing" | "unknown">;
   sleep: (ms: number) => Promise<void>;
   now: () => Date;
 }
@@ -248,8 +248,14 @@ export async function executeDestroy(plan: DestroyPlan, deps: DestroyDeps): Prom
   let tmuxMissing = 0;
   if (plan.scope === "all") {
     for (const sessionName of plan.managedTmuxSessions) {
-      if (deps.killTmuxSession(sessionName, serverArgs)) tmuxKilled += 1;
-      else tmuxMissing += 1;
+      const stopped = await deps.killTmuxSession(sessionName, serverArgs);
+      if (stopped === true || stopped === "stopped") tmuxKilled += 1;
+      else if (stopped === "missing") tmuxMissing += 1;
+      else {
+        warnings.push(`Cannot confirm managed session '${sessionName}' stopped or absent. State was left untouched for recovery.`);
+        return { scope: plan.scope, backup: plan.backup, stateRoot: plan.stateRoot, backupPaths,
+          daemonStopped, portCleared, stateRecreated, tmuxKilled, tmuxMissing, warnings };
+      }
     }
   }
 
@@ -315,11 +321,7 @@ export function parseWindowsListeningPid(output: string, port: number): number |
   return pids.size === 1 ? [...pids][0]! : null;
 }
 
-export function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): boolean {
-  try {
-    execFileSync("tmux", [...serverArgs, "kill-session", "-t", `=${sessionName}`], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+export async function killTmuxSessionWithCli(sessionName: string, serverArgs: readonly string[] = []): Promise<"stopped" | "missing" | "unknown"> {
+  const { stopTerminalSessionForCleanup } = await import("@openrig/daemon/terminal-cleanup");
+  return stopTerminalSessionForCleanup(sessionName, serverArgs);
 }

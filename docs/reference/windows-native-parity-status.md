@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Offline destroy retains uncertain session recovery state (2026-11-03)
+
+Offline destroy now reuses the daemon's terminal adapter instead of issuing a
+raw PATH tmux kill against a logical name. Native mapped names therefore pass
+through marker verification and guarded native stop. Cleanup distinguishes an
+observed absent session from an unknown transport/identity result and requires
+observed disappearance after a successful stop. The selected recorded server
+arguments are retained. This does not yet persist a daemon-resolved executable
+for offline use; normal adapter executable discovery still applies.
+
+An unknown result stops further session cleanup and leaves state targets intact,
+with a recovery warning and nonzero CLI exit. Previously every failed stop was
+counted as missing and state processing continued. Explicit missing results may
+continue; legacy injected false results are conservatively unknown.
+
+Five complete cleanup/destroy/mapping/exact-target files passed 86/86 on Windows,
+including command exit behavior, no delete/rename/recreate after uncertainty,
+positive absence and stop readback. Daemon TypeScript/assets build passed on
+the second ordinary invocation; the first compiler process exited 0xC0000005
+without a source diagnostic. CLI noEmit and whitespace checks passed after the
+final exit-condition adjustment. These are controlled fixtures, not actual instance destruction or
+the still-unresolved real mapped psmux EBUSY cleanup. Installed-package and
+paired full-directory receipts above predate this repair. No deployment,
+actual destroy, team restart or public push occurred.
+
 ## Paired full CLI/TUI/UI checkpoint at 0cfa4a8 (2026-11-03)
 
 Both platforms selected 758 test files at
