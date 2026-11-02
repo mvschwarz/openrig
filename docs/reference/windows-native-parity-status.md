@@ -4932,3 +4932,13 @@ and executes an owned literal-argv receiver through its default executor, to
 check delivery of the new paired public export. That updated installed gate is
 pending at this revision. The earlier installed receipts do not cover this
 new export. No original team, provider, real GUI or running deployment changed.
+
+The updated installed gate subsequently passed at clean source
+d23b0930cb1c3f8cf5508ea0bbfb8898d7467a4f in 67 seconds, with matching
+before/after HEAD and tracked-diff hashes. The actual installed terminal-window
+entry loaded its paired export and preserved the literal receiver argv through
+the native Job executor. Build/pack/isolated install, terminal helpers, SQLite,
+installed resources and rig.cmd also passed. Receipt:
+pack-terminal-assets-d23b093.json and its complete log. This supersedes the
+pending installed-export check above only; the broader parity requirements,
+real GUI/provider acceptance and full daemon-suite limitations remain open.
