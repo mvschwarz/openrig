@@ -150,6 +150,17 @@ describe("rex CLI transport", () => {
 });
 
 describe("resolveRexBinary", () => {
+  it.runIf(process.platform === "win32")("finds native Rex under quoted absolute PATH entries without bypassing earlier relative entries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rex quoted path # "));
+    const binary = path.join(root, "rex.exe");
+    try {
+      fs.writeFileSync(binary, "owned discovery fixture; never executed");
+      expect(resolveRexBinary({ PATH: `"${root}"` })).toBe(binary);
+      expect(resolveRexBinary({ PATH: `relative;"${root}"` })).toBeNull();
+      expect(resolveRexBinary({ PATH: `;"${root}"` })).toBeNull();
+      expect(resolveRexBinary({ PATH: `"${root}` })).toBeNull();
+    } finally { fs.unlinkSync(binary); fs.rmdirSync(root); }
+  });
   const bundled = path.join(homedir(), "Library", "Application Support", "com.superlogical.rex", "RexServer", "Versions", "Current", "Rex Server.app", "Contents", "MacOS", "rex");
 
   it("prefers $REX_BIN_DIR, then PATH, then the app bundle", () => {

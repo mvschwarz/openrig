@@ -4819,3 +4819,31 @@ four changed implementation/test files were copied and byte-compared. The
 daemon TypeScript build and whitespace check passed. This qualifies the native
 shell launch path, not the still-unconfirmed real Herdr GUI/foreground attach
 matrix, and does not raise Windows CreateProcess's own argv-size limit.
+
+### Installed current helpers and quoted Rex PATH discovery (2026-11-03)
+
+The complete native installed-package gate passed at clean source
+dfaff96348b58b664147db886fbd8da2bd45077e in 71 seconds. Before/after HEAD and
+tracked-diff hashes matched. This includes source build, tarball assembly,
+isolated-prefix installation, exact installed terminal helper bytes/execution,
+SQLite ABI, installed resource operations and rig.cmd daemon-subpath loading.
+Receipt: pack-terminal-assets-dfaff96.json and its complete log. It does not
+cover later source changes, the full daemon suite or deployment.
+
+A subsequent bounded path-list audit inspected 1,496 public production source
+files, excluding the private row before content reads. Candidate matches remain
+an inventory rather than semantic portability proof. One real native temporary
+directory reproduced a Rex resolver defect: a quoted absolute Windows PATH
+entry returned unavailable despite containing the selected rex.exe. Rex now
+unwraps a matching pair of directory quotes before absolute-path validation,
+matching the native Herdr behavior. Earlier empty/relative entries and unmatched
+quotes still refuse; no directory is skipped to select a different executable.
+The discovery fixture's file was never executed and was removed afterward.
+
+The regression failed before the change and passed afterward. Four complete
+Rex adapter/transport/native-Job/wiring files passed 63 cases on Windows with
+four POSIX process skips; WSL passed 60 with seven native-only skips after both
+changed files were copied and byte-compared. Daemon TypeScript build and
+whitespace checking passed. The route fixture used an owned synthetic Rex
+responder; real Rex GUI/server acceptance remains unqualified. No original team
+or running deployment changed, and no public push occurred.

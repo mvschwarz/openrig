@@ -66,7 +66,8 @@ export function resolveRexBinary(env: NodeJS.ProcessEnv, isExecutable: (file: st
   if (process.platform === "win32") {
     // The shared POSIX resolver splits on ':', which splits a Windows drive.
     // Rex control calls require a native executable, never a shell shim.
-    for (const directory of (search ?? "").split(path.delimiter)) {
+    for (const entry of (search ?? "").split(path.delimiter)) {
+      const directory = entry.startsWith('"') && entry.endsWith('"') ? entry.slice(1, -1) : entry;
       if (!path.isAbsolute(directory)) return null;
       const candidate = path.join(directory, "rex.exe");
       if (executable(candidate)) return candidate;
