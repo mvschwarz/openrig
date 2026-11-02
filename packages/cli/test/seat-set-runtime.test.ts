@@ -189,4 +189,13 @@ describe("rig seat set-runtime", () => {
     expect(errors.join("\n")).toMatch(message);
     expect(exitCode).toBe(1);
   });
+  it("a seat that has never started says nothing was switched, with no switch id, and that its first start uses the new runtime", async () => {
+    const { logs, exitCode } = await run({ status: 200, data: { ok: true, dryRun: false, changed: true, firstStart: true,
+      seat: { ref: "dev.build@cloud" }, from: "claude-code", to: "codex", permission: { mode: "inherit", source: "member_or_rig_policy" },
+      dropped: [{ setting: "model", value: "opus" }] } }, ["dev.build@cloud", "--runtime", "codex", "--reason", "start it on Codex"]);
+    expect(logs).toContain("dev.build@cloud has never started, so nothing was switched (no switch id): its saved runtime changed from claude-code to codex, and its first start uses it.");
+    expect(logs).toContain("Cleared from claude-code: model opus. Its first start takes the rest from its agent spec for codex.");
+    expect(logs.join("\n")).not.toMatch(/switch undefined|Queue:/);
+    expect(exitCode).toBeUndefined();
+  });
 });

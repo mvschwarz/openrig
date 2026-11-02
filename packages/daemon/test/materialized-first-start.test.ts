@@ -11,13 +11,15 @@ async function fixture(captureSnapshot = true, memberPatch: Record<string, unkno
     [`${root}/agent/agent.yaml`]: 'name: worker\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\nstartup:\n  files:\n    - path: role.md\n      required: true\n      delivery_hint: send_text\n',
     [`${root}/agent/role.md`]: "Read your role and work with the team.",
   };
-  const adapter: RuntimeAdapter = { runtime: "pi", listInstalled: vi.fn(async () => []),
+  const runtimeAdapter = (runtime: string): RuntimeAdapter => ({ runtime, listInstalled: vi.fn(async () => []),
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 1, failed: [] })),
     launchHarness: vi.fn(async () => ({ ok: true })), checkReady: vi.fn(async () => ({ ready: true })),
-  };
+  });
+  const adapter = runtimeAdapter("pi");
+  const adapters = { pi: adapter, "claude-code": runtimeAdapter("claude-code"), codex: runtimeAdapter("codex") };
   const tmux = mockTmuxAdapter(); tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
-  const options = { tmux, adapters: { pi: adapter }, podInstantiatorFsOps: {
+  const options = { tmux, adapters, podInstantiatorFsOps: {
     exists: (path: string) => path in files, readFile: (path: string) => { if (!(path in files)) throw new Error(`Missing ${path}`); return files[path]!; },
   } };
   const app = createTestApp(db, options);
@@ -29,7 +31,7 @@ async function fixture(captureSnapshot = true, memberPatch: Record<string, unkno
   if (!materialized.ok) throw new Error("fixture materialization failed");
   const rigId = materialized.result.rigId;
   if (captureSnapshot) app.snapshotCapture.captureSnapshot(rigId, "manual");
-  return { ...app, db, adapter, tmux, files, rigId, reopen: () => createTestApp(db, options) };
+  return { ...app, db, adapter, adapters, tmux, files, rigId, reopen: () => createTestApp(db, options) };
 }
 it.each([[false, true], [true, true], [true, false]])("first-starts only the selected seat with authored startup and four records intact (reopened=%s, snapshot=%s)", async (reopened, snapshot) => {
   const f = await fixture(snapshot);
@@ -147,4 +149,47 @@ it.each(["policy", "history", "rig name"])("does not launch a stale %s after an 
   });
   expect(await f.podInstantiator.launchFirstMaterializedNode(f.rigId, node.id)).toMatchObject({ ok: false, code: "selection_changed" });
   expect(f.adapter.launchHarness).not.toHaveBeenCalled();
+});
+
+// A seat saved as Claude Code and never started moves to Codex before its first start, keeping its address and edges.
+async function setRuntime(f: Awaited<ReturnType<typeof fixture>>, seat: string, body: Record<string, unknown> = {}) {
+  const response = await f.app.request(`/api/seat/set-runtime/${encodeURIComponent(seat)}`, { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runtime: "codex", reason: "start it on Codex", ...body }) });
+  return { status: response.status, body: await response.json() as Record<string, any> };
+}
+it("moves a materialized seat that has never started to the other runtime, and its first start uses it", async () => {
+  const f = await fixture(true, { runtime: "claude-code", model: "opus" });
+  const node = () => f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.build")!;
+  const before = node();
+  const plan = await setRuntime(f, "dev-build@materialized", { dryRun: true });
+  expect(plan.body).toMatchObject({ ok: true, dryRun: true, changed: true, firstStart: true, from: "claude-code", to: "codex" });
+  expect(node().runtime).toBe("claude-code");
+  const saved = await setRuntime(f, "dev-build@materialized");
+  expect(saved, JSON.stringify(saved.body)).toMatchObject({ status: 200, body: { ok: true, dryRun: false, changed: true, firstStart: true,
+    from: "claude-code", to: "codex", dropped: [{ setting: "model", value: "opus" }] } });
+  expect(saved.body.switchId).toBeUndefined();
+  expect(node()).toMatchObject({ id: before.id, logicalId: "dev.build", runtime: "codex", model: null });
+  expect(f.sessionRegistry.getSessionsForRig(f.rigId)).toEqual([]);
+  // A restore's first start reads the launch recipe and the newest snapshot: both say Codex now.
+  const recipe = f.rigRepo.getNodeLaunchRecipe(before.id)!.rigSpec.pods[0]!.members.find(member => member.id === "build")!;
+  expect(recipe).toMatchObject({ runtime: "codex" }); expect(recipe.model).toBeUndefined();
+  expect(f.snapshotRepo.getLatestSnapshot(f.rigId)!.data.nodes.find((entry: { id: string }) => entry.id === before.id)).toMatchObject({ runtime: "codex" });
+  const launched = await f.app.request(`/api/rigs/${f.rigId}/nodes/dev.build/launch`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  expect(launched.status, await launched.text()).toBe(201);
+  expect(f.adapters.codex.launchHarness).toHaveBeenCalledTimes(1);
+  expect(f.adapters["claude-code"].launchHarness).not.toHaveBeenCalled();
+});
+it("keeps today's refusal for a seat with history, and names the path for one that was never materialized", async () => {
+  const f = await fixture(true, { runtime: "claude-code" });
+  const build = f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.logicalId === "dev.build")!;
+  f.sessionRegistry.registerSession(build.id, "dev-build@materialized");
+  const history = await setRuntime(f, "dev-build@materialized");
+  expect(history.body).toMatchObject({ ok: false, code: "runtime_switch_unsupported", message: "dev.build@materialized can't switch runtime: it has no bound tmux pane." });
+  expect(history.body.guidance).toBeUndefined();
+  const declared = f.rigRepo.createRig("declared"), seat = f.rigRepo.addNode(declared.id, "dev.build", { runtime: "claude-code", cwd: root });
+  const refusal = await setRuntime(f, "dev.build@declared");
+  expect(refusal.body).toMatchObject({ ok: false, code: "runtime_switch_unsupported",
+    guidance: expect.stringContaining("declare the other runtime there and create the seat again") });
+  expect(f.rigRepo.getRig(declared.id)!.nodes.find(node => node.id === seat.id)).toMatchObject({ runtime: "claude-code" });
+  expect(f.rigRepo.getRig(f.rigId)!.nodes.find(node => node.id === build.id)).toMatchObject({ runtime: "claude-code" });
 });
