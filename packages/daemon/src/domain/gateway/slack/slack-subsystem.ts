@@ -99,9 +99,8 @@ export function makeHumanReplyResolver(
     const source = queueRepo.getById(input.qitemId);
     if (source?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
-    // A different person's reply to a question parked on someone else already reached the agent as their own message
-    // (the inbound row, linked to the question). It doesn't resume the question, which stays parked on its person.
-    if (source?.state === "blocked" && queueRepo.askedSomeoneElse(input.actorSession, source.blockedOn)) return "not-applicable";
+    // Any registered person's reply resumes a question parked on another: one trusted workspace, recorded as them on that
+    // person's ask (the write contract names both).
     const uncertainDecision = `${input.decision}\n\n---\nOpenRig timing context (Slack reply ${JSON.stringify([input.actorSession, input.messageTs ?? null])}): This reply resumed the question, but its ordering against the posted question could not be confirmed. Resuming is not approval; read the person's words in context.`;
     // An acknowledgement retry must not resolve again. Match this reply's durable
     // context, not an older episode's generic resolved marker.
@@ -114,7 +113,7 @@ export function makeHumanReplyResolver(
     // A park on a person by any address (a registered person's own address, as their Slack rows carry it, or a
     // legacy human seat) answers only from a reply written after its current question posted.
     if (source?.state === "blocked" && source.blockedOn && queueRepo.isPersonAddress(source.blockedOn)) {
-      parkedOnAsked = source.destinationSession === input.actorSession;
+      parkedOnAsked = queueRepo.isPersonAddress(source.destinationSession) && queueRepo.answersAsk(source, input.actorSession);
       const episode = queueRepo.currentHumanRequiredEpisode(input.qitemId);
       if (!episode) return "not-applicable";
       const { key, receipt } = episode;

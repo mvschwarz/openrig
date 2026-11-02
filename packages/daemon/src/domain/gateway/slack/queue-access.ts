@@ -224,11 +224,13 @@ export function makeQueuePorts(
     const people = registeredPeople((opts.loadHumanRegistry ?? (() => loadHumanRegistry()))());
     if (!people) return null;
     const channels = (opts.sharedChannels ?? (() => sharedChannelAddresses()))();
+    // A person with no connector binding is reached in the Feed and Steering only, so nothing posts for them.
+    const slackPeople = people.filter((person) => person.connectorBindings.length > 0);
     const episodes = queueRepo.transitionLog.activeOwnerNotificationEpisodes(includePosted);
     return episodes.flatMap(({ qitemId, transition, posted }) => {
       const row = queueRepo.getById(qitemId);
       if (!row) return [];
-      const item = project(row, transition, people, channels);
+      const item = project(row, transition, slackPeople, channels);
       return item ? [{ item, posted }] : [];
     });
   };
@@ -256,11 +258,13 @@ export function makeQueuePorts(
         inboundReplyTo: input.inReplyTo ?? null,
         gatewayInbound: true,
       };
-      const created = directAnswer && input.inReplyTo
+      let created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
           // A parked decision's answer belongs to its current question, so a re-park gets its own.
           ...(input.typedReply && ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
+      // Another registered person's answer already settled the ask: these words still reach the agent, as correspondence.
+      if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) created = await queueRepo.create(createInput);
       return (created as unknown as { qitemId: string }).qitemId;
     },
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {

@@ -181,14 +181,16 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
   if (address !== `${entityId}@${ADDRESS_DOMAIN}`) {
     return { ok: false, error: `address "${address}" must be the registered ref "${entityId}@${ADDRESS_DOMAIN}" (the <entityId>@external convention)` };
   }
-  if (!Array.isArray(connectorBindings) || connectorBindings.length < 1) {
-    return { ok: false, error: "connectorBindings must be a non-empty list (>=1)" };
+  // A person may have no connector binding (left out, or an empty list): they're reached in the Feed and Steering only.
+  if (connectorBindings !== undefined && !Array.isArray(connectorBindings)) {
+    return { ok: false, error: "connectorBindings must be a list (empty, or left out, for a person with no connector)" };
   }
+  const listed: unknown[] = Array.isArray(connectorBindings) ? connectorBindings : [];
 
   const bindings: HumanConnectorBinding[] = [];
   let primaryCount = 0;
-  for (let i = 0; i < connectorBindings.length; i++) {
-    const b = connectorBindings[i];
+  for (let i = 0; i < listed.length; i++) {
+    const b = listed[i];
     if (!isObj(b)) return { ok: false, error: `connectorBindings[${i}] must be a mapping` };
     const ubk = unknownKey(b, ALLOWED_BINDING_KEYS);
     if (ubk) return { ok: false, error: `connectorBindings[${i}] has unknown key "${ubk}" — allowed: ${[...ALLOWED_BINDING_KEYS].join(", ")}` };
@@ -216,8 +218,8 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
     if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
     bindings.push(binding);
   }
-  // EXACTLY ONE primary binding per entity = the default delivery channel.
-  if (primaryCount !== 1) {
+  // EXACTLY ONE primary binding per entity with any binding = the default delivery channel.
+  if (bindings.length > 0 && primaryCount !== 1) {
     return { ok: false, error: `exactly one connectorBinding must have role "primary" (found ${primaryCount}) — it is the default delivery channel` };
   }
   // A6 v3 pin-1 (within-fragment): a handle is UNIQUE per kind across this human's bindings —
@@ -489,7 +491,8 @@ export interface InflightItem {
 
 export interface HumanBindingsSummary {
   count: number;
-  primary: { kind: string; connectorRef: string };
+  /** Null for a person with no connector binding: they're reached in the Feed and Steering only. */
+  primary: { kind: string; connectorRef: string } | null;
   /** true iff any binding carries a handle (outbound-only otherwise). */
   inboundResolvable: boolean;
 }
@@ -592,7 +595,7 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
   const proj = projectHumans(home);
   if (!proj.ok) return { ok: false, error: proj.error };
   const humans: HumanSummary[] = proj.entities.map((e) => {
-    const primary = e.connectorBindings.find((b) => b.role === "primary")!;
+    const primary = e.connectorBindings.find((b) => b.role === "primary");
     return {
       entityId: e.entityId,
       displayName: e.displayName,
@@ -602,7 +605,7 @@ export function listHumans(home: string = getOpenRigHome()): ListHumansResult {
       availability: e.prefs.availability ?? (e.prefs.away === true ? "away" : "available"),
       bindings: {
         count: e.connectorBindings.length,
-        primary: { kind: primary.kind, connectorRef: primary.connectorRef },
+        primary: primary ? { kind: primary.kind, connectorRef: primary.connectorRef } : null,
         inboundResolvable: e.connectorBindings.some((b) => b.handle !== undefined),
       },
       fragmentPath: fragmentPathFor(e.entityId, home),

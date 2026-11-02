@@ -117,6 +117,9 @@ const FALLBACK_ACTOR = "system:queue-fallback";
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
  *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
 export const TYPED_GATE_BLOCKER_PREFIXES = ["fold:", "auth:", "external:"] as const;
+
+/** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
+export const UNATTRIBUTED_ACTOR = "human@host";
 export function typedGateBlockerPrefix(value: string): string | null {
   return TYPED_GATE_BLOCKER_PREFIXES.find((p) => value.startsWith(p)) ?? null;
 }
@@ -1847,6 +1850,9 @@ export class QueueRepository {
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
+    // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
+    const answered = this.getById(qitemId);
+    if (answered) return answered;
     return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] });
   }
 
@@ -2168,11 +2174,11 @@ export class QueueRepository {
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
-  /** Who may answer an ask: the asked person; and on a runner's permission request, any registered person, since a
-   *  person's yes counts however it arrives there. A shared channel never answers. */
+  /** Who may answer an ask: the asked person, and any other registered person in this workspace, who's recorded as
+   *  themselves with the asked person kept (one trusted workspace, equal authority). A shared channel never answers. */
   answersAsk(item: QueueItem, actorSession: string): boolean {
     if (item.destinationSession === actorSession) return true;
-    if (!runnerPermissionOrigin(item) || this.isSharedChannel(actorSession)) return false;
+    if (this.isSharedChannel(actorSession)) return false;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(actorSession, registry.entities) !== null;
   }
@@ -2187,8 +2193,8 @@ export class QueueRepository {
     return this.loadHumanRegistryFn();
   }
 
-  /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
-   *  asked person under another spelling, and an ask to no registered person aren't someone else. */
+  /** The asked person, when a different registered person is acting on what was asked of them, so the record names both;
+   *  else null. An agent, the asked person under another spelling, and an ask to no registered person aren't someone else. */
   askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
     const registry = this.loadHumanRegistryFn();
     if (!registry.ok) return null;
@@ -3799,9 +3805,13 @@ export class QueueRepository {
         || (!this.answersAsk(item, input.actorSession) && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
 
-      let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
-        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`
-        : `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${item.destinationSession}`;
+      const asked = item.destinationSession;
+      let transitionNote = asked === input.actorSession ? "direct human reply received"
+        : input.primaryUser && input.actorSession === UNATTRIBUTED_ACTOR
+          ? `reply from someone at the terminal OpenRig can't name (${UNATTRIBUTED_ACTOR}), unattributed, on ${asked}'s ask; not answered by ${asked}`
+        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${asked}'s ask; not answered by ${asked}`
+        : runnerPermissionOrigin(item) ? `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${asked}`
+        : `reply from ${input.actorSession}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
       const placed = this.placeTypedReply(item, input.decision);
       if (placed) transitionNote += `; ${placed}`;
       return this.updateInTransactionalContext({
@@ -3880,11 +3890,12 @@ export class QueueRepository {
     })();
   }
 
-  /** A decision parked on the person it asked takes that person's click or typed reply as its answer (makeHumanReplyResolver
-   *  resumes it): the park is on them by any of their addresses, and the answer came after its current question posted. */
+  /** A decision parked on the person it asked takes their click or typed reply, or another registered person's, as its
+   *  answer (makeHumanReplyResolver resumes it): the park is on a person, and the answer came after its current question
+   *  posted. */
   answersPark(item: QueueItem, actorSession: string, answeredTs: string | undefined): boolean {
     if (item.state !== "blocked" || !item.blockedOn || !this.isPersonAddress(item.blockedOn)) return false;
-    if (item.destinationSession !== actorSession || this.askedSomeoneElse(actorSession, item.blockedOn)) return false;
+    if (!this.isPersonAddress(item.destinationSession) || !this.answersAsk(item, actorSession)) return false;
     const posted = slackMicros(this.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs);
     const answered = slackMicros(answeredTs);
     return posted !== null && answered !== null && answered > posted;
