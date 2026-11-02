@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Restore-home observation and occupant/Stop races (2026-11-02)
+
+The asynchronous session-home lookup is now covered by explicit cancellation, generation-change and policy-disable races. The new generation-change regression initially reproduced an old restore prompt being sent after its captured occupant changed during the lookup. The current-stage check now revalidates both the known generation and the policy/operator exemption after asynchronous waits and at the existing before-write boundary, while retaining the existing unknown-generation semantics and operator-initiated manual exemption.
+
+All three races require no further send after the deferred observation returns. Five complete shared restore/enforcer/hook files passed 125/125 on Windows and 125/125 on ordinary-user WSL, with no skips; daemon typecheck passed. No real team was stopped, handed over or resumed by these fixtures. This validates these controlled race boundaries, not all transport races or a complete daemon/provider acceptance run.
+
 ## Restore tilde paths when daemon and pane user homes differ (2026-11-02)
 
 A real stock-pane regression reproduced the remaining mismatch: the receiver inherited its configured pane user home, while the daemon granted the same `~` extra beneath its own different user home. Fresh/fork/current-resume and legacy-resume launch grants now observe the selected session's USERPROFILE on Windows or HOME on POSIX when a tilde extra is configured. Post-compaction extra selection and prompt generation use that same observation. Provider account/config directories remain separate, and no pane HOME is overwritten.

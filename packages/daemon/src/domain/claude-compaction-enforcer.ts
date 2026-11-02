@@ -864,8 +864,15 @@ export class ClaudeCompactionEnforcer {
     // hook can predate it, so these drains require a live pane read to establish idle.
     const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
     const attempt = this.pendingPreCompactPrep.get(input.sessionName);
-    const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
-      && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
+    const stageGen = this.pendingStageGeneration.get(input.sessionName);
+    const isCurrent = () => {
+      const liveGen = stageGen != null ? this.resolveOccupantGeneration?.(input.sessionName) ?? null : null;
+      const enabled = this.settingsStore.resolveClaudeCompactionPolicy().enabled
+        || this.manualCompactionState.get(input.sessionName)?.operatorInitiated === true;
+      return enabled && this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
+        && this.pendingPreCompactPrep.get(input.sessionName) === attempt
+        && (stageGen == null || liveGen == null || stageGen === liveGen);
+    };
     const sendOpts = {
       openrigNotice: true as const,
       preserveInput: true as const,
@@ -894,7 +901,6 @@ export class ClaudeCompactionEnforcer {
     // ABSENT/unknown tenure on EITHER side is UNKNOWN — the gate is INERT (never treat the captured
     // stale generation as if it were live; the enabled-gate (a) + cutover invalidation (e) remain the
     // fail-closed layers when identity is unknown). Only a KNOWN mismatch refuses + drops the ghost.
-    const stageGen = this.pendingStageGeneration.get(input.sessionName);
     if (stageGen != null) {
       const liveGen = this.resolveOccupantGeneration?.(input.sessionName) ?? null;
       if (liveGen != null && liveGen !== stageGen) {

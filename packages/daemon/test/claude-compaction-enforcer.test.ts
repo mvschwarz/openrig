@@ -852,6 +852,32 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("If no current trace arrived, report that delivery gap");
   });
 
+  it.each(["invalidate", "generation-change", "policy-disabled"])("does not send an old restore prompt after %s during session-home observation", async change => {
+    const settings = makeSettingsStore({ ...POLICY_ENABLED_AT_80, messageFilePath: "~/owned-extra.md" });
+    const { transport, send } = makeSessionTransport();
+    let generation = "original";
+    let release!: (home: string) => void;
+    let observed!: () => void;
+    const started = new Promise<void>(resolve => { observed = resolve; });
+    Object.assign(transport, { restoreUserHome: vi.fn(() => {
+      observed(); return new Promise<string>(resolve => { release = resolve; });
+    }) });
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: TEST_HOME, resolveOccupantGeneration: () => generation });
+    const tick = (usedPercentage: number) => enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage });
+    expect(await tick(95)).toEqual({ triggered: true });
+    expect(await tick(95)).toEqual({ triggered: true });
+    expect(await tick(0)).toEqual({ triggered: true });
+    const before = send.mock.calls.length;
+    const pending = tick(0);
+    await started;
+    if (change === "invalidate") enforcer.invalidateOccupant("claude-seat@rig");
+    else if (change === "generation-change") generation = "successor";
+    else vi.mocked(settings.resolveClaudeCompactionPolicy).mockReturnValue({ ...POLICY_ENABLED_AT_80, enabled: false });
+    release(join(TEST_HOME, "selected-user-home"));
+    expect(await pending).toEqual({ triggered: false, reason: "preparation_stopped" });
+    expect(send).toHaveBeenCalledTimes(before);
+  });
+
   it.each(["absolute", "slash-home", "backslash-home"])("post-compact restore prompt carries the configured operator restore instruction (%s)", async form => {
     const userHome = join(TEST_HOME, "selected-user-home");
     const configuredFile = form === "absolute" ? "/tmp/openrig-extra-restore.md" : form === "slash-home" ? "~/openrig-extra-restore.md" : "~\\openrig-extra-restore.md";
