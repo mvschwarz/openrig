@@ -55,7 +55,8 @@ together in that home; it needs its own working sign-in and doesn't relocate `~/
 >   - Codex: hooks, workspace trust and team-selected config fragments (including MCP) in the selected
 >     `CODEX_HOME/config.toml`, default `~/.codex/config.toml`. These affect other Codex sessions using that home.
 >   - Claude Code: workspace trust in `~/.claude.json`, and activity hooks in the project's
->     `.claude/settings.local.json`, plus a status line unless you already have your own.
+>     `.claude/settings.local.json`, plus a status line unless you already have your own. `rig down` takes the hooks
+>     and status line back out once no Claude seat uses that directory.
 >   - Discovery skills go in `~/.claude/skills` and `~/.agents/skills`.
 >   - Each seat's `CLAUDE.md` or `AGENTS.md` gets OpenRig's managed blocks (culture, identity, onboarding). One more
 >     line, pointing an agent at its seat skills, is added only on a yes: saved at setup, or set where the daemon runs

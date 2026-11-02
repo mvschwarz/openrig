@@ -23,6 +23,10 @@ import { promisify } from "node:util";
 import { managedBlockText, mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE } from "../src/domain/seat-skill-storage.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { replaceFile } from "../src/adapters/replace-file.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import { claudeActivityRelayPath } from "../src/domain/claude-activity-hooks.js";
 
 
 function mockTmux(killResult?: { ok: boolean; code?: string; message?: string }): TmuxAdapter {
@@ -594,7 +598,7 @@ describe("RigTeardownOrchestrator", () => {
   });
 
   it.each([
-    ["claude-code", "CLAUDE.md"], ["claude-code", "CLAUDE.local.md"], ["codex", "AGENTS.md"],
+    ["claude-code", "CLAUDE.md"], ["claude-code", "CLAUDE.local.md"], ["codex", "AGENTS.md"], ["pi", "AGENTS.md"], ["omp", "AGENTS.md"],
   ])("preserves %s guidance when a sibling sharing %s cannot stop", async (runtime, fileName) => {
     const { rigId, nodeId, sessionId } = seedRigWithNode({ runtime, cwd: tmpDir });
     if (fileName === "CLAUDE.local.md") rigRepo.setRigClaudeManagedBlockFile(rigId, fileName);
@@ -738,6 +742,204 @@ describe("RigTeardownOrchestrator", () => {
     fs.writeFileSync(guidance, content);
     await buildTeardown().teardown(rigId);
     expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
+  });
+
+  // #875: Pi and omp seats write their blocks to AGENTS.md too, so a Codex rig stopping must not strip a file they still use.
+  it.each(["pi", "omp"])("keeps a shared AGENTS.md that another rig's live %s seat still uses when a Codex rig stops", async (runtime) => {
+    const { rigId } = seedRigWithNode({ runtime: "codex", cwd: tmpDir });
+    const other = rigRepo.createRig("other-rig");
+    const otherNode = rigRepo.addNode(other.id, "dev", { runtime, cwd: tmpDir });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(otherNode.id, "dev@other-rig").id, "running");
+    const guidance = path.join(tmpDir, "AGENTS.md");
+    const content = "<!-- BEGIN OpenRig MANAGED BLOCK: role -->\nshared guidance\n<!-- END OpenRig MANAGED BLOCK: role -->\n";
+    fs.writeFileSync(guidance, content);
+    await buildTeardown().teardown(rigId);
+    expect(fs.readFileSync(guidance, "utf-8")).toBe(content);
+  });
+
+  // #875: once no seat in a cwd still uses them, down takes back the collector, its status line and the activity relay hooks
+  // OpenRig added there, and leaves everything else as the person had it.
+  describe("OpenRig's Claude collector, status line and activity hooks in a seat's cwd", () => {
+    const COLLECTOR = "// shipped collector\n";
+
+    /** A Claude seat's cwd after a real collector install, with the person's own settings text if given. */
+    function claudeCwd(ownSettings?: string) {
+      const cwd = fs.mkdtempSync(path.join(tmpDir, "claude-cwd-"));
+      const state = path.join(tmpDir, "openrig-home");
+      const asset = path.join(tmpDir, "collector-asset.cjs");
+      fs.writeFileSync(asset, COLLECTOR);
+      const settings = path.join(cwd, ".claude", "settings.local.json");
+      if (ownSettings !== undefined) {
+        fs.mkdirSync(path.dirname(settings), { recursive: true });
+        fs.writeFileSync(settings, ownSettings);
+      }
+      const fsOps = {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        copyFile: replaceFile, homedir: os.homedir(),
+      };
+      new ClaudeCodeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateDir: state, collectorAssetPath: asset })
+        .ensureContextCollector({ cwd, tmuxSession: "dev@claude-rig" });
+      const relay = `${shellQuote(process.execPath)} ${shellQuote(claudeActivityRelayPath(state))}`;
+      return { cwd, asset, settings, collector: path.join(cwd, ".openrig", "context-collector.cjs"), relay };
+    }
+
+    /** Add hook groups the way the adapter writes them. */
+    function addHooks(settings: string, hooks: Record<string, unknown[]>): void {
+      const current = JSON.parse(fs.readFileSync(settings, "utf-8")) as Record<string, unknown>;
+      current["hooks"] = { ...(current["hooks"] as Record<string, unknown> | undefined), ...hooks };
+      fs.writeFileSync(settings, JSON.stringify(current, null, 2));
+    }
+
+    function claudeRig(name: string, cwd: string): string {
+      const rig = rigRepo.createRig(name);
+      const node = rigRepo.addNode(rig.id, "dev", { runtime: "claude-code", cwd });
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, `dev@${name}`).id, "running");
+      return rig.id;
+    }
+
+    function teardownWith(asset: string, tmux?: TmuxAdapter) {
+      return new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux ?? mockTmux(),
+        snapshotCapture: mockSnapshotCapture(db), eventBus, claudeCollectorAssetPath: asset });
+    }
+
+    it("gives a non-git cwd back the person's own settings bytes, and removes the collector and its emptied folder", async () => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] }, env: { TEAM: "1" } }, null, 2);
+      const s = claudeCwd(own);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }],
+        PreToolUse: [{ hooks: [{ type: "command", command: s.relay, timeout: 5 }] }] });
+      expect(fs.readFileSync(s.settings, "utf-8")).not.toBe(own);
+      expect(fs.existsSync(path.join(s.cwd, ".git"))).toBe(false);
+
+      const result = await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+      expect(fs.existsSync(s.collector)).toBe(false);
+      expect(fs.existsSync(path.join(s.cwd, ".openrig"))).toBe(false);
+      expect(result.keptFiles).toBeUndefined();
+      expect(result.errors).toEqual([]);
+    });
+
+    it("keeps settings.local.json as {} when OpenRig's entries were all it held, since nothing says who created it", async () => {
+      const s = claudeCwd();
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+
+      await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe("{}");
+      expect(fs.existsSync(path.join(s.cwd, ".claude"))).toBe(true);
+      expect(fs.existsSync(path.join(s.cwd, ".openrig"))).toBe(false);
+    });
+
+    it("takes only OpenRig's hooks out of a mixed group, keeping the person's hooks, the group's other fields and their status line fields", async () => {
+      const person = { type: "command", command: "echo person" };
+      const s = claudeCwd(JSON.stringify({ permissions: { deny: ["Read(.env)"] }, statusLine: { padding: 2 } }, null, 2));
+      addHooks(s.settings, {
+        PreToolUse: [{ matcher: "Bash", hooks: [person, { type: "command", command: s.relay }] }],
+        Stop: [{ hooks: [{ type: "command", command: s.relay }] }],
+        Notification: [{ matcher: "", hooks: [person] }],
+      });
+
+      await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+
+      expect(JSON.parse(fs.readFileSync(s.settings, "utf-8"))).toEqual({
+        permissions: { deny: ["Read(.env)"] },
+        statusLine: { padding: 2 },
+        hooks: { PreToolUse: [{ matcher: "Bash", hooks: [person] }], Notification: [{ matcher: "", hooks: [person] }] },
+      });
+    });
+
+    it("keeps and names a collector whose bytes aren't the shipped collector's, and still takes its status line out", async () => {
+      const s = claudeCwd();
+      fs.appendFileSync(s.collector, "// a person's edit\n");
+
+      const result = await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+
+      expect(fs.readFileSync(s.collector, "utf-8")).toBe(`${COLLECTOR}// a person's edit\n`);
+      expect(result.keptFiles).toEqual([`${s.collector}: not the shipped collector's bytes, so it was kept`]);
+      expect(JSON.parse(fs.readFileSync(s.settings, "utf-8"))).toEqual({});
+      expect(result.errors).toEqual([]);
+    });
+
+    it.each(["{ \"permissions\": ", "[]"])("leaves settings it can't read as a settings object (%s) byte for byte, and names them", async (text) => {
+      const s = claudeCwd(text);
+
+      const result = await teardownWith(s.asset).teardown(claudeRig("claude-rig", s.cwd));
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(text);
+      expect(result.keptFiles).toEqual([`${s.settings}: not a JSON settings object, so it was left as it is`]);
+      expect(fs.existsSync(s.collector)).toBe(false);
+      expect(result.errors).toEqual([]);
+    });
+
+    it.each(["another rig's seat", "a sibling whose stop failed"] as const)("keeps everything while %s still uses the cwd", async (consumer) => {
+      const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+      const s = claudeCwd(own);
+      addHooks(s.settings, { Stop: [{ hooks: [{ type: "command", command: s.relay }] }] });
+      const before = fs.readFileSync(s.settings, "utf-8");
+      const rigId = claudeRig("claude-rig", s.cwd);
+      const tmux = mockTmux();
+      if (consumer === "another rig's seat") claudeRig("other-rig", s.cwd);
+      else {
+        const sibling = rigRepo.addNode(rigId, "survivor", { runtime: "claude-code", cwd: s.cwd });
+        sessionRegistry.updateStatus(sessionRegistry.registerSession(sibling.id, "survivor@claude-rig").id, "running");
+        tmux.killSession = vi.fn(async target => target === "survivor@claude-rig"
+          ? { ok: false, code: "kill_failed", message: "tmux error" } : { ok: true });
+      }
+
+      await teardownWith(s.asset, tmux).teardown(rigId);
+
+      expect(fs.readFileSync(s.settings, "utf-8")).toBe(before);
+      expect(fs.readFileSync(s.collector, "utf-8")).toBe(COLLECTOR);
+
+      if (consumer === "a sibling whose stop failed") {
+        // Once that seat stops too, the next down takes OpenRig's additions back.
+        tmux.killSession = vi.fn(async () => ({ ok: true }));
+        await teardownWith(s.asset, tmux).teardown(rigId);
+        expect(fs.readFileSync(s.settings, "utf-8")).toBe(own);
+        expect(fs.existsSync(s.collector)).toBe(false);
+      }
+    });
+
+    // A link below the cwd shares a file between two directories: the stopping seat's cwd A and a live seat's cwd B. Whichever
+    // way the link points, the shared target stays and is named; A's own, unshared targets still go.
+    it.each(["B's .claude and .openrig link to A's", "A's .claude and .openrig link to B's", "settings.local.json is hardlinked"] as const)(
+      "keeps a Claude target a seat in another directory still uses when %s", async (shape) => {
+        const own = JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] } }, null, 2);
+        const real = claudeCwd(own);
+        addHooks(real.settings, { Stop: [{ hooks: [{ type: "command", command: real.relay }] }] });
+        const other = fs.mkdtempSync(path.join(tmpDir, "claude-other-"));
+        let a = real.cwd, b = other;
+        if (shape === "A's .claude and .openrig link to B's") { a = other; b = real.cwd; }
+        if (shape === "settings.local.json is hardlinked") {
+          fs.mkdirSync(path.join(other, ".claude"));
+          fs.linkSync(real.settings, path.join(other, ".claude", "settings.local.json"));
+        } else {
+          fs.symlinkSync(path.join(real.cwd, ".claude"), path.join(other, ".claude"));
+          fs.symlinkSync(path.join(real.cwd, ".openrig"), path.join(other, ".openrig"));
+        }
+        const before = fs.readFileSync(real.settings, "utf-8");
+        const rigId = claudeRig("claude-rig", a);
+        claudeRig("other-rig", b);
+
+        const result = await teardownWith(real.asset).teardown(rigId);
+
+        expect(fs.readFileSync(real.settings, "utf-8")).toBe(before);
+        const aSettings = path.join(a, ".claude", "settings.local.json");
+        const aCollector = path.join(a, ".openrig", "context-collector.cjs");
+        if (shape === "settings.local.json is hardlinked") {
+          // A's collector isn't shared, so it still goes.
+          expect(fs.existsSync(real.collector)).toBe(false);
+          expect(result.keptFiles).toEqual([`${aSettings}: another seat's directory still uses it through a link, so it was kept`]);
+        } else {
+          expect(fs.readFileSync(real.collector, "utf-8")).toBe(COLLECTOR);
+          expect(result.keptFiles).toEqual([
+            `${aSettings}: another seat's directory still uses it through a link, so it was kept`,
+            `${aCollector}: another seat's directory still uses it through a link, so it was kept`,
+          ]);
+        }
+        expect(result.errors).toEqual([]);
+      });
   });
 
   // T12: Kill failure + --delete -> blocked

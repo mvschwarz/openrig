@@ -22,7 +22,8 @@ import { subtreeNamesClaudeExecutable, claudeCommandSessionToken, listNativeProc
 import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
+import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -1248,22 +1249,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // 1. Strip OpenRig-owned relay entries (EXACT node-command shape) from all events;
     //    prune emptied groups + events. User-authored hooks are untouched.
-    let changed = false;
-    for (const event of Object.keys(hooks)) {
-      const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : null;
-      if (!groups) continue;
-      const keptGroups: unknown[] = [];
-      for (const group of groups) {
-        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) { keptGroups.push(group); continue; }
-        const groupHooks = group["hooks"] as unknown[];
-        const keptHooks = groupHooks.filter((h) => !isOwnedRelayCommand(hookCommand(h)));
-        if (keptHooks.length !== groupHooks.length) changed = true;
-        if (keptHooks.length === 0) continue; // prune emptied group
-        keptGroups.push({ ...group, hooks: keptHooks });
-      }
-      if (keptGroups.length === 0) delete hooks[event]; // prune emptied event
-      else hooks[event] = keptGroups;
-    }
+    let changed = stripOwnedRelayHooks(hooks);
 
     // 2. Deliverable enable: copy the relay asset + upsert the owned entry for each
     //    PREVALIDATED relay event (derived from the canonical manifest above).
@@ -1309,47 +1295,11 @@ interface ActivityHookOutcome {
   settingsUnparseable: boolean;
 }
 
-// OpenRig-owned relay path suffix. Ownership is the generated Node command whose single
-// argument ends with this path — a changed prefix still matches (replace, not duplicate); a
-// user command that merely contains the path (echo, or node with extra args) does NOT.
-const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
-
 function managedClaudeNodeCommand(executable: string, ...args: string[]): string {
   const quotedArgs = args.map(shellQuote).join(" ");
   const pinned = `${shellQuote(executable)} ${quotedArgs}`;
   // Keep legacy PATH resolution if this runtime's name is outside our ownership grammar.
   return parseManagedClaudeNodeCommand(pinned) ? pinned : `node ${quotedArgs}`;
-}
-
-function hookCommand(hook: unknown): string | undefined {
-  return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
-}
-
-// OpenRig-owned collectors use canonical POSIX-quoted paths. Recognise older unquoted
-// three/four-token commands too, but preserve commands composed with shell operators or
-// extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
-const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
-
-function isOwnedCollectorCommand(cmd: string): boolean {
-  if (/[\r\n]/.test(cmd)) return false;
-  const parsed = parseManagedClaudeNodeCommand(cmd);
-  if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
-    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
-  }
-  const tokens = cmd.trim().split(/\s+/);
-  if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
-  if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
-  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
-}
-
-function isOwnedRelayCommand(cmd: string | undefined): boolean {
-  if (!cmd) return false;
-  const parsed = parseManagedClaudeNodeCommand(cmd);
-  if (!parsed || parsed.args.length !== 1) return false;
-  const relay = parsed.args[0]!;
-  return relay.endsWith("/plugins/openrig-core/hooks/scripts/activity-relay.cjs")
-    || relay.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
-    || relay.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
 }
 
 function hashContent(content: string): string {
