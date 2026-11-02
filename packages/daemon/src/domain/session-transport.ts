@@ -1,4 +1,5 @@
 import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
+import { restoreSessionUserHome } from "./managed-restore-read-access.js";
 import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
@@ -2150,6 +2151,10 @@ export class SessionTransport {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
       (session, text, opts) => this.sendUnguarded(session, text, opts));
+  }
+
+  async restoreUserHome(session: string): Promise<string | undefined> {
+    return restoreSessionUserHome(this.tmuxAdapter, physicalSessionName(this.db, session));
   }
 
   configureGuardedWakes(applicable: (entries: readonly QueueWakeFacts[]) => boolean): void {

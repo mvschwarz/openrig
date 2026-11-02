@@ -209,10 +209,11 @@ it.each([
   expect(allow.filter(rule => !rule.startsWith(`Read(/${root}/`) && !rule.includes("/claude-compaction-restore/"))).toEqual([]);
 });
 
-it("both Claude launch paths grant the configured extra file the restore will name", async () => {
+it.each([false, true])("both Claude launch paths grant the configured extra file the restore will name (session tilde=%s)", async tilde => {
   const f = fixture();
   const custom = path.join(f.root, "elsewhere", "team-restore.md");
-  const restoreReadPolicy = () => ({ extraInstructionFile: custom, preparationRoot: null });
+  Object.assign(f.tmux, { getSessionEnv: vi.fn(async () => path.dirname(custom)) });
+  const restoreReadPolicy = () => ({ extraInstructionFile: tilde ? "~/team-restore.md" : custom, preparationRoot: null });
   const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, stateDir: f.home, sessionIdFactory: () => CHILD, restoreReadPolicy,
     fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
   vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });

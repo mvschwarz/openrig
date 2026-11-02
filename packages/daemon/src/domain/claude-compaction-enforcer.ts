@@ -311,6 +311,7 @@ function resolvePostCompactExtra(
   sessionName: string,
   openrigHome: string,
   globalPath: string | null | undefined,
+  userHome?: string,
 ): ResolvedExtra {
   const seatKey = sanitizeSessionKey(sessionName);
   const perSeatPath = path.join(openrigHome, "compaction", "post-compact-extra", `${seatKey}.md`);
@@ -321,7 +322,7 @@ function resolvePostCompactExtra(
     }
     return { filePath: perSeatPath, ignoredWrongSeat: false };
   }
-  const trimmed = postCompactExtraSetting(globalPath, openrigHome);
+  const trimmed = postCompactExtraSetting(globalPath, openrigHome, userHome);
   if (!trimmed) return { filePath: null, ignoredWrongSeat: false };
   const global = readExtraDeclaredSeat(trimmed);
   // Configured-but-absent: keep the path (the operator may populate it before restore;
@@ -346,6 +347,7 @@ export function buildPostCompactRestorePrompt(input: {
   sessionId?: string | null;
   postCompactInstruction?: string | null;
   postCompactInstructionFilePath?: string | null;
+  userHome?: string;
   ignoredWrongSeatExtra?: boolean;
 }): string {
   const markerPath = path.join(
@@ -373,7 +375,7 @@ export function buildPostCompactRestorePrompt(input: {
     pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under ${compactionPacketRoot()}${path.sep} for this Claude session.`);
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
-  const instructionFilePath = postCompactExtraSetting(input.postCompactInstructionFilePath, input.openrigHome);
+  const instructionFilePath = postCompactExtraSetting(input.postCompactInstructionFilePath, input.openrigHome, input.userHome);
   if (inlineInstruction) {
     pieces.push(`Operator post-compaction instruction: ${inlineInstruction}`);
   }
@@ -928,7 +930,9 @@ export class ClaudeCompactionEnforcer {
     if (pendingStage === "restore_prompt") {
       // OPR.0.4.1.09: resolve the extra FOR THIS SEAT (per-seat preferred; the legacy
       // global is refused if it declares a different seat) - never inject wrong-seat state.
-      const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath);
+      const userHome = /^~[\\/]/.test(policy.messageFilePath?.trim() ?? "") ? await this.sessionTransport.restoreUserHome?.(input.sessionName) : undefined;
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
+      const extra = resolvePostCompactExtra(input.sessionName, this.openrigHome, policy.messageFilePath, userHome);
       const restore = await this.sendRestoreStage(
         input.sessionName,
         buildPostCompactRestorePrompt({

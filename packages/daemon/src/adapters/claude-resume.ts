@@ -1,5 +1,5 @@
 import type { ClaudePermissionRules } from "../domain/claude-permission-rules.js";
-import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs, type ClaudeMcp } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
@@ -119,9 +119,11 @@ export class ClaudeResumeAdapter {
     const choice = { claudePermissions, kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
     const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(posture);
+    const restorePolicy = this.options.restoreReadPolicy?.() ?? {};
+    const userHome = /^~[\\/]/.test(restorePolicy.extraInstructionFile?.trim() ?? "") ? await restoreSessionUserHome(this.tmux, tmuxSessionName) : undefined;
     const launchArgs = withManagedRestoreReads(operationalLaunchArgs("claude-code", choice), {
       openrigHome: this.options.openrigHome, session: tmuxSessionName, cwd, nativeSessionId: resumeToken!,
-      ...(this.options.restoreReadPolicy?.() ?? {}),
+      ...restorePolicy, userHome,
     });
     const permissionMode = posture + launchArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs, "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))

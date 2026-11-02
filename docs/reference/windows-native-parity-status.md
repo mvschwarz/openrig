@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Restore tilde paths when daemon and pane user homes differ (2026-11-02)
+
+A real stock-pane regression reproduced the remaining mismatch: the receiver inherited its configured pane user home, while the daemon granted the same `~` extra beneath its own different user home. Fresh/fork/current-resume and legacy-resume launch grants now observe the selected session's USERPROFILE on Windows or HOME on POSIX when a tilde extra is configured. Post-compaction extra selection and prompt generation use that same observation. Provider account/config directories remain separate, and no pane HOME is overwritten.
+
+SessionTransport resolves the logical seat address through the existing current-physical-session registry before reading this environment value. Actual database tests cover direct and renamed logical addresses. Missing, failed, relative or control-bearing home observations are not adopted; legacy transports retain their ordinary daemon-home default. That fallback is compatibility behavior, not evidence that an unavailable/different pane home works. Manual shell-local home changes that are not reflected in session environment remain unqualified.
+
+Five complete shared restore/enforcer/hook files passed 122/122 on Windows and 122/122 on ordinary-user WSL, with no skips. The native seven-case launch file also passed with stock psmux enabled, including different daemon/pane homes, a third provider account directory, exact user-home grants and negative checks against both other homes. Daemon typecheck passed. This remains scoped acceptance; actual provider continuity, cross-user execution, complete same-head daemon validation and the running deployment are not qualified.
+
 ## Provider account directory versus user-home restore paths (2026-11-02)
 
 The actual stock-pane fixture now separates three owned locations: the daemon instance home, the pane user's HOME/USERPROFILE, and the selected provider account directory. SeatLaunchEnvironment receives an explicit synthetic account selector. Its Node receiver proves that CLAUDE_CONFIG_DIR selects that account while HOME/USERPROFILE retain the pane's user home. The `~\extra [owned].md` read rule names the user-home file and does not grant same-named files beneath the instance or provider account directories.

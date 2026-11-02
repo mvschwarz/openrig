@@ -852,13 +852,17 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("If no current trace arrived, report that delivery gap");
   });
 
-  it("post-compact restore prompt carries the configured operator restore instruction", async () => {
+  it.each(["absolute", "slash-home", "backslash-home"])("post-compact restore prompt carries the configured operator restore instruction (%s)", async form => {
+    const userHome = join(TEST_HOME, "selected-user-home");
+    const configuredFile = form === "absolute" ? "/tmp/openrig-extra-restore.md" : form === "slash-home" ? "~/openrig-extra-restore.md" : "~\\openrig-extra-restore.md";
     const settings = makeSettingsStore({
       ...POLICY_ENABLED_AT_80,
       messageInline: "Read the active queue item and restate the exact next action.",
-      messageFilePath: "/tmp/openrig-extra-restore.md",
+      messageFilePath: configuredFile,
     });
     const { transport, send } = makeSessionTransport();
+    const readUserHome = vi.fn(async () => userHome);
+    Object.assign(transport, { restoreUserHome: readUserHome });
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
       openrigHome: TEST_HOME,
     });
@@ -894,7 +898,9 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).toContain("Operator post-compaction instruction");
     expect(send.mock.calls[3]![1]).toContain("Read the active queue item and restate the exact next action.");
     expect(send.mock.calls[3]![1]).toContain("Additional post-compaction instruction file");
-    expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-extra-restore.md");
+    const expectedFile = form === "absolute" || (form === "backslash-home" && process.platform !== "win32") ? configuredFile : join(userHome, "openrig-extra-restore.md");
+    expect(send.mock.calls[3]![1]).toContain(`Additional post-compaction instruction file: ${expectedFile}.`);
+    if (form !== "absolute") expect(readUserHome).toHaveBeenCalledWith("claude-seat@rig");
   });
 
   it("post-compact restore prompt falls back to configured instruction file when inline is empty", async () => {

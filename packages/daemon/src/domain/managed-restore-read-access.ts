@@ -17,6 +17,8 @@ export interface RestoreReadContext {
   extraInstructionFile?: string | null;
   /** `policies.claude_compaction.preparation_root`: where restore maps go instead of the home's, when set. */
   preparationRoot?: string | null;
+  /** User home of the selected pane, distinct from provider account/config homes. */
+  userHome?: string;
 }
 
 /** The two compaction settings a launch passes so the restore can read the files they name. */
@@ -24,15 +26,26 @@ export type RestoreReadPolicy = Pick<RestoreReadContext, "extraInstructionFile" 
 
 /** The configured extra instruction file as the restore request names it: home prefixes expanded, or none when blank. The enforcer's
  *  resolver reads the setting through this too, so the grant and the request name the same file. */
-export function postCompactExtraSetting(value: string | null | undefined, openrigHome?: string | null): string | null {
+export function postCompactExtraSetting(value: string | null | undefined, openrigHome?: string | null, userHome = homedir()): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
-  for (const [prefix, base] of [["~", homedir()], ["${OPENRIG_HOME}", openrigHome], ["$OPENRIG_HOME", openrigHome]] as const) {
+  for (const [prefix, base] of [["~", userHome], ["${OPENRIG_HOME}", openrigHome], ["$OPENRIG_HOME", openrigHome]] as const) {
     if (base && (trimmed.startsWith(`${prefix}/`) || (process.platform === "win32" && trimmed.startsWith(`${prefix}\\`)))) {
       return path.join(base, trimmed.slice(prefix.length + 1));
     }
   }
   return trimmed;
+}
+
+/** Read only the selected session's OS user-home variable. Old transports or
+ * unavailable/invalid observations retain the caller's ordinary home default. */
+export async function restoreSessionUserHome(terminal: { getSessionEnv?: (session: string, key: string) => Promise<string | undefined> }, session: string): Promise<string | undefined> {
+  try {
+    const value = await terminal.getSessionEnv?.(session, process.platform === "win32" ? "USERPROFILE" : "HOME");
+    if (value && !/[\0\r\n]/.test(value) && path.isAbsolute(value)
+      && (process.platform !== "win32" || /^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+(?:\\|$))/.test(value))) return value;
+  } catch { /* The observation is optional on legacy transports. */ }
+  return undefined;
 }
 
 // These are permission patterns, not shell arguments. Keep literal path components
@@ -66,7 +79,7 @@ function spellings(value: string): string[] {
 export function withManagedRestoreReads(args: string[], context: RestoreReadContext): string[] {
   if (!context.openrigHome) return args;
   const seat = context.session.replace(/[^a-zA-Z0-9_.@-]/g, "_");
-  const extra = postCompactExtraSetting(context.extraInstructionFile, context.openrigHome);
+  const extra = postCompactExtraSetting(context.extraInstructionFile, context.openrigHome, context.userHome);
   const files = [
     ...spellings(context.openrigHome).flatMap(home => [
       `${home}/compaction/restore-pending/${seat}.json`,

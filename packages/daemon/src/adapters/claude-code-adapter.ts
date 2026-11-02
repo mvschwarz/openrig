@@ -1,4 +1,4 @@
-import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
+import { restoreSessionUserHome, withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
 import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
@@ -363,8 +363,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const launchNotes = () => (tokenWarnings.length ? { warnings: [...tokenWarnings] } : {});
     const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(posture);
+    const restorePolicy = this.restoreReadPolicy?.() ?? {};
+    const userHome = /^~[\\/]/.test(restorePolicy.extraInstructionFile?.trim() ?? "") ? await restoreSessionUserHome(this.tmux, session) : undefined;
     const permissionArgs = (nativeSessionId: string) => withManagedRestoreReads(operationalLaunchArgs(this.runtime, binding), {
-      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...(this.restoreReadPolicy?.() ?? {}),
+      openrigHome: this.stateDir, session: opts.name, cwd: binding.cwd, nativeSessionId, ...restorePolicy, userHome,
     });
     const permissionArg = (args: string[]) => posture + args.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every

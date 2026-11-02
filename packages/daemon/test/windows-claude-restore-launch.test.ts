@@ -22,8 +22,9 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("carr
   try {
     const home = path.join(root, "instance"), cwd = path.join(root, "seat's workspace");
     const userHome = path.join(root, "user home"), accountHome = path.join(root, "provider account");
-    for (const dir of [home, cwd, userHome, accountHome]) fs.mkdirSync(dir);
-    vi.stubEnv("HOME", userHome); vi.stubEnv("USERPROFILE", userHome);
+    const daemonUserHome = path.join(root, "daemon user home");
+    for (const dir of [home, cwd, userHome, accountHome, daemonUserHome]) fs.mkdirSync(dir);
+    vi.stubEnv("HOME", daemonUserHome); vi.stubEnv("USERPROFILE", daemonUserHome);
     const output = path.join(root, "received.json"), script = path.join(root, "owned receiver.mjs"), cli = path.join(root, "rig.mjs");
     fs.writeFileSync(script, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(output)},JSON.stringify({args:process.argv.slice(2),home:process.env.HOME,userProfile:process.env.USERPROFILE,accountHome:process.env.CLAUDE_CONFIG_DIR}));`);
     fs.writeFileSync(cli, "// inert CLI alias target");
@@ -47,7 +48,7 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("carr
     expect(settings.permissions.allow).toContain("Read(./work/**)");
     const custom = path.join(userHome, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
     expect(settings.permissions.allow).toContain(`Read(/${custom})`);
-    for (const otherHome of [home, accountHome]) {
+    for (const otherHome of [home, accountHome, daemonUserHome]) {
       const wrong = path.join(otherHome, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
       expect(settings.permissions.allow).not.toContain(`Read(/${wrong})`);
     }
