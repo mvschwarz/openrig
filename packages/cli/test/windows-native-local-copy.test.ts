@@ -25,6 +25,15 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     expect(await copy(src, dst)).toMatchObject({ ok: true, filesTransferred: 0, bytesTransferred: 0 });
   }));
 
+  it("preserves distinct Unicode names that JavaScript lowercase would merge",()=>fixture(async root=>{
+    const src=path.join(root,"source"),dst=path.join(root,"destination");await mkdir(src);await mkdir(dst);
+    await writeFile(path.join(src,"K.txt"),"Latin K");await writeFile(path.join(src,"K.txt"),"Kelvin sign");
+    const preview=await copy(src+path.sep,dst,true);expect(preview.ok,preview.stderr).toBe(true);expect(preview.filesTransferred).toBe(2);
+    expect(await readdir(dst)).toEqual([]);
+    const result=await copy(src+path.sep,dst);expect(result.ok,result.stderr).toBe(true);
+    expect(await readFile(path.join(dst,"K.txt"),"utf8")).toBe("Latin K");expect(await readFile(path.join(dst,"K.txt"),"utf8")).toBe("Kelvin sign");
+  }));
+
   it.each([false,true])("preserves native directory-link type, including dangling links (dangling=%s)", dangling => fixture(async root => {
     const src=path.join(root,"source-link"),dst=path.join(root,"destination-link"),target=path.join(root,"target");
     if(!dangling){await mkdir(target);await writeFile(path.join(target,"witness"),"retain referent");}

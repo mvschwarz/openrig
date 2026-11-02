@@ -10,6 +10,17 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("downloads distinct Unicode names without JavaScript lowercase conflation",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"sftp-unicode-case-")),source=path.join(root,"source"),destination=path.join(root,"destination");
+    try{
+      await mkdir(source);await mkdir(destination);await writeFile(path.join(source,"K.txt"),"Latin K");await writeFile(path.join(source,"K.txt"),"Kelvin sign");
+      const plan:CopyPlan={src:{kind:"remote",path:"/"+source.replaceAll("\\","/")+"/",host:{id:"fixture",target:"fixture",transport:"ssh"}},dst:{kind:"local",path:destination},dryRun:true};
+      const start=()=>spawn(server,[],{stdio:"pipe",windowsHide:true});
+      const preview=await runNativeSftpCopy(plan,start);expect(preview.ok,preview.stderr).toBe(true);expect(preview.filesTransferred).toBe(2);expect(await readdir(destination)).toEqual([]);
+      const result=await runNativeSftpCopy({...plan,dryRun:false},start);expect(result.ok,result.stderr).toBe(true);
+      expect(await readFile(path.join(destination,"K.txt"),"utf8")).toBe("Latin K");expect(await readFile(path.join(destination,"K.txt"),"utf8")).toBe("Kelvin sign");
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("retains case-distinct names only in a confirmed case-sensitive destination", async context => {
     const root=await mkdtemp(path.join(os.tmpdir(),"sftp-case-distinct-"));
     const source=path.join(root,"source"),strict=path.join(root,"strict"),ordinary=path.join(root,"ordinary");

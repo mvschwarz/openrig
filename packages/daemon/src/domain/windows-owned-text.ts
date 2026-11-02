@@ -33,6 +33,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
+      else if(args[0]=="names-collide")NamesCollide();
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -52,6 +53,7 @@ public static class OpenRigOwnedText {
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int kind,out uint info,uint size);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern int CompareStringOrdinal(string a,int aLength,string b,int bLength,bool ignoreCase);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe,out uint pid);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
@@ -108,6 +110,17 @@ public static class OpenRigOwnedText {
       }
       Console.Write((flags&1u)!=0?"true":"false");
     }
+  }
+  static int CompareNames(string a,string b) {
+    int result=CompareStringOrdinal(a,a.Length,b,b.Length,true);
+    if(result==0)throw new Win32Exception(Marshal.GetLastWin32Error());return result-2;
+  }
+  static void NamesCollide() {
+    string[] encoded=Console.In.ReadToEnd().Split(new char[]{'\n'},StringSplitOptions.RemoveEmptyEntries);
+    string[] names=Array.ConvertAll(encoded,value=>System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(value)));
+    Array.Sort(names,CompareNames);
+    for(int i=1;i<names.Length;i++)if(CompareNames(names[i-1],names[i])==0){Console.Write("true");return;}
+    Console.Write("false");
   }
   static SafeFileHandle Open(string path,bool write,bool fresh=false,bool seal=false) {
     byte[] descriptor=null; GCHandle pinned=default(GCHandle);
@@ -505,6 +518,17 @@ export function isWindowsDirectoryLink(file: string): boolean {
 export function isWindowsDirectoryCaseSensitive(file: string): boolean {
   return execFileSync(nativeHelper(), ["directory-case-sensitive", toNamespacedPath(file)], {
     encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  }) === "true";
+}
+
+/** Use Windows ordinal casing rather than JavaScript's Unicode lowercase mapping. */
+export function windowsNamesCollide(names: readonly string[]): boolean {
+  if (names.length < 2) return false;
+  // ASCII casing is identical and needs no helper process for ordinary trees.
+  if (names.every(name => /^[\x00-\x7f]*$/.test(name))) return new Set(names.map(name => name.toLowerCase())).size !== names.length;
+  return execFileSync(nativeHelper(), ["names-collide"], {
+    input: names.map(name => Buffer.from(name,"utf8").toString("base64")).join("\n"),
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],
   }) === "true";
 }
 

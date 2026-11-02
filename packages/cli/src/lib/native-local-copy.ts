@@ -1,7 +1,7 @@
 import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, rename, stat, symlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
+import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 
 /** Resolve existing parents too: a destination need not exist yet, but its
@@ -56,7 +56,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         changes.push(`.d..t. ${dst}`);
       }
       const names=await readdir(src);
-      if(process.platform === "win32" && new Set(names.map(name=>name.toLowerCase())).size !== names.length){
+      if(process.platform === "win32" && windowsNamesCollide(names)){
         let selected=dst;
         while(!await stat(selected)){
           const parent=path.dirname(selected);if(parent===selected)throw new Error("Cannot establish destination case sensitivity");selected=parent;

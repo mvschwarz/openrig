@@ -27,6 +27,25 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native Unicode filename collision comparison (2026-11-02)
+
+Local and SFTP collision checks now use Windows CompareStringOrdinal for names
+containing non-ASCII characters, with a direct ASCII fast path. JavaScript lower-
+casing incorrectly conflated K and the Kelvin sign on this host's NTFS volume;
+both are legitimate distinct entries here. Real native and OpenSSH subsystem
+fixtures now copy their different bytes successfully, while ASCII case collisions
+remain refused in ordinary destinations. The three copy/identity files pass 26
+tests; daemon build and CLI TypeScript checking pass. This establishes the tested
+host behavior, not every historical volume's Unicode upcase table.
+
+The controlled SQLite diagnostic at frozen 5659e82 replaces only the test
+directory's better-sqlite3 entry with task-local 12.11.1. The same nine-file set
+completes 1,670 tests with six pending, and both altered dependency entries are
+restored by SHA256. Native Rollup versus same-version WASM still crashes with
+0xC0000005, so native Rollup alone is not sufficient to explain the failure.
+An original-13.0.3 reverse control is in progress; no production dependency or
+live daemon is changed and a version downgrade is not yet a concluded fix.
+
 ### Local directory case-collision refusal (2026-11-02)
 
 Native local directory copies now perform the same destination-capability check
