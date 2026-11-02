@@ -92,24 +92,29 @@ export function removeOwnedClaudeSettings(settings: Record<string, unknown>): bo
   return changed;
 }
 
-function removeIfEmpty(dir: string): void {
+function removeIfEmpty(dir: string, isShared: (path: string) => boolean): void {
   try {
-    if (fs.lstatSync(dir).isDirectory() && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+    if (!isShared(dir) && fs.lstatSync(dir).isDirectory() && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
   } catch {
     // Missing, or not ours to judge: leave it.
   }
 }
+
+const SHARED = "another seat's directory still uses it through a link, so it was kept";
 
 /** rig down (#875), for a cwd no Claude seat still uses: take back what OpenRig added there for Claude.
  *  - Its entries leave `.claude/settings.local.json`, which is kept even when that leaves `{}`, since nothing records
  *    whether OpenRig created it. Settings that don't parse as an object are left as they are.
  *  - The collector goes only while its bytes are the shipped collector's.
  *  - `.openrig` and `.claude` go only if they're then empty, never recursively.
+ *  - A target `isShared` names (one another seat's directory reaches through a symlink or a hardlink) is left as it is.
  *  Returns what was kept for the person to look at. */
-export function cleanupOwnedClaudeCwd(cwd: string, collectorAssetPath: string | null | undefined): string[] {
+export function cleanupOwnedClaudeCwd(cwd: string, collectorAssetPath: string | null | undefined,
+  isShared: (path: string) => boolean = () => false): string[] {
   const kept: string[] = [];
   const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
-  if (fs.existsSync(settingsPath)) {
+  if (fs.existsSync(settingsPath) && isShared(settingsPath)) kept.push(`${settingsPath}: ${SHARED}`);
+  else if (fs.existsSync(settingsPath)) {
     const text = fs.readFileSync(settingsPath, "utf-8");
     let parsed: unknown;
     try { parsed = text.trim() === "" ? {} : JSON.parse(text); } catch { parsed = undefined; }
@@ -117,13 +122,14 @@ export function cleanupOwnedClaudeCwd(cwd: string, collectorAssetPath: string | 
     else if (removeOwnedClaudeSettings(parsed)) fs.writeFileSync(settingsPath, JSON.stringify(parsed, null, 2), "utf-8");
   }
   const collectorPath = nodePath.join(cwd, ".openrig", "context-collector.cjs");
-  if (fs.existsSync(collectorPath)) {
+  if (fs.existsSync(collectorPath) && isShared(collectorPath)) kept.push(`${collectorPath}: ${SHARED}`);
+  else if (fs.existsSync(collectorPath)) {
     let shipped: Buffer | null = null;
     try { shipped = collectorAssetPath ? fs.readFileSync(collectorAssetPath) : null; } catch { shipped = null; }
     if (!shipped) kept.push(`${collectorPath}: couldn't be compared with the shipped collector, so it was kept`);
     else if (fs.lstatSync(collectorPath).isFile() && fs.readFileSync(collectorPath).equals(shipped)) fs.unlinkSync(collectorPath);
     else kept.push(`${collectorPath}: not the shipped collector's bytes, so it was kept`);
   }
-  for (const dir of [".openrig", ".claude"]) removeIfEmpty(nodePath.join(cwd, dir));
+  for (const dir of [".openrig", ".claude"]) removeIfEmpty(nodePath.join(cwd, dir), isShared);
   return kept;
 }

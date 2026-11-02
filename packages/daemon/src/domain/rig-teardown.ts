@@ -434,13 +434,15 @@ export class RigTeardownOrchestrator {
       SELECT DISTINCT cwd FROM nodes WHERE rig_id = ? AND runtime = 'claude-code' AND cwd IS NOT NULL
     `).all(rigId) as Array<{ cwd: string }>;
     if (rows.length === 0) return;
-    const inUse = this.claudeCwdsInUse(rigId);
+    const inUse = this.claudeTargetsInUse(rigId);
+    const done = new Set<string>();
     for (const { cwd } of rows) {
       const key = this.guidancePathKey(cwd);
-      if (inUse.has(key)) continue;
-      inUse.add(key); // one cleanup per directory, however many of this rig's seats name it
+      if (inUse.has(key) || done.has(key)) continue;
+      done.add(key); // one cleanup per directory, however many of this rig's seats name it
       try {
-        for (const entry of cleanupOwnedClaudeCwd(cwd, this.deps.claudeCollectorAssetPath)) {
+        const isShared = (path: string) => inUse.has(this.guidancePathKey(path));
+        for (const entry of cleanupOwnedClaudeCwd(cwd, this.deps.claudeCollectorAssetPath, isShared)) {
           if (!result.keptFiles?.includes(entry)) (result.keptFiles ??= []).push(entry);
         }
       } catch (err) {
@@ -449,17 +451,25 @@ export class RigTeardownOrchestrator {
     }
   }
 
-  /** The cwds a Claude seat may still use, by the same rule as guidance files: a Claude seat of any other rig that isn't
-   *  archived, and this rig's own Claude seats still live (a failed stop, an inconclusive probe, an attached CLI). */
-  private claudeCwdsInUse(rigId: string): Set<string> {
+  /** What a Claude seat may still use, by the same rule as guidance files: the cwd of a Claude seat of any other rig that
+   *  isn't archived, or of one of this rig's Claude seats still live (a failed stop, an inconclusive probe, an attached
+   *  CLI). Each cwd's settings file, collector, `.claude` and `.openrig` are keyed by their own identity too, so a target
+   *  another directory reaches through a symlink or a hardlink counts as in use. */
+  private claudeTargetsInUse(rigId: string): Set<string> {
     const rows = this.db.prepare(`
       SELECT n.cwd FROM nodes n
       JOIN rigs r ON r.id = n.rig_id
       WHERE r.archived_at IS NULL AND r.id <> ? AND n.runtime = 'claude-code' AND n.cwd IS NOT NULL
     `).all(rigId) as Array<{ cwd: string }>;
-    const keys = new Set(rows.map((row) => this.guidancePathKey(row.cwd)));
+    const cwds = rows.map((row) => row.cwd);
     for (const session of this.getLatestLiveSessions(rigId)) {
-      if (session.runtime === "claude-code" && session.cwd) keys.add(this.guidancePathKey(session.cwd));
+      if (session.runtime === "claude-code" && session.cwd) cwds.push(session.cwd);
+    }
+    const keys = new Set<string>();
+    for (const cwd of cwds) {
+      for (const target of [".", ".claude", nodePath.join(".claude", "settings.local.json"), ".openrig", nodePath.join(".openrig", "context-collector.cjs")]) {
+        keys.add(this.guidancePathKey(nodePath.join(cwd, target)));
+      }
     }
     return keys;
   }
