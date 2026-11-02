@@ -20,6 +20,29 @@ import type { ProjectionManifestStore } from "../src/domain/projection-manifest-
 const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry =>
   entry.isDirectory() ? walk(path.join(dir, entry.name)).map(file => path.join(entry.name, file)) : [entry.name]);
 
+const superscriptDeviceIds = ["COM", "LPT"].flatMap(prefix => ["\u00b9", "\u00b2", "\u00b3"].flatMap(digit => [prefix + digit, prefix.toLowerCase() + digit + ".txt"]));
+it("escapes superscript Win32 device names with or without extensions", () => {
+  for (const id of superscriptDeviceIds) {
+    const name = resourceDirectoryName(id, "win32");
+    expect(name).not.toBe(id);
+    expect(resourceIdFromDirectoryName(name, "win32")).toBe(id);
+    expect(resourceDirectoryName(id, "linux")).toBe(id);
+    expect(resourceDirectoryName(name, "win32")).not.toBe(name);
+  }
+});
+
+it.runIf(process.platform === "win32")("stores superscript device identities through native resource directories", () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "resource-device-"));
+  try {
+    for (const id of superscriptDeviceIds) {
+      const directory = path.join(root, resourceDirectoryName(id)); fs.mkdirSync(directory);
+      fs.writeFileSync(path.join(directory, "SKILL.md"), id);
+      expect(fs.readFileSync(path.join(directory, "SKILL.md"), "utf8")).toBe(id);
+    }
+    expect(fs.readdirSync(root)).toHaveLength(superscriptDeviceIds.length);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 it("keeps qualified and literal escape spellings distinct and leaves POSIX names unchanged", () => {
   const ids = ["shared:skill", "Shared:Skill", "shared:Skill", "shared:Ä", "shared:ä", "shared%3Askill", "shared%253Askill", "skill", "con", "CON", "Con", "NUL.txt", "tail.", "tail ", "a/b", "a\\b", "a?b"];
   const names = ids.map(id => resourceDirectoryName(id, "win32"));

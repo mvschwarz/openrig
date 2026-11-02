@@ -4,7 +4,9 @@
 export function resourceDirectoryName(id: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32") return id;
   const escape = (value: string) => [...Buffer.from(value)].map(byte => "%" + byte.toString(16).toUpperCase().padStart(2, "0")).join("");
-  const reserved = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+  // Win32 also reserves the ISO-8859-1 superscript digits in COM/LPT names,
+  // including when followed by an extension (Microsoft file naming rules).
+  const reserved = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i;
   if (!/[%<>:"/\\|?*\x00-\x1f]|[. ]$/.test(id) && !reserved.test(id)) return id;
   // Newly representable IDs also encode case and Unicode differences, which
   // otherwise alias each other on a case-insensitive Windows volume.

@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Current resource directory device names and open case collision (2026-11-02)
+
+Resource directory encoding now includes the six superscript COM/LPT device
+names, with extension and case variants. Microsoft documents superscript
+digits 1/2/3 as reserved in these names in every directory:
+https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file .
+The resource identity itself and POSIX path spelling remain unchanged; only
+its Windows directory representation is escaped reversibly. The resource
+projection file passed 16 native tests, including actual creation/readback of
+12 escaped directories. The selected current mapper/test in the WSL mirror
+passed 2 pure mapping checks with 14 native filesystem/projection skips, and
+daemon TypeScript passed.
+
+An additional owned fresh-directory probe establishes a remaining implementation
+gap: unqualified `Skill`/`skill` and Unicode upper/lower resource IDs still map to
+case-aliasing native paths. Both second mkdir operations returned EEXIST, with
+the first identity's bytes unchanged; the probe directory was removed. Qualified
+IDs already encode their case, but that does not close ordinary IDs. A complete
+fix must cover all runtime projection, installed-resource discovery, conflict
+checks and replay while preserving edits in legacy directory spellings; changing
+only the mapper would not establish compatibility. No main instance was touched.
+
 ## Current native terminal activity (2026-11-02)
 
 A native terminal seat no longer reports running merely because its pane
