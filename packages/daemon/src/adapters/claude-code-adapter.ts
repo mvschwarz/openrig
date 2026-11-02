@@ -23,7 +23,7 @@ import { isPerSeatRoleGuidance, perSeatRoleSkipWarning, DEFAULT_CLAUDE_MANAGED_B
 import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/managed-block-records.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { resourceDirectoryName, resourceIdFromDirectoryName } from " ../domain/resource-directory-name.js;
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
 import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, parseManagedClaudeNodeCommand } from "../domain/claude-activity-hooks.js";
 import { isOwnedCollectorCommand, stripOwnedRelayHooks } from "../domain/claude-owned-settings.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
@@ -954,11 +954,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string, seatSkillsRoot?: string): string | null {
     switch (entry.category) {
-      case "skill": return nodePath.join(seatSkillsRoot ?? nodePath.join(cwd, ".claude", "skills"), resourceDirectoryName(entry.effectiveId));
+      case "skill": return resourceDirectoryPath(seatSkillsRoot ?? nodePath.join(cwd, ".claude", "skills"), entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".claude", "agents");
-      case "plugin": return nodePath.join(cwd, ".claude", "plugins", resourceDirectoryName(entry.effectiveId));
-      case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", resourceDirectoryName(entry.effectiveId));
+      case "plugin": return resourceDirectoryPath(nodePath.join(cwd, ".claude", "plugins"), entry.effectiveId);
+      case "runtime_resource": return resourceDirectoryPath(nodePath.join(cwd, ".claude", "extensions"), entry.effectiveId);
       default: return null;
     }
   }

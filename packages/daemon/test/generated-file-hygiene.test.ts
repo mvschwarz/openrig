@@ -9,7 +9,7 @@ import { mergeManagedBlock } from "../src/domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../src/domain/generated-file-hygiene.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionEntry } from "../src/domain/projection-planner.js";
-import { resourceDirectoryName } from "../src/domain/resource-directory-name.js";
+import { resourceDirectoryName, resourceDirectoryPath } from "../src/domain/resource-directory-name.js";
 import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.mjs";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -59,6 +59,16 @@ describe("generated file Git hygiene", () => {
     expect(result.failed).toEqual([]);
     return result;
   }
+
+  it.runIf(process.platform === "win32")("excludes an owned core-plugin case alias while keeping the legacy identity visible", () => {
+    const legacy = write(".codex/plugins/Openrig-Core/payload.txt", "operator legacy bytes");
+    const directory = resourceDirectoryPath(path.join(repo, ".codex", "plugins"), "openrig-core");
+    const file = path.join(directory, "payload.txt"); fs.mkdirSync(directory); fs.writeFileSync(file, "new owned bytes");
+    expect(excludeNewGeneratedFiles(repo, [file])).toEqual([]);
+    expect(ignoredPath(repo, file)).toBe(file + "\0");
+    expect(git(repo, "status", "--porcelain", "--untracked-files=all", "--", legacy)).toContain("Openrig-Core/payload.txt");
+    expect(fs.readFileSync(legacy, "utf8")).toBe("operator legacy bytes");
+  });
 
   it("warns about newly generated guidance without hiding it", async () => {
     const source = write("guidance.md", "Managed guidance", root);

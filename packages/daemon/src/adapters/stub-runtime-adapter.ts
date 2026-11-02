@@ -14,7 +14,7 @@
 // increments (A5 items 5-8) — deliberately NOT here.
 
 import nodePath from "node:path";
-import { resourceDirectoryName } from "../domain/resource-directory-name.js";
+import { resourceDirectoryPath } from "../domain/resource-directory-name.js";
 import { randomUUID } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
 import { renderWindowsLaunch } from "./windows-launch.js";
@@ -321,7 +321,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath), warnings, entry.absolutePath);
     }
     if (entry.category === "skill") {
-      const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", resourceDirectoryName(entry.effectiveId));
+      const targetDir = resourceDirectoryPath(nodePath.join(binding.cwd, ".openrig", "stub", "skills"), entry.effectiveId);
       this.fsOps.mkdirp(targetDir);
       let isDir = false;
       if (this.fsOps.listFiles) {

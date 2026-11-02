@@ -13,7 +13,7 @@ import nodePath from "node:path";
 import { sameSessionFile } from "./same-session-file.js";
 import { randomUUID } from "node:crypto";
 import { shellQuote } from "./shell-quote.js";
-import { resourceDirectoryName, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
 import { renderWindowsLaunch } from "./windows-launch.js";
 import { verifyWindowsManagedRunner, type WindowsRunnerEvidence } from "../domain/windows-managed-runner.js";
 import type { TmuxAdapter } from "./tmux.js";
@@ -159,7 +159,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   /** Conflict detection must inspect this seat's copy, not a Claude sibling. */
   skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
     if (!tmuxSession) return null;
-    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", resourceDirectoryName(effectiveId), "SKILL.md");
+    return nodePath.join(resourceDirectoryPath(nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills"), effectiveId), "SKILL.md");
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
@@ -509,7 +509,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "skill") {
       if (!binding.tmuxSession) return false;
       const { agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
-      const targetDir = nodePath.join(agentDir, "skills", resourceDirectoryName(entry.effectiveId));
+      const targetDir = resourceDirectoryPath(nodePath.join(agentDir, "skills"), entry.effectiveId);
       this.fs.mkdirp(targetDir);
       let isDir = false;
       if (this.fs.listFiles) {

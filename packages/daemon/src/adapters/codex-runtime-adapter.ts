@@ -44,7 +44,7 @@ import { writeManagedGuidanceBlock, type ManagedBlockRecords } from "../domain/m
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexSeatFolder, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
-import { resourceDirectoryName, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "../domain/resource-directory-name.js";
 import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
@@ -1525,11 +1525,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string, seatSkillsRoot?: string): string | null {
     switch (entry.category) {
-      case "skill": return nodePath.join(seatSkillsRoot ?? nodePath.join(cwd, ".agents", "skills"), resourceDirectoryName(entry.effectiveId));
+      case "skill": return resourceDirectoryPath(seatSkillsRoot ?? nodePath.join(cwd, ".agents", "skills"), entry.effectiveId);
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".agents"); // .agents/{id}.yaml per preserved contract
-      case "plugin": return nodePath.join(cwd, ".codex", "plugins", resourceDirectoryName(entry.effectiveId));
-      case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", resourceDirectoryName(entry.effectiveId));
+      case "plugin": return resourceDirectoryPath(nodePath.join(cwd, ".codex", "plugins"), entry.effectiveId);
+      case "runtime_resource": return resourceDirectoryPath(nodePath.join(cwd, ".agents", "extensions"), entry.effectiveId);
       default: return null;
     }
   }

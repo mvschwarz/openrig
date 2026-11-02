@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resourceDirectoryName } from "./resource-directory-name.js";
+import { resourceDirectoryPath, resourceIdFromDirectoryName } from "./resource-directory-name.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { getOpenRigHome } from "../openrig-compat.js";
@@ -411,7 +411,7 @@ export function seatSkillsToKeep(
   const warnings: string[] = [];
   for (const entry of entries) {
     if (entry.category !== "skill") continue;
-    const target = nodePath.join(paths.skillsRoot, resourceDirectoryName(entry.effectiveId));
+    const target = resourceDirectoryPath(paths.skillsRoot, entry.effectiveId);
     if (!fs.existsSync(target)) continue;
     if (seatSkillDiffers(entry.absolutePath, target)) {
       warnings.push(`Restore: kept ${target}: it differs from its source ${entry.absolutePath} (an edit is never overwritten)`);
@@ -442,8 +442,17 @@ export function seatSkillReplay(input: {
   const warnings = [...kept.warnings];
   for (const entry of input.entries) {
     if (entry.category !== "skill" || skipEntryIds.has(entry.effectiveId)) continue;
-    const target = nodePath.resolve(paths.skillsRoot, resourceDirectoryName(entry.effectiveId));
-    if (blocked(target)) {
+    const target = nodePath.resolve(resourceDirectoryPath(paths.skillsRoot, entry.effectiveId));
+    // A missing legacy directory no longer exists for the live path resolver
+    // to find. Its recorded spelling still identifies the saved resource;
+    // do not replay today's source into a newly encoded canonical directory.
+    const recordedIdentityBlocked = notPutBack.some(file => {
+      const relative = nodePath.relative(paths.skillsRoot, file);
+      if (relative === ".." || relative.startsWith(".." + nodePath.sep) || nodePath.isAbsolute(relative)) return false;
+      const parts = relative.split(nodePath.sep);
+      return parts.length > 1 && resourceIdFromDirectoryName(parts[0]!) === entry.effectiveId;
+    });
+    if (blocked(target) || recordedIdentityBlocked) {
       skipEntryIds.add(entry.effectiveId);
       warnings.push(`Restore: ${target} not projected again: its recorded source is gone or has changed`);
     }

@@ -1,5 +1,5 @@
 import nodePath from "node:path";
-import { resourceDirectoryName } from "./resource-directory-name.js";
+import { resourceDirectoryPath } from "./resource-directory-name.js";
 import * as os from "node:os";
 import { OPENRIG_HOME } from "../openrig-compat.js";
 import type { StartupBlock } from "./types.js";
@@ -306,7 +306,7 @@ export function claudeConflictTargetPath(
 ): string | null {
   switch (category) {
     case "skill":
-      return nodePath.join(cwd, ".claude", "skills", resourceDirectoryName(effectiveId), "SKILL.md");
+      return nodePath.join(resourceDirectoryPath(nodePath.join(cwd, ".claude", "skills"), effectiveId), "SKILL.md");
     case "subagent":
       return sourcePath ? nodePath.join(cwd, ".claude", "agents", nodePath.basename(sourcePath)) : null;
     case "guidance":

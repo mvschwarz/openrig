@@ -1,5 +1,38 @@
 # Native Windows parity: implementation and evidence
 
+## Current case-distinct resource paths and legacy compatibility (2026-11-02)
+
+Ordinary resource IDs now encode uppercase and Unicode characters on Windows,
+so fresh Skill/skill and Unicode case variants have distinct native directories.
+Lowercase ASCII paths remain stable. An exact legacy directory is retained in
+place, including its edits; a new lowercase identity colliding with another
+legacy spelling gets a reversible escaped alias instead. Long aliases use the
+existing compact Windows representation. Duplicate identity spellings and
+non-directory/link occupants are refused without modifying either entry.
+
+Projection, cwd preparation, conflict planning, runtime-switch materials and
+seat replay share this path selection. Installed-resource discovery decodes
+both canonical and alias names. Missing legacy files retain their recorded
+resource identity during replay rather than substituting today's source at a
+new path. Git hygiene resolves the actual core-plugin directory and keeps a
+different legacy identity visible. No legacy directory is moved or linked.
+
+The expanded native projection/storage selection passed 150 checks in 11 files;
+runtime-switch/Git hygiene passed 36 checks, followed by the added native alias
+case alone (1 passed, 29 other cases not selected). Seven selected current-source
+files in the ordinary-user WSL mirror passed 75 checks with 21 native-only skips.
+Daemon TypeScript passed. Real filesystem fixtures cover all four provider
+adapters, edited legacy directories, maximum-length native components, links,
+duplicate identities, listing, conflict paths and missing-source replay. These
+are projection/storage checks, not provider launch or a full same-head suite.
+
+A separate user-authorized path audit inventoried 3,900 tracked public source,
+asset, script and test files, excluding the private source and protected
+diagnostic before reads. It found 290 production and 731 test candidate files;
+those are static matches requiring semantic review, not confirmed defects or a
+completed full audit. The old 0b0df4c CLI/TUI receipt has 3 failures and is not
+evidence for this newer source. Main deployment and original teams are unchanged.
+
 ## Current resource directory device names and open case collision (2026-11-02)
 
 Resource directory encoding now includes the six superscript COM/LPT device
@@ -13,14 +46,13 @@ projection file passed 16 native tests, including actual creation/readback of
 passed 2 pure mapping checks with 14 native filesystem/projection skips, and
 daemon TypeScript passed.
 
-An additional owned fresh-directory probe establishes a remaining implementation
-gap: unqualified `Skill`/`skill` and Unicode upper/lower resource IDs still map to
+An earlier owned fresh-directory probe established an implementation
+gap: unqualified `Skill`/`skill` and Unicode upper/lower resource IDs mapped to
 case-aliasing native paths. Both second mkdir operations returned EEXIST, with
-the first identity's bytes unchanged; the probe directory was removed. Qualified
-IDs already encode their case, but that does not close ordinary IDs. A complete
-fix must cover all runtime projection, installed-resource discovery, conflict
-checks and replay while preserving edits in legacy directory spellings; changing
-only the mapper would not establish compatibility. No main instance was touched.
+the first identity's bytes unchanged; the probe directory was removed. The current
+case-distinct resource-path receipt above supersedes that ordinary-ID limitation
+for its tested projection/storage scope, including legacy edits and replay.
+No main instance was touched.
 
 ## Current native terminal activity (2026-11-02)
 

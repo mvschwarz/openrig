@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { resourceDirectoryName } from "./resource-directory-name.js";
+import { resourceDirectoryPath } from "./resource-directory-name.js";
 
 const within = (root: string, file: string): boolean => {
   const rel = path.relative(root, file);
@@ -13,7 +13,7 @@ const foldCase = (value: string) => value.replace(/[A-Z]/g, c => c.toLowerCase()
 // Native Windows resolution expands DOS short names consistently with Git.
 const realpath = (file: string) => fs.realpathSync.native(file);
 // The bundled plugin is imported as shared:openrig-core; keep the unqualified projection too.
-const corePluginDirectories = ["openrig-core", "shared:openrig-core"].map(id => `.codex/plugins/${resourceDirectoryName(id)}`);
+const corePluginIds = ["openrig-core", "shared:openrig-core"];
 
 /** Only pass files this projection created. Existing names/bytes are not ownership. */
 export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): string[] {
@@ -53,7 +53,9 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
     if (!exclude || !common) throw new Error("Git did not return exclusion and common metadata paths");
     const metadataIdentity = (file: string) => fs.existsSync(file) ? realpath(file)
       : path.join(realpath(path.dirname(file)), path.basename(file));
-    const coreDirectories = corePluginDirectories.map(directory => path.join(path.relative(root, realpath(cwd)), directory));
+    const cwdRoot = realpath(cwd);
+    const corePluginDirectories = corePluginIds.map(id => path.relative(cwdRoot, resourceDirectoryPath(path.join(cwdRoot, ".codex", "plugins"), id)).split(path.sep).join("/"));
+    const coreDirectories = corePluginDirectories.map(directory => path.join(path.relative(root, cwdRoot), directory));
     const ignoresCase = (dir: string) => git(dir, ["config", "--type=bool", "--get", "core.ignorecase"], undefined, true).trim() === "true";
     // One bounded listing per worktree, including ignored files only at relevant paths.
     const inventory = (dir: string, ignoreCase: boolean, paths = coreDirectories) => git(dir, ["ls-files", "--cached", "--others", "-t", "-z", "--",
