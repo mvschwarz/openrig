@@ -58,3 +58,24 @@ it("the shipped resume latch refuses missing exact history before provider prepa
   writeFileSync(join(root,"control","launch.pending.json"),JSON.stringify({version:1,bindingId:"binding-one",generation:"generation-two",nativeId:id,resumeToken:id,nativeType:"community:openshell-claude",files:[],checkpoint:{nativeId:id,nativeType:"community:openshell-claude",files:[]}}));
   expect(await command(root,"--prepare")).toMatchObject({ok:false,code:"environment_checkpoint_invalid"});
 });
+
+// Model the measured filesystem grant: the selected root is readable, its ancestors are not.
+it("reads inside the granted workspace when opening every ancestor is denied", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "openshell-granted-root-"))); roots.push(root);
+  mkdirSync(join(root, "work")); const file = join(root, "work", "role.md"); writeFileSync(file, "selected context");
+  const script = `import importlib.util,os,sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("guest",sys.argv[1]); g=importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+original=os.open
+ancestors={str(p) for p in Path(sys.argv[2]).parents}
+def granted(path, flags, *args, **kwargs):
+ if str(path) in ancestors: raise PermissionError(13,"ancestor not granted",str(path))
+ return original(path,flags,*args,**kwargs)
+os.open=granted
+try:
+ print(g.regular(sys.argv[2],sys.argv[3]).decode())
+except Exception as error: print(type(error).__name__+":"+str(error))
+`;
+  const result = await run("python3", ["-c", script, helper, root, file], { timeout: 5000 });
+  expect(result.stdout.trim()).toBe("selected context");
+});
