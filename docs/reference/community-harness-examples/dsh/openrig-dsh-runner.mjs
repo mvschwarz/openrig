@@ -265,6 +265,9 @@ async function main() {
   let heartbeat;
   let workBeat;
   let tty = false;
+  // The turn may read working: it runs, nothing holds needs input, no permission request is being submitted or waits for its
+  // permission_resolved, and dsh is alive. The beat and the agent's own reports both go by it.
+  const working = () => state.running && !state.holding && state.asking === 0 && !state.resolvedAsk && !agentExited;
 
   const restoreTty = () => {
     if (!tty) return;
@@ -305,7 +308,7 @@ async function main() {
   peer.onNotification("session/update", (params) => {
     if (params.sessionId !== state.sessionId || !params.update) return;
     const update = params.update;
-    const reporting = state.running && !state.holding; // while needs input is held, nothing may read working
+    const reporting = working();
     if (update.sessionUpdate === "agent_message_chunk") {
       if (update.content?.type === "text") process.stdout.write(update.content.text);
       if (reporting && Date.now() - state.lastActive >= ACTIVE_EVERY_MS) { state.lastActive = Date.now(); activity.post("active", "agent_message"); }
@@ -438,13 +441,13 @@ async function main() {
     return askOwner(requestId, toolCall, options).finally(() => { state.asking -= 1; setImmediate(settle); });
   });
 
-  // Once nothing waits on a person or is being submitted, and the seat holds no refusal of its own, say the turn goes on.
-  // It goes out after the agent has its answer, and before the next beat.
+  // Once nothing waits on a person or is being submitted, the seat holds no refusal of its own and dsh is alive, say the turn
+  // goes on. It goes out after the agent has its answer, and before the next beat.
   const settle = () => {
     const done = state.resolvedAsk;
     if (!done || state.holding || state.asking > 0) return;
     state.resolvedAsk = null;
-    if (state.running && state.turn === done.turn) activity.post("active", "permission_resolved", { turnId: String(done.turn), askId: done.askId });
+    if (state.running && state.turn === done.turn && !agentExited) activity.post("active", "permission_resolved", { turnId: String(done.turn), askId: done.askId });
   };
 
   const abort = () => {
@@ -559,7 +562,7 @@ async function main() {
   heartbeat = setInterval(() => { if (!state.running && !state.holding && !agentExited) postIdle("idle_heartbeat"); }, BEAT_MS);
   // While a turn runs and nothing waits on a person: the turn is still outstanding and dsh is alive. Not progress.
   workBeat = setInterval(() => {
-    if (state.running && !state.holding && state.asking === 0 && !state.resolvedAsk && !agentExited) {
+    if (working()) {
       activity.post("active", "liveness", { turnId: String(state.turn), livenessSeconds: WORK_LIVENESS_SECONDS });
     }
   }, WORK_BEAT_MS);
