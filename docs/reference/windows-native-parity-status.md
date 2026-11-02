@@ -1,5 +1,33 @@
 # Native Windows parity: implementation and evidence
 
+## Stable launch environment and native lease identity (2026-11-03)
+
+Session creation previously checked only the exact OPENRIG_NODE_ID property,
+while a native Windows child resolves environment names case-insensitively.
+Its caller-owned environment object also remained mutable across asynchronous
+preparation: a controlled regression changed the observed identity and a
+synthetic value after the lease check. Creation now takes a shallow snapshot
+of the string-valued environment before checking the lease. Native psmux uses
+the existing Windows lookup rule, including duplicate-key precedence; POSIX
+terminal launches retain exact-name matching. Creation and fresh-pane custody
+both use the same captured identity, not a later read of the caller's object.
+An identity whose lifecycle lease is not held still refuses before dispatch.
+
+Three regressions failed before the change: two legitimate native key spellings
+were refused, and asynchronous preparation observed changed values. The final
+five new boundary tests and complete delivery-guard file passed 39/39 on
+Windows; the same two files passed 36 with three native-only skips on WSL after
+the changed source/test files were byte-compared. The complete native private
+bootstrap file passed six with one existing opt-in skip, including real shell
+receiver and consumed-bootstrap recovery checks. Daemon TypeScript build and
+whitespace checks passed.
+
+The new identity regressions use real lifecycle leases and SQLite state with
+the terminal creation boundary controlled; they do not launch an actual managed
+provider or prove its later conversation continuity. Existing Stop/hold behavior
+is unchanged. Earlier whole-directory and installed receipts predate this
+repair, and no running instance, original team or public branch was changed.
+
 ## SFTP native transport descendant custody (2026-11-03)
 
 The default native SFTP transport previously used ordinary spawn for ssh. A

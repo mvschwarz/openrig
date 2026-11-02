@@ -18,6 +18,7 @@ import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../dom
 import { windowsScopedLaunch } from "./windows-scoped-launch.js";
 import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "../domain/native-runtime-switch-exchange.js";
 import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-journal.js";
+import { readPlatformEnv } from "../domain/platform-env.js";
 const execFileAsync = promisify(execFile);
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -940,16 +941,18 @@ export class TmuxAdapter {
   }
 
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
-    if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
+    const launchEnv = env === undefined ? undefined : { ...env };
+    const nodeId = readPlatformEnv(launchEnv ?? {}, "OPENRIG_NODE_ID", this.isNativeWindows ? "win32" : "linux");
+    if (this.deliveryGuard && (!nodeId || !this.deliveryGuard.ownsLifecycle(nodeId))) {
       return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
     }
-    const result = await this.createSessionUnchecked(name, cwd, env);
-    if (result.ok && this.deliveryGuard && env?.OPENRIG_NODE_ID) {
+    const result = await this.createSessionUnchecked(name, cwd, launchEnv);
+    if (result.ok && this.deliveryGuard && nodeId) {
       try {
         const panes = await this.listPanes(name);
         if (panes.length === 1) {
-          this.deliveryGuard.noteFreshLifecyclePane(env.OPENRIG_NODE_ID, panes[0]!.id);
-          this.freshManaged.set(name, {nodeId: env.OPENRIG_NODE_ID, pane: panes[0]!.id});
+          this.deliveryGuard.noteFreshLifecyclePane(nodeId, panes[0]!.id);
+          this.freshManaged.set(name, {nodeId, pane: panes[0]!.id});
         }
       } catch { /* no fresh pane proof: subsequent writes remain refused */ }
     }
