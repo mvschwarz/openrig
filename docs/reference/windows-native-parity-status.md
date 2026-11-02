@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Native managed-restore read regression harness (2026-11-02)
+
+The previously failing managed-read fixture now runs the generated POSIX command text through a Git Bash script file on Windows and `/bin/sh` on POSIX. A private shell function records argv, so no provider is executed. The file avoids Windows `-c` argument reparsing of nested quotes/backslashes, which had corrupted the synthetic hook-command JSON. Expected permission paths use the protocol's forward separators, native canonical fixture roots and drive-aware prompt extraction; existing exact-grant, deny/ask preservation, symlink spelling and canonical-seat assertions remain active.
+
+The complete managed-read file now passes 19/19 on Windows. Together with instruction-prefix, enforcer and PreCompact hook files, both Windows and ordinary-user WSL pass 111/111 with no skips. This supersedes the 18 native fixture failures above. The shell oracle tests the adapter's generated POSIX grammar before the native terminal bridge; it does not qualify that bridge, actual Claude permission approval, provider continuity or a full daemon suite.
+
 ## Restore instruction selection, prompt and exact read grants (2026-11-02)
 
 Daemon extra-file selection, restore prompt construction and managed read grants now share the same explicit home-prefix resolver. It expands `~/` and the two OPENRIG_HOME forms, plus native backslash forms on Windows, using the selected daemon home rather than an unrelated cwd. POSIX backslashes remain literal. Arbitrary environment variables are not expanded. The permission remains an exact file grant; neighbouring files are not granted.
