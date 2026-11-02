@@ -9,6 +9,9 @@ import path from "node:path";
 import type { TmuxServerSelection } from "../domain/tmux-server-selection.js";
 import { nativeViewerCommand } from "../domain/terminal/native-viewer-command.js";
 import { readPlatformEnv } from "../domain/platform-env.js";
+import { bindNativeSessionName } from "../domain/terminal/native-session-name.js";
+import { windowsTileAttachArgv } from "../domain/terminal/windows-tile-attach.js";
+import { powershellQuote } from "./windows-launch.js";
 
 function realpath(p: string): string {
   try {
@@ -45,11 +48,19 @@ export function tmuxServerArgs(env: NodeJS.ProcessEnv, uid: number | undefined =
 
 let daemonServerArgs: string[] = [];
 let daemonServerSelection: TmuxServerSelection | undefined;
+let daemonAttachCommand: readonly string[] = ["tmux"];
 
 /** Recorded once at daemon startup, before reconciliation or launch. */
 export function setDaemonTmuxServer(args: readonly string[], selection?: TmuxServerSelection): void {
   daemonServerArgs = [...args];
   daemonServerSelection = selection;
+  daemonAttachCommand = ["tmux"];
+}
+
+/** Pin generated recovery guidance to the daemon's resolved executable. */
+export function setDaemonTmuxAttachCommand(command: readonly string[]): void {
+  if (!command[0] || command.some(word => word.includes("\0"))) throw new Error("Invalid attach command argv");
+  daemonAttachCommand = [...command];
 }
 
 /** Effective startup choice, including a deferred change while old seats survive. */
@@ -77,8 +88,12 @@ function tmuxOnDaemonServer(command: readonly string[]): string {
 }
 
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
-export function tmuxAttachCommand(session: string, command: readonly string[] = ["tmux"]): string {
+export function tmuxAttachCommand(session: string, command: readonly string[] = daemonAttachCommand): string {
   if (!command[0] || [...command, ...daemonServerArgs, session].some(value => value.includes("\0"))) throw new Error("Invalid attach command argv");
+  if (process.platform === "win32" && bindNativeSessionName(session).marker) {
+    const argv = windowsTileAttachArgv(command[0], [...command.slice(1), ...daemonServerArgs], session, false);
+    return "& " + argv.map(powershellQuote).join(" ");
+  }
   // This API receives a session name, not a tmux target expression. A stale
   // hint must not fall back to a surviving session with the same prefix.
   const target = "=" + session;

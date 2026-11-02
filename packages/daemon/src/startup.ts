@@ -42,7 +42,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
-import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { setDaemonTmuxAttachCommand, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { selectTmuxServer, type TmuxServerMode } from "./domain/tmux-server-selection.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand, execTmuxCommand } from "./adapters/tmux-exec.js";
@@ -921,6 +921,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // before it listens (fresh DB), so a hung binary must not hold it. An injected test exec keeps probing as given.
   const runtimeVerifier = new RuntimeVerifier({ exec, db, ...(opts?.tmuxExec ? {} : { probeExec: boundedProbeExec() }) });
   const probeRegistry = new RequirementsProbeRegistry(exec);
+  if (process.platform === "win32" && !opts?.tmuxExec && !opts?.argvExec) {
+    try {
+      const detected = (await probeRegistry.probeCli("tmux")).detectedPath;
+      if (detected && nodePath.win32.isAbsolute(detected)) setDaemonTmuxAttachCommand([detected]);
+    } catch { /* unavailable discovery retains the normal executable lookup */ }
+  }
   const externalInstallPlanner = new ExternalInstallPlanner();
   const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
   const packageInstallService = new PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });

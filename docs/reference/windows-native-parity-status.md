@@ -5207,6 +5207,21 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+General native attach guidance now uses the canonical verified tile wrapper for
+mapped names, preserving executable prefix arguments and the selected server.
+The daemon records an absolute executable when startup's requirements probe
+finds one; unavailable discovery retains existing executable lookup. Injected
+test transports do not trigger that new discovery. Server-context reset clears
+the recorded command. A wake diagnostic now passes the raw session name instead
+of pre-quoting it before attach-command construction.
+
+Twelve attach/server tests passed, including actual PowerShell execution of
+generated general guidance over a controlled executable: the valid marker
+attached, a wrong marker made no attach attempt, and prefix/server arguments
+were preserved. Daemon build passed. Production startup discovery and stock
+psmux desktop attachment remain unqualified; direct CLI attach and installed
+asset qualification remain pending.
+
 Mapped native view/tile attachment now carries canonical physical-name/marker
 data in its generated wrapper. The PowerShell helper verifies exact presence,
 marker and legacy ambiguity before selecting the physical route, rechecks on
