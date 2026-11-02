@@ -1,5 +1,26 @@
 # Native Windows parity: implementation and evidence
 
+## Explicit session composer inspection and Codex PID capture (2026-11-03)
+
+The Codex thread-id capture's production callers all supply session names, so
+its PID read now uses the named-session metadata entry. Current-generation/model
+dependencies that can receive an already-bound pane remain on their generic
+contract; their type is not guessed from a field called sessionTarget.
+
+Delivery-guard inspection now distinguishes a bound pane from a session-only
+binding. A session-only binding uses explicit named-session composer capture for
+cursor, styled screen and mode; an existing pane retains the pane API. Both
+cursor observations and the screen/mode reads use the same logical-name contract.
+Marker mismatch or cursor movement still returns null rather than permission to
+write. No new input or lifecycle authority is granted.
+
+Four related metadata/target files passed 80 with two skips on Windows; three
+delivery-guard/composer files passed 84/84. The complete native colon fixture
+also passed after adding a cursor-drift refusal case. Daemon build and whitespace
+checks passed. These are controlled inspections, not actual provider input,
+stock psmux or current cross-platform/installed qualification. No deployment,
+user-team operation or public push occurred.
+
 ## Named-session current-pane metadata and capture (2026-11-03)
 
 Explicit session-name APIs now read the current pane's PID, foreground command,

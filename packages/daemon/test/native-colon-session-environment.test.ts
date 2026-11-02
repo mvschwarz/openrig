@@ -2,8 +2,9 @@ import { expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
 
-function fixture(valid = true) {
+function fixture(valid = true, drift = false) {
   const name = "owned:logical", binding = bindNativeSessionName(name), calls: string[][] = [];
+  let cursorReads = 0;
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, {
     tmpName: () => "unused", bufferName: () => "unused", writeFile: async () => {}, unlink: async () => {},
     privateConfig: async () => ({ path: "C:/owned/private.conf", dispose: async () => {} }),
@@ -14,7 +15,12 @@ function fixture(valid = true) {
     if (command === "show-environment" && argv.includes("-g")) return "";
     if (command === "list-windows") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "2|owned|1|1\n"; }
     if (command === "list-panes") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":2"); return `${binding.physical}|%1|0|C:/owned|80|24|1\n`; }
-    if (command === "display-message") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return argv.at(-1) === "#{pane_pid}" ? "1234\n" : "owned-runtime\n"; }
+    if (command === "display-message") {
+      expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":");
+      if (argv.at(-1)?.includes("cursor_x")) return `${drift && cursorReads++ > 0 ? 2 : 1}|2|80|24\n`;
+      if (argv.at(-1) === "#{pane_in_mode}") return "0\n";
+      return argv.at(-1) === "#{pane_pid}" ? "1234\n" : "owned-runtime\n";
+    }
     if (command === "capture-pane") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":"); return "owned capture\n"; }
     if (command === "show-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "OWNED_VALUE=literal\n"; }
     if (["source-file", "set-environment"].includes(command!)) { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
@@ -48,6 +54,16 @@ it("keeps metadata and capture unknown after a binding-marker mismatch", async (
   expect(await f.adapter.getSessionPanePid(f.name)).toBeNull(); expect(await f.adapter.getSessionPaneCommand(f.name)).toBeNull();
   expect(await f.adapter.captureSessionContent(f.name)).toBeNull(); expect(await f.adapter.captureSessionScreen(f.name)).toBeNull();
   expect(f.calls.some(argv => argv.includes("display-message") || argv.includes("capture-pane"))).toBe(false);
+});
+it("reads a stable composer snapshot without treating a colon as target syntax", async () => {
+  const f = fixture();
+  expect(await f.adapter.captureSessionComposerSnapshot(f.name)).toEqual({ screen: "owned capture\n", cursor: { x: 1, y: 2, width: 80, height: 24 }, inMode: false });
+  expect(f.calls.flat()).not.toContain("=owned:");
+  expect(await fixture(false).adapter.captureSessionComposerSnapshot(f.name)).toBeNull();
+});
+it("returns unknown if the named-session cursor changes during capture", async () => {
+  const f = fixture(true, true);
+  expect(await f.adapter.captureSessionComposerSnapshot(f.name)).toBeNull();
 });
 it("does not fall back to the name prefix when its marker is wrong", async () => {
   const f = fixture(false);

@@ -489,7 +489,7 @@ export class TmuxAdapter {
   get deliveryGuard(): SeatDeliveryGuard | undefined { return this.inputGuard; }
   set deliveryGuard(guard: SeatDeliveryGuard | undefined) {
     this.inputGuard = guard;
-    guard?.attachInputInspection(async (target, owned) => inspectComposerInput(await this.captureComposerSnapshot(target.pane ?? target.session), null, owned), async target => {
+    guard?.attachInputInspection(async (target, owned) => inspectComposerInput(await (target.pane ? this.captureComposerSnapshot(target.pane) : this.captureSessionComposerSnapshot(target.session)), null, owned), async target => {
       if (!target.pane) return true;
       const probe = await this.probeSession(target.session);
       if (probe.state === "absent") return true;
@@ -2400,14 +2400,18 @@ export class TmuxAdapter {
   }
 
   /** Cursor movement during capture is an unknown input, never permission to type. */
-  async captureComposerSnapshot(paneId: string): Promise<ComposerSnapshot | null> {
+  async captureSessionComposerSnapshot(name: string): Promise<ComposerSnapshot | null> { return this.captureComposerSnapshot(name, true); }
+
+  async captureComposerSnapshot(paneId: string, literalSessionName = false): Promise<ComposerSnapshot | null> {
     try {
-      const before = await this.getPaneCursorPosition(paneId);
+      const before = literalSessionName ? await this.getSessionCursorPosition(paneId) : await this.getPaneCursorPosition(paneId);
       if (!before) return null;
-      const screen = await this.capturePaneScreen(paneId, { escapeSequences: true });
+      const screen = literalSessionName ? await this.captureSessionScreen(paneId, { escapeSequences: true }) : await this.capturePaneScreen(paneId, { escapeSequences: true });
       if (screen === null) return null;
-      const mode = (await this.run(["tmux", "display-message", "-p", "-t", exactTarget(paneId, "pane"), "#{pane_in_mode}"])).trim();
-      const after = await this.getPaneCursorPosition(paneId);
+      const target = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
+      const argv = ["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"];
+      const mode = (literalSessionName ? await this.runNamedSession(argv, paneId, undefined, true) : await this.run(argv)).trim();
+      const after = literalSessionName ? await this.getSessionCursorPosition(paneId) : await this.getPaneCursorPosition(paneId);
       if (!after || JSON.stringify(before) !== JSON.stringify(after) || !/^\d+$/.test(mode)) return null;
       return { screen, cursor: after, inMode: Number(mode) !== 0 };
     } catch { return null; }
@@ -2419,13 +2423,13 @@ export class TmuxAdapter {
    * out-of-range values (x<0, y<0, width<1, height<1) so a bad read never
    * produces a garbage seed.
    */
-  async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
-    const exact = exactTarget(paneId, "pane");
+  async getSessionCursorPosition(name: string): Promise<TmuxCursorPosition | null> { return this.getPaneCursorPosition(name, true); }
+
+  async getPaneCursorPosition(paneId: string, literalSessionName = false): Promise<TmuxCursorPosition | null> {
+    const exact = literalSessionName ? `=${paneId}:` : exactTarget(paneId, "pane");
     try {
-      const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT],
-        `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`,
-      );
+      const argv = ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT], legacy = `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`;
+      const output = literalSessionName ? await this.runNamedSession(argv, paneId, legacy, true) : await this.run(argv, legacy);
       const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
       const x = Number.parseInt(xRaw ?? "", 10);
       const y = Number.parseInt(yRaw ?? "", 10);

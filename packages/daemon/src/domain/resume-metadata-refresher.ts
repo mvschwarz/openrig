@@ -1,4 +1,4 @@
-import { readNamedSessionCommand, captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
+import { readNamedSessionPid, readNamedSessionCommand, captureNamedSessionContent } from "../adapters/session-pane-lookup.js";
 import os from "node:os";
 import type { ProcessRow } from "./model-divergence/current-generation-record.js";
 import { shellQuote } from "../adapters/shell-quote.js";
@@ -344,7 +344,7 @@ export class ResumeMetadataRefresher {
       if (!this.tmuxAdapter.getPanePid) { reason = "no_pane_pid"; return undefined; }
       const attempts = Math.max(1, opts?.attempts ?? 8);
       for (let attempt = 0; attempt < attempts && !ctrl.signal.aborted; attempt++) {
-        const shellPid = await this.tmuxAdapter.getPanePid(sessionTarget);
+        const shellPid = await readNamedSessionPid(this.tmuxAdapter, sessionTarget);
         if (ctrl.signal.aborted) return undefined;
         reason = "no_pane_pid"; count = undefined;
         if (shellPid) {
