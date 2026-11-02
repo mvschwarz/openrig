@@ -2570,3 +2570,9 @@ The test preserves any original body failure alongside cleanup failure.
 Daemon type checking passes. The earlier statement that awaiting pipe close
 resolved the cleanup root cause is superseded by the later failure above.
 No complete Windows Herdr/following, desktop or reboot claim is made.
+
+### Native Herdr viewer preparation — 2026-11-02
+
+The viewer can decode only this build’s exact Windows tile wrapper and inspect its psmux server/session/node binding without evaluating its PowerShell text. Native cwd attribution accepts Herdr’s case/separator spelling and trailing separator while rejecting sibling and relative paths. Shell command rendering supports quoted PowerShell and POSIX shells; cmd remains unqualified because Windows argv quoting does not prevent cmd expansion.
+
+Validation: native viewer preparation plus existing viewer state-machine tests: 24/24 passed. Daemon typecheck passed before the cwd-only follow-up. The Windows viewer/follow entry remains gated: native private journals, foreground attachment verification, following explanation strip and desktop launch still require implementation and real acceptance. This does not resolve the separately recorded Herdr fixture cleanup EPERM.

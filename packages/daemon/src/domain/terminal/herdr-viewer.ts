@@ -7,6 +7,7 @@ import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
 import { readPlatformEnv } from "../platform-env.js";
+import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -54,8 +55,13 @@ export function resolveHerdrBinary(env: NodeJS.ProcessEnv, platform: NodeJS.Plat
   return null;
 }
 async function inspectSeat(argv: string[]): Promise<{ sessionId: string; nodeId: string }> {
-  const call = async (args: string[]) => (await runFile(argv[5]!, [...argv.slice(6), ...args], { encoding: "utf8", timeout: 3000 })).stdout.trim();
-  const sessionId = await call(["display-message", "-p", "-t", `=${argv[4]}:`, "#{session_id}"]);
+  const native = readWindowsTileAttachArgv(argv);
+  if (process.platform === "win32" && !native) throw new Error("Native seat attachment is not an exact installed tile wrapper.");
+  const binary = native?.tmux ?? argv[5]!;
+  const server = native?.server ?? argv.slice(6);
+  const session = native?.session ?? argv[4];
+  const call = async (args: string[]) => (await runFile(binary, [...server, ...args], { encoding: "utf8", timeout: 3000 })).stdout.trim();
+  const sessionId = await call(["display-message", "-p", "-t", `=${session}:`, "#{session_id}"]);
   if (!/^\$\d+$/.test(sessionId)) throw new Error("Seat session identity is unknown.");
   const node = await call(["show-environment", "-t", sessionId, "OPENRIG_NODE_ID"]);
   if (!node.startsWith("OPENRIG_NODE_ID=")) throw new Error("Seat node identity is unknown.");
@@ -72,8 +78,17 @@ function pane(raw: unknown): Pane | null {
   return ["workspace_id", "pane_id", "terminal_id", "cwd"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
 }
 
+/** Herdr reports native cwd with a trailing separator; compare path components,
+ * while retaining the private creation directory as the attribution boundary. */
+export function sameViewerCwd(actual: string, expected: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32") return actual === expected;
+  if (!path.win32.isAbsolute(actual) || !path.win32.isAbsolute(expected)) return false;
+  const normalized = (value: string) => path.win32.normalize(value).replace(/[\\/]+$/, "").toLowerCase();
+  return normalized(actual) === normalized(expected);
+}
+
 /** Complete endpoint-wide attribution; mutable labels are never ownership. */
-export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string): Promise<Pane[]> {
+export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string, platform: NodeJS.Platform = process.platform): Promise<Pane[]> {
   // 0.9.5 emits JSON by default here; unlike status server, list rejects --json.
   const listed = body(await run(["workspace", "list"]));
   if (!Array.isArray(listed.workspaces)) throw new Error("Viewer enumeration is unreadable.");
@@ -85,7 +100,7 @@ export async function findAttributedViewerPanes(run: HerdrViewerRun, cwd: string
     for (const raw of listedPanes.panes) {
       const candidate = pane(raw);
       if (!candidate || candidate.workspace_id !== workspace.workspace_id) throw new Error("Viewer pane enumeration is incomplete.");
-      if (candidate.cwd === cwd) found.push(candidate);
+      if (sameViewerCwd(candidate.cwd, cwd, platform)) found.push(candidate);
     }
   }
   return found;
@@ -114,7 +129,7 @@ export class HerdrViewer {
     this.pending = result.then(() => {}, () => {}); return result;
   }
   private async ownedPanes(entry: Entry): Promise<Pane[]> {
-    return findAttributedViewerPanes(this.run, entry.cwd);
+    return findAttributedViewerPanes(this.run, entry.cwd, this.platform);
   }
   private async ensureOnce(key: ViewerKey, target: ComposedPane, provision = true, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     let entry: Entry | undefined;
@@ -173,7 +188,7 @@ export class HerdrViewer {
         }
         const reply = body(raw);
         const made = pane(reply.root_pane);
-        if (!made || made.cwd !== cwd) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
+        if (!made || !sameViewerCwd(made.cwd, cwd, this.platform)) return unconfirmed("Create returned no attributable pane/terminal pair; its effect remains uncertain.");
         entry.pane = made; entry.phase = "created"; save(); created = true;
       }
       if (!entry.pane) {
@@ -187,7 +202,7 @@ export class HerdrViewer {
       try { current = pane(body(await this.run(["pane", "get", entry.pane.pane_id])).pane); }
       catch { current = null; } // A missing ID alone never proves absence.
       if (!current || current.pane_id !== entry.pane.pane_id || current.terminal_id !== entry.pane.terminal_id
-        || current.workspace_id !== entry.pane.workspace_id || current.cwd !== entry.cwd) {
+        || current.workspace_id !== entry.pane.workspace_id || !sameViewerCwd(current.cwd, entry.cwd, this.platform)) {
         if (!provision || (await this.ownedPanes(entry)).length !== 0) {
           return unconfirmed("Viewer identity changed or disappeared; an enumerable viewer cannot be replaced.");
         }
