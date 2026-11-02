@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Scoped psmux targets versus literal command data (2026-11-02)
+
+The native routing mapper now reads only the command's first target operand and rewrites only that operand. Previously it searched every argument and replaced every matching scoped identifier: a user option value could select an unrelated server, or be shortened to a bare pane ID. Boolean `-s` flags remain distinct from detach-client's source-session operand, and an explicit `--` bounds target parsing.
+
+New regressions first reproduced both literal-value failures, then passed for ordinary and scoped targets and boolean server/session flags. Six complete native adapter files passed 258 with four platform skips. The same six WSL files passed 259, failed two and skipped one: the existing parent-environment fixture disagrees about removal ordering, and the exhaustive legacy-string oracle does not drive all current run() sites. Those failures remain open; this is not a green cross-platform comparison. Daemon typecheck passed.
+
+An additional real stock psmux 3.4.0 test passed against two independently selected namespaces with equal session names. Each stored and read back a complete routing-shaped option value, retained its receiver output, and survived the sibling's stop; owned sessions and directories were cleaned. No existing team or main runtime was changed. Concurrent server-name exchange atomicity and literal-pipe session-name support remain unqualified.
+
 ## File-transfer state wall at filesystem roots (2026-11-02)
 
 The local transfer deny wall now preserves an existing trailing root separator when checking descendants. Previously a configured drive-root OPENRIG_HOME produced a doubled separator and allowed child paths through the lexical check. The new regression reproduced that failure and now requires the existing active-state refusal. Ordinary custom homes, credential-directory denials and directory-content trailing separators remain covered.

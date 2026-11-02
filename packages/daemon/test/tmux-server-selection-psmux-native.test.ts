@@ -33,6 +33,9 @@ it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("isol
     for (let i = 0; i < adapters.length; i++) {
       await expect.poll(() => adapters[i]!.capturePaneContent(name, 20), { timeout: 5000 }).toContain(`marker-${i}`);
       expect(await adapters[i]!.capturePaneContent(name, 20)).not.toContain(`marker-${1 - i}`);
+      const routingShapedValue = `psmux:${Buffer.from("unrelated-server").toString("base64url")}:%7`;
+      expect(await adapters[i]!.setSessionOption(name, "@owned-routing-data", routingShapedValue)).toEqual({ ok: true });
+      expect(await adapters[i]!.getSessionOption(name, "@owned-routing-data")).toBe(routingShapedValue);
       expect(await invoke([...selected[i]!.serverArgs, "list-sessions", "-F", "#{session_name}"])).toContain(name);
       const restored = await selectTmuxServer({ home: homes[i]!, mode: "isolated", registeredSessions: [name], env });
       expect(restored.executionArgs).toEqual(selected[i]!.executionArgs);

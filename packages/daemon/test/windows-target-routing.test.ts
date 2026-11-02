@@ -5,6 +5,29 @@ const session = "seat with spaces";
 const pane = `psmux:${Buffer.from(session).toString("base64url")}:%7`;
 
 describe("psmux first-target client routing", () => {
+  it("does not mistake a boolean server/session flag for a target operand", async () => {
+    const calls: string[][] = [];
+    const adapter = new TmuxAdapter(async () => { throw new Error("no shell"); }, undefined, async argv => {
+      calls.push([...argv]); return "";
+    }, "psmux");
+    await adapter.listPanes(pane, true);
+    expect(await adapter.setNativeServerOption(pane, "exit-empty", "off")).toEqual({ ok: true });
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.slice(0, 3)).toEqual(["tmux", "-t", `=${session}:.%7`]);
+  });
+
+  it.each(["owned-session", pane])("does not interpret option data as routing metadata for %s", async target => {
+    const calls: string[][] = [];
+    const adapter = new TmuxAdapter(async () => { throw new Error("no shell"); }, undefined, async argv => {
+      calls.push([...argv]); return "";
+    }, "psmux");
+    expect(await adapter.setSessionOption(target, "@owned-note", pane)).toEqual({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.at(-1)).toBe(pane);
+    if (target === "owned-session") expect(calls[0]).toEqual(["tmux", "set-option", "-t", "=owned-session:", "@owned-note", pane]);
+    else expect(calls[0]!.slice(0, 3)).toEqual(["tmux", "-t", `=${session}:.%7`]);
+  });
+
   it("delivers Enter to an inactive pane even when the client discards the later -t", async () => {
     const received = new Map([["%7", [] as string[]], ["%8", [] as string[]]]);
     const active = "%8";

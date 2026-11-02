@@ -653,7 +653,14 @@ export class TmuxAdapter {
    */
   private async run(argv: string[], legacy?: string, bufferScope?: string, env?: Readonly<Record<string,string|undefined>>): Promise<string> {
     if (this.terminalKind === "psmux") {
-      const scopedArg = argv.find(a => /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(a));
+      // Only the command's first target operand can carry routing metadata.
+      // Option values, key payloads and child argv are literal user data even
+      // when their bytes happen to equal a scoped pane identifier.
+      const end = argv.indexOf("--");
+      const targetOption = argv[1] === "detach-client" ? "-s" : "-t";
+      const targetFlag = argv.findIndex((arg, index) => index > 1 && (end < 0 || index < end) && arg === targetOption);
+      const targetIndex = targetFlag < 0 ? -1 : targetFlag + 1;
+      const scopedArg = targetIndex > 0 && /^psmux:[A-Za-z0-9_-]+:[%$@]\d+$/.test(argv[targetIndex] ?? "") ? argv[targetIndex] : undefined;
       const scoped = scopedArg ?? bufferScope;
       if (scoped) {
         const [, encoded, pane] = scoped.split(":");
@@ -664,7 +671,7 @@ export class TmuxAdapter {
         // in the first target too; session-only routing would hit its active pane.
         const target = scopedArg && pane!.startsWith("%") ? `=${session}:.${pane}`
           : scopedArg && pane!.startsWith("@") ? `=${session}:${pane}` : `=${session}`;
-        argv = [argv[0]!, "-t", target, ...argv.slice(1).map(a => a === scoped ? pane! : a)];
+        argv = [argv[0]!, "-t", target, ...argv.slice(1).map((a, index) => scopedArg && index + 1 === targetIndex ? pane! : a)];
         legacy = undefined;
       }
     }
