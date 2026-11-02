@@ -15,10 +15,19 @@ const breaks = new Set(argv.flatMap((a, i) => (a === "--break" ? [argv[i + 1]] :
 const readWait = argv.includes("--read-wait") ? argv[argv.indexOf("--read-wait") + 1] : "25";
 const readQuery = readWait === "none" ? "" : `?waitSeconds=${readWait}`;
 const withdrawAfterStop = argv.includes("--withdraw-after-stop");
+// --beat: the optional working beat (section 4). While a turn is open and nothing waits on a person, post active/liveness
+// every 10 s with livenessSeconds 30; after delivering an answer to an ask OpenRig opened, post active/permission_resolved
+// first. Breaks: beat-after-stop, beat-during-ask, no-resolve.
+const beatMode = argv.includes("--beat");
+let beatTurn = null;
 // With --withdraw-after-stop: the ask a cancelled or ended turn withdraws once its Stop is posted.
 let deferredWithdraw = null;
 // --break stop-before-end: a non-exit Stop posted while the ask waits stands in for the turn's end, which is then not posted.
 let stoppedEarly = false;
+if (beatMode) setInterval(() => {
+  if (beatTurn !== null && (!attention || breaks.has("beat-during-ask"))) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
+}, 10_000).unref();
+const resolved = (ask) => { if (beatMode && !breaks.has("no-resolve")) void post("active", "permission_resolved", { turnId: String(turn), askId: ask.askId }); };
 const env = process.env;
 const name = env.OPENRIG_RUNTIME ?? "runner";
 
@@ -95,6 +104,7 @@ agent.stdout.on("data", (chunk) => {
 let exiting = false;
 agent.on("exit", async () => {
   if (exiting) return;
+  beatTurn = null;
   await withdrawLive("exited");
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
@@ -175,6 +185,7 @@ async function onPermission(msg) {
       select(ask.id, read.body.optionId);
       if (breaks.has("deliver-twice")) select(ask.id, read.body.optionId);
       attention = false;
+      resolved(ask);
     } else if (!ask.done) {
       // A refused, withdrawn or stale read, or a refusal saying the request isn't the current occupant's: it can't take an
       // answer, and no person is still waiting, so it's cancelled and nothing is held. The seat's opt-in refuses and holds.
@@ -187,7 +198,7 @@ async function onPermission(msg) {
       else if (cancelled || (!state && breaks.has("cancel-on-read-error")) || (state && breaks.has("cancel-on-unlisted-state"))) {
         refuse(ask.id); attention = breaks.has("hold-on-cancel");
       }
-      else { permit(); attention = !allowOf(options); }
+      else { permit(); attention = !allowOf(options); if (!attention) resolved(ask); }
     }
     ask.done = true;
     if (live === ask && (!ask.open || breaks.has("forget-permitted-ask"))) live = null;
@@ -220,11 +231,13 @@ async function prompt(text) {
   cancelSent = false;
   turn += 1;
   stoppedEarly = false;
+  beatTurn = turn;
   show(`you ▸ ${text.split("\n")[0]}`);
   attention = false;
   await post("UserPromptSubmit", "accepted", { turnId: String(turn) });
   const res = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
   await withdrawLive("turn_ended");
+  if (!breaks.has("beat-after-stop")) beatTurn = null;
   if (res.error) {
     if (!breaks.has("no-error-post")) await post("Notification", "runtime_error");
   } else {

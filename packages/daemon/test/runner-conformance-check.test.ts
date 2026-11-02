@@ -32,7 +32,9 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
   it("passes every case for a runner that keeps the contract", async () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 0, advisory: 1 });
+    // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 1 });
+    expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
@@ -125,6 +127,26 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(report.results.map((r) => [r.id, r.status])).toEqual([["1", "pass"]]);
     expect(code).toBe(0);
   }, 90_000);
+
+  // The optional working beat (section 4): a runner that beats in a quiet turn keeps 3b's promises, and each way of
+  // breaking one is caught by the check that names it.
+  it("passes 3b for a runner that beats through a quiet turn, stops while a person is asked, and resolves before beating again", async () => {
+    const { code, report } = await check(["--cases", "3b"], " --beat");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["3b", "pass"]]);
+    expect(code).toBe(0);
+  }, 150_000);
+  it.concurrent.each([
+    ["beat-after-stop", "no beat after the turn's Stop"],
+    ["beat-during-ask", "asked: no beat while the ask waits on a person"],
+    ["no-resolve", "asked: after the answer, active/permission_resolved names the turn and the ask, before any beat"],
+  ])("catches %s in case 3b", async (broken, name) => {
+    const { code, report } = await check(["--cases", "3b"], ` --beat --break ${broken}`);
+    const result = report.results.find((r) => r.id === "3b")!;
+    expect(result.status).toBe("fail");
+    expect(result.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining(name));
+    expect(code).toBe(1);
+  }, 150_000);
 
   // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
   it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
