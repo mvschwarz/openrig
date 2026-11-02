@@ -5205,3 +5205,25 @@ installed resources and rig.cmd also passed. Receipt:
 pack-terminal-assets-d23b093.json and its complete log. This supersedes the
 pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
+# Scoped native SFTP filename qualification — 2026-11-03
+
+Local Windows copy I/O now uses namespace-aware absolute paths, retaining literal
+NTFS DOS-reserved names and trailing dots/spaces. An opt-in Linux SFTP subsystem
+to native Windows receiver check copied distinct `con`, `nul`, `aux.txt`,
+`trailing`, `trailing.`, and `trailing ` files and directory witnesses, verified
+all twelve contents and exact enumerated names, and verified a repeat preview
+requires no retransmission. This is a receiver/subsystem check, not SSH network
+or provider continuity acceptance.
+
+The installed Windows OpenSSH subsystem omitted reserved entries and normalized
+trailing-dot reads to another entry. Known Windows remote endpoints (PowerShell
+metadata or drive-qualified protocol paths) therefore reject enumerated reserved
+and trailing names rather than copying aliased bytes. A server can omit entries
+before the client sees them; this guard cannot certify complete enumeration.
+Windows OpenSSH exact-name parity remains unqualified. Ordinary recursive copy
+can have copied preceding siblings before encountering a rejected entry.
+
+Validation: Windows recursive SFTP file 26 passed, 1 host-capability skip,
+including the explicit WSL subsystem opt-in and Windows alias refusal; CLI
+TypeScript no-emit passed. No deployment or push.
+

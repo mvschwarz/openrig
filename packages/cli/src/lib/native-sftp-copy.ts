@@ -93,6 +93,8 @@ export function spawnSftpTransport(file: string, argv: string[]): ChildProcessWi
 }
 
 export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) => ChildProcessWithoutNullStreams = argv => spawnSftpTransport("ssh", argv)): Promise<FileCopyResult> {
+  const remotePlan = plan.src.kind === "remote" ? plan.src : plan.dst;
+  const windowsRemote = remotePlan.host?.remoteShell === "powershell" || /^\/?[A-Za-z]:[\\/]/.test(remotePlan.path);
   let client: SftpClient | undefined;
   let stderr = "", staged: string | undefined, filesTransferred = 0, bytesTransferred = 0;
   let spawnError: NodeJS.ErrnoException | undefined;
@@ -178,9 +180,14 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         let childError: unknown;
         try {
           for (const name of names) {
+            // Windows OpenSSH can normalize these names to a different source
+            // entry. Namespace-aware local I/O cannot repair a remote alias.
+            if (windowsRemote && (/[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))) {
+              throw new Error(`Unqualified Windows SFTP directory entry: ${JSON.stringify(name)}`);
+            }
             // A remote directory entry must remain exactly one native filename.
             if (!name || name === "." || name === ".." || /[\/\\\0]/.test(name)
-              || (destination === local && process.platform === "win32" && (/[\x01-\x1f<>:"|?*]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)))) {
+              || (destination === local && process.platform === "win32" && /[\x01-\x1f<>:"|?*]/.test(name))) {
               throw new Error(`Unrepresentable directory entry: ${JSON.stringify(name)}`);
             }
             await copy(source.paths.join(src, name), destination.paths.join(dst, name));
@@ -262,7 +269,11 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       } else await destination.rename(staged, dst, existing !== undefined);
       staged = undefined;
     };
-    const src = source.paths.normalize(plan.src.path), dst = destination.paths.normalize(plan.dst.path);
+    // Local native I/O must retain literal NTFS names rather than Win32 device
+    // aliases or trailing-dot/space normalization. All descendants inherit this
+    // namespace prefix; remote SFTP paths keep their original protocol syntax.
+    const src = source === local && process.platform === "win32" ? path.toNamespacedPath(path.resolve(plan.src.path)) : source.paths.normalize(plan.src.path);
+    const dst = destination === local && process.platform === "win32" ? path.toNamespacedPath(path.resolve(plan.dst.path)) : destination.paths.normalize(plan.dst.path);
     const attrs = await source.stat(src), existing = await destination.stat(dst);
     if (!attrs) throw new Error(`Source not found: ${src}`);
     const contents = /[\\/]$/.test(plan.src.path) && kind(attrs) === 0o040000;

@@ -10,6 +10,49 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("refuses an unqualified Windows server trailing name before copying aliased bytes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "sftp-windows-name-alias-"));
+    try {
+      const source = path.join(root, "source"), destination = path.join(root, "destination");
+      await mkdir(source); await mkdir(destination);
+      await writeFile(path.join(source, "ambiguous"), "different ordinary name");
+      await writeFile(path.toNamespacedPath(path.join(source, "ambiguous.")), "literal trailing name");
+      const result = await runNativeSftpCopy({ src: { kind: "remote", path: "/" + source.replaceAll("\\", "/") + "/", host: { id: "owned", target: "owned", transport: "ssh" } }, dst: { kind: "local", path: destination }, dryRun: false }, () => spawn(server, [], { stdio: "pipe", windowsHide: true }));
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("Unqualified Windows SFTP directory entry");
+      expect(await readdir(destination)).not.toContain("ambiguous.");
+    } finally { await rm(path.toNamespacedPath(root), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  });
+  it.skipIf(!process.env.OPENRIG_TEST_WSL_SFTP_SERVER)("receives exact reserved and trailing names from Linux SFTP without normalization collisions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "sftp-exact-native-names-"));
+    const source = path.join(root, "source"), destination = path.join(root, "destination");
+    const names = ["con", "nul", "aux.txt", "trailing", "trailing.", "trailing "];
+    const literal = (file: string) => path.toNamespacedPath(file);
+    try {
+      await mkdir(source); await mkdir(destination);
+      await mkdir(path.join(source, "files")); await mkdir(path.join(source, "directories"));
+      for (const name of names) {
+        await writeFile(literal(path.join(source, "files", name)), "file:" + name);
+        await mkdir(literal(path.join(source, "directories", name)));
+        await writeFile(literal(path.join(source, "directories", name, "witness.txt")), "directory:" + name);
+      }
+      expect((await readdir(literal(path.join(source, "files")))).sort()).toEqual([...names].sort());
+      const linuxSource = "/mnt/" + source[0]!.toLowerCase() + source.slice(2).replaceAll("\\", "/");
+      const plan: CopyPlan = { src: { kind: "remote", path: linuxSource + "/", host: { id: "owned", target: "owned", transport: "ssh" } },
+        dst: { kind: "local", path: destination }, dryRun: true };
+      const start = () => spawn("wsl.exe", ["--distribution", "Ubuntu-24.04", "--user", "codexqa", "--", process.env.OPENRIG_TEST_WSL_SFTP_SERVER!], { stdio: "pipe", windowsHide: true, windowsVerbatimArguments: true });
+      const preview = await runNativeSftpCopy(plan, start); expect(preview.ok, preview.stderr).toBe(true);
+      expect(await readdir(destination)).toEqual([]);
+      const copied = await runNativeSftpCopy({ ...plan, dryRun: false }, start); expect(copied.ok, copied.stderr).toBe(true);
+      expect(copied.filesTransferred, JSON.stringify({ changes: copied.stdout, files: await readdir(literal(path.join(destination, "files"))), directories: await readdir(literal(path.join(destination, "directories"))) })).toBe(names.length * 2);
+      for (const branch of ["files", "directories"]) expect((await readdir(literal(path.join(destination, branch)))).sort()).toEqual([...names].sort());
+      for (const name of names) {
+        expect(await readFile(literal(path.join(destination, "files", name)), "utf8")).toBe("file:" + name);
+        expect(await readFile(literal(path.join(destination, "directories", name, "witness.txt")), "utf8")).toBe("directory:" + name);
+      }
+      const repeated = await runNativeSftpCopy(plan, start); expect(repeated.ok, repeated.stderr).toBe(true); expect(repeated.filesTransferred).toBe(0);
+    } finally { await rm(literal(root), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+  }, 40000);
   it.each([
     ['upload','file'],['upload','file-link'],['upload','directory-link'],
     ['download','file'],['download','file-link'],['download','directory-link'],
