@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmod, link, lstat, utimes, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
+import { chmod, link, lstat, lutimes, utimes, mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { planFileCopy, runFileCopy } from "../src/lib/file-transfer.js";
@@ -56,6 +56,23 @@ describe.skipIf(process.platform !== "win32")("native Windows local transfer", (
     if(!dangling)expect(await readFile(path.join(dst,"witness"),"utf8")).toBe("retain referent");
     expect((await copy(src,dst,true)).stdout).toBe("");
     expect((await readdir(root)).filter(name=>name.startsWith(".openrig-copy-"))).toEqual([]);
+  }));
+
+  it.each(["file", "dir"] as const)("preserves %s link timestamps and repairs drift without touching its referent", type => fixture(async root => {
+    const src=path.join(root,"source-link"),dst=path.join(root,"destination-link"),target=path.join(root,"target");
+    if(type==="dir")await mkdir(target);else await writeFile(target,"owned referent");
+    await utimes(target,1500000000,1500000000);
+    await symlink("target",src,type);await lutimes(src,1400000000,1400000000);
+    const result=await copy(src,dst);expect(result.ok,result.stderr).toBe(true);
+    expect(Math.floor((await lstat(dst)).mtimeMs/1000)).toBe(1400000000);
+    await lutimes(dst,1600000000,1600000000);const inode=(await lstat(dst)).ino;
+    expect((await copy(src,dst,true)).stdout).toContain(".L..t.");
+    expect(Math.floor((await lstat(dst)).mtimeMs/1000)).toBe(1600000000);
+    expect(await copy(src,dst)).toMatchObject({ok:true,filesTransferred:0});
+    expect((await lstat(dst)).ino).toBe(inode);
+    expect(Math.floor((await lstat(dst)).mtimeMs/1000)).toBe(1400000000);
+    expect(Math.floor((await lstat(target)).mtimeMs/1000)).toBe(1500000000);
+    expect((await copy(src,dst,true)).stdout).toBe("");
   }));
 
   it.each([false,true])("replaces a readonly destination without mutating its retained hardlink, source readonly=%s", readonly => fixture(async root => {

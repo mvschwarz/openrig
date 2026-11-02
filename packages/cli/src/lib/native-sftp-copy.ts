@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { chmod, lstat, stat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
+import { chmod, lstat, lutimes, stat, mkdir, open, readdir, readlink, rename, symlink, utimes } from "node:fs/promises";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -19,6 +19,7 @@ interface Endpoint {
   read(file: string): AsyncIterable<Buffer>;
   write(file: string, data: AsyncIterable<Buffer>): Promise<void>;
   times(file: string, attrs: SftpAttrs): Promise<void>;
+  linkTimes?(file: string, attrs: SftpAttrs): Promise<void>;
   rename(src: string, dst: string, replacing: boolean): Promise<void>;
 }
 const local: Endpoint = {
@@ -52,6 +53,10 @@ const local: Endpoint = {
     // A Windows directory readonly attribute is Explorer customization state,
     // not directory write permission. Do not pretend chmod can enforce it.
     if (attrs.mode !== undefined && !(process.platform === "win32" && kind(attrs) === 0o040000)) await chmod(file, attrs.mode & 0o7777);
+  },
+  async linkTimes(file, attrs) {
+    // Never use SETSTAT/utimes for links: those follow the referent.
+    if (attrs.atime !== undefined && attrs.mtime !== undefined) await lutimes(file, attrs.atime, attrs.mtime);
   },
   async rename(src, dst, replacing) {
     if (process.platform === "win32" && replacing && kind(await local.stat(src)) === 0o100000 && kind(await local.stat(dst)) === 0o100000) {
@@ -130,7 +135,13 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       const target = isLink ? await source.link(src) : undefined;
       const directory = isLink && destination === local && process.platform === "win32" ? await source.followsDirectory(src) : undefined;
       if (isLink && kind(existing) === 0o120000 && target === await destination.link(dst)) {
-        if (directory === undefined || directory === isWindowsDirectoryLink(dst)) return;
+        if (directory === undefined || directory === isWindowsDirectoryLink(dst)) {
+          if (destination.linkTimes && attrs.mtime !== undefined && attrs.mtime !== existing?.mtime) {
+            changes.push(`.L..t. ${dst}`);
+            if (!plan.dryRun) await destination.linkTimes(dst, attrs);
+          }
+          return;
+        }
       }
       if (!isLink && kind(existing) === 0o100000 && attrs.size === existing?.size && attrs.mtime === existing?.mtime) {
         const mask = destination === local && process.platform === "win32" ? 0o200 : 0o7777;
@@ -148,6 +159,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         // NTFS distinguishes directory and file links. Inspect only target type;
         // copy the original link text, never recursively copy its referent.
         await destination.symlink(target!, staged, directory);
+        await destination.linkTimes?.(staged, attrs);
       }
       else { await destination.write(staged, source.read(src)); await destination.times(staged, attrs); }
       await destination.rename(staged, dst, existing !== undefined);

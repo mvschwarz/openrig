@@ -27,6 +27,23 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native symlink timestamp preservation (2026-11-02)
+
+Native local copies now preserve the link's own timestamps using `lutimes`,
+including directory links, and repair mtime drift on an otherwise unchanged link
+without replacing its inode. Native SFTP downloads apply the same operation to
+the staged link before rename and to existing matching links. Dry runs report
+the timestamp change without writing. Neither operation follows the link to
+change the referent's timestamps or permissions.
+
+The three native copy test files pass 31 tests and CLI TypeScript checking
+passes. An ordinary WSL-user `rsync -a` comparison confirms new-link timestamp
+preservation, unchanged-link metadata repair with inode retention, dry-run
+nonmutation and unchanged referent timestamps. These are scoped comparisons,
+not a full current-head suite result. Uploading link timestamps remains open:
+the current SFTP v3 client has no qualified no-follow timestamp extension, and
+ordinary SETSTAT must not be used because it can modify the referent.
+
 ### Installed native file effects verified (2026-11-02)
 
 The target-native package Gate passes at `e76b08e2967a5161ac72e135bfb66e015b99664f`

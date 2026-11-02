@@ -1,4 +1,4 @@
-import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, rename, stat, symlink, utimes } from "node:fs/promises";
+import { chmod, cp, lstat, lutimes, mkdir, readdir, readlink, realpath, rename, stat, symlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
@@ -79,6 +79,11 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       : destination?.isFile() && source.size === destination.size
         && Math.floor(source.mtimeMs / 1000) === Math.floor(destination.mtimeMs / 1000);
     if (same) {
+      if (source.isSymbolicLink() && destination
+        && Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000)) {
+        changes.push(`.L..t. ${dst}`);
+        if (!plan.dryRun) await lutimes(dst, source.atime, source.mtime);
+      }
       if (source.isFile() && destination?.isFile()) {
         const mask = process.platform === "win32" ? 0o200 : 0o7777;
         if ((source.mode & mask) !== (destination.mode & mask)) {
@@ -94,6 +99,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       if (directoryLink !== undefined) {
         staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
         await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
+        await lutimes(staged, source.atime, source.mtime);
         await rename(staged, dst);
         staged = undefined;
         return;
@@ -107,6 +113,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       }
       // fs.cp overwrites the entry, preserving links rather than following their targets.
       await cp(src, dst, { force: true, preserveTimestamps: true, verbatimSymlinks: true });
+      if (source.isSymbolicLink()) await lutimes(dst, source.atime, source.mtime);
     }
   };
   try {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, lutimes, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { runNativeSftpCopy } from "../src/lib/native-sftp-copy.js";
@@ -10,6 +10,25 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("downloads and repairs link timestamps without mutating the referent",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-linktime-"));
+    const source=path.join(root,"source"),destination=path.join(root,"destination"),target=path.join(root,"target");
+    try{
+      await writeFile(target,"owned referent");await utimes(target,1500000000,1500000000);
+      await symlink("target",source,"file");await lutimes(source,1400000000,1400000000);
+      const plan:CopyPlan={src:{kind:"remote",path:"/"+source.replaceAll("\\","/"),host:{id:"fixture",target:"fixture",transport:"ssh"}},dst:{kind:"local",path:destination},dryRun:false};
+      const start=()=>spawn(server,[],{stdio:"pipe",windowsHide:true});
+      const result=await runNativeSftpCopy(plan,start);expect(result.ok,result.stderr).toBe(true);
+      expect(Math.floor((await lstat(destination)).mtimeMs/1000)).toBe(1400000000);
+      await lutimes(destination,1600000000,1600000000);const inode=(await lstat(destination)).ino;
+      expect((await runNativeSftpCopy({...plan,dryRun:true},start)).stdout).toContain(".L..t.");
+      expect(Math.floor((await lstat(destination)).mtimeMs/1000)).toBe(1600000000);
+      expect((await runNativeSftpCopy(plan,start)).ok).toBe(true);
+      expect((await lstat(destination)).ino).toBe(inode);
+      expect(Math.floor((await lstat(destination)).mtimeMs/1000)).toBe(1400000000);
+      expect(Math.floor((await lstat(target)).mtimeMs/1000)).toBe(1500000000);
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("downloads distinct Unicode names without JavaScript lowercase conflation",async()=>{
     const root=await mkdtemp(path.join(os.tmpdir(),"sftp-unicode-case-")),source=path.join(root,"source"),destination=path.join(root,"destination");
     try{
