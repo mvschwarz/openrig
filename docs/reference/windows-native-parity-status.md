@@ -5207,6 +5207,16 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Real stock psmux 3.4.0 direct-first-child environment acceptance passed: a
+synthetic value containing quotes, backslash, format-looking text, LF/CRLF and
+Unicode reached the initial direct Node process exactly through protected
+initial configuration. A second independent session/server in the same owned
+registry received no such variable; recorded multiplexer argv contained no
+synthetic value. Exact owned sessions, private config and temporary receiver
+files were cleaned successfully. This is first direct-process evidence, not
+interactive shell startup, warm standby, process-list observation or desktop
+reattachment acceptance. Earlier exhausted interactive experiments stay open.
+
 Real stock psmux 3.4.0 batch-capture acceptance passed with two task-owned
 sessions under a private `PSMUX_DATA_DIR`, each printing a distinct marker.
 Batch results matched each session's independently captured bytes and contained
