@@ -197,6 +197,21 @@ describe("shared-workspace people", () => {
   describe("a person with no connector binding", () => {
     const dana = { entityId: "dana", class: "human" as const, displayName: "Dana", address: "dana@external", connectorBindings: [], prefs: { deliveryClass: "B" as const } };
 
+    it("an open ask to them owes no Slack post, so it never reads never-posted or undelivered; one to a Slack person does", async () => {
+      register("sarah");
+      expect(addHumanFragment(dana, home)).toMatchObject({ ok: true });
+      const danas = await ask("dana@external");
+      const sarahs = await ask("sarah@external");
+      vi.useFakeTimers({ now: Date.now() + 10 * 60_000, toFake: ["Date"] });
+      try {
+        expect(repo.deliveryOutcomeFor(sarahs.qitemId)?.outcome).toBe("never-posted");
+        expect(repo.deliveryOutcomeFor(danas.qitemId)).toBeNull();
+        expect(repo.findUndelivered().map((item) => item.qitemId)).not.toContain(danas.qitemId);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("registers and loads beside people with Slack, and a hand-written fragment with no bindings loads too", () => {
       register("sarah");
       expect(addHumanFragment(dana, home)).toMatchObject({ ok: true });
