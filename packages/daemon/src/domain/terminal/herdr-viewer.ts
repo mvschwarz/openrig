@@ -81,13 +81,16 @@ function pane(raw: unknown): Pane | null {
   return ["workspace_id", "pane_id", "terminal_id", "cwd"].every(k => typeof p[k] === "string" && p[k] !== "") ? p as unknown as Pane : null;
 }
 
-/** Herdr reports native cwd with a trailing separator; compare path components,
- * while retaining the private creation directory as the attribution boundary. */
+/** Windows can enable case sensitivity per directory. Compare live filesystem
+ * identities rather than folding names and conflating two distinct directories. */
 export function sameViewerCwd(actual: string, expected: string, platform: NodeJS.Platform = process.platform): boolean {
   if (platform !== "win32") return actual === expected;
   if (!path.win32.isAbsolute(actual) || !path.win32.isAbsolute(expected)) return false;
-  const normalized = (value: string) => path.win32.normalize(value).replace(/[\\/]+$/, "").toLowerCase();
-  return normalized(actual) === normalized(expected);
+  try {
+    const observed = statSync(actual, {bigint:true}), owned = statSync(expected, {bigint:true});
+    return observed.isDirectory() && owned.isDirectory() && observed.ino !== 0n
+      && observed.dev === owned.dev && observed.ino === owned.ino;
+  } catch { return false; }
 }
 
 /** Complete endpoint-wide attribution; mutable labels are never ownership. */

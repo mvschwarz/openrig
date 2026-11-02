@@ -2,9 +2,19 @@ import { test, expect } from "vitest";
 import { nativeViewerCommand, nativeViewerShellCommand } from "../src/domain/terminal/native-viewer-command.js";
 import { windowsTileAttachArgv, readWindowsTileAttachArgv } from "../src/domain/terminal/windows-tile-attach.js";
 import { sameViewerCwd } from "../src/domain/terminal/herdr-viewer.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-test("native cwd attribution accepts Herdr spelling but rejects a sibling", () => {
-  expect(sameViewerCwd("c:\\Owned\\viewer\\", "C:/owned/viewer", "win32")).toBe(true);
+test.skipIf(process.platform !== "win32")("native cwd attribution accepts a live alias but rejects siblings and missing paths", () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),"viewer-cwd-"));
+  try {
+    const owned=path.join(root,"Owned"), sibling=path.join(root,"Sibling");fs.mkdirSync(owned);fs.mkdirSync(sibling);
+    expect(sameViewerCwd(owned.toUpperCase()+"\\",owned,"win32")).toBe(true);
+    expect(sameViewerCwd(sibling,owned,"win32")).toBe(false);
+    expect(sameViewerCwd(path.join(root,"missing"),path.join(root,"missing"),"win32")).toBe(false);
+    expect(sameViewerCwd(root,owned,"win32")).toBe(false);
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
   expect(sameViewerCwd("C:/owned/viewer-other", "C:/owned/viewer", "win32")).toBe(false);
   expect(sameViewerCwd("viewer", "viewer", "win32")).toBe(false);
   expect(sameViewerCwd("/owned/viewer/", "/owned/viewer", "linux")).toBe(false);
