@@ -334,10 +334,11 @@ export class AgentImageLibraryService {
       );
     }
     for (const relPath of fileContents.keys()) {
-      if (relPath.split(/[\\/]/).includes("..") || relPath.startsWith("/")) {
+      const pathError = validateSafePath(relPath, "install file");
+      if (pathError !== null) {
         throw new AgentImageError(
           "manifest_invalid",
-          `install file path '${relPath}' must be relative inside the image (no '..', no leading '/')`,
+          `install file path '${relPath}' must be relative inside the image: ${pathError}`,
         );
       }
     }
@@ -412,3 +413,4 @@ function quoteYamlString(s: string): string {
   // JSON string literals are valid YAML scalars and prevent implicit coercion.
   return JSON.stringify(s);
 }
+import { validateSafePath } from "../path-safety.js";

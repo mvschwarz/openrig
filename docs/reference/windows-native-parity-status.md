@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Manifest and library relative file paths (2026-11-02)
+
+Agent-image and context-pack manifest parsers, the agent-image install content map, and context-pack file resolution now reuse the existing authored-relative-path validator. Drive-absolute, drive-relative, UNC/rooted-backslash and NUL paths receive the existing structured domain errors rather than passing a partial slash-only check. Parent-segment rejection and ordinary dotted relative filenames remain supported. Invalid install content paths are rejected before creating the image directory.
+
+Validation: seven complete parser, installation, library and route test files passed 111/111 on Windows and 111/111 on ordinary-user WSL; daemon typecheck passed. No new symlink, concurrent replacement, installed-package or deployment qualification is claimed.
+
 ## Review media and StoryGraph native artifact paths (2026-11-02)
 
 Review composition and frozen exports now share a bounded media-reference mapper. Drive/drive-relative and UNC refs, NUL and parent traversal beyond the slice are rejected consistently. A native absolute ref is rejected even when it names a real image inside the slice: authored media remains relative. Windows relative separators normalize to the transport form; ordinary POSIX literal-backslash filenames retain their actual filename semantics. Existing artifact-relative parent refs that stay inside the slice remain supported.

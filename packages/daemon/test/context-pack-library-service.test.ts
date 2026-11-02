@@ -208,6 +208,9 @@ files:
     const entry = lib.getByRef("guard")!;
     expect(() => lib.resolveFileWithinPack(entry, "../etc/passwd")).toThrow(/inside the pack/);
     expect(() => lib.resolveFileWithinPack(entry, "/abs")).toThrow(/inside the pack/);
+    for (const value of ["C:\\outside.md", "C:outside.md", "\\\\host\\share\\outside.md", "\\rooted.md", "bad\0.md"]) {
+      expect(() => lib.resolveFileWithinPack(entry, value)).toThrow(/inside the pack/);
+    }
   });
 });
 

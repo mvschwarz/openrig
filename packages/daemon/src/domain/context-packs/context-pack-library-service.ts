@@ -422,10 +422,11 @@ export class ContextPackLibraryService {
    *  containment check that prevents path-traversal escaping the pack
    *  directory. */
   resolveFileWithinPack(packEntry: ContextPackEntry, relPath: string): string {
-    if (relPath.split(/[\\/]/).includes("..") || relPath.startsWith("/")) {
+    const pathError = validateSafePath(relPath, "pack file");
+    if (pathError !== null) {
       throw new ContextPackError(
         "file_outside_pack",
-        `relative path '${relPath}' must be inside the pack directory (no '..' segments, no leading '/')`,
+        `relative path '${relPath}' must be inside the pack directory: ${pathError}`,
         { packId: packEntry.id, relPath },
       );
     }
@@ -497,3 +498,4 @@ export class ContextPackLibraryService {
     };
   }
 }
+import { validateSafePath } from "../path-safety.js";
