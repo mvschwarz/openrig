@@ -5207,6 +5207,18 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Updated paired transfer checkpoint at `bf9500221851458d9611fcf0a22cd139a822d318`:
+the same sixteen explicit test files selected, 189 tests per platform. Windows:
+164 passed, zero failed, 25 skipped. WSL: 124 passed, zero failed, 65 skipped.
+This includes new native-local and SFTP time tests plus the prior protocol,
+recovery, identity, mode, source-size and command checks. WSL Linux subsystem
+was explicitly enabled; native-Windows-only cases remain skips there. Windows
+HEAD/tracked diff stayed unchanged. WSL paired daemon build passed and all
+4,712 public regular-file hashes matched before/after; existing private source
+was excluded and its indexed Git identity checked around the build. Six links
+and generated/untracked files remain outside mirror equivalence. These are
+transfer-scoped results, not full-workspace, deployment or remote-provider proof.
+
 Out-of-range native-local link acceptance now passed all four combinations of
 file/directory link and -1/2^32 seconds: initial copy, dry-run drift detection,
 repair without file retransmission, unchanged referent timestamps and contents.
