@@ -386,11 +386,10 @@ export class DaemonClient {
   }
   /** Recent terminal transitions (JUST FINISHED) via the SAME shipped /list
    * route with a COMMA multi-state ?state=done,handed-off (queue.ts splits
-   * stateRaw on ","). No fleet-wide finish-time transitions endpoint exists, so
-   * this is a bounded RECENT WINDOW fetched in ts_created order; the PULSE render
-   * re-sorts by tsUpdated DESC (finish time) for newest-first. NOT a new endpoint. */
+   * stateRaw on ","). sort=updated picks this bounded RECENT WINDOW by finish time,
+   * so an old item closed just now is in it. NOT a new endpoint. */
   queueRecentlyFinished(limit = 20) {
-    return this.get(`/api/queue/list?state=done,handed-off&limit=${limit}`);
+    return this.get(`/api/queue/list?state=done,handed-off&sort=updated&limit=${limit}`);
   }
   /** A single qitem by id via the shipped GET /api/queue/:qitemId (queue.ts:864,
    * returns the QueueItem or 404). Used for the BLOCKED ON AGENTS bounded per-row

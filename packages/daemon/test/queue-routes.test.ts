@@ -1667,6 +1667,31 @@ describe("queue routes", () => {
     expect(await ids(`attention=1&handedOffFrom=${source}`)).toEqual([]);
   });
 
+  it("GET /api/queue/list?sort=updated picks a bounded window by latest update, so an old item closed last is in it", async () => {
+    const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
+    });
+    const create = async (body: string) => ((await (await post("/api/queue/create", "a@r", { destinationSession: "b@r", body, nudge: false })).json()) as { qitemId: string }).qitemId;
+    const close = (qitemId: string, ts: string) => {
+      db.prepare("UPDATE queue_items SET state = 'done', ts_updated = ? WHERE qitem_id = ?").run(ts, qitemId);
+    };
+    const oldest = await create("started first, finished last");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-01T00:00:00.000Z' WHERE qitem_id = ?").run(oldest);
+    const middle = await create("middle");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-02T00:00:00.000Z' WHERE qitem_id = ?").run(middle);
+    const newest = await create("started last");
+    db.prepare("UPDATE queue_items SET ts_created = '2026-01-03T00:00:00.000Z' WHERE qitem_id = ?").run(newest);
+    close(middle, "2026-01-04T00:00:00.000Z");
+    close(newest, "2026-01-05T00:00:00.000Z");
+    close(oldest, "2026-01-06T00:00:00.000Z");
+    const ids = async (query: string) => ((await (await app.request(`/api/queue/list?${query}`)).json()) as Array<{ qitemId: string }>).map((q) => q.qitemId);
+
+    expect(await ids("state=done,handed-off&sort=updated&limit=2")).toEqual([oldest, newest]);
+    // Without it the window stays newest created, and a sort it doesn't know changes nothing.
+    expect(await ids("state=done,handed-off&limit=2")).toEqual([newest, middle]);
+    expect(await ids("state=done,handed-off&sort=other&limit=2")).toEqual([newest, middle]);
+  });
+
   it("GET /api/queue/list trims each state name and otherwise keeps today's matching", async () => {
     const post = (path: string, session: string, body: Record<string, unknown>) => app.request(path, {
       method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": session }, body: JSON.stringify(body),
