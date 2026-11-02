@@ -210,16 +210,18 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     const a = await connect(served.url, A);
     const b = await connect(served.url, B);
     const toB = createdId(await a("rig_queue_create", { destination: B.seat, body: "for B" }));
-    const toTeam = repo.create({ sourceSession: LEAD, destinationSession: "worker@team-a", body: "team-internal", nudge: false } as never).qitemId;
-    const toA = repo.create({ sourceSession: LEAD, destinationSession: A.seat, body: "for A", nudge: false } as never).qitemId;
+    const toTeam = (await repo.create({ sourceSession: LEAD, destinationSession: "worker@team-a", body: "team-internal", nudge: false } as never)).qitemId;
+    const toA = (await repo.create({ sourceSession: LEAD, destinationSession: A.seat, body: "for A", nudge: false } as never)).qitemId;
+    const refused = { isError: true, structured: { code: "out_of_scope" } };
+    // A sent B's item and may read it; the daemon refuses its claim as someone else's.
     expect((await a("rig_queue_claim", { qitemId: toB })).isError).toBe(true);
-    expect((await a("rig_queue_update", { qitemId: toB, state: "done", closureReason: "no-follow-on" })).isError).toBe(true);
-    expect((await b("rig_queue_claim", { qitemId: toTeam })).isError).toBe(true);
-    expect((await b("rig_queue_claim", { qitemId: toA })).isError).toBe(true);
-    expect((await b("rig_queue_show", { qitemId: toTeam })).isError).toBe(true);
-    expect((await a("rig_queue_create", { destination: "lead@team-b", body: "other workspace" })).isError).toBe(true);
-    expect((await a("rig_queue_create", { destination: "someone@external", body: "a person" })).isError).toBe(true);
-    expect((await a("rig_team", { rigId: "team-b" })).isError).toBe(true);
+    expect(await a("rig_queue_update", { qitemId: toB, state: "done", closureReason: "no-follow-on" })).toMatchObject(refused);
+    expect(await b("rig_queue_claim", { qitemId: toTeam })).toMatchObject(refused);
+    expect(await b("rig_queue_claim", { qitemId: toA })).toMatchObject(refused);
+    expect(await b("rig_queue_show", { qitemId: toTeam })).toMatchObject(refused);
+    expect(await a("rig_queue_create", { destination: "lead@team-b", body: "other workspace" })).toMatchObject(refused);
+    expect(await a("rig_queue_create", { destination: "someone@external", body: "a person" })).toMatchObject(refused);
+    expect(await a("rig_team", { rigId: "team-b" })).toMatchObject(refused);
     expect(row(toB).state).toBe("pending");
 
     // B waits only on an item it can read: never on a person (who would be asked) or on the team's own item.
@@ -244,8 +246,9 @@ describe("agent network increment A: OAuth-connected assistants work with each o
     grants.set(B.key, V1);
     const served = await listen();
     const a = await connect(served.url, A);
-    expect((await a("rig_queue_create", { destination: B.seat, body: "v1 can't" })).isError).toBe(true);
-    const fromB = repo.create({ sourceSession: B.seat, destinationSession: A.seat, body: "from another caller", nudge: false } as never).qitemId;
-    expect((await a("rig_queue_show", { qitemId: fromB })).isError).toBe(true);
+    const refused = { isError: true, structured: { code: "out_of_scope" } };
+    expect(await a("rig_queue_create", { destination: B.seat, body: "v1 can't" })).toMatchObject(refused);
+    const fromB = (await repo.create({ sourceSession: B.seat, destinationSession: A.seat, body: "from another caller", nudge: false } as never)).qitemId;
+    expect(await a("rig_queue_show", { qitemId: fromB })).toMatchObject(refused);
   });
 });
