@@ -28,6 +28,16 @@ subsystem and process-custody proofs, not SSH authentication, an actual
 ProxyCommand configuration, remote continuity or full directory revalidation.
 No existing SSH connection, original team or running deployment was changed.
 
+The updated installed gate subsequently passed at clean source
+c97467c6f8d7eb1a453c4819a497d88a8f9440a7 in 68 seconds. The installed SFTP
+module loaded the paired spawn export and preserved binary bytes through its
+native Job-backed transport helper. The terminal control probe, source build,
+tarball/isolated-prefix install, SQLite, installed resources and rig.cmd checks
+also passed; before/after HEAD and tracked-diff hashes matched. Receipt:
+pack-terminal-assets-c97467c.json and its complete log. This closes only the
+pending installed-export check above, not real remote SSH/provider acceptance
+or newer complete-directory verification.
+
 ## SFTP source byte-count verification (2026-11-03)
 
 This repair is newer than the frozen whole-workspace checkpoint below. A real
