@@ -4594,3 +4594,29 @@ owned npm argv tests above. It does not execute a real authenticated provider,
 qualify interactive console continuity, or replace current-head complete
 Windows/WSL suites. No global install, runtime deployment, team restart,
 publication or public push was performed.
+
+### Quoted provider switch undo and list guidance (2026-11-03)
+
+The Codex provider switch receipt interpolated its home directly into the undo
+command, and a missing-profile refusal did the same in its list command.
+Actual platform-shell witnesses reproduced failure for homes containing spaces,
+an apostrophe and Unicode. Both commands now quote their data words for POSIX
+or native PowerShell; ordinary safe hints keep their prior form. The regression
+uses an in-memory login service and shell argument witnesses, not real logins.
+
+The related Windows file-level switch tests initially failed because their
+fixtures used POSIX mode bits without establishing private Windows DACLs.
+They now use the existing private directory/file constructors. The production
+auth checks were not weakened. The two complete files passed 22/22 on Windows
+and 22/22 on WSL, including synthetic login save/switch/undo, retained recovery
+copies and serialized same-home switches. Daemon TypeScript checking passed.
+Receipts: provider-undo-home-before-20261103.json,
+provider-undo-home-native-after-20261103.json,
+provider-undo-home-native-final-20261103.json and
+provider-undo-home-wsl-final-20261103.json. Synthetic fixture roots were removed;
+no personal credential file or existing seat was read, switched or restarted.
+
+The resume-metadata refresh probe was also inspected: its Windows branch
+already resolves the provider and uses renderWindowsLaunch, so it was not
+replaced with the presentation wrapper. Manual in-place restart recovery and
+other human-facing command surfaces still require separate coverage.
