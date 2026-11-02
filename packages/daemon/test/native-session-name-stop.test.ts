@@ -2,8 +2,8 @@ import { expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
 
-function fixture(mode: "stop" | "changed" | "lost-marker" | "rollback" | "rollback-changed") {
-  const logical = "owned|mapped-stop", binding = bindNativeSessionName(logical), calls: string[][] = [];
+function fixture(mode: "stop" | "changed" | "lost-marker" | "rollback" | "rollback-changed", logical = "owned|mapped-stop") {
+  const binding = bindNativeSessionName(logical), calls: string[][] = [];
   let present = !mode.startsWith("rollback"), marker = present ? binding.marker! : "";
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, undefined, async argv => {
     calls.push(argv); const command = argv[1] === "-t" ? argv[3] : argv[1];
@@ -34,6 +34,11 @@ function fixture(mode: "stop" | "changed" | "lost-marker" | "rollback" | "rollba
 
 it("stops only the verified physical server and observes positive absence", async () => {
   const f = fixture("stop"); expect(await f.adapter.killSession(f.logical)).toEqual({ ok: true }); expect(f.present()).toBe(false);
+});
+it("does not interpret a colon-bearing logical session as a window target during stop", async () => {
+  const f = fixture("stop", "owned:logical");
+  expect(await f.adapter.probeSession(f.logical)).toEqual({ state: "present" });
+  expect(await f.adapter.killSession(f.logical)).toEqual({ ok: true }); expect(f.present()).toBe(false);
 });
 it("does not report a changed native identity as stopped", async () => {
   const f = fixture("changed"); expect(await f.adapter.killSession(f.logical)).toMatchObject({ ok: false, code: "guard_target_changed" }); expect(f.present()).toBe(true);

@@ -1,5 +1,25 @@
 # Native Windows parity: implementation and evidence
 
+## Colon-bearing native names in session-specific operations (2026-11-03)
+
+Native session probe, stop and session-environment read/write/remove now resolve
+the complete colon-bearing logical name through its observed marker before
+building a physical target. These APIs receive a session name; splitting at the
+first colon incorrectly selected the name prefix as though it were a window
+expression. Ordinary names and POSIX target behavior retain their existing path.
+The native stop conditional selects the same verified physical server, checks
+its session ID and requires observed disappearance. Marker mismatch refuses
+environment changes without falling back to the prefix session.
+
+Five complete mapping/stop/environment files and daemon TypeScript/assets build
+passed on Windows. The controlled regressions include a colon-bearing logical
+name, literal selected environment reads, private-file update, remove, and
+wrong-marker no-write behavior. These are not real stock psmux qualification.
+Ambiguous pane/window APIs and environment persistence immediately after managed
+creation still require the same typed-name audit; this checkpoint does not claim
+complete colon-name lifecycle support. Installed and full-directory receipts
+predate this change. No deployment or public push occurred.
+
 ## Native display reads use pane-qualified session targets (2026-11-03)
 
 Real WSL tmux distinguished a session target from a pane target: display-message

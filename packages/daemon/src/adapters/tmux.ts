@@ -649,6 +649,16 @@ export class TmuxAdapter {
     return env ? this.argvExec(targeted, { env }) : this.argvExec(targeted);
   }
 
+  /** Session-name APIs must not parse a logical colon as a window separator. */
+  private async runNamedSession(argv: string[], name: string, legacy?: string, pane = false): Promise<string> {
+    if (this.terminalKind !== "psmux" || !name.includes(":")) return this.run(argv, legacy);
+    const flag = argv.indexOf("-t");
+    if (flag < 1) throw new Error("Named session command lacks target");
+    const physical = await this.nativeBoundName(name), selected = [...argv];
+    selected[flag + 1] = `=${physical}${pane ? ":" : ""}`;
+    return this.nativeRaw(selected);
+  }
+
   private async nativeSessionExists(physical: string): Promise<boolean> {
     try { await this.nativeRaw(["tmux", "has-session", "-t", `=${physical}`]); return true; }
     catch (error) {
@@ -1017,7 +1027,7 @@ export class TmuxAdapter {
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
       const target = `=${name}`; // canonical session name, never a prefix lookup
-      await this.run(["tmux", "has-session", "-t", target],
+      await this.runNamedSession(["tmux", "has-session", "-t", target], name,
         `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
@@ -1742,7 +1752,7 @@ export class TmuxAdapter {
       try {
         const scoped = /^psmux:([A-Za-z0-9_-]+):(\$\d+)$/.exec(name);
         sessionName = scoped ? Buffer.from(scoped[1]!, "base64url").toString("utf8") : name.replace(/^=/, "");
-        id = scoped?.[2] ?? (await this.run(["tmux", "display-message", "-p", "-t", `=${sessionName}:`, "#{session_id}"])).trim();
+        id = scoped?.[2] ?? (await this.runNamedSession(["tmux", "display-message", "-p", "-t", `=${sessionName}:`, "#{session_id}"], sessionName, undefined, true)).trim();
         if (!/^\$\d+$/.test(id)) return { ok: false, code: "guard_target_unknown", message: "Native session identity unavailable; nothing killed." };
       } catch (error) { return classifyWriteError(error); }
       beforeEffect?.();
@@ -1751,7 +1761,10 @@ export class TmuxAdapter {
         // psmux doesn't accept $N as a selector. Select its server once, check
         // identity inside that connection, then kill SELF without resolving a
         // name again. Each native session has its own server: no sibling view can switch.
-        const out = await this.run(["tmux", "if-shell", "-F", `#{==:#{session_id},${id}}`, "kill-session", "display-message -p kept"], undefined, sessionName);
+        const conditional = ["tmux", "if-shell", "-F", `#{==:#{session_id},${id}}`, "kill-session", "display-message -p kept"];
+        const out = sessionName.includes(":")
+          ? await this.nativeRaw(["tmux", "-t", "=" + await this.nativeBoundName(sessionName), ...conditional.slice(1)])
+          : await this.run(conditional, undefined, sessionName);
         if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: "Native server identity changed; nothing killed." };
         if ((await this.probeSession(sessionName)).state !== "absent") return { ok: false, code: "kill_unverified", message: "Native session disappearance unverified." };
         this.freshProbes.delete(name); this.freshManaged.delete(name);
@@ -2058,7 +2071,7 @@ export class TmuxAdapter {
     const target = exactTarget(session, "session");
     try {
       const delimiter = this.terminalKind === "psmux" && key.startsWith("-") ? ["--"] : [];
-      const output = await this.run(["tmux", "show-environment", "-t", target, ...delimiter, key],
+      const output = await this.runNamedSession(["tmux", "show-environment", "-t", target, ...delimiter, key], session,
         `tmux show-environment -t ${shellQuote(target)} ${delimiter.length ? "-- " : ""}${shellQuote(key)}`);
       if (this.terminalKind === "psmux") {
         // The protocol adds one LF; a preceding CR belongs to the value.
@@ -2069,7 +2082,7 @@ export class TmuxAdapter {
           // a multiline response as one value. Never log either response.
           const probe = `OPENRIG_SELECTOR_PROBE_${randomUUID().replace(/-/g, "")}`;
           let selective = false;
-          try { await this.run(["tmux", "show-environment", "-t", target, probe]); }
+          try { await this.runNamedSession(["tmux", "show-environment", "-t", target, probe], session); }
           catch (error) { selective = error instanceof Error && error.message.includes(`unknown variable: ${probe}`); }
           if (!selective) throw new Error("Native environment selectors are not qualified");
         }
@@ -2112,7 +2125,7 @@ export class TmuxAdapter {
       if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
       const config = await this.fileOps.privateConfig(psmuxPrivateEnvironmentLine(key, value));
       // Keep the file after any uncertain call; never fall back to value argv.
-      await this.run(["tmux", "source-file", "-t", target, config.path]);
+      await this.runNamedSession(["tmux", "source-file", "-t", target, config.path], session);
       await config.dispose().catch(() => { console.warn(`Native environment config cleanup failed: ${config.path}`); });
       return;
     }
@@ -2131,7 +2144,7 @@ export class TmuxAdapter {
     const flag = parents.length ? "-r" : "-u";
     for (const name of new Set([key, ...parents])) {
       const delimiter = this.terminalKind === "psmux" && name.startsWith("-") ? ["--"] : [];
-      await this.run(["tmux", "set-environment", "-t", target, flag, ...delimiter, name],
+      await this.runNamedSession(["tmux", "set-environment", "-t", target, flag, ...delimiter, name], session,
         `tmux set-environment -t ${shellQuote(target)} ${flag} ${delimiter.length ? "-- " : ""}${shellQuote(name)}`);
     }
   }
