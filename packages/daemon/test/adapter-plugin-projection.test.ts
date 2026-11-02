@@ -21,7 +21,8 @@ import * as nodePath from "node:path";
 import { tmpdir } from "node:os";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
-import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
+import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../src/domain/projection-planner.js";
+import type { ResolvedNodeConfig } from "../src/domain/profile-resolver.js";
 import type { NodeBinding } from "../src/domain/types.js";
 
 // ----- Mock helpers shared with existing adapter tests -----
@@ -113,10 +114,12 @@ const OPENRIG_CORE_TREE = {
   "/p/openrig-core/README.md": "# openrig-core plugin",
 };
 
-it.runIf(process.platform === "win32")("projects the nested synthetic plugin tree through actual native files for both runtimes", async () => {
+it("plans a home-relative plugin and projects its nested real files for both runtimes", async () => {
   const root = nodeFs.mkdtempSync(nodePath.join(tmpdir(), "native plugin projection "));
+  vi.stubEnv("HOME", root);
+  if (process.platform === "win32") vi.stubEnv("USERPROFILE", root);
   try {
-    const source = nodePath.join(root, "source"), cwd = nodePath.join(root, "project");
+    const source = nodePath.join(root, "plugins", "openrig-core"), cwd = nodePath.join(root, "project");
     nodeFs.mkdirSync(cwd);
     for (const [file, bytes] of Object.entries(OPENRIG_CORE_TREE)) {
       const target = nodePath.join(source, file.slice("/p/openrig-core/".length));
@@ -132,11 +135,24 @@ it.runIf(process.platform === "win32")("projects the nested synthetic plugin tre
       listFiles: (dir: string): string[] => nodeFs.readdirSync(dir, { recursive: true }).map(String)
         .filter(file => nodeFs.statSync(nodePath.join(dir, file)).isFile()),
     };
+    const config: ResolvedNodeConfig = {
+      runtime: "claude-code", model: undefined, cwd, restorePolicy: "resume_if_possible", lifecycle: undefined,
+      selectedResources: { skills: [], guidance: [], subagents: [], runtimeResources: [], plugins: [{
+        effectiveId: "openrig-core", sourceSpec: "owned", sourcePath: root,
+        resource: { id: "openrig-core", source: { kind: "local", path: process.platform === "win32"
+          ? "~\\plugins\\openrig-core" : "~/plugins/openrig-core" } },
+      }] },
+      startup: { files: [], actions: [] }, resolvedSpecName: "owned", resolvedSpecVersion: "1", resolvedSpecHash: "owned",
+    };
+    const planned = planProjection({ config, collisions: [], fsOps: files });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) throw new Error(planned.errors.join("; "));
+    expect(planned.plan.entries[0]!.absolutePath).toBe(source);
     for (const [adapter, runtimeDir] of [
       [new ClaudeCodeAdapter({ tmux: mockTmux(), fsOps: files }), ".claude"],
       [new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: files }), ".codex"],
     ] as const) {
-      const result = await adapter.project(makePlan([makePluginEntry("openrig-core", source)]), makeBinding(cwd));
+      const result = await adapter.project(planned.plan, makeBinding(cwd));
       expect(result.projected, JSON.stringify(result)).toContain("openrig-core");
       expect(result.failed).toEqual([]);
       for (const [file, bytes] of Object.entries(OPENRIG_CORE_TREE)) {
@@ -146,7 +162,7 @@ it.runIf(process.platform === "win32")("projects the nested synthetic plugin tre
       }
       expect(nodeFs.existsSync(nodePath.join(cwd, runtimeDir, "skills", "openrig-core"))).toBe(false);
     }
-  } finally { nodeFs.rmSync(root, { recursive: true, force: true }); }
+  } finally { vi.unstubAllEnvs(); nodeFs.rmSync(root, { recursive: true, force: true }); }
 });
 
 // ============================================================

@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Home-relative plugin plan through real adapter projection (2026-11-02)
+
+The real-filesystem plugin projection fixture now starts from an authored home-relative reference, passes it through the production planner, and gives that resulting plan to both Claude and Codex adapters. Windows uses the native backslash spelling; POSIX uses slash spelling. It checks every nested manifest, hook, skill and README byte in both runtime-specific destinations and the unchanged source tree. The case now runs on both platforms instead of being Windows-only.
+
+The complete adapter-plugin and plugin-planner files passed 23/23 on Windows and 23/23 on ordinary-user WSL. HOME/USERPROFILE are redirected to an owned fixture root and restored before its removal. Initial spying on the built-in homedir export did not affect the planner's imported binding; that failed fixture attempt is superseded by the environment-backed filesystem run. This qualifies actual synthetic plugin copying, not provider loading, hook execution, external plugin installation or an active seat deployment.
+
 ## Native home-relative plugin references (2026-11-02)
 
 The plugin projection planner now expands `~\plugins\...` on Windows, matching its existing `~/plugins/...` behavior. Previously the native spelling resolved beneath the declaring spec's literal `~` directory. POSIX keeps backslashes as filename content, and explicit `~user` names are still not expanded. A new planner regression reproduced the Windows mismatch before the fix and checks both platform interpretations.
