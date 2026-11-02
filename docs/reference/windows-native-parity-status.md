@@ -27,6 +27,22 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Rex no-launch and incomplete-reply semantics (2026-11-02)
+
+A positively missing absolute Rex executable is now rejected before starting
+the Windows Job helper, preserving ENOENT and the transport's unavailable
+classification. This check does not claim to eliminate a later executable
+replacement/removal race. Output exceeding the bounded stdout/stderr limit now
+ends the owned command and reports an unknown request outcome rather than
+silently accepting a truncated reply. Neither path repeats the request.
+
+Both transport/process files pass 27 tests on Windows (four POSIX-shell cases
+skipped) and 26 on the ordinary WSL mirror (five Windows process cases skipped).
+The overflow tests execute real Node processes on both platforms and check the
+unknown classification for each stream. Native missing-binary coverage checks
+both the process error and the transport classification. Daemon TypeScript
+checking passes. No installed Rex GUI or remote provider is involved.
+
 ### Rex native launch and control-process custody (2026-11-02)
 
 Rex grids now carry exact generated Windows local/SSH tile argv directly rather

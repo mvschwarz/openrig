@@ -79,6 +79,9 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   const [file, ...args] = argv;
   let child: ReturnType<typeof spawn>;
   try {
+    // The Job helper is the spawned process on Windows. Preserve a positively
+    // observed missing resolved executable as a no-launch error, not exit 125.
+    if (process.platform === "win32" && file && path.isAbsolute(file)) accessSync(file, constants.F_OK);
     child = process.platform === "win32"
       ? spawnWindowsJobProcess(file!, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
       : spawn(file!, args, { stdio: ["pipe", "pipe", "pipe"], detached: true });
@@ -91,17 +94,31 @@ export const spawnRex: RexRun = (argv, stdin, timeoutMs) => new Promise((resolve
   let settled = false;
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
-  child.stdout!.on("data", (chunk: string) => { if (stdout.length < MAX_OUTPUT_CHARS) stdout += chunk; });
-  child.stderr!.on("data", (chunk: string) => { if (stderr.length < MAX_OUTPUT_CHARS) stderr += chunk; });
+  const stop = (message: string) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    // A lost or incomplete reply has unknown outcome; never return a truncated
+    // JSON prefix as a successful response or automatically repeat its request.
+    if (process.platform === "win32") child.kill();
+    else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
+    void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(message, null, stderr)));
+  };
+  child.stdout!.on("data", (chunk: string) => {
+    const overflow = stdout.length + chunk.length > MAX_OUTPUT_CHARS;
+    stdout += chunk.slice(0, MAX_OUTPUT_CHARS - stdout.length);
+    if (overflow) stop("stdout exceeded the Rex reply limit");
+  });
+  child.stderr!.on("data", (chunk: string) => {
+    const overflow = stderr.length + chunk.length > MAX_OUTPUT_CHARS;
+    stderr += chunk.slice(0, MAX_OUTPUT_CHARS - stderr.length);
+    if (overflow) stop("stderr exceeded the Rex reply limit");
+  });
   child.stdin!.on("error", () => { /* rex may exit before reading its input; its exit status says why */ });
   child.stdin!.end(stdin);
   const timer = setTimeout(() => {
-    if (settled) return;
-    settled = true;
     // Past its deadline rex has nothing left to read, so end it now instead of after stopGroup's stdin grace.
-    if (process.platform === "win32") child.kill();
-    else try { process.kill(-child.pid!, "SIGTERM"); } catch { /* already gone */ }
-    void stopGroup(child, STOP_GRACE_MS).then(() => reject(new RexRunError(`did not answer within ${timeoutMs} ms`, null, stderr)));
+    stop(`did not answer within ${timeoutMs} ms`);
   }, timeoutMs);
   child.once("error", (err) => {
     if (settled) return;

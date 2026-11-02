@@ -2,7 +2,20 @@ import { expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnRex } from "../src/domain/terminal/rex-transport.js";
+import { spawnRex, createRexCliTransport } from "../src/domain/terminal/rex-transport.js";
+
+it.skipIf(process.platform !== "win32")("native Rex reports a missing resolved executable as unavailable before launching", async () => {
+  const missing=path.join(os.tmpdir(),'openrig-rex-missing-'+Date.now(),'rex.exe');
+  await expect(spawnRex([missing],"{}",5000)).rejects.toMatchObject({errno:"ENOENT",exitCode:null});
+  await expect(createRexCliTransport({binary:()=>missing}).request('server.status',{})).rejects.toMatchObject({kind:'unavailable'});
+});
+
+it.each(['stdout','stderr'] as const)("Rex rejects an overflowing %s as unknown instead of accepting truncated output", async stream => {
+  const code=`process.${stream}.write(' '.repeat(4*1024*1024+1));setInterval(()=>{},1000);`;
+  const run=(_argv:string[],input:string,timeout:number)=>spawnRex([process.execPath,'-e',code],input,timeout);
+  await expect(createRexCliTransport({binary:()=>process.execPath,run,timeoutMs:5000}).request('layout.apply',{}))
+    .rejects.toMatchObject({kind:'unknown',message:expect.stringContaining(stream+' exceeded the Rex reply limit')});
+},10000);
 
 it.skipIf(process.platform !== "win32")("native Rex forwards literal argv and stdin", async () => {
   const args = ["x y", "quote\"word", "中文", "", "end\\"];
