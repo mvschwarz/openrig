@@ -1,5 +1,32 @@
 # Native Windows parity: implementation and evidence
 
+## Explicit session windows and indexed pane discovery (2026-11-03)
+
+The production adapter now exposes explicit session-window lookup and a separate
+window index on session-pane lookup. Native colon-bearing names resolve their
+verified physical binding before either target is constructed. Discovery scans
+pass the session name and index separately; window-switch checks and runtime
+exchange use explicit session windows. Kernel hook-review and optional community
+harness pane observation also prefer the named-session entry. Generic pane/window
+target APIs retain their existing semantics; mixed diagnostic targets are not
+guessed into a session-name contract.
+
+Seven complete window/mapping/discovery/switch/exchange/hook-review files passed
+250 with five skips on Windows. Four scanner/community harness files passed 98
+with one skip, overlapping the first set. Daemon TypeScript/assets build and
+whitespace checks passed. Regressions verify a colon-bearing session's window
+list, exact indexed pane target and scanner delegation without the generic target
+API. An initial helper changed old injected-adapter window arguments and broke
+runtime-switch fixtures; its compatibility fallback now preserves each caller's
+existing raw or exact argument while production uses the explicit method. A stale
+hook-guidance expectation also stopped applying shell quoting before the API that
+already quotes names, matching the earlier production repair.
+
+These checks do not establish real stock psmux window discovery, provider
+continuity or current installed/full-directory acceptance. Mixed resume geometry
+and other general window-expression operations remain distinct audit work.
+No deployment, user-team operation or public push occurred.
+
 ## Session-name pane observation across lifecycle callers (2026-11-03)
 
 Known pure-session callers in launch, restore, binding observation, attention

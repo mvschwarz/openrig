@@ -26,7 +26,7 @@ import { verifyWindowsPaneReceiver } from "../domain/windows-pane-receiver.js";
 
 interface CommunityHarnessAdapterDeps {
   environmentStartup?: EnvironmentStartup;
-  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "isNativeWindows" | "getPanePid" | "listPanes">>;
+  tmux: Pick<TmuxAdapter, "hasSession" | "getPaneCommand" | "sendShellCommand"> & Partial<Pick<TmuxAdapter, "isNativeWindows" | "getPanePid" | "listPanes" | "listSessionPanes">>;
   seatLaunchEnvironment?: Pick<SeatLaunchEnvironment, "command">;
   presetsDir?: () => string;
   /** Where launch-result records go (tests); defaults to $OPENRIG_HOME/state/launch-results. */
@@ -232,7 +232,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     if ((this.deps.tmux.isNativeWindows || process.platform === "win32") && command && isWindowsShellHost(command)) {
       if (this.deps.tmux.getPanePid && await verifyWindowsPaneReceiver({ target: binding.tmuxPane ?? session,
         getPanePid: async target => {
-          if (binding.tmuxPane && (!this.deps.tmux.listPanes || !(await this.deps.tmux.listPanes(session)).some(pane => pane.id === binding.tmuxPane))) return null;
+          const lookup = this.deps.tmux.listSessionPanes ?? this.deps.tmux.listPanes;
+          if (binding.tmuxPane && (!lookup || !(await lookup.call(this.deps.tmux, session)).some(pane => pane.id === binding.tmuxPane))) return null;
           return this.deps.tmux.getPanePid!(target);
         } })) return { ready: true };
       return { ready: false, reason: `Community harness "${this.runtime}" readiness is unverified: a Windows shell host is not evidence of a running harness.`, code: "native_lineage_unverified" };

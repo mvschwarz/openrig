@@ -12,6 +12,8 @@ function fixture(valid = true) {
     if (command === "has-session") return "";
     if (command === "show-options") return (valid ? binding.marker : "wrong") + "\n";
     if (command === "show-environment" && argv.includes("-g")) return "";
+    if (command === "list-windows") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "2|owned|1|1\n"; }
+    if (command === "list-panes") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical + ":2"); return `${binding.physical}|%1|0|C:/owned|80|24|1\n`; }
     if (command === "show-environment") { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return "OWNED_VALUE=literal\n"; }
     if (["source-file", "set-environment"].includes(command!)) { expect(argv[argv.indexOf("-t") + 1]).toBe("=" + binding.physical); return ""; }
     throw new Error("Unexpected command: " + command);
@@ -22,6 +24,12 @@ it("reads and changes only the fully bound colon-bearing session", async () => {
   const f = fixture();
   expect(await f.adapter.getSessionEnv(f.name, "OWNED_VALUE")).toBe("literal");
   await f.adapter.setSessionEnv(f.name, "OWNED_VALUE", "synthetic"); await f.adapter.unsetSessionEnv(f.name, "OWNED_VALUE");
+  expect(f.calls.flat()).not.toContain("=owned");
+});
+it("looks up windows and indexed panes without splitting the logical session name", async () => {
+  const f = fixture();
+  expect(await f.adapter.listSessionWindows(f.name)).toMatchObject([{ index: 2 }]);
+  expect(await f.adapter.listSessionPanes(f.name, false, 2)).toHaveLength(1);
   expect(f.calls.flat()).not.toContain("=owned");
 });
 it("does not fall back to the name prefix when its marker is wrong", async () => {

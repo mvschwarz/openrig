@@ -1,4 +1,4 @@
-import { listNamedSessionPanes } from "../adapters/session-pane-lookup.js";
+import { listNamedSessionPanes, listNamedSessionWindows } from "../adapters/session-pane-lookup.js";
 import { claudeSeatTokenRefProblem, claudeSeatTokenFileProblem, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import { isolatedClaudeAccountProblem } from "./claude-credential-precedence.js";
 import nodePath from "node:path";
@@ -265,7 +265,7 @@ export class SeatRuntimeSwitchService {
     if (unsupported) return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: ${unsupported}.`,
       unsupported === NO_PANE ? NO_PANE_GUIDANCE : undefined);
     try {
-      const [panes, windows] = await Promise.all([listNamedSessionPanes(tmux, sessionName!), tmux.listWindows(sessionName!)]);
+      const [panes, windows] = await Promise.all([listNamedSessionPanes(tmux, sessionName!), listNamedSessionWindows(tmux, sessionName!)]);
       if (windows.length !== 1 || panes.length !== 1 || panes[0]!.id !== binding!.tmuxPane) {
         return refuse("runtime_switch_unsupported", `${seatRef} can't switch runtime: only a single-window, single-pane seat can, and its session has ${windows.length} window(s) and ${panes.length} pane(s).`);
       }

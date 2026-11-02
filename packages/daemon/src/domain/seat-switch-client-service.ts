@@ -1,3 +1,4 @@
+import { listNamedSessionWindows } from "../adapters/session-pane-lookup.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter, TmuxWindow, TmuxClient } from "../adapters/tmux.js";
 import { SeatStatusService } from "./seat-status-service.js";
@@ -141,7 +142,7 @@ export class SeatSwitchClientService {
     if (req.toWindow != null) {
       let windows: TmuxWindow[];
       try {
-        windows = await this.tmuxAdapter.listWindows(`=${session}`);
+        windows = await listNamedSessionWindows(this.tmuxAdapter, session, true);
       } catch (err) {
         return this.probeFailed(`list-windows for "${session}"`, err);
       }

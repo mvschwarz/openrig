@@ -650,12 +650,12 @@ export class TmuxAdapter {
   }
 
   /** Session-name APIs must not parse a logical colon as a window separator. */
-  private async runNamedSession(argv: string[], name: string, legacy?: string, pane = false): Promise<string> {
+  private async runNamedSession(argv: string[], name: string, legacy?: string, pane = false, windowIndex?: number): Promise<string> {
     if (this.terminalKind !== "psmux" || !name.includes(":")) return this.run(argv, legacy);
     const flag = argv.indexOf("-t");
     if (flag < 1) throw new Error("Named session command lacks target");
     const physical = await this.nativeBoundName(name), selected = [...argv];
-    selected[flag + 1] = `=${physical}${pane ? ":" : ""}`;
+    selected[flag + 1] = `=${physical}${pane ? ":" + (windowIndex ?? "") : ""}`;
     return this.nativeRaw(selected);
   }
 
@@ -977,24 +977,32 @@ export class TmuxAdapter {
     }
   }
 
-  /** Session identity is explicit, including native names containing target punctuation. */
-  async listSessionPanes(name: string, allWindows = false): Promise<TmuxPane[]> {
-    return this.listPanes(name, allWindows, true);
+  async listSessionWindows(name: string): Promise<TmuxWindow[]> {
+    const target = "=" + name;
+    const output = await this.runNamedSession(["tmux", "list-windows", "-t", target, "-F", WINDOW_FORMAT], name,
+      `tmux list-windows -t ${shellQuote(target)} -F "${WINDOW_FORMAT}"`);
+    return parseLines(output, parseWindowLine);
   }
 
-  async listPanes(target: string, allWindows = false, literalSessionName = false): Promise<TmuxPane[]> {
+  /** Session identity is explicit, including native names containing target punctuation. */
+  async listSessionPanes(name: string, allWindows = false, windowIndex?: number): Promise<TmuxPane[]> {
+    if (windowIndex !== undefined && (!Number.isSafeInteger(windowIndex) || windowIndex < 0)) throw new Error("Invalid window index");
+    return this.listPanes(name, allWindows, true, windowIndex);
+  }
+
+  async listPanes(target: string, allWindows = false, literalSessionName = false, windowIndex?: number): Promise<TmuxPane[]> {
     // Callers name a session (optionally with a window), or an immutable tmux
     // id. Exact session matching prevents observing a prefix neighbor's pane.
     // A bare leading '=' belongs to the literal session name. Only qualified
     // targets already carry tmux's encoded exact-match syntax.
     const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
-    const exactTarget = target.startsWith("psmux:") ? target : /^[%$@]\d+$/.test(target) ? target
+    const exactTarget = literalSessionName ? `=${target}:${windowIndex ?? ""}` : target.startsWith("psmux:") ? target : /^[%$@]\d+$/.test(target) ? target
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
       const format = this.terminalKind === "psmux" ? `#{session_name}|${PANE_FORMAT}` : PANE_FORMAT;
       const argv = ["tmux", "list-panes", ...(allWindows ? ["-s"] : []), "-t", exactTarget, "-F", format];
       const legacy = `tmux list-panes ${allWindows ? "-s " : ""}-t ${shellQuote(exactTarget)} -F "${format}"`;
-      const output = literalSessionName ? await this.runNamedSession(argv, target, legacy, true) : await this.run(argv, legacy);
+      const output = literalSessionName ? await this.runNamedSession(argv, target, legacy, true, windowIndex) : await this.run(argv, legacy);
       if (this.terminalKind === "psmux") {
         const rows = parseLines(output, line => {
           const separator = line.indexOf("|");
@@ -1123,7 +1131,7 @@ export class TmuxAdapter {
         if((await this.probeSession(identity.staging)).state!=="present"
           || await this.getSessionEnv(identity.staging,"OPENRIG_NODE_ID")!==nodeId
           || await this.getSessionEnv(identity.staging,"OPENRIG_OCCUPANT_GENERATION")!==identity.predecessorGeneration
-          || (await this.listSessionPanes(identity.staging)).length!==1 || (await this.listWindows(identity.staging)).length!==1) {
+          || (await this.listSessionPanes(identity.staging)).length!==1 || (await this.listSessionWindows(identity.staging)).length!==1) {
           throw new Error("Native exchange predecessor identity is not established");
         }
       }
@@ -1175,7 +1183,7 @@ export class TmuxAdapter {
         const probe = await this.probeSession(session);
         if (probe.state === "absent") return {state:"absent"};
         if (probe.state !== "present") return {state:"unknown"};
-        const panes = await this.listSessionPanes(session), windows = await this.listWindows(session);
+        const panes = await this.listSessionPanes(session), windows = await this.listSessionWindows(session);
         if (panes.length !== 1 || windows.length !== 1 || await this.getSessionEnv(session,"OPENRIG_NODE_ID") !== nodeId) return {state:"unknown"};
         const generation = await this.getSessionEnv(session,"OPENRIG_OCCUPANT_GENERATION");
         const dead = (await this.run(["tmux","display-message","-p","-t",panes[0]!.id,"#{pane_dead}"])).trim();
@@ -1252,7 +1260,7 @@ export class TmuxAdapter {
       if (this.deliveryGuard?.maybeTarget(input.stagingSession)) throw new Error("The staging session is now another seat's; nothing was touched.");
       const panes = await this.listSessionPanes(input.stagingSession);
       const generation = await this.getSessionEnv(input.stagingSession, "OPENRIG_OCCUPANT_GENERATION");
-      if ((await this.listWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
+      if ((await this.listSessionWindows(input.stagingSession)).length !== 1 || panes.length !== 1 || panes[0]!.id !== input.pane
         || await this.getSessionEnv(input.stagingSession, "OPENRIG_NODE_ID") !== input.nodeId
         || !generation || !input.generations.includes(generation)) {
         throw new Error("The staging session's identity changed; nothing was touched.");
