@@ -93,7 +93,9 @@ export function mergeManagedBlock(
     if (!updated.includes(begin) || !updated.includes(end)) {
       updated = `${updated.trim()}\n\n${block}`.trim();
     }
-    fs.writeFile(targetPath, `${updated}\n`);
+    // End with one newline only when the file doesn't already: re-merging on every launch must not add a line each time
+    // (#2372), and blank lines a person left after the last block stay.
+    fs.writeFile(targetPath, updated.endsWith("\n") ? updated : `${updated}\n`);
     return;
   }
 
@@ -170,7 +172,7 @@ const CURRENT_BLOCK = /(?:\n|^)\s*(<!-- BEGIN OpenRig MANAGED BLOCK: [\s\S]*?<!-
 /**
  * `content` with OpenRig's blocks taken out as `mergeManagedBlock` put them in: each block, the separator it wrote before
  * the first (none when that block started a new file), and the newline-only text between and after blocks, where the
- * writer puts its separators (a later merge ends the file with one more). Text a person adds is kept. Blank lines a
+ * writer puts its separators (a later merge ends the file with a newline). Text a person adds is kept. Blank lines a
  * person adds right next to a block, between blocks or after the last, go with it: they can't be told from the writer's.
  * Null when the file isn't in that shape, such as a legacy block, or text against a block without the writer's separator.
  */
