@@ -27,6 +27,40 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native runtime-switch service integration (2026-11-02)
+
+The runtime-switch service now selects the native name-exchange coordinator on
+Windows/psmux instead of passing scoped IDs to POSIX `swap-pane`. A partial or
+unconfirmed exchange retains both servers and its durable recovery record; it
+does not enter ordinary staging cleanup. After a completed exchange the canonical
+pane is read again, and the remapped successor pane is persisted atomically with
+the runtime commit. Database commit failure reverses the native exchange before
+the uncommitted successor can be retired.
+
+Native recovery uses recorded generations and observed slots, including the
+parking session, rather than interpreting a renamed scope ID as physical pane
+identity. It handles interruption at each rename, abandonment whose retirement
+failed, a committed predecessor already terminated, and an already absent retired
+server. Staging custody is adopted for the occupant appropriate to the direction
+before termination or removal.
+
+The adapter also has a source-server client-following path. It validates the
+successor and predecessor, issues identity-checked client switches from the
+predecessor's server, and waits for attached clients to leave before allowing
+retirement. Malformed, incomplete or changed client observations retain the
+predecessor and record an attention message. Stock psmux's boolean
+`session_attached` is treated as presence rather than tmux's numeric client count.
+
+Six complete service/custody/route/adapter/planner/journal test files pass 292
+tests, including native-path simulated-server exchange, canonical binding
+remapping, three uncertain rename outcomes, commit rollback and deferred client
+following recovery. These service cases use fake terminal processes. The actual
+stock psmux exchange test separately passes node/generation checks, forward and
+reverse PID continuity and the no-attached-client retirement prerequisite. Daemon
+TypeScript checking passes. Real attached-client following and full native
+provider-backed runtime switching still need acceptance. This supersedes the
+earlier missing service-wiring limitation, not the remaining acceptance matrix.
+
 ### Native adapter exchange backend qualified (2026-11-02)
 
 `TmuxAdapter.nativeRuntimeExchangeTerminal` now supplies the coordinator's native

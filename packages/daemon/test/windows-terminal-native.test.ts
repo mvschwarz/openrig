@@ -81,6 +81,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       // not mistake a same local %N under the canonical name for the predecessor.
       expect(active.pane).not.toBe(successor.pane);
       expect((await adapter.listSessions()).map(s=>s.name).sort()).toEqual([canonical,staging].sort());
+      expect(await adapter.followNativeRuntimeExchangeClients(nodeId,identity)).toEqual({ok:true});
       await exchange("rollback");
       expect(await before(canonical)).toEqual(predecessor);expect(await before(staging)).toEqual(successor);
     }finally{

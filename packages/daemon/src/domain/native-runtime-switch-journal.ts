@@ -42,7 +42,8 @@ export class NativeRuntimeSwitchJournal {
         } | undefined;
       if (!row || row.node_id !== this.nodeId || row.canonical_session !== identity.canonical || row.staging_session !== identity.staging
         || row.predecessor_generation !== identity.predecessorGeneration || row.successor_generation !== identity.successorGeneration
-        || !["confirmed", "committed"].includes(row.phase) || (direction === "rollback" && row.committed_at)) {
+        || !(["confirmed", "committed"].includes(row.phase) || (row.phase === "abandoned" && direction === "rollback" && !row.committed_at))
+        || (direction === "rollback" && row.committed_at)) {
         throw new Error("The native runtime exchange does not match the switch's custody or commit state");
       }
       const plan: unknown = JSON.parse(row.plan_json);

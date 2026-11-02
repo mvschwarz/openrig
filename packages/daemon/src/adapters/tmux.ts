@@ -952,6 +952,62 @@ export class TmuxAdapter {
   /** The committed binding now owns identity; this is not filesystem cleanup. */
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
+  usesNativeRuntimeExchange(): boolean { return this.isNativeWindows; }
+
+  /** Move attached predecessor clients before its server can be retired. A
+   * failed/unconfirmed request is not retried here; recovery reobserves clients. */
+  async followNativeRuntimeExchangeClients(nodeId: string, identity: NativeExchangeIdentity): Promise<TmuxResult> {
+    try {
+      const backend=this.nativeRuntimeExchangeTerminal(nodeId,identity);
+      if(!backend.ownsLifecycle())throw new Error("Native client following requires its lifecycle lease");
+      const slots=await backend.observe();
+      if(slots.canonical.state!=="present" || slots.canonical.generation!==identity.successorGeneration
+        || slots.parking.state!=="absent")throw new Error("Native exchange successor identity is not established");
+      if(slots.staging.state==="absent")return {ok:true};
+      if(slots.staging.state!=="present" || slots.staging.generation!==identity.predecessorGeneration){
+        // Recovery may find the predecessor already terminated but its retained
+        // pane/server not yet removed. Its identity still must match.
+        if((await this.probeSession(identity.staging)).state!=="present"
+          || await this.getSessionEnv(identity.staging,"OPENRIG_NODE_ID")!==nodeId
+          || await this.getSessionEnv(identity.staging,"OPENRIG_OCCUPANT_GENERATION")!==identity.predecessorGeneration
+          || (await this.listPanes(identity.staging)).length!==1 || (await this.listWindows(identity.staging)).length!==1) {
+          throw new Error("Native exchange predecessor identity is not established");
+        }
+      }
+      const clients=async()=>{
+        const output=await this.run(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT]);
+        const rows=parseLines(output,parseClientLine);
+        if(output.split(/\r?\n/).filter(line=>line.trim()!=="").length!==rows.length)throw new Error("Native attached-client listing is malformed");
+        const rawCount=(await this.run(["tmux","display-message","-p","-t",`=${identity.staging}`,"#{session_attached}"])).trim();
+        // Stock psmux reports this format as a boolean, unlike tmux's count.
+        if(!/^\d+$/.test(rawCount) || (Number(rawCount)>0)!==(rows.length>0))throw new Error("Native attached-client observation changed or is incomplete");
+        return rows;
+      };
+      const attached=await clients();
+      if(attached.some(client=>client.session!==identity.staging))throw new Error("Native client listing contains an unexpected session");
+      for(const client of attached){
+        if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost");
+        const refused=`openrig-native-client-refused-${randomUUID()}`;
+        const condition=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${identity.predecessorGeneration}}}`;
+        const output=await this.run(["tmux","if-shell","-F","-t",`=${identity.staging}`,condition,
+          `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${identity.canonical}`)}`,`display-message -p ${refused}`]);
+        if(output.includes(refused))throw new Error("Native predecessor identity changed before client following");
+      }
+      // The native client reconnects asynchronously. Do not retire a server
+      // while it still owns an attached client, including a newly attached one.
+      for(let attempt=0;attempt<20;attempt++){
+        if((await clients()).length===0){
+          const current=await backend.observe();
+          if(current.canonical.state!=="present" || current.canonical.generation!==identity.successorGeneration
+            || current.parking.state!=="absent")throw new Error("Native successor identity changed during client following");
+          return {ok:true};
+        }
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }
+      throw new Error("Native clients have not confirmed leaving the predecessor; its server was retained");
+    }catch(error){return {ok:false,code:"native_client_follow_pending",message:(error as Error).message};}
+  }
+
   /** Backend for the durable native name-exchange coordinator. It does not
    * retire servers, update bindings, or pretend that a rename preserves scope IDs. */
   nativeRuntimeExchangeTerminal(nodeId: string, identity: NativeExchangeIdentity): NativeExchangeTerminal {

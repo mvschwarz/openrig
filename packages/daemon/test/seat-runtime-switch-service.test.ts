@@ -26,6 +26,7 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
+import type { NativeExchangeIdentity, NativeExchangeSlot } from "../src/domain/native-runtime-switch-exchange.js";
 
 const SEAT = "dev-impl@seat-rig";
 
@@ -131,6 +132,79 @@ describe("live seat runtime switch", () => {
     predecessorGeneration = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
   });
   afterEach(() => { db.close(); fs.rmSync(home, { recursive: true, force: true }); });
+
+  function enableNativeExchange(failureAfterRename?:number){
+    const scoped=(session:string,pane:string)=>`psmux:${Buffer.from(session).toString("base64url")}:${pane}`;
+    const generations=new Map([[SEAT,predecessorGeneration]]);let renames=0;
+    panes.set(SEAT,scoped(SEAT,"%0"));sessionRegistry.updateBinding(nodeId,{tmuxSession:SEAT,tmuxPane:panes.get(SEAT)!});
+    fakeTmux.createSession.mockImplementation(async(name:string,...rest:unknown[])=>{
+      const env=rest[1] as Record<string,string>;panes.set(name,scoped(name,"%5"));generations.set(name,env.OPENRIG_OCCUPANT_GENERATION!);return {ok:true};
+    });
+    const follow=vi.fn(async()=>({ok:true}));
+    Object.assign(fakeTmux,{
+      usesNativeRuntimeExchange:()=>true,
+      followNativeRuntimeExchangeClients:follow,
+      getSessionEnv:async(name:string,key:string)=>key==="OPENRIG_NODE_ID"?nodeId:generations.get(name),
+      nativeRuntimeExchangeTerminal:(_node:string,identity:NativeExchangeIdentity)=>{
+        const observe=(name:string):NativeExchangeSlot=>panes.has(name)?{state:"present",generation:generations.get(name)!}:{state:"absent"};
+        return {ownsLifecycle:()=>true,observe:async()=>({canonical:observe(identity.canonical),staging:observe(identity.staging),parking:observe(identity.parking)}),
+          rename:async(from:string,to:string,generation:string)=>{
+            expect(generations.get(from)).toBe(generation);expect(panes.has(to)).toBe(false);
+            const local=panes.get(from)!.split(":").at(-1)!;panes.set(to,scoped(to,local));panes.delete(from);
+            generations.set(to,generations.get(from)!);generations.delete(from);renames++;
+            if(renames===failureAfterRename)throw Error("native rename result unknown");
+          }};
+      },
+    });
+    return {follow,scoped,generations,renames:()=>renames};
+  }
+
+  it("commits a native name exchange using the remapped canonical pane, then follows clients before retirement",async()=>{
+    const native=enableNativeExchange(),svc=service();successorConfirms(svc);
+    const originalKill=fakeTmux.killSession.getMockImplementation()!;
+    fakeTmux.killSession.mockImplementation(async name=>{expect(native.follow).toHaveBeenCalled();return originalKill(name);});
+    const result=await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"native exchange"});
+    expect(result).toMatchObject({ok:true,recoveryPending:false});
+    expect(sessionRegistry.getBindingForNode(nodeId)?.tmuxPane).toBe(native.scoped(SEAT,"%5"));
+    expect(nodeRow().runtime).toBe("claude-code");expect(native.renames()).toBe(3);
+    expect(fakeTmux.swapRuntimeSwitchPanes).not.toHaveBeenCalled();expect(openSwitch()?.phase).toBe("finished");
+  });
+
+  it.each([1,2,3])("recovers an unknown native rename result at step %i without killing either occupant prematurely",async failure=>{
+    const native=enableNativeExchange(failure),svc=service();successorConfirms(svc);
+    expect(await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"interrupt native exchange"})).toMatchObject({ok:false,recoveryPending:true});
+    expect(fakeTmux.killSession).not.toHaveBeenCalled();expect(nodeRow().runtime).toBe("codex");
+    expect(await service().recover(nodeId)).toMatchObject({ok:true});
+    expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%0"));expect(panes.size).toBe(1);
+    expect(nodeRow().runtime).toBe("codex");expect(openSwitch()?.phase).toBe("abandoned");
+  });
+
+  it("rolls back native names when the database commit fails",async()=>{
+    const native=enableNativeExchange(),svc=service();successorConfirms(svc);
+    db.exec("CREATE TRIGGER reject_native_switch BEFORE UPDATE OF runtime ON nodes BEGIN SELECT RAISE(ABORT,'owned commit failure'); END");
+    expect(await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"reject native commit"})).toMatchObject({ok:false,committed:false});
+    expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%0"));expect(panes.size).toBe(1);
+    expect(native.renames()).toBe(6);expect(nodeRow().runtime).toBe("codex");
+  });
+
+  it("retains the committed native predecessor until client following can finish at recovery",async()=>{
+    const native=enableNativeExchange(),svc=service();successorConfirms(svc);
+    native.follow.mockResolvedValueOnce({ok:false,message:"client reconnect pending"} as never);
+    expect(await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"native client following"})).toMatchObject({ok:true,recoveryPending:true});
+    expect(fakeTmux.killSession).not.toHaveBeenCalled();expect(panes.size).toBe(2);expect(nodeRow().runtime).toBe("claude-code");
+    expect(await service().recover(nodeId)).toMatchObject({ok:true});
+    expect(panes.size).toBe(1);expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%5"));expect(native.renames()).toBe(3);
+  });
+
+  it("can finish native abandonment when retirement failed after a successful rollback",async()=>{
+    const native=enableNativeExchange(),svc=service();successorConfirms(svc);
+    db.exec("CREATE TRIGGER reject_native_switch BEFORE UPDATE OF runtime ON nodes BEGIN SELECT RAISE(ABORT,'owned commit failure'); END");
+    fakeTmux.killSession.mockResolvedValueOnce({ok:false,code:"owned-retire-failure",message:"owned staging server retained"} as never);
+    expect(await svc.setRuntime({seatRef:SEAT,runtime:"claude-code",reason:"native rollback retirement"})).toMatchObject({ok:false,recoveryPending:true});
+    expect(openSwitch()?.phase).toBe("abandoned");expect(panes.size).toBe(2);
+    expect(await service().recover(nodeId)).toMatchObject({ok:true});
+    expect(panes.size).toBe(1);expect(panes.get(SEAT)).toBe(native.scoped(SEAT,"%0"));expect(native.renames()).toBe(6);
+  });
 
   it("switches a Codex seat to another account home on the same runtime, committing only after confirmation", async () => {
     const accountHome = path.join(home, "api-account");
