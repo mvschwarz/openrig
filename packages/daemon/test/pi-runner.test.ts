@@ -308,6 +308,25 @@ describe("streaming heartbeat", () => {
     expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
   });
 
+  // Section 4: each prompt the runner submits is accepted with its own number. One submitted while a run is open (a
+  // steer, or a follow-up) is posted as it's sent, and the open run's agent_end ends it.
+  it("posts an accepted turn for each prompt or follow-up submitted while a run is open, and its beats name it", () => {
+    const c = clocked();
+    ready(c.core);
+    const turns = () => c.f.activity.filter(a => a.hookEvent === "UserPromptSubmit").map(a => a.turnId);
+    c.core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    c.core.handleUserBlock("look at b.txt too");
+    expect(turns()).toEqual(["1", "2"]);
+    c.advance(10_000); c.core.heartbeat();
+    c.core.handleUserBlock("/followup then c.txt");
+    c.core.handleUserBlock("/abort");
+    expect(turns()).toEqual(["1", "2", "3"]);
+    c.advance(10_000); c.core.heartbeat();
+    expect(c.beats().map(a => a.turnId)).toEqual(["2", "3"]);
+    const sequences = c.f.activity.map(a => Number(a.sequence)).filter(Number.isFinite);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+  });
+
   it("opens no turn for a prompt Pi handles without a run, so the idle beat goes on", () => {
     const c = clocked();
     ready(c.core);
