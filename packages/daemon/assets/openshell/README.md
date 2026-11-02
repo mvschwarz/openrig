@@ -6,7 +6,7 @@ The image recipe is an input recipe, not a published prebuilt image or a reprodu
 
 ## Install the reference and work connection
 
-Run the environment commands from your managed OpenRig seat. In a plain shell, set `OPENRIG_SESSION_NAME` to the actual acting `member@rig` address, for example `export OPENRIG_SESSION_NAME=operator@kernel` when operating as that member. The CLI uses this existing convention to stamp `X-OpenRig-Session`; it attributes requests within the daemon's trusted transport, and is not authentication. The work and activity credentials below are separate authorities, not replacements for this actor attribution.
+Run the environment commands from your managed OpenRig seat. In a plain shell, set `OPENRIG_SESSION_NAME` to the actual acting `member@rig` address, for example `export OPENRIG_SESSION_NAME=operator-agent@kernel` when operating as that member. The CLI uses this existing convention to stamp `X-OpenRig-Session`; it attributes requests within the daemon's trusted transport, and is not authentication. The work and activity credentials below are separate authorities, not replacements for this actor attribution.
 
 Start an MCP HTTP listener using `rig mcp serve --http --help` and the normal member-grant file on this daemon host. Select a guest-reachable address and explicit port. Setup adds one non-owner, one-seat, one-rig work grant in that existing file and stores its bearer credential in a private managed file. It prints only the file reference. Existing files/presets with different bytes are preserved.
 
