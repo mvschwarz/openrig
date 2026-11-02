@@ -137,8 +137,8 @@ Post each event to `POST <base>/api/activity/hooks` with `Authorization: Bearer 
     - the seat has no attention outstanding, such as a permission request waiting on a person.
 
     So number every post with one `sequence` that rises across your whole runner process, beats included. OpenRig
-    orders your posts by `occurredAt`, then `sequence`: a post that arrives after a newer one changes nothing, so a late
-    `Stop` for an earlier turn doesn't end the current one.
+    orders your posts by `occurredAt` (or, for a post without a valid one, when it arrives), then `sequence`: a post
+    that arrives after a newer one changes nothing, so a late `Stop` for an earlier turn doesn't end the current one.
   - **After you deliver an answer or permit** to a request OpenRig had shown as needing input (section 7; it created an
     ask, and a permit at submit opens none), post `active` / `permission_resolved` with the turn's `turnId` and the
     `askId`, before your next beat. That clears the seat's attention. So does any other working or idle post OpenRig

@@ -707,7 +707,10 @@ function recordHookActivity(c: Context, store: AgentActivityStore, body: Record<
         runtimeRungInventory(runtime, currentSession?.community_harness ?? null, currentSession?.community_runner === 1),
       );
     }
-    if (!beat) {
+    if (beat) {
+      workingLiveness.count(emitted.nodeId, { sequence: result.activity.sourceSequence ?? null,
+        eventAt: result.activity.eventAt ?? result.activity.sampledAt ?? null });
+    } else {
       workingLiveness.observe(emitted.nodeId, {
         generation: result.activity.generation ?? null,
         hookEvent: result.activity.rawEvent ?? (typeof body.hookEvent === "string" ? body.hookEvent : ""),

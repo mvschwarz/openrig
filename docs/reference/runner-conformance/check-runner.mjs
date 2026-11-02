@@ -383,11 +383,14 @@ const cases = {
     if (!beats.length) return r.skip("the runner sends no working beat in a quiet turn; the beat is optional (section 4)");
     r.check("each beat names the turn it belongs to", accepted && beats.every((b) => b.body.turnId === accepted.body.turnId),
       `turnIds: ${beats.map((b) => b.body.turnId).join(", ")}`);
-    const seqs = h.posts().map(seqOf).sort((a, b) => a - b);
-    r.check("sequence rises across every post, beats included", seqs.every((v, i) => Number.isFinite(v) && (i === 0 || v > seqs[i - 1])),
-      `sequences: ${seqs.join(", ")}`);
+    // In the runner's own time order, not delivery's: a post delivered late still has to fit where the runner sent it.
+    const byTime = (a, b) => at(a) - at(b) || seqOf(a) - seqOf(b);
+    const timed = h.posts().slice().sort(byTime);
+    r.check("sequence rises with the runner's own time across every post, beats included",
+      timed.every((p, i) => Number.isFinite(seqOf(p)) && Number.isFinite(at(p)) && (i === 0 || seqOf(p) > seqOf(timed[i - 1]))),
+      `sequences in occurredAt order: ${timed.map(seqOf).join(", ")}`);
     const life = (b) => (Number.isFinite(b.body.livenessSeconds) ? b.body.livenessSeconds : 30);
-    const inTurn = beats.filter((b) => !end || seqOf(b) < seqOf(end)).sort((a, b) => seqOf(a) - seqOf(b));
+    const inTurn = beats.filter((b) => !end || seqOf(b) < seqOf(end)).sort(byTime);
     const gaps = inTurn.map((b, i) => at(b) - at(i === 0 ? accepted : inTurn[i - 1]));
     r.check("beats come more often than every livenessSeconds / 2", inTurn.every((b, i) => gaps[i] <= life(b) * 500 + 1000),
       `gaps by the runner's own times: ${gaps.join(", ")} ms`);
