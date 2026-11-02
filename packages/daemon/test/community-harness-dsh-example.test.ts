@@ -18,6 +18,8 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const log = (entry) => appendFileSync(process.env.FAKE_LOG, JSON.stringify(entry) + "\\n");
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+// Like dsh 0.2.1-rc.2: its CLI reports its real version, and its ACP handshake reports 0.0.1.
+if (process.argv.includes("--version")) { process.stdout.write("dsh 0.2.1-rc.2\\n"); process.exit(0); }
 log({ start: { argv: process.argv.slice(2), DSH_HOME: process.env.DSH_HOME ?? null, DSH_PERMISSION_MODE: process.env.DSH_PERMISSION_MODE ?? null,
   DSH_TELEMETRY_DISABLED: process.env.DSH_TELEMETRY_DISABLED ?? null, token: "OPENRIG_ACTIVITY_HOOK_TOKEN" in process.env } });
 process.stdout.write("dsh: a log line that isn't JSON\\n");
@@ -30,7 +32,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const reply = (result) => send({ id: message.id, result });
   const fail = (code, text) => send({ id: message.id, error: { code, message: text } });
   switch (message.method) {
-    case "initialize": return reply({ protocolVersion: 1, agentCapabilities: JSON.parse(process.env.FAKE_CAPS ?? "{}"), agentInfo: { name: "dsh", version: "0.2.1-rc.2" } });
+    case "initialize": return reply({ protocolVersion: 1, agentCapabilities: JSON.parse(process.env.FAKE_CAPS ?? "{}"), agentInfo: { name: "dsh", version: "0.0.1" } });
     case "session/new": session = "sess-new-1"; return reply({ sessionId: session });
     case "session/resume": case "session/load": {
       if (process.env.FAKE_RESUME === "missing") return fail(-32002, "Resource not found");
@@ -178,7 +180,7 @@ async function fakeOpenRig(permissions: Permissions) {
   return { url: `http://127.0.0.1:${address.port}`, hooks, submits, withdraws };
 }
 
-function start(openrig: { url: string }, env: Record<string, string> = {}) {
+function start(openrig: { url: string }, env: Record<string, string> = {}, binVar = "OPENRIG_DSH") {
   const dir = mkdtempSync(join(tmpdir(), "dsh-example-"));
   const fake = join(dir, "fake-dsh.mjs");
   writeFileSync(fake, FAKE_DSH);
@@ -187,7 +189,7 @@ function start(openrig: { url: string }, env: Record<string, string> = {}) {
   const launchResult = join(dir, "launch", "result.json");
   mkdirSync(join(dir, "launch"));
   const child: ChildProcess = spawn(process.execPath, [RUNNER], { cwd: dir, stdio: "pipe", env: {
-    PATH: process.env["PATH"]!, OPENRIG_DSH: fake, FAKE_LOG: logFile, OPENRIG_HOME: join(dir, "home"),
+    PATH: process.env["PATH"]!, [binVar]: fake, FAKE_LOG: logFile, OPENRIG_HOME: join(dir, "home"),
     OPENRIG_URL: openrig.url, OPENRIG_ACTIVITY_HOOK_TOKEN: "test-token",
     OPENRIG_SESSION_NAME: "dev-dsh@test-rig", OPENRIG_NODE_ID: "node-1", OPENRIG_OCCUPANT_GENERATION: "gen-1", OPENRIG_RUNTIME: "dsh",
     OPENRIG_LAUNCH_RESULT: launchResult, OPENRIG_LAUNCH_ATTEMPT: "attempt-1", ...env,
@@ -241,6 +243,15 @@ describe("the documented dsh example runner", () => {
     expect(idle.body).toMatchObject({ sessionName: "dev-dsh@test-rig", nodeId: "node-1", generation: "gen-1", runtime: "dsh" });
     expect(idle.body.livenessSeconds).toBeGreaterThan(0);
     expect(idle.auth).toBe("Bearer test-token");
+  });
+
+  it("takes its dsh binary and home from DSH_BIN and DSH_HOME, which a rig spec's env: can set", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const home = mkdtempSync(join(tmpdir(), "dsh-prepared-home-"));
+    cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+    const seat = start(openrig, { DSH_HOME: home }, "DSH_BIN");
+    await waitFor(seat.launch, "the launch record");
+    expect((seat.log()[0] as { start: Record<string, unknown> }).start).toMatchObject({ argv: ["--profile", "acp"], DSH_HOME: home });
   });
 
   it("sends one submitted block as one prompt and reports working, then idle, in order", async () => {
