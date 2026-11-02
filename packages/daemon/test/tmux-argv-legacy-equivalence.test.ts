@@ -55,6 +55,9 @@ function respond(cmd: string, failing: string[], composer = false): string {
   if (composer && sub === "capture-pane") return "❯ \n";
   if (sub === "new-session" && cmd.includes("session_created")) return "$7 123\n";
   if (sub === "show-options" && cmd.includes("default-shell")) return "/bin/sh\n";
+  if (sub === "show-environment" && cmd.endsWith("'OPENRIG_NODE_ID'")) {
+    return cmd.includes(" -s ") ? 'OPENRIG_NODE_ID="n1\\r"; export OPENRIG_NODE_ID;\n' : "OPENRIG_NODE_ID=n1\\r\n";
+  }
   switch (sub) {
     case "list-sessions": return `${SESSION}\nalpha\n`;
     case "list-panes": return "%1|0|/w|80|24|1\n";

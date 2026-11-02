@@ -1953,7 +1953,23 @@ export class TmuxAdapter {
       }
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
-      return output.slice(key.length + 1).replace(/\n$/, "");
+      const value = output.slice(key.length + 1).replace(/\n$/, "");
+      if (!value.includes("\\")) return value;
+      // tmux's printable output uses VIS_CSTYLE|VIS_OCTAL|VIS_NOSLASH:
+      // raw literal backslashes are indistinguishable from escaped controls.
+      // Shell output escapes literal backslashes first, restoring injectivity.
+      // Parse that closed representation as data; never evaluate shell text.
+      const quoted = await this.run(["tmux", "show-environment", "-s", "-t", target, key],
+        `tmux show-environment -s -t ${shellQuote(target)} ${shellQuote(key)}`);
+      const prefix = `${key}="`, suffix = `"; export ${key};\n`;
+      if (!quoted.startsWith(prefix) || !quoted.endsWith(suffix)) throw new Error("Unexpected quoted environment response");
+      const encoded = quoted.slice(prefix.length, -suffix.length);
+      const escapes: Record<string, string> = { "\\": "\\", '"': '"', "$": "$", "`": "`", a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", s: " ", t: "\t", v: "\v", "0": "\0" };
+      return encoded.replace(/\\([0-7]{3}|[\s\S])/g, (_all, escape: string) => {
+        if (/^[0-7]{3}$/.test(escape)) return String.fromCharCode(parseInt(escape, 8));
+        if (!(escape in escapes)) throw new Error("Unsupported environment escape");
+        return escapes[escape]!;
+      });
     } catch (error) {
       if (error instanceof Error && error.message.includes(`unknown variable: ${key}`)) return undefined;
       throw new Error("Cannot read the session's launch environment.");

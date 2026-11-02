@@ -5207,6 +5207,25 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Real isolated WSL tmux 3.4 exposed a further POSIX readback defect: printable
+responses encode controls using VIS_CSTYLE/VIS_OCTAL while leaving literal
+backslashes unescaped. POSIX environment reads now request the shell-form
+representation when a backslash makes the raw value ambiguous, then parse its
+closed quoted envelope as data without evaluating commands. Literal backslashes
+are escaped in this representation, distinguishing CR/LF and octal-looking
+literal text. The encoding is grounded in upstream
+[show-environment](https://github.com/tmux/tmux/blob/3.4/cmd-show-environment.c)
+and [client printing](https://github.com/tmux/tmux/blob/3.4/server-client.c).
+
+Real tmux checks passed for empty/multiline/Unicode values, trailing CR/LF/CRLF,
+literal backslash escapes, quotes, dollar/backtick and control bytes. WSL four
+selected files: 20 passed, including the exhaustive legacy/argv equivalence
+oracle updated to exercise the additional quoted read. Windows related files:
+59 passed; daemon build passed. Five explicit public source/test file hashes
+matched the Windows source and WSL overlay before/after; this is a scoped
+overlay, not a refreshed full-checkout comparison. The exact owned socket and
+temporary directory were removed; no existing tmux server was selected.
+
 Native session environment reads now retain complete selected values instead
 of truncating at their first newline. Before interpreting a multiline response,
 a read-only missing-variable probe qualifies selector support; older servers
