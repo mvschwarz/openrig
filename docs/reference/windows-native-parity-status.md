@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Codex fork selected-history dispatch parity (2026-11-02)
+
+The corresponding Codex audit found its fork branch omitted both selected-history checks used by fresh/resume: one after asynchronous command staging and one at the transport write boundary. Six deferred-staging/write regressions reproduced both fork failures while the four fresh/resume controls passed. Fork now uses the same pre-dispatch refusal and before-write callback. No text or keys are emitted when selection changed.
+
+The complete Codex runtime-adapter file passed 152/152 on native Windows and 152/152 on ordinary-user WSL, with no skips; daemon typecheck passed. Existing positive fork argument/readiness cases remain active. Preparation, pane/process observations and provider readiness are controlled in the new cancellation fixtures, so this is dispatch-boundary acceptance rather than real Codex provider continuity or full runtime deployment.
+
 ## Selected-history changes during restore-home lookup (2026-11-02)
 
 Eight deferred-lookup regressions now cover fresh, fork, resume and legacy-resume in classic and explicit managed-permission modes. When history selection changes before the lookup returns, no launch text or Enter is emitted. The transport fixture invokes the actual before-write callback contract rather than pretending a recorded command is a completed effect.

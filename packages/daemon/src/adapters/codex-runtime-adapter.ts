@@ -944,7 +944,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // The git dirs and the seat folder follow the parent id: ps flattens argv, so a path with a space placed before the
       // id would be read as the id when the fork is verified.
       const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}${gitDirArg}${seatFolderArg}`;
-      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatCommand(binding, cmd));
+      const staged = await this.seatCommand(binding, cmd);
+      if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Codex launch preparation; no native command was sent.", recovery: "attention_required" };
+      const textResult = opts.beforeNativeDispatch
+        ? await this.tmux.sendShellCommand(binding.tmuxSession, staged, () => { if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Codex input"); })
+        : await this.tmux.sendShellCommand(binding.tmuxSession, staged);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }

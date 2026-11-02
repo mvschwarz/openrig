@@ -1548,6 +1548,37 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand("sess-456", testQueueRoot(), "gpt-5.4-cheap"));
   });
 
+  it.each(["fresh", "fork", "resume"].flatMap(kind => ["preparation", "before-write"].map(phase => ({ kind, phase }))))("refuses $kind when history selection changes during $phase", async ({ kind, phase }) => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), listProcesses: () => [], sleep: async () => {} });
+    vi.spyOn(adapter as any, "dismissSkippableCodexUpdatePrompt").mockResolvedValue(undefined);
+    vi.spyOn(adapter as any, "captureVerifiedForkId").mockResolvedValue("child-thread-id");
+    vi.spyOn(adapter as any, "captureFreshThreadId").mockResolvedValue("child-thread-id");
+    vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
+    let release!: () => void;
+    let observed!: () => void;
+    const started = new Promise<void>(resolve => { observed = resolve; });
+    const staging = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(adapter as any, "seatCommand").mockImplementation(async () => { observed(); await staging; return "owned-staged-codex"; });
+    let selected = true;
+    const effects: string[] = [];
+    vi.spyOn(tmux, "sendShellCommand").mockImplementation(async (_session, command, beforeWrite) => {
+      if (phase === "before-write") selected = false;
+      try { beforeWrite?.(); } catch { return { ok: false, code: "selection_changed", message: "Selected history changed" }; }
+      effects.push(command); return { ok: true };
+    });
+    const pending = adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig", beforeNativeDispatch: () => selected,
+      ...(kind === "fork" ? { forkSource: { kind: "native_id" as const, value: "parent-thread-id" } } : {}),
+      ...(kind === "resume" ? { resumeToken: "selected-thread-id" } : {}) });
+    await started;
+    if (phase === "preparation") selected = false;
+    release();
+    expect(await pending).toMatchObject({ ok: false });
+    expect(effects).toEqual([]);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
   it("0.5.2-07 A2-3: launchHarness threads the SPEC model onto the codex FORK command (fork-instantiate gap)", async () => {
     const tmux = mockTmux();
     const adapter = new CodexRuntimeAdapter({
