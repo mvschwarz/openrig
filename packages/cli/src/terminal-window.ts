@@ -322,12 +322,12 @@ function failure(provider: string, error: string): OpenViewResult {
 }
 
 /** Saved Herdr labels survive reboot; only current clients prove a local attachment. */
-async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps, serverArgs: readonly string[]): Promise<boolean> {
+export async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: Pane[][], pageLabel: (index: number) => string, herdrArgs: string[], deps: WindowDeps, serverArgs: readonly string[]): Promise<boolean> {
   try {
     const nativeTargets = pages.flat().map(pane => ({pane,target:pane.attachArgv && readWindowsTileAttachArgv(pane.attachArgv)}));
     const native = deps.platform === "win32";
     const tmux = native ? nativeTargets.find(item=>item.target)?.target?.tmux ?? "" : (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
-    if (!path.isAbsolute(tmux)) return false;
+    if (!(native ? path.win32 : path).isAbsolute(tmux)) return false;
     const listed = JSON.parse(await deps.exec("/usr/bin/env", [...herdrArgs, "pane", "list", "--workspace", existing.workspace_id]));
     const panes = listed?.result?.panes as Array<{ workspace_id: string; tab_id: string; pane_id: string }> | undefined;
     if (!Array.isArray(panes) || !panes.every(pane => pane && pane.workspace_id === existing.workspace_id && typeof pane.tab_id === "string" && typeof pane.pane_id === "string" && pane.pane_id)) return false;
@@ -335,11 +335,17 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
     // Match view-composer's serialization (these strings are compared, never executed).
     const quote = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
     const server = serverArgs.map((arg, index) => index % 2 ? quote(arg) : arg).join(" ");
-    const inventory = await deps.exec(tmux, [...serverArgs, "list-clients", "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
-    for (const line of inventory.trim().split("\n")) {
+    // Stock psmux has one server per session. A single default-server query
+    // cannot prove the attachments in a multi-seat view, unlike POSIX tmux.
+    const sessions: Array<string | undefined> = native ? [...new Set(nativeTargets.flatMap(({target}) =>
+      target && target.tmux === tmux && JSON.stringify(target.server) === JSON.stringify(serverArgs) ? [target.session] : []))] : [undefined];
+    for (const selectedSession of sessions) {
+      const inventory = await deps.exec(tmux, [...serverArgs, "list-clients", ...(selectedSession === undefined ? [] : ["-t", `=${selectedSession}`]), "-F", "#{client_pid}\t#{session_name}\t#{client_readonly}"]);
+      for (const line of inventory.trim().split(/\r?\n/)) {
       const [pid, session, readOnly] = line.split("\t");
       if (!pid || !/^\d+$/.test(pid) || !session || !["0", "1"].includes(readOnly ?? "")) continue;
       if (native) {
+        if (session !== selectedSession) return false;
         clients.set(pid,nativeTargets.filter(({target})=>target && target.tmux===tmux && target.session===session
           && target.readOnly===(readOnly==="1") && JSON.stringify(target.server)===JSON.stringify(serverArgs))
           .map(({pane})=>pane.recoveryCommand ?? pane.paneCommand));
@@ -349,6 +355,7 @@ async function hasLiveAttachments(existing: HerdrTab, tabs: HerdrTab[], pages: P
       // SSH/custom commands cannot be confirmed from this local client inventory.
       const flags = readOnly === "1" ? ["-r "] : ["", "-f ignore-size "];
       clients.set(pid, ["tmux", quote(tmux)].flatMap(binary => flags.map(flag => `${binary}${server ? ` ${server}` : ""} attach ${flag}-t ${quote(session)}`)));
+      }
     }
     const used = new Set<string>();
     for (const [index, page] of pages.entries()) {

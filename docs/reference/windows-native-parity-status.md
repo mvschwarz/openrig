@@ -1,5 +1,24 @@
 # Native Windows parity: implementation and evidence
 
+## Current native multi-server attachment proof (2026-11-02)
+
+Herdr workspace reuse now queries each distinct local psmux target session with
+the daemon's exact server options. POSIX tmux retains its single-server client
+inventory. A native result from another session, a missing client, an unavailable
+server, a reused PID across tiles, or a read-only mismatch cannot prove reuse.
+Windows executable paths are interpreted using Windows path semantics even in
+cross-platform fixtures; CRLF client rows are accepted.
+
+An isolated stock psmux 3.4.0 acceptance ran two real hidden-console clients on
+separate session servers (one writable, one read-only). The production attachment
+proof queried both exact sessions and matched their actual PIDs; only Herdr's
+pane/process inventory was supplied by a fixture. Both session process cleanup
+and owned-directory cleanup passed. Thus native client matching is qualified on
+this host, while actual Herdr desktop workspace reuse remains unqualified.
+The native window-action set passed 248 tests with 13 POSIX-only skips; selected
+current CLI source/tests in the ordinary-user WSL mirror passed 83 with 1 native
+tool-lookup skip, and CLI TypeScript passed. No full-current-head parity claim.
+
 ## Current piped native hosting width (2026-11-02)
 
 The Windows CLI now measures its hosting psmux window when stdout is piped,
