@@ -264,8 +264,8 @@ describe("#25 selected-file semantics — preservation, idempotence, the other f
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     await f.claude.deliverStartup(files, { ...binding, claudeManagedBlockFile: "CLAUDE.local.md" });
     const again = f.read("CLAUDE.local.md")!;
-    // Blocks are replaced in place, never duplicated. mergeManagedBlock's trailing
-    // blank-line growth on re-merge predates #25 and is file-independent (parity below).
+    // Blocks are replaced in place, never duplicated. A re-merge ends the file with one
+    // newline, whichever file it is (parity below).
     const count = (text: string) => text.split(BEGIN).length - 1;
     expect(count(again)).toBe(count(first!));
     expect(again.trimEnd()).toBe(first!.trimEnd());
