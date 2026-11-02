@@ -1,5 +1,26 @@
 # Native Windows parity: implementation and evidence
 
+## Installed command/cleanup gate and final-session classification (2026-11-03)
+
+The native build/pack/isolated-prefix install gate passed at
+`25d23ff8127332ae7015e2df54e8d0e95c9fc661` in 71 seconds, with unchanged HEAD
+and tracked diff. Its installed probe confirms the watcher child entry ships,
+imports the shipped terminal-control surface, creates a mapped session through
+a controlled backend using a pinned executable/prefix, checks literal child
+arguments and then observes stopped and missing cleanup results. Existing
+installed argv, binary SFTP transport, timestamps, exact helper assets, SQLite
+ABI, resources and rig.cmd loading checks also passed. This controlled backend
+does not establish real psmux or desktop operation. Leak-guard term checks had
+no rules file and are not qualified by this gate.
+
+A subsequent cleanup correction recognizes the adapter's positive
+`no server running on ...` diagnostic as missing before stop or stopped after
+successful termination. Last-session POSIX cleanup must not become unknown
+merely because tmux exits when its final session ends. Permission/other transport
+errors remain unknown and do not authorize cleanup. Related complete cleanup,
+command and destroy files and daemon build passed. The installed gate above
+predates this classification correction. No deployment or public push occurred.
+
 ## Chatroom watcher follows the selected terminal instance (2026-11-03)
 
 `chatroom watch --tmux` now confirms the selected instance locally and reads its

@@ -1,4 +1,4 @@
-import { TmuxAdapter } from "./adapters/tmux.js";
+import { probeShowsNoServer, TmuxAdapter } from "./adapters/tmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 
 export async function createTerminalCommandSession(session: string, child: readonly string[], serverArgs: readonly string[], command: readonly string[]): Promise<string> {
@@ -13,10 +13,11 @@ export async function stopTerminalSessionForCleanup(session: string, serverArgs:
   const adapter = new TmuxAdapter(execCommand, undefined, execArgvCommand, serverArgs, process.platform === "win32" ? "psmux" : "tmux");
   try {
     const before = await adapter.probeSession(session);
-    if (before.state === "absent") return "missing";
+    if (before.state === "absent" || probeShowsNoServer(before)) return "missing";
     if (before.state !== "present") return "unknown";
     const stopped = await adapter.killSession(session);
     if (!stopped.ok) return "unknown";
-    return (await adapter.probeSession(session)).state === "absent" ? "stopped" : "unknown";
+    const after = await adapter.probeSession(session);
+    return after.state === "absent" || probeShowsNoServer(after) ? "stopped" : "unknown";
   } catch { return "unknown"; }
 }
