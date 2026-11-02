@@ -22,6 +22,7 @@ import { ContextUsageStore } from "../src/domain/context-usage-store.js";
 import type { ProjectionEntry, ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { MANAGED_BLOCK_START } from "../src/domain/managed-blocks.js";
 
 // Real snapshot/restore/startup/projection and settings files; only terminal and
 // native launch/readiness are simulated. No Claude, provider or daemon is started.
@@ -99,7 +100,8 @@ describe("contained Claude restore activity resources", () => {
     return Object.values(s.hooks ?? {}).flatMap((groups: any) => groups.flatMap((g: any) => g.hooks ?? []))
       .map((h: any) => h.command as string).filter(c => c.includes("state/claude-activity-hooks/activity-relay.cjs"));
   }
-  function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true, seedCwd: string | null = cwd) {
+  function seed(pod: boolean, selected = true, runtime = "claude-code", withStartupContext = true, seedCwd: string | null = cwd,
+    extraEntries: Array<{ category: string; effectiveId: string; absolutePath: string; mergeStrategy: string }> = []) {
     const rig = rigs.createRig("restore");
     if (pod) db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod", rig.id, "P");
     const node = rigs.addNode(rig.id, pod ? "p.seat" : "seat", { runtime, ...(seedCwd ? { cwd: seedCwd } : {}), ...(pod ? { podId: "pod" } : {}) });
@@ -109,6 +111,7 @@ describe("contained Claude restore activity resources", () => {
     const entries = [
       ...(selected ? [activity()] : []),
       { category: "guidance", effectiveId: "do-not-replay", absolutePath: path.join(root, "missing-guidance.md"), mergeStrategy: "managed_block" },
+      ...extraEntries,
     ];
     const files = [{ path: "missing.md", absolutePath: path.join(root, "missing.md"), required: true, appliesOn: ["restore"] }];
     const actions = [{ type: "send_text", value: "DO NOT REPLAY", phase: "after_ready", appliesOn: ["restore"], idempotent: true }];
@@ -460,6 +463,52 @@ describe("contained Claude restore activity resources", () => {
     expect(resume.mock.calls[0]![3]).toBe(liveCwd);
     expect(liveOwned(liveSettingsPath).length).toBeGreaterThan(0);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // CodeRabbit follow-up on #2373: the saved-guidance lookups must use the
+  // same resolved launch directory as the hook projection and startup replay.
+  // When the snapshot node has no cwd, seatGuidance with node.cwd (null)
+  // returns null, so the pre-resume repair is skipped and the post-launch
+  // check reports nothing — a seat whose guidance blocks are missing in the
+  // live directory comes back fully_restored with no warning. The seed's
+  // "do-not-replay" guidance entry (source always missing) stays a gap in
+  // both tests; only the SOP.md entry distinguishes fixed from unfixed.
+  it("puts back saved guidance blocks in the live seat directory when the snapshot node has no cwd", async () => {
+    const { liveCwd } = liveProject();
+    const sourcePath = path.join(root, "SOP.md");
+    fs.writeFileSync(sourcePath, "Current SOP text.");
+    const guidanceFile = path.join(liveCwd, "CLAUDE.md");
+    fs.writeFileSync(guidanceFile, "# My project notes\n");
+    const f = seed(false, false, "claude-code", true, null, [
+      { category: "guidance", effectiveId: "SOP.md", absolutePath: sourcePath, mergeStrategy: "managed_block" },
+    ]);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
+    const result = await restore(f, adapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const content = fs.readFileSync(guidanceFile, "utf-8");
+    expect(content).toContain(MANAGED_BLOCK_START("SOP.md"));
+    expect(content).toContain("Current SOP text.");
+    expect(result.result.nodes[0].guidanceGaps).toEqual(["do-not-replay"]);
+  });
+
+  it("discloses a guidance gap in the live seat directory when the snapshot node has no cwd and the source is gone", async () => {
+    const { liveCwd } = liveProject();
+    const sourcePath = path.join(root, "SOP-gone.md");
+    fs.writeFileSync(sourcePath, "Current SOP text.");
+    const guidanceFile = path.join(liveCwd, "CLAUDE.md");
+    fs.writeFileSync(guidanceFile, "# My project notes\n");
+    const f = seed(false, false, "claude-code", true, null, [
+      { category: "guidance", effectiveId: "SOP.md", absolutePath: sourcePath, mergeStrategy: "managed_block" },
+    ]);
+    db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(liveCwd, f.node.id);
+    fs.rmSync(sourcePath);
+    const result = await restore(f, adapter);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect([...(result.result.nodes[0].guidanceGaps ?? [])].sort()).toEqual(["SOP.md", "do-not-replay"]);
+    expect(result.result.warnings.join("\n")).toContain("SOP.md");
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toBe("# My project notes\n");
   });
 
   // The recovery projection must be awaited: an adapter whose project()

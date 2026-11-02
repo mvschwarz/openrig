@@ -1508,7 +1508,15 @@ export class RestoreOrchestrator {
     if (!["resumed", "fresh-primed", "fresh", "rebuilt", "attention_required"].includes(result.status)) return result;
     let guidance: ReturnType<typeof seatGuidance>;
     try {
-      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, node.cwd,
+      // The seat was launched in the snapshot node's cwd when set, else the
+      // live node's cwd — the same resolved launch directory the hook
+      // projection and startup replay use. Passing node.cwd alone returns
+      // no guidance at all when the snapshot node has no cwd. No "." fallback:
+      // when neither cwd exists the old skip is kept, so no guidance file is
+      // written into the daemon's own working directory.
+      const guidanceCwd = node.cwd
+        ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId)?.cwd;
+      guidance = seatGuidance(data.nodeStartupContext?.[node.id] ?? null, guidanceCwd,
         this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
     } catch (err) {
       warnings?.push(`Restore: ${node.logicalId}: could not check its guidance: ${(err as Error).message}`);
@@ -1756,7 +1764,13 @@ export class RestoreOrchestrator {
     if (resumeRequested && resumeToken && launchResult) {
       let guidance: ReturnType<typeof seatGuidance> = null;
       try {
-        guidance = seatGuidance(startupCtx, node.cwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
+        // Same resolved directory as launchCwd, without its "." fallback:
+        // when neither the snapshot nor the live node has a cwd, keep the
+        // old skip instead of writing guidance into the daemon's folder.
+        const guidanceCwd = node.cwd
+          ?? this.rigRepo.getRig(rigId)?.nodes.find(current => current.logicalId === node.logicalId
+            && (!selected || current.id === node.id))?.cwd;
+        guidance = seatGuidance(startupCtx, guidanceCwd, this.rigRepo.getRigClaudeManagedBlockFile(rigId), existsSync, (path) => readFileSync(path, "utf-8"));
       } catch (err) {
         // Guidance never blocks the exact resume; the post-launch check discloses the gap.
         warnings?.push(`Restore guidance: ${node.logicalId}: could not read its saved guidance selection: ${(err as Error).message}`);
