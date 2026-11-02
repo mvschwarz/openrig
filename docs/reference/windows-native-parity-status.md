@@ -27,6 +27,20 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native local-copy directory permission finalization (2026-11-02)
+
+The local-copy implementation now previews and repairs POSIX directory-mode
+drift, creates new POSIX directories owner-accessible while copying children,
+and applies the source mode after recursion so umask does not alter the final
+permissions. Windows directory readonly remains excluded because it does not
+represent directory access permission. An ordinary WSL UID-1000 test using the
+exact changed source passes metadata-only repair, dry-run nonmutation, and a
+new readonly directory containing a file under umask 0077. This is a scoped
+source test in the retained WSL mirror, not a same-head full-platform run.
+Windows local-copy and identity checks pass 20 tests; the POSIX mode test is
+explicitly skipped there. CLI TypeScript checking passes. This does not close
+NTFS/POSIX ownership, execute permission, ACL or special-file equivalence.
+
 ### Bounded-probe descendant lifetime follow-up (2026-11-02)
 
 The native probe now preserves descendants only after its root exits and both

@@ -53,10 +53,13 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
       if (destination && !destination.isDirectory()) throw new Error(`Destination is not an ordinary directory: ${dst}`);
       if (!destination) {
         changes.push(`cd ${dst}`);
-        if (!plan.dryRun) await mkdir(dst, { mode: source.mode });
+        if (!plan.dryRun) await mkdir(dst, { mode: process.platform === "win32" ? source.mode : 0o700 });
       }
-      else if (Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000)) {
-        changes.push(`.d..t. ${dst}`);
+      else {
+        const timeChanged = Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000);
+        // NTFS directory readonly is Explorer state, not directory access.
+        const modeChanged = process.platform !== "win32" && (source.mode & 0o7777) !== (destination.mode & 0o7777);
+        if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
       }
       const names=await readdir(src);
       if(process.platform === "win32" && windowsNamesCollide(names)){
@@ -67,7 +70,12 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
         if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
       }
       for (const name of names) await copy(path.join(src, name), path.join(dst, name));
-      if (!plan.dryRun) await utimes(dst, source.atime, source.mtime);
+      if (!plan.dryRun) {
+        // Apply after recursion: restrictive source permissions must not prevent
+        // child creation, and mkdir's umask must not change the final mode.
+        if (process.platform !== "win32") await chmod(dst, source.mode & 0o7777);
+        await utimes(dst, source.atime, source.mtime);
+      }
       return;
     }
     if (!source.isFile() && !source.isSymbolicLink()) throw new Error(`Unsupported special file: ${src}`);
