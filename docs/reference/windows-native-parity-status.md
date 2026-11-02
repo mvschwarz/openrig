@@ -4689,3 +4689,61 @@ terminal-helper and rig.cmd checks passed. Receipt:
 pack-terminal-assets-d118cf5.json and its log. This is package delivery/loading
 evidence, not full current-head suites or real authenticated provider/engine
 acceptance. No actual runtime installation, deployment or public push occurred.
+
+### Complete CLI/TUI/UI comparison at 0aa6375 (2026-11-03)
+
+Both selected directory runs used source
+0aa63755a2fc991ba170ba730ac076d1fa62a325. Windows finished with 9,440 passed,
+one failed and 116 pending (9,557 total), with clean tracked source before and
+after. WSL finished with 9,362 passed, zero failed and 194 pending (9,556 total).
+UI passed 1,837/1,837 on each platform. TUI passed 1,232 with 19 skips on Windows
+and 1,237 with 14 skips on WSL. CLI passed 6,371, failed one and skipped 97 on
+Windows; WSL CLI passed 6,288 with 180 skips. Skips are retained as unverified
+coverage, not converted into passes.
+
+The sole Windows failure is still terminal-window-windows.test.ts's owned-PATH
+Windows Terminal discovery case; its bounded investigation remains exhausted.
+Neither platform reproduced the earlier live-events failures in this complete
+run. That observation does not establish their original cause. These selections
+exclude the daemon suite and opt-in real provider/psmux acceptance. UI uses its
+jsdom project configuration, not a real visible desktop window.
+
+WSL's paired daemon was rebuilt before testing. All 4,703 public regular files
+matched the frozen snapshot before and after. A first public-only build lacked
+the deliberately excluded dependency and failed; that is retained as a coverage
+setup result, not a platform defect. The existing excluded file stayed in its
+original location. Its Git-normalized content identity matched the current
+index before/after compilation and after the complete suite, without displaying
+or copying its source. A raw-byte comparison had differed and was not a valid
+comparison to the normalized indexed blob. Six symlinks remain outside snapshot
+verification. Windows used Node 24.14.1 and WSL used Node 24.11.0, so these are
+same-OpenRig-source functional checks, not identical-runtime performance tests.
+
+Receipts: workspaces-comparison-0aa6375.json,
+workspace-cli-tui-0aa6375-metadata.json,
+cli-tui-ui-wsl-0aa6375-verified-metadata.json,
+daemon-build-wsl-verified-0aa6375.json and
+private-version-post-suite-0aa6375.json, plus the immutable full reports.
+This result does not close the Windows discovery failure, daemon-suite or real
+engine/provider requirements. No deployment or public push occurred.
+
+### Portable Podman prerequisite and unchanged OpenShell boundary (2026-11-03)
+
+The official [OpenShell v0.1.6 release](https://github.com/NVIDIA/OpenShell/releases/tag/v0.1.6)
+still has no Windows asset, and the Windows branch remains at
+e451bb390a3b463724ccf5547b46b9432428690d. No changed upstream fact justified
+repeating the earlier failed native builds.
+
+The official [Podman v6.1.4 release](https://github.com/containers/podman/releases/tag/v6.1.4)
+does provide a portable Windows amd64 archive. A task-owned copy was downloaded,
+its 32,122,424 bytes and official SHA-256 digest verified, and archive destinations
+checked before extraction. Its native CLI returned podman version 6.1.4 through
+owned Windows Job custody. Machine-init help also loaded. Local receipts are
+under podman-native-6.1.4-20261103 (download-receipt.json, extract-receipt.json,
+version-receipt.json and machine-help-receipt.json).
+
+This is a portable CLI prerequisite only. No global installation, Podman machine
+initialization/start, image execution or real OpenShell/Podman lifecycle was
+performed. Help exposes host-default mounts; any subsequent owned machine test
+must use task-local Windows config/data locations and explicit task volumes,
+preserving existing engines and running WSL work. Engine acceptance remains open.
