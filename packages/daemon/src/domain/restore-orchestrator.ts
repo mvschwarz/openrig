@@ -1717,8 +1717,16 @@ export class RestoreOrchestrator {
     // re-apply the CURRENT marker, marker-only: no profile-wide resolution,
     // no guidance, skills or startup replay, and the saved context is never
     // rewritten. A seat whose current spec does not select hooks stays silent.
+    // The no-context fallback is scoped: it applies only to a legacy
+    // (non-pod) agent whose live runtime still matches the snapshot's. A
+    // runtime changed after the snapshot would otherwise read the snapshot's
+    // runtime and write Claude hooks into another agent's working folder
+    // (with a saved context, the compatibility gate already stops that
+    // mismatch), and a pod-aware agent must get no write from this recovery
+    // at all — it still ends at the "Harness not started" gate, unchanged.
     const activityAdapter = opts?.adapters?.["claude-code"];
-    const recoveryRuntime = startupCtx?.runtime ?? node.runtime;
+    const recoveryRuntime = startupCtx?.runtime
+      ?? (!isPodAware && liveRuntime === node.runtime ? node.runtime : null);
     if (resumeRequested && resumeToken && launchResult && recoveryRuntime === "claude-code") {
       const entries = (startupCtx?.projectionEntries ?? []).filter(e =>
         e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");

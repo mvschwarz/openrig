@@ -291,9 +291,10 @@ describe("contained Claude restore activity resources", () => {
   // NO nodeStartupContext row at all must not leave a known-selected legacy
   // Claude seat hookless with no restore gap. The runtime falls back to the
   // node's saved runtime and absent projection entries count as an empty list.
-  // Legacy (non-pod) shape: pod-aware seats with no context stop earlier at
-  // the "Harness not started" gate, so the fully_restored-without-hooks
-  // outcome only arises on the legacy resume path.
+  // The fallback is scoped to legacy seats whose live runtime still matches
+  // the snapshot's: a pod-aware seat, or one whose runtime changed since the
+  // snapshot, gets no hooks write from this recovery (see the two tests
+  // below). The restore itself is unchanged in both cases.
   it("re-applies the current selection when the saved startup context is absent (legacy seat)", async () => {
     const f = seed(false, false, "claude-code", false);
     const project = vi.spyOn(adapter, "project");
@@ -332,6 +333,48 @@ describe("contained Claude restore activity resources", () => {
     expect(otherRecovery).toBeUndefined();
     expect(owned()).toEqual([]);
     expect(writes).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Maintainer review on #2373: the no-context fallback must not write Claude
+  // hooks for a snapshot whose agent runtime changed after the snapshot was
+  // taken. With a saved startup context, the compatibility gate stops the
+  // mismatch; without one, nothing does, so the fallback must compare the
+  // live runtime against the snapshot's before re-applying anything.
+  it("does not project claude hooks when the live runtime no longer matches the snapshot runtime (no startup context)", async () => {
+    const f = seed(false, false, "claude-code", false);
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run("codex", f.node.id);
+    const project = vi.spyOn(adapter, "project");
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, adapter, () => {}, desired);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(desired).not.toHaveBeenCalled();
+    const claudeRecovery = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(claudeRecovery).toBeUndefined();
+    expect(owned()).toEqual([]);
+    expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
+    expect(result.result.nodes[0].restoreGaps).toBeUndefined();
+  });
+
+  // Maintainer review on #2373: a pod-aware agent with no startup context
+  // must get no hooks write from this recovery — it still ends at the
+  // "Harness not started" gate, and the restore itself is unchanged.
+  it("does not project claude hooks for a pod-aware seat with no startup context", async () => {
+    const f = seed(true, false, "claude-code", false);
+    const project = vi.spyOn(adapter, "project");
+    const desired = vi.fn((): { status: "known"; selected: boolean } => ({ status: "known", selected: true }));
+    const result = await restore(f, adapter, () => {}, desired);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({
+      status: "attention_required", error: "Harness not started: no startup context for p.seat.",
+    });
+    expect(desired).not.toHaveBeenCalled();
+    const claudeRecovery = project.mock.calls.find(([plan]) => plan.entries.some((e) => e.resourceType === "claude_activity_hooks"));
+    expect(claudeRecovery).toBeUndefined();
+    expect(owned()).toEqual([]);
     expect(result.result.warnings.some((w) => w.startsWith("Restore activity hooks:"))).toBe(false);
     expect(result.result.nodes[0].restoreGaps).toBeUndefined();
   });
