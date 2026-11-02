@@ -222,12 +222,13 @@ export type FreezeOutcome =
 export function resolveAllowlisted(allowlist: AllowlistRoot[], absDir: string): { root: string; rel: string } | null {
   let real: string;
   try {
-    real = fs.realpathSync(absDir);
+    real = process.platform === "win32" ? fs.realpathSync.native(absDir) : fs.realpathSync(absDir);
   } catch {
     return null;
   }
   for (const r of allowlist) {
-    if (real === r.canonicalPath || real.startsWith(r.canonicalPath + path.sep)) {
+    const rootWithSep = r.canonicalPath.endsWith(path.sep) ? r.canonicalPath : r.canonicalPath + path.sep;
+    if (real === r.canonicalPath || real.startsWith(rootWithSep)) {
       return { root: r.name, rel: path.relative(r.canonicalPath, real) };
     }
   }

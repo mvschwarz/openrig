@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Review export allowlist mapping (2026-11-02)
+
+Review export directory mapping now canonicalizes Windows paths through native realpath, matching the file service's allowlist namespace. Its prefix boundary also preserves an existing terminal separator, so filesystem-root allowlists work instead of constructing a doubled separator. Different directories remain outside the mapping.
+
+Validation: the complete review-freeze file passed 15/15 on Windows and 14 with one native-only case skipped on ordinary-user WSL; daemon typecheck passed. Tests cover filesystem-root mapping and a Windows case alias, alongside the route-level freeze/export cases. This is not a concurrent filesystem replacement or deployment qualification.
+
 ## Native CLI entry identity (2026-11-02)
 
 Both the source index and bin wrapper now use native realpath for their Windows direct-run identity check. A case alias of the same file previously compared unequal through the JavaScript realpath implementation and could leave the entry inert. POSIX resolution remains unchanged, and a different file still does not qualify as the current module.

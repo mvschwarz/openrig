@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { realpathSync, writeFileSync } from "node:fs";
+import { realpathSync as fsRealpathSync, writeFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -19,9 +19,30 @@ import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { ReviewGatherer } from "../src/domain/review/gather.js";
 import { FileWriteService } from "../src/domain/files/file-write-service.js";
 import { reviewRoutes } from "../src/routes/review.js";
+import { resolveAllowlisted } from "../src/domain/review/freeze.js";
 import { makeFixtureWorkspace, writeFixtureSlice, writeFullGateSet, type FixtureWorkspace } from "./review-fixtures.js";
 
 const NOW = "2026-07-04T12:00:00.000Z";
+const realpathSync = process.platform === "win32" ? fsRealpathSync.native : fsRealpathSync;
+
+it("maps filesystem-root allowlists without doubling their terminal separator", () => {
+  const ws = makeFixtureWorkspace();
+  try {
+    const root = realpathSync(path.parse(ws.root).root);
+    expect(resolveAllowlisted([{ name: "filesystem", canonicalPath: root }], ws.root))
+      .toEqual({ root: "filesystem", rel: path.relative(root, realpathSync(ws.root)) });
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
+
+it.runIf(process.platform === "win32")("maps a native case alias to its canonical allowlist without accepting a sibling", () => {
+  const ws = makeFixtureWorkspace();
+  try {
+    const root = realpathSync(ws.root);
+    expect(resolveAllowlisted([{ name: "workspace", canonicalPath: root }], ws.root.toUpperCase()))
+      .toEqual({ root: "workspace", rel: "" });
+    expect(resolveAllowlisted([{ name: "workspace", canonicalPath: root }], path.dirname(root))).toBeNull();
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
 
 describe("POST /api/review/freeze", () => {
   let ws: FixtureWorkspace;
