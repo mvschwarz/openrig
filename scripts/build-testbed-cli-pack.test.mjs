@@ -90,6 +90,10 @@ test("package proof: the tarball ships the daemon surfaces and no packaged JS im
 
     execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
     const tileHelper = join(extract, "package/daemon/assets/terminal/windows-tile-attach.ps1");
+    const followHelper = join(extract, "package/daemon/assets/terminal/follow-events.mjs");
+    assert.equal(lstatSync(followHelper).isFile(), true);
+    assert.equal(lstatSync(followHelper).isSymbolicLink(), false);
+    assert.deepEqual(readFileSync(followHelper), readFileSync(join(REPO_ROOT, "packages/daemon/assets/terminal/follow-events.mjs")));
     assert.equal(lstatSync(tileHelper).isFile(), true);
     assert.equal(lstatSync(tileHelper).isSymbolicLink(), false);
     assert.deepEqual(readFileSync(tileHelper), readFileSync(join(REPO_ROOT,"packages/daemon/assets/terminal/windows-tile-attach.ps1")));

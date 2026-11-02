@@ -48,12 +48,12 @@ function fixture() {
       if (args.length !== 2) throw new Error("usage: herdr workspace list");
       return JSON.stringify({ result: { workspaces: [{ workspace_id: "w1" }] } });
     }
-    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.includes("/viewers/")) } });
+    if (command === "pane list") return JSON.stringify({ result: { panes: [...panes.values()].filter(p => !hideViewers || !p.cwd.split(path.sep).includes("viewers")) } });
     if (command === "pane get") {
       const selected = panes.get(args[2]!); if (!selected) throw new Error("missing pane");
       return JSON.stringify({ result: { pane: selected } });
     }
-    if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.includes("/viewers/")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
+    if (command === "pane process-info" && failedProcessRead && panes.get(args[3]!)!.cwd.split(path.sep).includes("viewers")) { failedProcessRead = false; throw new Error("first viewer inspection failed"); }
     if (command === "pane process-info") return JSON.stringify({ result: { process_info: { foreground_processes: [{ argv: panes.get(args[3]!)!.argv }] } } });
     if (command === "pane run") {
       const selected = panes.get(args[2]!)!;
@@ -209,7 +209,7 @@ describe("stable task-following workspace", () => {
   });
   it("a changed terminal identity holds the whole view before joining another member", async () => {
     const f = fixture(); await f.follow();
-    [...f.panes.values()].find(p => p.cwd.includes("/viewers/"))!.terminal_id = "other-generation";
+    [...f.panes.values()].find(p => p.cwd.split(path.sep).includes("viewers"))!.terminal_id = "other-generation";
     const count = f.calls.length;
     expect(await f.follow(["a", "b", "c", "d"])).toMatchObject({ ok: false, following: { state: "retained" } });
     expect(f.calls.slice(count).some(c => ["run", "split", "close"].includes(c[1]!))).toBe(false);
