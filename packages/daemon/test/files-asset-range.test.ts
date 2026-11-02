@@ -7,10 +7,11 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync as jsRealpath } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../src/routes/files.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 describe("GET /api/files/asset — Range + render opt-in", () => {
   let root: string;

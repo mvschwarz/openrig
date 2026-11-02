@@ -1,10 +1,11 @@
 // Explicit previews retain their content type and scripts; ordinary HTML reads stay text.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync as jsRealpath, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../src/routes/files.js";
+const realpathSync = process.platform === "win32" ? jsRealpath.native : jsRealpath;
 
 const html = '<!doctype html><p id="preview">waiting</p><script>document.getElementById("preview").textContent="ready";</script>';
 const script = 'document.getElementById("preview").textContent="ready";';

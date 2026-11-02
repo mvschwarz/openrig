@@ -1,5 +1,31 @@
 # Native Windows parity: implementation and evidence
 
+## Current file-browser root boundaries and native canonical spelling (2026-11-02)
+
+Local roots now preserve an existing trailing separator, so an allowlisted
+drive root or POSIX filesystem root matches its configured descendants. Windows
+allowlist decoding, file resolution and local-root presentation use native
+realpath spelling: JS realpath was experimentally shown to retain arbitrary
+input casing on this host, which incorrectly rejected internal file aliases.
+This keeps strict canonical boundaries without blindly case-folding distinct
+directories. The production startup producer uses the shared allowlist decoder.
+Windows drive-relative reader requests and embedded NUL are rejected early.
+
+The local reader also recognizes its direct entry through a native parent
+directory link. Real fixtures cover a drive-root selection, mixed-case and
+extended-prefix root spellings, an internal file alias, an escaping alias, and
+an actual Node subprocess started through a linked parent. That subprocess
+returned the expected roots JSON, and its owned link was removed separately.
+Four old HTTP fixture groups were updated to supply actual canonical native
+roots, preserving their read/write/conflict/audit/media/truncation assertions.
+
+Six focused files passed 72 native checks (1 POSIX executable-mode skip) and
+69 ordinary-user WSL checks (4 platform-specific skips). Both package TypeScript
+checks passed. The CLI's paired daemon dependency was transpiled for this one
+reviewed module in the task checkout/mirror; no full package build or deployment.
+Network UNC shares and filesystem-identity races are not qualified by these
+local fixtures. The broad path audit and whole same-head suite remain open.
+
 ## Current authored relative-path validation (2026-11-02)
 
 The byte-identical CLI/daemon safe-path validators now reject drive-relative

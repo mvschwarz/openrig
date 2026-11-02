@@ -20,9 +20,9 @@ export function localRead(request: LocalRequest) {
     return { source: "local configuration and disk", readAt: new Date().toISOString(),
       entries: targets.map(([label, source, kind]) => {
         let canonical = source!;
-        try { canonical = fs.realpathSync(source!); } catch { /* the selected read reports the actual error */ }
+        try { canonical = process.platform === "win32" ? fs.realpathSync.native(source!) : fs.realpathSync(source!); } catch { /* the selected read reports the actual error */ }
         const root = [...roots].sort((a, b) => b.canonicalPath.length - a.canonicalPath.length)
-          .find((r) => canonical === r.canonicalPath || canonical.startsWith(r.canonicalPath + path.sep));
+          .find((r) => canonical === r.canonicalPath || canonical.startsWith(r.canonicalPath.endsWith(path.sep) ? r.canonicalPath : r.canonicalPath + path.sep));
         return { label, kind, source, root: root?.name ?? "", path: root ? path.relative(root.canonicalPath, canonical) : "",
           ...(!source ? { error: "Source is not configured" } : !root ? { error: "Source is outside files.allowlist; no local read permitted" } : {}) };
       }),
@@ -48,7 +48,14 @@ export function localRead(request: LocalRequest) {
   };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const isDirectRun = (() => {
+  if (!process.argv[1]) return false;
+  try { return process.platform === "win32"
+    ? fs.realpathSync.native(process.argv[1]) === fs.realpathSync.native(fileURLToPath(import.meta.url))
+    : path.resolve(process.argv[1]) === fileURLToPath(import.meta.url); }
+  catch { return false; }
+})();
+if (isDirectRun) {
   try { process.stdout.write(JSON.stringify(localRead(JSON.parse(process.argv[2] ?? "{}")))); }
   catch (error) { process.stdout.write(JSON.stringify({ error: error instanceof FilePathSafetyError ? error.code : "local_read_failed", message: error instanceof Error ? error.message : String(error) })); }
 }
