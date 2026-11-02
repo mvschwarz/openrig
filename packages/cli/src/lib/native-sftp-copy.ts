@@ -78,6 +78,7 @@ const local: Endpoint = {
   },
 };
 const kind = (attrs: SftpAttrs | undefined) => (attrs?.mode ?? 0) & 0o170000;
+const windowsSftpAliasesName = (name: string) => /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
 
 export function buildSftpArgv(plan: CopyPlan): string[] {
   const remote = plan.src.kind === "remote" ? plan.src : plan.dst;
@@ -105,6 +106,9 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
   let originalMoveAttempted = false;
   const changes: string[] = [];
   try {
+    if (windowsRemote && remotePlan.path.split(/[\\/]/).some(name => name !== "." && name !== ".." && windowsSftpAliasesName(name))) {
+      throw new Error(`Unqualified Windows SFTP path: ${JSON.stringify(remotePlan.path)}`);
+    }
     const child = start(buildSftpArgv(plan));
     child.once("error", (error: NodeJS.ErrnoException) => { spawnError = error; });
     child.once("exit", code => { transportExit = code; });
@@ -182,7 +186,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           for (const name of names) {
             // Windows OpenSSH can normalize these names to a different source
             // entry. Namespace-aware local I/O cannot repair a remote alias.
-            if (windowsRemote && (/[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))) {
+            if (windowsRemote && windowsSftpAliasesName(name)) {
               throw new Error(`Unqualified Windows SFTP directory entry: ${JSON.stringify(name)}`);
             }
             // A remote directory entry must remain exactly one native filename.

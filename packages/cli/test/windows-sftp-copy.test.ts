@@ -10,6 +10,21 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it.each(["download", "upload"])("refuses an explicit Windows remote alias before opening transport (%s)", async direction => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "sftp-explicit-name-alias-"));
+    try {
+      const ordinary = path.join(root, "ordinary");
+      await writeFile(ordinary, "retain original bytes");
+      const remote = { kind: "remote" as const, path: "/" + path.join(root, "ordinary.").replaceAll("\\", "/"), host: { id: "owned", target: "owned", transport: "ssh" as const } };
+      const local = { kind: "local" as const, path: ordinary };
+      let opened = false;
+      const result = await runNativeSftpCopy({ src: direction === "download" ? remote : local, dst: direction === "download" ? local : remote, dryRun: false }, () => { opened = true; return spawn(server, [], { stdio: "pipe", windowsHide: true }); });
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("Unqualified Windows SFTP path");
+      expect(opened).toBe(false);
+      expect(await readFile(ordinary, "utf8")).toBe("retain original bytes");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("refuses an unqualified Windows server trailing name before copying aliased bytes", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "sftp-windows-name-alias-"));
     try {

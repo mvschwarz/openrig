@@ -5207,6 +5207,12 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Explicit remote paths now receive the same alias check before opening transport,
+including intermediate components and both upload/download directions. Two
+command-level copy tests verify rejection before transport and preservation of
+the ordinary file's original bytes. Updated native recursive check: 28 passed,
+1 host-capability skip; CLI TypeScript no-emit passed.
+
 Local Windows copy I/O now uses namespace-aware absolute paths, retaining literal
 NTFS DOS-reserved names and trailing dots/spaces. An opt-in Linux SFTP subsystem
 to native Windows receiver check copied distinct `con`, `nul`, `aux.txt`,
