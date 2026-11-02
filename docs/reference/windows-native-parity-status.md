@@ -4445,7 +4445,9 @@ Windows failed the first real HTTP SSE delivery case. Its exact fixture port
 and failed wait phase were not captured, so neither a bad-port explanation nor
 a product parser defect is established. These results are not green parity.
 Receipts: workspace-cli-tui-e998266-metadata.json, cli-tui-wsl-e998266-metadata.json,
-their full reports, and live-events-wsl-e998266-scoped.json.
+their full reports. The unchanged-source scoped pass was observed before the
+fixture changes below; its fixed-name report was subsequently overwritten and
+must not be used as an immutable source-bound receipt.
 
 ### Recovery attach guidance quoting (2026-11-03)
 
@@ -4464,3 +4466,21 @@ The witnesses exercise shell parsing into function arguments, not native
 psmux argument parsing or a real session attachment. Cmd guidance, arbitrary
 native quote-bearing session names and the existing stock-pipe-name limitation
 are not qualified by these tests. No existing session, daemon or team changed.
+
+### SSE fixture observations and monotonic deadlines (2026-11-03)
+
+The live-events HTTP fixtures now use the already-qualified bounded high-port
+listener rather than port zero, avoiding fetch's forbidden-port range. This is
+a fixture correction based on the earlier proven low-port problem, not proof
+that either e998266 SSE failure had that cause. Wait deadlines use monotonic
+performance.now instead of wall-clock Date.now without increasing their limits.
+The failed HTTP notification and oversized-frame phases now report their
+specific phase and observed connection/open/event state; HTTP failures also
+include the exact owned endpoint and opening errors. Bind failures reject the
+fixture setup instead of leaving its promise pending.
+
+The complete live-events file passed 17/17 on each platform after these fixture
+changes (live-events-native-observed-final-20261103.json and
+live-events-wsl-observed-final-20261103.json). Product SSE parsing/reconnect
+code was not changed. A future complete run must still establish whether the
+earlier full-run failures recur; these scoped passes do not replace them.
