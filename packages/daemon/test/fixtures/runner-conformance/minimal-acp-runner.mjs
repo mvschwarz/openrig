@@ -174,6 +174,8 @@ async function onPermission(msg) {
   // A person is asked. OpenRig records the seat's permission prompt, so the runner doesn't post it.
   attention = true;
   if (breaks.has("self-prompt")) void post("Notification", "permission_prompt");
+  // --break beat-during-ask beats as soon as the ask waits too, so the check sees it whatever the 10 s timer's phase.
+  if (breaks.has("beat-during-ask") && beatTurn !== null) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
   if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
