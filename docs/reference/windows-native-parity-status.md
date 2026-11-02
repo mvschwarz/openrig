@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Installed spec entry location identity (2026-11-03)
+
+The specs add receipt previously selected the first synchronized entry with
+the same name and path suffix. Owned fixtures reproduced a foreign library
+entry being reported as the newly installed spec, including when the foreign
+location was a hardlink. A separate native fixture reproduced a legitimate
+filesystem case alias producing no entry ID. Matching now requires the actual
+installed root YAML's canonical filesystem path, name and kind; only a unique
+match supplies the ID/entry. Foreign-only or duplicate matches remain null
+rather than choosing an arbitrary registration. Distinct hardlink locations
+remain distinct registrations; no blanket lowercasing merges native paths.
+
+Six new file/directory installation cases failed before the repair and passed
+afterward on Windows. Three complete spec CLI files passed 30/30 there, and
+29 with one native case-alias skip on ordinary-user WSL after the two changed
+files were copied and byte-compared. CLI TypeScript noEmit and whitespace
+checks passed. Fixtures perform real owned file/directory copies and hardlink
+operations with controlled review/sync responses; they do not qualify concurrent
+library replacement, a deployed daemon or case-sensitive NTFS acceptance.
+Earlier whole-directory and installed receipts predate this repair. No existing
+user spec, original team, running instance or public branch was changed.
+
 ## Workflow drive-relative source selection (2026-11-03)
 
 The instantiate/run source selector previously recognized absolute paths,
