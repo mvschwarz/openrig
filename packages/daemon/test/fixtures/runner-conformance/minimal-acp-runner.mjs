@@ -120,6 +120,8 @@ agent.on("exit", async () => {
   if (exiting) return;
   beatTurn = null;
   await withdrawLive("exited");
+  // --break idle-low-sequence-on-exit: an idle Stop for the dead turn, numbered below its accepted prompt but later in time.
+  if (breaks.has("idle-low-sequence-on-exit")) await post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
   await post("Stop", breaks.has("idle-on-exit") ? "end_turn" : `${name}_exited`);
   process.exit(1);
 });
@@ -185,6 +187,8 @@ async function onPermission(msg) {
   // --break beat-during-ask beats as soon as the ask waits too, so the check sees it whatever the 10 s timer's phase.
   if (breaks.has("beat-during-ask") && beatTurn !== null) void post("active", "liveness", { turnId: String(beatTurn), livenessSeconds: 30 });
   if (breaks.has("stop-before-end")) { stoppedEarly = true; void post("Stop", "idle_heartbeat", { livenessSeconds: 30 }); }
+  // --break stop-low-sequence: an idle Stop while the ask waits, numbered below the accepted prompt but later in time.
+  if (breaks.has("stop-low-sequence")) void post("Stop", "idle_heartbeat", { livenessSeconds: 30, sequence: 1 });
   // done: the agent has its answer. open: OpenRig's ask may still be open, so it's withdrawn at the turn's end.
   const ask = { id: msg.id, askId: submitted.body.askId, offered: options.map((o) => o.optionId), done: false, open: true };
   live = ask;

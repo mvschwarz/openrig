@@ -100,6 +100,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["hold-on-cancel", "4b", "stale ask: nothing is held"],
     ["hold-after-withdraw", "4b", "turn end: nothing is held once the ask is withdrawn"],
     ["stop-before-end", "4b", "turn end: nothing is held once the ask is withdrawn"],
+    ["stop-low-sequence", "4b", "pending: no idle Stop while it waits"],
     ["hold-after-withdraw", "4b", "pending: after /abort, the turn's end is reported, holding nothing"],
     ["forget-permitted-ask", "4b", "unreachable read: the ask is still withdrawn at the turn's end"],
     ["cancel-on-revoked", "4b", "activity_grant_revoked: the agent gets its allow_once option"],
@@ -112,6 +113,8 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],
     ["idle-on-exit", "7", "no idle report for the turn it died in"],
+    // An idle Stop numbered below the turn's accepted prompt but later in time: OpenRig orders by time first, so it counts.
+    ["idle-low-sequence-on-exit", "7", "no idle report for the turn it died in"],
     ["no-error-post", "7b", "a failed session/prompt posts Notification/runtime_error"],
     ["ignore-unknown", "8", "the unknown request is answered -32601"],
     ["first-input-trim", "9", "the first prompt is the file's bytes, newlines and spaces included"],

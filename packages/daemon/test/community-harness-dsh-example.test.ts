@@ -55,6 +55,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const text = message.params.prompt.map((part) => part.text).join("");
       const end = (stopReason) => reply({ stopReason });
       if (text.includes("EXIT")) process.exit(0);
+      if (text.includes("TWOASK")) {
+        // Two permission requests at once; the turn ends once both are answered.
+        let left = 2;
+        const answered = () => { left -= 1; if (left === 0) { say("both answered"); end("end_turn"); } };
+        for (const [id, file] of [["perm-5", "e.txt"], ["perm-6", "f.txt"]]) {
+          waiting.set(id, answered);
+          send({ id, method: "session/request_permission", params: { sessionId: session, toolCall: { toolCallId: id, title: "Edit " + file, kind: "edit" },
+            options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
+        }
+        return;
+      }
       if (text.includes("QUIETASK")) {
         // Asks, then works on quietly after the answer until it's cancelled.
         waiting.set("perm-4", (response) => { say("outcome " + JSON.stringify(response.result?.outcome ?? null)); held = () => end("cancelled"); });
@@ -90,7 +101,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late";
+type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late" | "two";
 interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
 const cleanups: Array<() => void> = [];
@@ -116,10 +127,18 @@ async function fakeOpenRig(permissions: Permissions) {
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "revoked") return json(401, { ok: false, code: "activity_grant_revoked", error: "This activity grant was revoked; nothing was asked." });
         if (permissions === "permitted") return json(200, { ok: true, state: "permitted", optionId: "allow", reason: "no one can be asked: no person is registered" });
+        if (permissions === "two") return json(200, { ok: true, askId: `ask-${submits.length}`, created: true });
         return json(200, { ok: true, askId: "ask-1", created: true });
       }
       const withdraw = url.pathname.match(/^\/api\/activity\/permission-requests\/([^/]+)\/withdraw$/);
       if (req.method === "POST" && withdraw) { withdraws.push({ askId: withdraw[1]!, body }); return json(200, { ok: true, state: "withdrawn" }); }
+      // Two asks: the first is answered at once, the second 2 s after it was submitted.
+      const two = url.pathname.match(/^\/api\/activity\/permission-requests\/(ask-[12])$/);
+      if (permissions === "two" && req.method === "GET" && two) {
+        if (two[1] === "ask-1" || Date.now() - submits[1]!.at >= 2_000) return json(200, { ok: true, state: "answered", optionId: "allow" });
+        setTimeout(() => json(200, { ok: true, state: "pending" }), 100);
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/api/activity/permission-requests/ask-1") {
         if (permissions === "answer") return json(200, { ok: true, state: "answered", optionId: "allow" });
         if (permissions === "words") return json(200, { ok: true, state: "permitted", optionId: "allow", said: "Only a.txt, please." });
@@ -443,6 +462,26 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(next).toContain("Edit a.txt");
     expect(prompts()).toHaveLength(2);
     expect(seat.out()).toContain("Only a.txt, please.");
+  });
+
+  // Two asks open at once: the first answer reaches the agent at once, but the seat still waits on a person for the second,
+  // so nothing that clears needs input is posted until that one is answered too; then permission_resolved goes out once.
+  it("keeps the seat needing input while a second ask waits, and resolves once, after the last answer", async () => {
+    const openrig = await fakeOpenRig("two");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("TWOASK two edits");
+    for (const id of ["perm-5", "perm-6"]) {
+      const answer = await waitFor(() => responseTo(seat.log(), id), `the answer to ${id}`, 8_000);
+      expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    }
+    await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's end");
+    expect(openrig.submits).toHaveLength(2);
+    const resolved = openrig.hooks.filter((hook) => hook.body.subtype === "permission_resolved");
+    expect(resolved.map((hook) => hook.body.turnId)).toEqual(["1"]);
+    expect(resolved[0]!.at - openrig.submits[1]!.at).toBeGreaterThanOrEqual(2_000); // after the later ask's answer
+    const between = openrig.hooks.filter((hook) => hook.at > openrig.submits[0]!.at && hook.at < resolved[0]!.at);
+    expect(between.map((hook) => `${String(hook.body.hookEvent)}/${String(hook.body.subtype)}`)).toEqual([]);
   });
 
   it("withdraws a pending ask when the turn is cancelled, and answers the agent cancelled", async () => {
