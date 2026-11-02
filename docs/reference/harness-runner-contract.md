@@ -252,15 +252,15 @@ that runs without asking gains no approval step. Ordinary conversation and `rig 
      `refused` (with `reason`: `said_no` when the person said no and the agent offered no reject option, or
      `no_allow_offered` when it was closed without a choice and the agent offered no allow option), `withdrawn` or
      `stale`.
-   - **`said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they answered in
-     words that were neither a choice nor a plain yes or no (up to 2,000 characters). It never changes the outcome.
+   - **From 0.7.9, `said`,** with `permitted` or `refused` (`no_allow_offered`), is the person's own words, when they
+     answered in words that were neither a choice nor a plain yes or no. It never changes the outcome.
    - **A seat grant reads and withdraws only its own launch's requests.** Once its occupant is replaced, the grant is
      refused (`409 activity_grant_stale`), even during a read's wait.
 3. **Deliver** `{"outcome": {"outcome": "selected", "optionId": "<optionId>"}}` to the agent once, and only while that
    request is still its live one. For `refused`, `withdrawn` or `stale`, answer `cancelled` and hold no attention: no
-   person is still waiting. A refusal of the read itself follows the refusals below. When the read carries `said`, give
-   the agent those words as its next prompt, after the current turn. They're never the answer. A runner that drops them
-   still keeps this contract.
+   person is still waiting. A refusal of the read itself follows the refusals below. From 0.7.9, when the read carries
+   `said`, queue those words for the agent as an ordinary prompt: they reach it after the current turn, behind any prompt
+   already waiting. They're never the answer. A runner that drops them still keeps this contract.
 4. **Withdraw** when the turn is cancelled or ends, or the agent exits:
    `POST <base>/api/activity/permission-requests/<askId>/withdraw` with
    `{"reason": "turn_cancelled" | "turn_ended" | "exited"}`.

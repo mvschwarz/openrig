@@ -35,8 +35,6 @@ const NATIVE_MEANING: Record<string, string> = {
 };
 const WITHDRAW_REASONS = new Set(["turn_cancelled", "turn_ended", "exited"]);
 const MAX_AGENT_TEXT = 500;
-/** The most of a person's own words a read passes back to the runner. */
-const MAX_SAID = 2000;
 const MAX_HANDOFF_HOPS = 10;
 /** The seat setting that opts in to refusing every request; OpenRig's default is to ask a person, or permit. */
 export const PERMISSIONS_DENY = "deny";
@@ -52,11 +50,11 @@ function typedYesOrNo(answer: unknown): "yes" | "no" | null {
   return SAID_YES.has(words) ? "yes" : SAID_NO.has(words) ? "no" : null;
 }
 
-/** A person's typed reply that says more than a plain yes or no: their own words, bounded. */
+/** A person's typed reply that says more than a plain yes or no: their own words, whole. */
 function typedWords(answer: unknown): string | null {
   if (!answer || typeof answer !== "object" || (answer as { kind?: unknown }).kind !== "typed-reply" || typedYesOrNo(answer)) return null;
   const words = String((answer as { text?: unknown }).text ?? "").trim();
-  return words ? clip(words, MAX_SAID) : null;
+  return words || null;
 }
 
 export type PermissionOwnerRefusal = { ok: false; code: "permissions_to_not_a_person" | "permissions_to_unavailable"; message: string };

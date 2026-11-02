@@ -108,7 +108,7 @@ let cancelSent = false;
 const queue = [];
 
 // Permissions. Every request goes to OpenRig's answered path, and the runner delivers the option that comes back: the
-// person's, or OpenRig's permit. A person's own words (`said`) become the agent's next prompt, after the turn. A refusal,
+// person's, or OpenRig's permit. A person's own words (`said`) join the prompt queue, after the turn. A refusal,
 // at submit or while reading, is read by its code: the seat's opt-in refuses and
 // holds attention; one that says the request isn't the current occupant's answers cancelled and holds nothing, as a
 // refused, stale or withdrawn read does; anything else (404, unreachable, a "permits" code or one the contract doesn't
@@ -164,7 +164,7 @@ async function onPermission(msg) {
     if (state === "pending") { if (readWait !== "25") await new Promise((done) => setTimeout(done, 200)); continue; }
     // A listed answer means OpenRig closed its ask; anything else leaves it open, to withdraw at the turn's end.
     if (["answered", "permitted", "refused", "withdrawn", "stale"].includes(state)) ask.open = false;
-    // A person who answered in words: their words go to the agent as its next prompt, after this turn, never as the answer.
+    // A person who answered in words: their words join the prompt queue in order, after this turn, never as the answer.
     const said = state && typeof read.body?.said === "string" && read.body.said.trim() ? read.body.said : null;
     if (said && !breaks.has("drop-words")) queue.push(`The person who answered your permission request (${toolCall?.title}) also wrote:\n\n${said}`);
     if (said && breaks.has("said-as-answer") && !ask.done) {

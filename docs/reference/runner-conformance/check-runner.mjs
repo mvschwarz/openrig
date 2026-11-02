@@ -553,18 +553,18 @@ const cases = {
   },
 
   // Section 7: a person who answers in their own words gets them passed on. OpenRig carries them as the read's `said`, and
-  // a runner gives them to the agent as its next prompt, after the turn, never as the answer. A runner that drops them
-  // still keeps the contract, so the result is advisory.
+  // a runner queues them for the agent like any other prompt, after the turn, never as the answer. A runner that drops
+  // them still keeps the contract, so the result is advisory.
   async "4c"() {
-    const r = result("4c", "The person's words: a read's said becomes the agent's next prompt (advisory)", { proposed: true });
+    const r = result("4c", "The person's words: a read's said is queued to the agent as a prompt (advisory)", { proposed: true });
     const said = "Only the notes file, please. Leave the rest alone.";
     const h = await launch("4c", { scenario: { turns: [{ permission: true }, {}] },
       asks: { answer: { afterMs: 300, state: "permitted", optionId: "allow-once", said } } });
     if (!r.check("the runner opens its conversation", await ready(h), "no launch record")) return r;
     h.paste(message(h, "edit the notes"));
     if (!r.check("the first turn ends", await waitFor(() => h.hooks("Stop", "end_turn")[0], scale(6000)), "no Stop/end_turn")) return r;
-    const next = await waitFor(() => h.prompts()[1], scale(4000));
-    r.check("the person's words are the agent's next prompt", next?.includes(said), `prompts: ${JSON.stringify(h.prompts())}`);
+    const later = await waitFor(() => h.prompts().slice(1).find((prompt) => prompt?.includes(said)), scale(4000));
+    r.check("the person's words are queued to the agent as a prompt, after the turn", later, `prompts: ${JSON.stringify(h.prompts())}`);
     return r;
   },
 

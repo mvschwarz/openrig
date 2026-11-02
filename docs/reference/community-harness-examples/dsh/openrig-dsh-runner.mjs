@@ -348,8 +348,8 @@ async function main() {
       say(`[permission] permitted: ${why} (${allow.optionId})`);
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
     };
-    // A person who answered in their own words: OpenRig passes them back as `said`. They go to dsh as its next prompt,
-    // after this turn, and are never the answer.
+    // A person who answered in their own words: OpenRig passes them back as `said`. They join the prompt queue like any
+    // message, so dsh gets them after this turn and after any message already waiting. They're never the answer.
     const passOn = (said) => {
       if (typeof said !== "string" || !said.trim()) return;
       say(`[permission] the person also wrote: ${firstLine(said)}`);
