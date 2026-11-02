@@ -33,8 +33,9 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     const { code, report } = await check(["--resume", "--first-input"]);
     expect(failing(report)).toEqual([]);
     // 3b, the optional working beat, skips: this double sends no beats unless it's run with --beat.
-    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 1 });
+    expect(report.summary).toEqual({ pass: 12, fail: 0, skip: 1, advisory: 2 });
     expect(report.results.find((r) => r.id === "3b")).toMatchObject({ status: "skip", reason: expect.stringContaining("optional") });
+    expect(report.results.find((r) => r.id === "4c")).toMatchObject({ status: "advisory", met: true });
     expect(report.results.find((r) => r.id === "7c")).toMatchObject({ status: "advisory", met: true });
     expect(code).toBe(0);
   }, 120_000);
@@ -47,6 +48,18 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(shutdown).toMatchObject({ status: "advisory", met: false });
     expect(shutdown.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("closing the pane ends the agent process"));
     expect(report.results.find((r) => r.id === "7b")!.status).toBe("pass");
+    expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
+    expect(code).toBe(0);
+  }, 90_000);
+
+  // Section 7 lets a runner drop a person's words (OpenRig's `said`) and still keep the contract, so passing them on is
+  // reported on its own, like the shutdown duty.
+  it("reports a runner that drops the person's words as an advisory result that doesn't fail the run", async () => {
+    const { code, report } = await check(["--cases", "4b,4c"], " --break drop-words");
+    const words = report.results.find((r) => r.id === "4c")!;
+    expect(words).toMatchObject({ status: "advisory", met: false });
+    expect(words.checks.filter((c) => !c.ok).map((c) => c.name)).toContainEqual(expect.stringContaining("the person's words are queued to the agent as a prompt"));
+    expect(report.results.find((r) => r.id === "4b")!.status).toBe("pass");
     expect(report.summary).toMatchObject({ fail: 0, advisory: 1 });
     expect(code).toBe(0);
   }, 90_000);
@@ -94,6 +107,7 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     ["no-withdraw", "4b", "pending: /abort withdraws the ask with turn_cancelled"],
     ["late-deliver", "4b", "pending: an answer after the withdraw isn't delivered"],
     ["paste-answers", "4b", "pending: a pasted message isn't an answer"],
+    ["said-as-answer", "4b", "permitted at read, with the person's words: the agent gets its allow_once option"],
     ["wrong-generation", "5", "generation is OPENRIG_OCCUPANT_GENERATION on every post"],
     ["new-on-resume", "6", "other failure: no new conversation starts"],
     ["missing-on-any-error", "6", "other failure: not reported missing or resumed"],

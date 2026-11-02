@@ -84,7 +84,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "saidno" | "unknown" | "readfail" | "pending" | "lost";
+type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost";
 interface Hook { auth: string | undefined; body: Record<string, unknown> }
 
 const cleanups: Array<() => void> = [];
@@ -116,6 +116,7 @@ async function fakeOpenRig(permissions: Permissions) {
       if (req.method === "POST" && withdraw) { withdraws.push({ askId: withdraw[1]!, body }); return json(200, { ok: true, state: "withdrawn" }); }
       if (req.method === "GET" && url.pathname === "/api/activity/permission-requests/ask-1") {
         if (permissions === "answer") return json(200, { ok: true, state: "answered", optionId: "allow" });
+        if (permissions === "words") return json(200, { ok: true, state: "permitted", optionId: "allow", said: "Only a.txt, please." });
         if (permissions === "saidno") return json(200, { ok: true, state: "refused", reason: "said_no" });
         if (permissions === "unknown") return json(200, { ok: true, state: "deferred" });
         if (permissions === "readfail") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
@@ -365,6 +366,22 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
     expect(openrig.withdraws).toEqual([]);
+  });
+
+  it("gives the agent its option, then queues the person's own words as a prompt, after the turn", async () => {
+    const openrig = await fakeOpenRig("words");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("PERMIT an edit");
+    const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
+    expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    const prompts = () => requests(seat.log(), "session/prompt")
+      .map((entry) => (entry.params as { prompt: Array<{ text: string }> }).prompt.map((part) => part.text).join(""));
+    const next = await waitFor(() => prompts()[1], "the person's words as a queued prompt");
+    expect(next).toContain("Only a.txt, please.");
+    expect(next).toContain("Edit a.txt");
+    expect(prompts()).toHaveLength(2);
+    expect(seat.out()).toContain("Only a.txt, please.");
   });
 
   it("withdraws a pending ask when the turn is cancelled, and answers the agent cancelled", async () => {

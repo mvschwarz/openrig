@@ -528,13 +528,17 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
 
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
-export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean } = {}): Promise<NativeProcessRow[]> {
+export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean; frozenExecutable?: string } = {}): Promise<NativeProcessRow[]> {
   try {
     // Copies: the table is shared with concurrent readers, and executable paths are added below.
     const rows: NativeProcessRow[] = (await runAsyncSite("codex.runtime.list_processes", readProcessTable)).map((row) => ({ ...row }));
     // `claudeLaunchPaths`: the caller is proving a launch through a `#!` script, which needs the OS path of the
-    // foreground path-named Claude too. Every other listing skips that read (on macOS it starts a helper process).
-    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (options.claudeLaunchPaths === true && mayBeClaudeAfterScript(row)));
+    // foreground path-named Claude too. `frozenExecutable`: the caller is proving a launch that froze that file (the
+    // installer's symlink resolved to its versioned file), which needs the path only of a path-named Claude whose
+    // argv[0] isn't already the file; an exact launch is proved without it, and a helper timeout can't change its
+    // fingerprint. Every other listing skips that read (on macOS it starts a helper process).
+    const candidates = rows.filter(row => needsClaudeExecutablePath(row) || (mayBeClaudeAfterScript(row) && (options.claudeLaunchPaths === true
+      || (!!options.frozenExecutable && tokens(row.command)[0] !== options.frozenExecutable))));
     if (candidates.length > 0) {
       const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
       for (const row of candidates) row.executablePath = paths.get(row.pid);
@@ -570,7 +574,7 @@ function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation |
   return !!rotation && row.pid === rotation.process.pid && !!row.startedAt && row.startedAt === rotation.process.startedAt;
 }
 
-/** `afterScript`: found by the script-launch rule, not the exact-path match; its first proof must be pinned. */
+/** `afterScript`: found by the script-launch or symlink rule, not the exact-path match; its first proof must be pinned. */
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string; afterScript?: true };
 export type CodexProcessObservation = NativeProcessObservation;
 
@@ -581,9 +585,22 @@ function runsFrozenScript(row: NativeProcessRow, selectedExecutable: string): bo
   return first === selectedExecutable || (first?.startsWith("-") === true && second === selectedExecutable);
 }
 
+/** A process whose argv[0] is an absolute path named `claude` and whose OS executable path is exactly the frozen file. */
+function runsFrozenFile(row: NativeProcessRow, selectedExecutable: string): boolean {
+  const argv0 = tokens(row.command)[0] ?? "";
+  const path = row.executablePath;
+  return !!path && path === selectedExecutable && path.startsWith("/") && !path.split("/").some(part => part === "." || part === "..")
+    && argv0.startsWith("/") && executableName(argv0) === "claude";
+}
+
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string, scriptLaunch?: boolean): NativeProcessObservation[] {
   const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable));
-  if (exact.length > 0 || runtime !== "claude-code" || !selectedExecutable || scriptLaunch !== true) return exact;
+  if (exact.length > 0 || runtime !== "claude-code" || !selectedExecutable) return exact;
+  // #2341: the native installer's `claude` is a symlink to `versions/<ver>`, and the launch froze its realpath. A Claude
+  // spelling argv[0] through the link is that launch when the OS says it runs exactly the frozen file.
+  const linked = candidatesMatching(rows, panePid, runtime, row => runsFrozenFile(row, selectedExecutable));
+  if (linked.length > 0) return linked.map(candidate => ({ ...candidate, afterScript: true as const }));
+  if (scriptLaunch !== true) return exact;
   const named = candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript);
   if (named.length > 0) return named.map(candidate => ({ ...candidate, afterScript: true as const }));
   // #2341: a wrapper that starts Claude without `exec` keeps running the frozen script as the foreground parent, and
@@ -738,7 +755,7 @@ async function observeNativePaneProcess(input: {
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
-    const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true })))();
+    const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch, input.requireArgv);
   } catch { return null; }
@@ -850,7 +867,7 @@ export async function observeClaudePaneRuntime(input: Omit<Parameters<typeof obs
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
-    const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true })))();
+    const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true, frozenExecutable: input.selectedExecutable })))();
     const candidates = nativeProcessCandidates(rows, pid, "claude-code", input.selectedExecutable, input.scriptLaunch);
     return candidates.length === 1 ? candidates[0]! : null;
   } catch { return null; }

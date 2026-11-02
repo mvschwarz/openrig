@@ -350,6 +350,13 @@ async function main() {
       say(`[permission] permitted: ${why} (${allow.optionId})`);
       return { outcome: { outcome: "selected", optionId: allow.optionId } };
     };
+    // A person who answered in their own words: OpenRig passes them back as `said`. They join the prompt queue like any
+    // message, so dsh gets them after this turn and after any message already waiting. They're never the answer.
+    const passOn = (said) => {
+      if (typeof said !== "string" || !said.trim()) return;
+      say(`[permission] the person also wrote: ${firstLine(said)}`);
+      submit(`The person who answered your permission request (${toolCall.title}) also wrote:\n\n${said}`);
+    };
     if (!askId) {
       if (submitted.body?.code === "denied_by_seat") return refuse("the seat's operator chose to refuse its permission requests");
       if (NOT_LIVE.includes(submitted.body?.code)) {
@@ -390,6 +397,7 @@ async function main() {
             state.holding = false;
             say(`[permission] ${answer.state}: ${answer.optionId}`);
             resolve({ outcome: { outcome: "selected", optionId: answer.optionId } });
+            passOn(answer.said);
           } else if (live() && (read.status === 200 ? !ENDED.includes(answer.state) : !NOT_LIVE.includes(answer.code))) {
             // OpenRig stopped answering, or answered in a way the contract doesn't list: nobody can be asked. The ask stays
             // tracked, so the turn's end still withdraws it.
@@ -399,6 +407,7 @@ async function main() {
             state.holding = false; // a person said no, or the request is over: no one is still waiting
             say(`[permission] not answered (${answer.reason ?? answer.state ?? answer.code ?? read.status}); answered cancelled`);
             resolve(CANCELLED);
+            passOn(answer.said);
           }
         }
       })();

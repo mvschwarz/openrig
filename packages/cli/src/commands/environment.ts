@@ -110,7 +110,7 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
       .requiredOption("--seat <address>").option("--node <id>", "Existing node ID; otherwise claimed by the exact named seat on its first launch")
       .requiredOption("--gateway <ref>").requiredOption("--workspace <ref>").requiredOption("--name <name>")
       .requiredOption("--image <digest>").requiredOption("--provider <ref>").requiredOption("--policy <path>")
-      .requiredOption("--guest-base-url <origin>", "Guest-reachable daemon origin for the single P6 activity grant")
+      .requiredOption("--guest-base-url <origin>", "Guest-reachable guest-only activity listener origin (not the main daemon API)")
       .option("--operation <id>", "Stable effect identity (default verb plus binding ID)").option("--json");
     if (verb === "attach") sub.requiredOption("--resource-id <id>", "Immutable live resource ID").option("--fingerprint <value>", "Expected host-key fingerprint");
     sub.action(action(async (binding: string, opts: Record<string, string>) => {
@@ -160,10 +160,11 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
     .option("--json").description("Select finite completion for one task, generation and required verified export; persistent defaults stay unchanged")
     .action(action(async (id: string, opts: { request: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/completion`, JSON.parse(readFileSync(opts.request, "utf8")))))));
   cmd.command("effect").argument("<binding>").requiredOption("--effect <name>", "close-viewer, stop-native, stop-compute or delete-owned")
-    .requiredOption("--generation <id>", "Selected execution generation").requiredOption("--operation <id>", "Stable effect identity; retries reconcile without another provider mutation")
+    .option("--generation <id>", "Selected execution generation; omit only for delete-owned before any generation exists")
+    .option("--resource-id <id>", "Exact immutable compute ID; required for delete-owned without a generation").requiredOption("--operation <id>", "Stable effect identity; retries reconcile without another provider mutation")
     .option("--engine-socket <path>", "Owned local rootless Podman socket, required to capture dependent identities before delete-owned").option("--json")
     .description("Execute one selected effect and return its separate observed outcome; attached native/storage/compute are preserved")
-    .action(action(async (id: string, opts: { effect: string; generation: string; operation: string; engineSocket?: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/effect`, { effect: opts.effect, generation: opts.generation, operationId: opts.operation, engineSocket: opts.engineSocket }, { timeoutMs: 120_000 })))));
-  cmd.addHelpText("after", "\nStart with rig environment setup --help. Create/attach are explicit effects; a 202 is unconfirmed. The first native start remains rig up with the installed openshell-claude preset. Checkpoint before stop, select effects explicitly, and recreate compute before exact normal rig restore. No unknown effect permits fresh-native fallback.\n");
+    .action(action(async (id: string, opts: { effect: string; generation?: string; resourceId?: string; operation: string; engineSocket?: string }) => report(checked(await (await client()).post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/effect`, { effect: opts.effect, generation: opts.generation ?? null, ...(opts.resourceId ? { resourceId: opts.resourceId } : {}), operationId: opts.operation, engineSocket: opts.engineSocket }, { timeoutMs: 120_000 })))));
+  cmd.addHelpText("after", "\nStart with rig environment setup --help. Run from your managed seat, or set OPENRIG_SESSION_NAME to the acting member@rig in a plain shell for existing transport attribution (not authentication). --guest-base-url names the separate guest-only activity listener, reachable from the guest; never the main API. Create/attach are explicit effects; a 202 is unconfirmed. The first native start remains rig up with the installed openshell-claude preset. Checkpoint before stop, select effects explicitly, and recreate compute before exact normal rig restore. No unknown effect permits fresh-native fallback.\n");
   return cmd;
 }

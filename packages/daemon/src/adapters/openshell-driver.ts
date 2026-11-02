@@ -106,11 +106,12 @@ export class OpenShellDriver implements EnvironmentDriver {
     if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected stop is no longer eligible; no command was dispatched");
     await this.command([...this.prefix(binding.placement), "stop", binding.placement.name]);
   }
-  async deleteEnvironment(binding: EnvironmentBinding, _operationId: string): Promise<void> {
+  async deleteEnvironment(binding: EnvironmentBinding, _operationId: string, beforeDispatch?: () => boolean): Promise<void> {
     const actual = await this.inspect(binding);
     if (!binding.resource || actual.id !== binding.resource.id || actual.name !== binding.resource.name || actual.workspace !== binding.resource.workspace
       || binding.resource.fingerprint && actual.fingerprint !== binding.resource.fingerprint)
       throw new EnvironmentError("environment_identity_changed", "The selected compute changed before deletion");
+    if (beforeDispatch && !beforeDispatch()) throw new EnvironmentError("environment_selection_changed", "The selected delete is no longer eligible; no command was dispatched");
     await this.command([...this.prefix(binding.placement), "delete", binding.placement.name]);
   }
   connectArgs(binding: EnvironmentBinding): string[] { return [...this.prefix(binding.placement), "connect", binding.placement.name]; }

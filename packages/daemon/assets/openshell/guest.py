@@ -55,9 +55,11 @@ def safe(root, raw):
 def regular(root, raw, limit=LIMIT):
     path = safe(root, raw)
     parts = path.relative_to(root).parts
-    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    directory = None
     try:
-        for part in (*Path(root).parts[1:], *parts[:-1]):
+        # Ancestors need traversal, not a directory-read grant. Anchor reads at the selected root.
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for part in parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
@@ -79,7 +81,8 @@ def regular(root, raw, limit=LIMIT):
     except OSError:
         raise Refused("environment_file_invalid")
     finally:
-        os.close(directory)
+        if directory is not None:
+            os.close(directory)
 
 
 def atomic(root, raw, data):
