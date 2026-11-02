@@ -76,8 +76,9 @@ describe("a Slack reply from someone other than the person a question is parked 
     expect(repo.listTransitions(parked.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved")).toHaveLength(1);
   });
 
-  it("an interrupted park resumes with the committed answer, as its author's, and stores its typed words", async () => {
-    // An ask to Ana with a question, parked by its asker on Ana and posted to her.
+  /** An ask to Ana with a question, parked by its asker on Ana and posted to her; Ana's typed answer is committed under
+   *  this park's answer identity, then execution stops before the resume. */
+  const interruptedPark = async () => {
     const asked = await repo.create({ sourceSession: "asker@r", destinationSession: ANA, body: "Which day?", summary: "Which day?",
       humanIntent: "decision", evidenceRef: "/fixture/day", nudge: false,
       humanQuestions: [{ id: "day", question: "Which day?", options: [{ id: "mon", label: "Monday" }, { id: "tue", label: "Tuesday" }] }] });
@@ -85,15 +86,33 @@ describe("a Slack reply from someone other than the person a question is parked 
     const episode = repo.listTransitions(asked.qitemId).filter((t) => t.ownerNotificationKind === "human-required").at(-1)!;
     repo.update({ qitemId: asked.qitemId, actorSession: "openrig-slack",
       transitionNote: `slack-owner-notification-posted notification_key=${asked.qitemId}:${episode.transitionId} kind=human-required thread_ts=1.1 message_ts=1.5` });
-    // Ana's typed answer is committed under this park's answer identity, then execution stops before the resume.
     await repo.createHumanAnswer({ sourceSession: ANA, destinationSession: "asker@r", body: "Wednesday works", summary: "Wednesday works",
       inboundReplyTo: asked.qitemId, episodeKey: repo.currentHumanRequiredEpisode(asked.qitemId)!.key, nudge: false } as never);
+    return asked;
+  };
+  const resolvedBy = (qitemId: string) => repo.listTransitions(qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved").map((t) => t.actorSession);
+
+  it("an interrupted park resumes with the committed answer, as its author's, and stores its typed words", async () => {
+    const asked = await interruptedPark();
     expect(await slackReply(asked.qitemId, MIKE)).toBe("not-applicable");
     const resumed = repo.getById(asked.qitemId)!;
     expect(resumed).toMatchObject({ state: "in-progress", blockedOn: null });
     expect(resumed.humanAnswers?.day).toMatchObject({ kind: "typed-reply", text: "Wednesday works" });
-    expect(repo.listTransitions(asked.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved").map((t) => t.actorSession))
-      .toEqual([ANA]);
+    expect(resolvedBy(asked.qitemId)).toEqual([ANA]);
+  });
+
+  it("a click on an interrupted park records nothing, and the park resumes with the committed answer, as its author's", async () => {
+    const asked = await interruptedPark();
+    // Mike clicks a valid option after the question posted: the click path records it, then resumes through the resolver.
+    expect(repo.recordHumanAnswer({ qitemId: asked.qitemId, actorSession: MIKE, questionId: "day", optionId: "mon", clickedTs: "2.2" }))
+      .toMatchObject({ status: "not-applicable", answeredBy: ANA });
+    await makeHumanReplyResolver(repo, contract)({ qitemId: asked.qitemId, actorSession: MIKE, decision: "", messageTs: "2.2" });
+    const resumed = repo.getById(asked.qitemId)!;
+    expect(resumed).toMatchObject({ state: "in-progress", blockedOn: null });
+    expect(resumed.humanAnswers?.day).toMatchObject({ kind: "typed-reply", text: "Wednesday works" });
+    expect(resolvedBy(asked.qitemId)).toEqual([ANA]);
+    expect(repo.list({ limit: 100 }).filter((item) => item.replyTo === asked.qitemId && (item.tags ?? []).includes("human-answer"))
+      .map((item) => item.sourceSession)).toEqual([ANA]);
   });
 
   it("the person it's parked on still resumes it from Slack", async () => {
