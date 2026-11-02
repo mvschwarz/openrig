@@ -8,6 +8,8 @@ import {TmuxAdapter,defaultTmuxFileOps} from "../src/adapters/tmux.js";
 import {renderWindowsLaunchArgv} from "../src/adapters/windows-launch.js";
 import {verifyWindowsManagedRunner} from "../src/domain/windows-managed-runner.js";
 import {readProcessTable} from "../src/domain/process-table.js";
+import {verifyPaneIdleShell} from "../src/domain/native-process-lineage.js";
+import {verifyWindowsPaneReceiver} from "../src/domain/windows-pane-receiver.js";
 
 const bash="C:/Program Files/Git/usr/bin/bash.exe";
 it.runIf(process.platform==="win32" && fs.existsSync(bash) && !!process.env.OPENRIG_TEST_PSMUX)("delivers a private managed launch through real Git Bash and stock psmux with exact runner attribution",async()=>{
@@ -25,10 +27,15 @@ it.runIf(process.platform==="win32" && fs.existsSync(bash) && !!process.env.OPEN
    await invoke(["tmux","set-option","-g","default-shell",`"${bash}" --noprofile --norc -i`]);
    expect(await adapter.createSession("owned-bash",root)).toEqual({ok:true});
    await expect.poll(()=>adapter.getPaneCommand("owned-bash"),{timeout:6000}).toMatch(/bash(?:\.exe)?$/i);
+   await expect.poll(()=>verifyPaneIdleShell({target:"owned-bash",tmux:adapter}),{timeout:6000}).toBe(true);
+   const receiverInput={target:"owned-bash",getPanePid:(target:string)=>adapter.getPanePid(target)};
+   expect(await verifyWindowsPaneReceiver(receiverInput)).toBe(false);
    const args=[entry,"--session-name","owned-bash","--state-root",state,"--cwd",root,"--launch-id",launch];
    expect(await adapter.sendShellCommand("owned-bash",renderWindowsLaunchArgv([process.execPath,...args]))).toEqual({ok:true});
    await expect.poll(()=>fs.existsSync(ready),{timeout:7000}).toBe(true);
    const receipt=JSON.parse(fs.readFileSync(ready,"utf8"));pid=receipt.pid;expect(receipt.args).toEqual(args.slice(1));
+   expect(await verifyPaneIdleShell({target:"owned-bash",tmux:adapter})).toBe(false);
+   expect(await verifyWindowsPaneReceiver(receiverInput)).toBe(true);
    const input={runtime:"pi" as const,sessionName:"owned-bash",entryPath:entry,cwd:root,stateRoot:state,launchId:launch,
      getPanePid:()=>adapter.getPanePid("owned-bash"),listProcesses:readProcessTable};
    const verified=await verifyWindowsManagedRunner(input);

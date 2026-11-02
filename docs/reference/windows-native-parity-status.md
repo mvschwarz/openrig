@@ -27,6 +27,22 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native Bash idle and receiver distinction (2026-11-02)
+
+The canonical scoped bootstrap now exposes only its unique, creation-time-bound
+shell child to idle-shell verification. Bare native Bash/sh/dash/zsh/ksh argv
+are accepted only with the bounded interactive/login flags; command/script argv,
+ambiguous children and extra console receivers remain refused. Known shell leaves
+(including fish/nu/csh/tcsh) no longer count as community provider receivers;
+this classification alone does not qualify their command-delivery behavior.
+
+Real stock psmux with Git Bash now proves idle=true/receiver=false before launch
+and idle=false/receiver=true after its owned Node runner starts, alongside exact
+managed-runner attribution and wrong-launch refusal. Eight real Bash/cmd/
+PowerShell tests passed; 275 lineage, scoped-parent and receiver cases passed,
+and daemon TypeScript checking passed. These scoped receipts do not close the
+remaining platform requirements below.
+
 These remain required by the parity goal. Later scoped passes do not close an
 entire row. This is a current work list, not proof that discovery is exhaustive.
 

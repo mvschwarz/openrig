@@ -11,7 +11,7 @@ import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 import { readWindowsConsoleProcesses } from "./windows-process-facts.js";
 import { recognizedWindowsClaudeScript } from "./windows-provider-command.js";
 import { sameSessionFile as sameNativeFile } from "../adapters/same-session-file.js";
-import { windowsManagedRunnerParent } from "./windows-cmd-bridge.js";
+import { windowsScopedShellPid } from "./windows-cmd-bridge.js";
 
 
 export interface NativeProcessRow {
@@ -1027,7 +1027,8 @@ async function observedIdleShellRoot(rows: NativeProcessRow[], pid: number,
   if (root?.platform !== "win32") return idleShellRoot(rows, pid);
   if (new Set(rows.map(row => row.pid)).size !== rows.length || !root.startedAt || !root.executablePath) return null;
   const allowed = [pid];
-  const scopedShell = windowsManagedRunnerParent(rows, pid);
+  const scopedShell = windowsScopedShellPid(rows, pid);
+  if(scopedShell===null)return null;
   if (scopedShell !== null && scopedShell !== pid) {
     root = rows.find(row => row.pid === scopedShell);
     if (!root?.startedAt || !root.executablePath) return null;
@@ -1040,6 +1041,8 @@ async function observedIdleShellRoot(rows: NativeProcessRow[], pid: number,
     if (!argv.slice(1).every(arg => /^-(?:NoLogo|NoProfile|NoExit|Sta|Mta)$/i.test(arg))) return null;
   } else if (name === "cmd") {
     if (!argv.slice(1).every(arg => /^\/(?:[dqak]|[vef]:(?:on|off))$/i.test(arg))) return null;
+  } else if (["bash","sh","dash","zsh","ksh"].includes(name)) {
+    if (!argv.slice(1).every(arg => /^(?:--noprofile|--norc|--login|-[ilf]+)$/.test(arg))) return null;
   } else return null;
   const members = await consoleProcesses(pid);
   return members?.length === allowed.length && new Set(members).size === members.length

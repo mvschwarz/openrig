@@ -23,3 +23,14 @@ it.each(["ready", "idle", "unknown-console", "unlisted-receiver", "unrelated", "
       return kind === "unknown-console" ? null : kind === "changing" && calls === 2 ? [10] : members;
     } })).toBe(kind === "ready");
 });
+
+it.each(["bash", "sh", "dash", "zsh", "ksh", "fish", "nu", "tcsh", "csh"])("does not count an idle native %s shell as a community receiver", async name => {
+  const shell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  const child = `C:\\shells\\${name}.exe`;
+  const rows: NativeProcessRow[] = [
+    { platform: "win32", pid: 10, ppid: 1, executableName: "powershell.exe", executablePath: shell, command: `"${shell}" -NoProfile`, startedAt: "2026-10-30T00:00:00Z" },
+    { platform: "win32", pid: 11, ppid: 10, executableName: `${name}.exe`, executablePath: child, command: `"${child}"`, startedAt: "2026-10-30T00:00:01Z" },
+  ];
+  expect(await verifyWindowsPaneReceiver({ target: "owned", getPanePid: async () => 10,
+    listProcesses: () => rows, consoleProcesses: async () => [10, 11] })).toBe(false);
+});

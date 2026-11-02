@@ -18,7 +18,7 @@ export const SHELL_FOREGROUND_BASENAMES: ReadonlySet<string> = new Set([
  * host only; callers must inspect native lineage, not infer an idle shell. */
 export function isWindowsShellHost(command: string): boolean {
   const name = nodePath.win32.basename(command.trim()).toLowerCase().replace(/\.exe$/, "");
-  return name === "powershell" || name === "pwsh" || name === "cmd";
+  return name === "powershell" || name === "pwsh" || name === "cmd" || SHELL_FOREGROUND_BASENAMES.has(name);
 }
 
 /**

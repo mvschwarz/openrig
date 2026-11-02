@@ -55,6 +55,23 @@ function isScopedBootstrap(row: ProcessRow): boolean {
     && words[4] === Buffer.from(source, "utf16le").toString("base64");
 }
 
+function scopedShellChild(rows: ProcessRow[], pane: ProcessRow): ProcessRow | null {
+  const children=rows.filter(row=>row.ppid===pane.pid),start=Date.parse(pane.startedAt??"");
+  if (!Number.isFinite(start) || children.length!==1 || !Number.isFinite(Date.parse(children[0]!.startedAt??""))
+    || Date.parse(children[0]!.startedAt!)<start) return null;
+  const shell=children[0]!;
+  return ["powershell","pwsh","cmd","bash","sh","dash","zsh","ksh"].some(name=>executable(shell,name)) ? shell : null;
+}
+
+/** Only the canonical bootstrap is transparent to idle-shell observation.
+ * A running bridge/fork is not an idle-shell transition. */
+export function windowsScopedShellPid(rows: ProcessRow[], panePid: number): number | null {
+  if(new Set(rows.map(row=>row.pid)).size!==rows.length)return null;
+  const pane=rows.find(row=>row.pid===panePid);
+  if(!pane)return null;
+  return isScopedBootstrap(pane) ? scopedShellChild(rows,pane)?.pid ?? null : panePid;
+}
+
 /** A direct PowerShell parent, or one managed loader under a supported shell. */
 export function windowsManagedRunnerParent(rows: ProcessRow[], panePid: number): number | null {
   if (new Set(rows.map(row => row.pid)).size !== rows.length) return null;
@@ -65,11 +82,8 @@ function managedRunnerParent(rows: ProcessRow[], panePid: number, posixForks: nu
   const pane = rows.find(row => row.pid === panePid);
   if (!pane) return null;
   if (isScopedBootstrap(pane)) {
-    const children = rows.filter(row => row.ppid === panePid);
-    const start = Date.parse(pane.startedAt ?? "");
-    if (!Number.isFinite(start) || children.length !== 1 || !Number.isFinite(Date.parse(children[0]!.startedAt ?? ""))
-      || Date.parse(children[0]!.startedAt!) < start) return null;
-    const shell = children[0]!;
+    const shell = scopedShellChild(rows,pane);
+    if(!shell)return null;
     if (executable(shell, "powershell") || executable(shell, "pwsh")) return shell.pid;
     if (["cmd","bash","sh","dash","zsh","ksh"].some(name=>executable(shell,name))) return managedRunnerParent(rows, shell.pid,posixForks);
     return null;
