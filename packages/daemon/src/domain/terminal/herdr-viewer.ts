@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { getDefaultOpenRigPath } from "../../openrig-compat.js";
 import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
+import { readPlatformEnv } from "../platform-env.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -30,15 +31,27 @@ const runFile = promisify(execFile);
 export function createHerdrViewerRun(endpoint: { socketPath: string }, sourceEnv: NodeJS.ProcessEnv = process.env): HerdrViewerRun {
   // Herdr's explicit --session wins over the socket override. Select by the
   // already resolved socket alone, including paths outside the config tree.
-  const env: NodeJS.ProcessEnv = { ...sourceEnv, HERDR_SOCKET_PATH: endpoint.socketPath };
+  const env: NodeJS.ProcessEnv = { ...Object.fromEntries(Object.entries(sourceEnv).filter(([key]) => process.platform !== "win32" || !["HERDR_SESSION", "HERDR_SOCKET_PATH"].includes(key.toUpperCase()))), HERDR_SOCKET_PATH: endpoint.socketPath };
   delete env.HERDR_SESSION;
   return async args => {
-    const binary = resolveOnPath("herdr", env.PATH);
+    const binary = resolveHerdrBinary(env);
     if (!binary) throw new Error("Herdr CLI is unavailable.");
     const { stdout } = await runFile(binary, args,
       { env, encoding: "utf8", timeout: 5000, maxBuffer: 2 * 1024 * 1024 });
     return stdout;
   };
+}
+
+/** Native Herdr is an executable, not a batch shim or a POSIX PATH lookup. */
+export function resolveHerdrBinary(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
+  const search = readPlatformEnv(env, "PATH", platform);
+  if (platform !== "win32") return resolveOnPath("herdr", search);
+  for (const directory of (search ?? "").split(";")) {
+    if (!path.win32.isAbsolute(directory)) return null;
+    const file = path.win32.join(directory, "herdr.exe");
+    try { if (statSync(file).isFile()) return file; } catch { /* next PATH entry */ }
+  }
+  return null;
 }
 async function inspectSeat(argv: string[]): Promise<{ sessionId: string; nodeId: string }> {
   const call = async (args: string[]) => (await runFile(argv[5]!, [...argv.slice(6), ...args], { encoding: "utf8", timeout: 3000 })).stdout.trim();

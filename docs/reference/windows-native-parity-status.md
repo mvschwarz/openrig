@@ -2528,3 +2528,45 @@ synthetic receiver upload did not complete: SSH to the existing host timed out
 before authentication (exit 255). Therefore no real remote command or remote
 rig-version pass is claimed for this change. The failed upload did not start a
 daemon or team. This is a separate dependency from the user's deferred Pi login.
+
+### Native Herdr endpoint foundation, qualification still open (2026-11-02)
+
+The earlier blanket assumption that Herdr is unavailable on Windows was wrong.
+The official v0.9.5 release contains a Windows archive; its SHA-256 matched the
+release asset digest. The task-local portable copy retained its ConPTY runtime
+and was not installed, put on PATH, or used to start an OpenRig team. A real
+owned headless instance reports version 0.9.5/protocol 22. See the official
+[Windows support](https://herdr.dev/tui/docs/windows-beta/) and
+[v0.9.5 release](https://github.com/herdrdev/herdr/releases/tag/v0.9.5).
+
+OpenRig now maps the Windows socket marker path to Herdr's named-pipe endpoint,
+instead of attempting a Unix socket connection to that file. Native config
+resolution uses Roaming AppData unless XDG_CONFIG_HOME is explicitly selected;
+case-insensitive overrides and session markers are handled without changing
+the caller environment. The CLI runner finds herdr.exe through a native PATH
+and removes inherited session/socket aliases before pinning the exact endpoint.
+RPC completion waits for the client socket/pipe close event.
+
+The real native witness completes protocol checks, independent default/named
+endpoint checks, explicit-socket CLI routing despite mixed-case stale markers,
+and named-server stop while the default endpoint stays alive. Both owned
+servers report normal exits. These do not yet qualify the viewer/follow engine:
+the Linux-only process/attach verification, explanation strip, private journal
+and desktop launch paths still require a native implementation and acceptance.
+
+Validation remains failing because the witness's final directory removal
+intermittently reports EPERM. One two-file run passed 8/8 including cleanup;
+the subsequent four-file receipt has 18 passes, one cleanup failure and three
+POSIX runner skips. Waiting for child close, canonicalizing the path, and
+waiting for RPC close did not establish a stable cleanup result. No deletion
+retry count was increased. Directory/link/ACL inspection and a read-only native
+DELETE-access probe found no continuing refusal after the failed worker ended;
+an exact previously failed root was subsequently removable by a separate Node
+process. That does not identify the live handle or OS cause. After the bounded
+repair attempts, this cleanup issue is retained for evidence-led investigation;
+the assumption that observed exits imply immediate deletability is unproven.
+The test preserves any original body failure alongside cleanup failure.
+
+Daemon type checking passes. The earlier statement that awaiting pipe close
+resolved the cleanup root cause is superseded by the later failure above.
+No complete Windows Herdr/following, desktop or reboot claim is made.

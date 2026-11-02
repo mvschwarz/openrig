@@ -26,6 +26,7 @@
 import net from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
+import { readPlatformEnv } from "../platform-env.js";
 
 /** A herdr socket result body — always carries a `type` discriminator. */
 export interface HerdrResult {
@@ -54,14 +55,17 @@ export type HerdrTransportFactory = () => HerdrTransport;
 
 /** A per-request session keeps the daemon's config home. An explicit socket
  * belongs to its configured session, never to an unrelated requested session. */
-export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env, selectedSession?: string): string {
-  if (env["HERDR_SOCKET_PATH"] && (selectedSession === undefined || selectedSession === env["HERDR_SESSION"])) {
-    return env["HERDR_SOCKET_PATH"];
+export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env, selectedSession?: string, platform: NodeJS.Platform = process.platform): string {
+  const read = (key: string) => readPlatformEnv(env, key, platform);
+  const override = read("HERDR_SOCKET_PATH"), configuredSession = read("HERDR_SESSION"), xdg = read("XDG_CONFIG_HOME");
+  if (override && (selectedSession === undefined || selectedSession === configuredSession)) {
+    return override;
   }
-  const configHome = env["XDG_CONFIG_HOME"] !== undefined
-    ? path.resolve(env["XDG_CONFIG_HOME"]) : path.join(env["HOME"] || homedir(), ".config");
+  const configHome = xdg !== undefined ? path.resolve(xdg)
+    : platform === "win32" ? read("APPDATA") || path.join(read("USERPROFILE") || homedir(), "AppData", "Roaming")
+      : path.join(read("HOME") || homedir(), ".config");
   const base = path.join(configHome, "herdr");
-  const session = selectedSession ?? env["HERDR_SESSION"];
+  const session = selectedSession ?? configuredSession;
   return session && session !== "default" ? path.join(base, "sessions", session, "herdr.sock") : path.join(base, "herdr.sock");
 }
 
@@ -105,7 +109,7 @@ export function createHerdrSocketRpc(
 ): HerdrSocketRpc {
   return (req) =>
     new Promise<HerdrResult>((resolve, reject) => {
-      const conn = net.createConnection({ path: socketPath });
+      const conn = net.createConnection({ path: herdrSocketEndpoint(socketPath) });
       conn.setEncoding("utf8"); // decode across chunks, so a split multi-byte character stays intact
       let buf = "";
       let settled = false;
@@ -113,8 +117,9 @@ export function createHerdrSocketRpc(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        // A completed round trip also releases its native pipe/socket handle.
+        conn.once("close", fn);
         conn.destroy();
-        fn();
       };
       const timer = setTimeout(
         () => finish(() => reject(new Error(`herdr socket timeout after ${timeoutMs}ms (${socketPath})`))),
@@ -148,6 +153,13 @@ export function createHerdrSocketRpc(
       conn.on("error", (err) => finish(() => reject(err)));
       conn.on("end", () => finish(() => reject(new Error("herdr socket closed before a response"))));
     });
+}
+
+/** Herdr's Windows interprocess endpoint uses the socket marker path as a
+ * GenericNamespaced pipe name; the marker itself is not a Unix socket. */
+export function herdrSocketEndpoint(socketPath: string, platform: NodeJS.Platform = process.platform): string {
+  if (socketPath.includes("\0")) throw new Error("Invalid Herdr socket path");
+  return platform === "win32" && !socketPath.startsWith("\\\\.\\pipe\\") ? "\\\\.\\pipe\\" + socketPath : socketPath;
 }
 
 /**
