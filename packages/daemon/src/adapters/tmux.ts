@@ -731,6 +731,9 @@ export class TmuxAdapter {
             const format = argv[argv.indexOf("-F") + 1];
             if (!argv.includes("-P") || !["#{pane_id}", "#{session_id} #{session_created}"].includes(format ?? "")) throw new Error("Mapped session creation requires an explicit creation receipt");
             createdBinding = binding; argv = [...argv]; argv[nameFlag + 1] = binding.physical; legacy = undefined;
+          } else {
+            const formatted = tmuxSessionNameFormat(logical);
+            if (formatted !== logical) { argv = [...argv]; argv[nameFlag + 1] = formatted; legacy = undefined; }
           }
         }
       }
@@ -1276,12 +1279,13 @@ export class TmuxAdapter {
     // use private source-file persistence and are available to later recovery.
     const transportEnv = Object.entries(seatEnv).filter(([key]) =>
       !(this.isNativeWindows && scopedCommand) || isWindowsPrivateEnvironmentName(key));
-    const argv = ["tmux", "new-session", "-d", "-s", name];
+    const formattedName = this.terminalKind === "psmux" ? name : tmuxSessionNameFormat(name);
+    const argv = ["tmux", "new-session", "-d", "-s", formattedName];
     if (cwd != null) argv.push("-c", cwd);
     for (const [k, v] of transportEnv) argv.push("-e", `${k}=${v}`);
     // The pane new-session itself made: an after-new-session hook may select another window.
     argv.push("-P", "-F", "#{pane_id}");
-    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(name)];
+    const legacyParts = ["tmux", "new-session", "-d", "-s", tmuxConfigQuote(formattedName)];
     if (cwd != null) legacyParts.push("-c", tmuxConfigQuote(cwd));
     for (const [k, v] of transportEnv) legacyParts.push("-e", tmuxConfigQuote(`${k}=${v}`));
     legacyParts.push("-P", "-F", tmuxConfigQuote("#{pane_id}"));

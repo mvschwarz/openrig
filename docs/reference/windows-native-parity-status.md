@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Private-environment session creation preserves literal hashes (2026-11-03)
+
+Ordinary managed-session creation still passed names directly to tmux's
+`new-session -s` format after probe/watcher creation had been repaired. POSIX
+private configuration now writes the literal name format; native new-session
+routing applies it only after determining the name does not need a physical
+binding. Mapped names retain their original logical input until binding, avoiding
+double encoding or an environment supplement targeting an escaped alias.
+
+Five complete format/argv/mapping/parent-environment/stock-environment files
+passed 30 with three skips on Windows, and daemon TypeScript/assets build passed.
+Real WSL tmux then exercised the actual compiled adapter's private-environment
+creation for `#{session_id}`, consecutive hashes and style-bracket names. Its
+independent session inventory and immutable-ID readback preserved all three
+names; synthetic format-looking environment values read back literally and all
+three sessions stopped successfully. The fixture's anchor/socket/files were
+cleaned. No actual provider or user team was started.
+
+The first fixture readback used a format-looking name directly as a
+display-message target and returned empty although inventory showed the correct
+session. Immutable-ID readback resolved that fixture ambiguity; direct-name
+display targeting remains a separate audit item, not a completed behavior claim.
+Real stock psmux and installed/full-directory receipts have not been refreshed
+for this change. No deployment or public push occurred.
+
 ## Literal session names in probe rollback format conditions (2026-11-03)
 
 Probe rollback previously inserted the session name directly into a nested

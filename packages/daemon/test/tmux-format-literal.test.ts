@@ -23,3 +23,23 @@ it.each(["tmux", "psmux"] as const)("uses literal name formatting in probe creat
   const rollback = calls.find(argv => argv.includes("if-shell"))!;
   expect(rollback.join(" ")).toContain("#{==:#{session_name}," + tmuxFormatLiteral(name) + "}");
 });
+
+it.each(["tmux", "psmux"] as const)("preserves format-looking names through private-environment creation on %s", async kind => {
+  const name = "owned#{session_id}", calls: string[][] = [], files: string[] = [];
+  const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, {
+    tmpName: () => "C:/owned/bootstrap.cmd", bufferName: () => "owned", unlink: async () => {},
+    writeFile: async (_file, text) => { files.push(String(text)); },
+    privateConfig: async text => { files.push(text); return { path: "C:/owned/private.conf", dispose: async () => {} }; },
+  }, async argv => {
+    calls.push(argv);
+    if (argv[1] === "openrig-private-environment-capability") return "openrig-envfile-v1:new-session,respawn-pane";
+    if (argv[1] === "show-options") return "cmd.exe\n";
+    if (argv[1] === "new-session" || argv.includes("source-file")) return "%1\n";
+    return "";
+  }, [], kind);
+  expect(await adapter.createSession(name)).toMatchObject({ ok: true });
+  if (kind === "psmux") {
+    const created = calls.find(argv => argv[1] === "new-session")!;
+    expect(created[created.indexOf("-s") + 1]).toBe(tmuxSessionNameFormat(name));
+  } else expect(files.some(text => text.includes(tmuxSessionNameFormat(name)))).toBe(true);
+});
