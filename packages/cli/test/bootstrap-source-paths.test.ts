@@ -46,7 +46,7 @@ describe("bootstrap source paths respect the daemon target", () => {
     // The responder reads relative paths from a different root, like an already-running daemon.
     server = http.createServer(async (req, res) => {
       res.setHeader("Content-Type", "application/json");
-      if (req.url === "/api/specs/library") {
+      if (req.url === "/api/specs/library" || req.url === "/api/specs/library?include_builtins=true") {
         catalogReads++;
         res.end(JSON.stringify(catalog));
         return;
@@ -184,7 +184,7 @@ describe("bootstrap source paths respect the daemon target", () => {
     ("preserves catalog source paths (explicit URL=%s, plan=%s)", async (explicitUrl, plan) => {
       if (explicitUrl) vi.stubEnv("OPENRIG_URL", daemonUrl);
       await run("bootstrap", "catalog-rig", [plan ? "--plan" : "--yes"]);
-      expect(catalogReads).toBe(1);
+      expect(catalogReads).toBe(2);
       expect(requests[0]?.sourceRef).toBe(catalog[0]!.sourcePath);
       expect(requests[0]?.content).toBe("name: daemon\n");
     });
@@ -192,7 +192,7 @@ describe("bootstrap source paths respect the daemon target", () => {
   it.each([false, true])("preserves unresolved bare-name fallback (explicit URL=%s)", async (explicitUrl) => {
     if (explicitUrl) vi.stubEnv("OPENRIG_URL", daemonUrl);
     await run("bootstrap", "unlisted", ["--plan"]);
-    expect(catalogReads).toBe(1);
+    expect(catalogReads).toBe(2);
     expect(requests[0]?.sourceRef).toBe("unlisted");
   });
 
@@ -208,7 +208,7 @@ describe("bootstrap source paths respect the daemon target", () => {
     if (explicitUrl) vi.stubEnv("OPENRIG_URL", daemonUrl);
     catalog.push({ ...catalog[0]!, id: "other-id", sourcePath: path.join(callerDir, "rig.yaml") });
     await run("bootstrap", "catalog-rig", ["--plan"]);
-    expect(catalogReads).toBe(1);
+    expect(catalogReads).toBe(2);
     expect(requests).toEqual([]);
     expect(process.exitCode).toBe(1);
   });

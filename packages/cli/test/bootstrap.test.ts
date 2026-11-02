@@ -400,7 +400,7 @@ describe("Bootstrap CLI", () => {
       let body = "";
       req.on("data", (chunk: Buffer) => { body += chunk; });
       req.on("end", () => {
-        if (url === "/api/specs/library") {
+        if (url === "/api/specs/library" || url === "/api/specs/library?include_builtins=true") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify([{ id: "lib1", name: "my-lib-rig", sourcePath: "/specs/my-lib-rig.yaml", kind: "rig", version: "0.2", sourceType: "user_file" }]));
         } else if (url.includes("/api/bootstrap")) {
