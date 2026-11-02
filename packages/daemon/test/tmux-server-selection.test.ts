@@ -13,6 +13,7 @@ describe("durable tmux server selection", () => {
   let oldSocket: string;
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "t"));
+    if (process.platform === "win32") root = fs.realpathSync.native(root);
     home = path.join(root, "home");
     oldSocket = path.join(root, "personal.sock");
     inspect.mockClear();

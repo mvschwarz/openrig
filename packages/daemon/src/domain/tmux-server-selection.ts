@@ -51,8 +51,16 @@ interface SelectionOptions {
 }
 
 function canonical(file: string): string {
-  try { return fs.realpathSync(file); }
-  catch { return path.resolve(file); }
+  try { return process.platform === "win32" ? fs.realpathSync.native(file) : fs.realpathSync(file); }
+  catch (error) {
+    const absolute = path.resolve(file), parent = path.dirname(absolute);
+    // New homes still inherit the physical spelling of their existing parent;
+    // otherwise their socket identity changes after the first mkdir.
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "ENOENT" && parent !== absolute) {
+      return path.join(canonical(parent), path.basename(absolute));
+    }
+    return absolute;
+  }
 }
 
 /** TMUX appends two numeric fields; a socket path itself may contain commas. */
@@ -105,7 +113,9 @@ function readRecord(file: string, home: string): ServerRecord | null {
   }
   const record = value as Partial<ServerRecord> | null;
   const pinned = record?.pinned === true || record?.mode === "isolated";
-  if (!record || record.version !== 1 || record.home !== home
+  const matchesHome = typeof record?.home === "string" && path.isAbsolute(record.home)
+    && (process.platform === "win32" ? canonical(record.home) === home : record.home === home);
+  if (!record || record.version !== 1 || !matchesHome
     || !["inherit", "isolated"].includes(record.mode ?? "")
     || (record.pinned !== undefined && typeof record.pinned !== "boolean")
     || (record.mode === "isolated" && record.pinned === false)

@@ -27,6 +27,24 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Native instance-home identity in durable server records (2026-11-02)
+
+Windows server selection now uses native realpath spelling, including the
+existing parent of a not-yet-created home. Its socket identity therefore does
+not change merely because mkdir made a DOS/long-name parent resolvable. Reading
+older records resolves their home spelling too; offline attachment uses the same
+native identity check. Drive-case aliases no longer reject a valid pin or select
+a different namespace. This uses filesystem resolution, not blanket case folding;
+invalid or genuinely different homes remain refused. The four server-selection/
+attachment files passed 92 tests with two platform skips, including a real
+drive-case/legacy-record fixture; daemon TypeScript checking passed.
+
+The safe static candidate inventory was refreshed at 5659e82: 1,638 production
+text files, 544 candidates, 134 unchanged/76 changed/334 outside the older
+ledger. One private row was excluded before reads. Two additional explicit
+source reviews (log-tail and preflight-exec) found no new implementation gap in
+those files; this does not close the unreviewed inventory.
+
 ### Real tmux normalized-name recovery and hermetic ref failure (2026-11-02)
 
 tmux 3.4's printed name for a literal dollar can contain escaping that is not a

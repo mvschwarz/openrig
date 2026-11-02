@@ -29,7 +29,12 @@ export function readRecordedTmuxServerArgs(home: string): string[] {
   catch (error) { readError = error; }
   const pinned = record?.mode === "isolated" || record?.pinned === true;
   let matchesHome = false;
-  try { matchesHome = record?.home === realpathSync(home); } catch { /* A missing/unreadable home is not a valid record. */ }
+  try {
+    matchesHome = typeof record?.home === "string" && path.isAbsolute(record.home)
+      && (process.platform === "win32"
+        ? realpathSync.native(record.home) === realpathSync.native(home)
+        : record.home === realpathSync(home));
+  } catch { /* A missing/unreadable home is not a valid record. */ }
   const valid = record?.version === 1 && matchesHome
     && (record.mode === "inherit" || record.mode === "isolated")
     && (record.pinned === undefined || typeof record.pinned === "boolean")
