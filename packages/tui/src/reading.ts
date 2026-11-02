@@ -13,6 +13,11 @@ export interface FileRead {
 }
 export type FileReadResult = FileRead | { error: string; message?: string };
 
+/** Fully qualified daemon paths, independent of the TUI host's platform. */
+export function isAbsoluteServerPath(value: string): boolean {
+  return !value.includes("\0") && (path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+(?:\\|$)/.test(value));
+}
+
 /** Map only against explicitly served roots, never search another installation. */
 export function fileTargetForPath(source: string, roots: FileRoot[]): FileTarget | null {
   for (const root of [...roots].sort((a, b) => b.path.length - a.path.length)) {

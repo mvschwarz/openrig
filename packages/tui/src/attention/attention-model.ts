@@ -1,6 +1,7 @@
 import type { AttentionRead, AttentionItem } from "@openrig/daemon/attention";
 import type { Action, FleetSnapshot, ViewState } from "../types.js";
 import { listItem, wrapDetailLines, type ContentLine } from "../detail.js";
+import { isAbsoluteServerPath } from "../reading.js";
 
 /** The bounded, confirmed-delivery projection served by S02; no client classification. */
 export interface DeliveredHumanUpdates {
@@ -30,7 +31,7 @@ export function composeHumanUpdates(attention: AttentionRead | null, updates: De
       read.detailError = null;
       read.detail = { item, lines: [q.body, ...(q.humanDetail ? ["Supplemental detail:", q.humanDetail] : []),
         `From: ${q.sourceSession}`, `Delivered: ${q.deliveredAt}`, `Delivery receipt: ${q.deliveryReceipt}`, `Queue: ${q.qitemId}`, `Evidence: ${q.evidenceRef ?? "none recorded"}`],
-        files: q.evidenceRef?.startsWith("/") ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
+        files: q.evidenceRef && isAbsoluteServerPath(q.evidenceRef) ? [{ label: "Update evidence", path: q.evidenceRef }] : [] };
     }
   }
   read.items.sort((a, b) => a.kind.localeCompare(b.kind) || (a.kind === "update" ? ((b.id.startsWith("queue-update:") && b.urgency === "critical" ? 2 : b.urgency === "urgent" ? 1 : 0) - (a.id.startsWith("queue-update:") && a.urgency === "critical" ? 2 : a.urgency === "urgent" ? 1 : 0)) : 0) || (b.at ?? "").localeCompare(a.at ?? "") || a.id.localeCompare(b.id));

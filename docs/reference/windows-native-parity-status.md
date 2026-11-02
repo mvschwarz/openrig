@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Feed native evidence and project continuity (2026-11-02)
+
+Delivered-update evidence now recognizes fully qualified daemon Windows drive and UNC paths alongside POSIX paths, regardless of the TUI host. Drive-relative refs, relative paths and URLs are not invented as absolute file targets. Attention source navigation uses the existing server-path root mapper for project membership, replacing the POSIX-only string prefix. Exact served-source validation remains mandatory, sibling directories do not inherit the project, anchors are retained, and Back restores the caller. Queue project tags alone still do not create project authority.
+
+Validation: complete Attention, Feed-system and reading-journey files passed 29/29 on both native Windows and ordinary-user WSL; TUI typecheck passed. Drive, UNC and mixed-separator navigation, outside-sibling rejection and unserved-path refusal are covered. Final whole-directory validation remains separate.
+
 ## TUI directory regression follow-up (2026-11-02)
 
 The complete native TUI directory at `a9d2e39` reported 1,212 passed, 11 failed and 19 pending tests. Reading-journey and literal-argument fixtures supplied non-native TEMP spelling to the canonical file allowlist; they now use native realpath on Windows. The actual viewer C# source was separately compiled with inherited versus owned compiler temp: inherited global TEMP failed to supply its transient source, while the owned directory compiled successfully. Viewer environment reads now create and remove a unique compiler directory and pass its TEMP/TMP explicitly, excluding inherited case variants. The real signal fixture likewise uses its owned root for compiler temporary files. The cause of the host's global TEMP behaviour remains unknown.
