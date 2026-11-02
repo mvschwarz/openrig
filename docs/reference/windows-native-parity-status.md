@@ -27,6 +27,28 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### Case-sensitive native copy identity and worker exit evidence (2026-11-02)
+
+Local overlap detection now compares bigint filesystem device/file identities
+along the physical destination's ancestor chain, rather than case folding names
+or using Windows's case-insensitive lexical relative-path rules. Existing
+junction parents are resolved even for a new destination. A source with no file
+identity is refused instead of silently bypassing overlap checks. On this host,
+fsutil successfully enabled case sensitivity on an owned temporary NTFS test
+directory: distinct Source/source directories and File.txt/file.txt entries copy
+correctly. Fourteen native identity/local-copy tests pass; the same case-sensitive
+identity fixture passes under WSL uid 1000. CLI TypeScript checking passed. This
+qualifies these owned filesystem operations, not every runtime's path behavior.
+
+Reduced native crash diagnosis: the last three files pass 363 tests/one pending;
+adding CLI queue passes 529/one pending. Replaying the common nine-file prefix
+with exit-only test-pool instrumentation captures worker PID 60364 exiting
+3221225477 (0xC0000005), with terminating=false, immediately before the secondary
+IPC-channel error. This proves an unrequested access-violation exit, not which
+native module caused it. The temporary dependency observer was restored to its
+original SHA256 afterward. Root cause and complete native suite validation remain
+open; the smaller passing combinations do not close them.
+
 ### Native local-link type preservation and repair (2026-11-02)
 
 Local copies now compare the NTFS link-entry directory attribute as well as link

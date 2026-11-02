@@ -1,4 +1,4 @@
-import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, rename, symlink, utimes } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, readlink, realpath, rename, stat, symlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
@@ -11,6 +11,24 @@ async function physicalDestination(file: string): Promise<string> {
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT" || path.dirname(file) === file) throw error;
     return path.join(await physicalDestination(path.dirname(file)), path.basename(file));
+  }
+}
+
+/** Filesystem identity respects case-sensitive NTFS directories and aliases alike. */
+async function rejectOverlap(src: string, target: string, directory: boolean): Promise<void> {
+  const source = await lstat(src, { bigint: true });
+  if (source.ino === 0n) throw new Error("Source filesystem identity is unavailable; overlap cannot be checked");
+  let candidate = directory ? await physicalDestination(target) : target;
+  for (;;) {
+    try {
+      const entry = directory ? await stat(candidate, { bigint: true }) : await lstat(candidate, { bigint: true });
+      if (source.dev === entry.dev && source.ino === entry.ino) throw new Error("Source and destination overlap");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const parent = path.dirname(candidate);
+    if (!directory || parent === candidate) return;
+    candidate = parent;
   }
 }
 
@@ -87,12 +105,7 @@ export async function runNativeLocalCopy(plan: CopyPlan): Promise<FileCopyResult
     const destination = await stat(dst);
     const contentsOnly = plan.src.path.endsWith(path.sep) || plan.src.path.endsWith("/");
     const target = destination?.isDirectory() && !(source.isDirectory() && contentsOnly) ? path.join(dst, path.basename(src)) : dst;
-    const sourceIdentity = source.isDirectory() ? await realpath(src) : src;
-    const targetIdentity = source.isDirectory() ? await physicalDestination(target) : target;
-    const relative = path.relative(sourceIdentity, targetIdentity);
-    if (sourceIdentity.toLowerCase() === targetIdentity.toLowerCase() || (source.isDirectory() && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))) {
-      throw new Error("Source and destination overlap");
-    }
+    await rejectOverlap(src, target, source.isDirectory());
     await copy(src, target);
     return { ok: true, failedStep: "none", exitCode: 0, stdout: changes.join("\n"), stderr: "", filesTransferred, bytesTransferred, transport: "native-local" };
   } catch (error) {
