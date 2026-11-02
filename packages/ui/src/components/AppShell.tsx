@@ -50,6 +50,7 @@ import {
   TopologyOverlayProvider,
   useTopologyOverlay,
 } from "./topology/topology-overlay-context.js";
+import { UiMaintenanceNotice } from "./UiMaintenanceNotice.js";
 import { ThemeSelector } from "./ThemeSelector.js";
 import { useSettings } from "../hooks/useSettings.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
@@ -504,6 +505,7 @@ function AppShellInner({ children }: AppShellProps) {
           }}
         >
           <div className="h-screen flex flex-col">
+            <UiMaintenanceNotice />
             {/* Top bar — universal across viewports per universal-shell.md
                 L40–L53. Single source of truth: same element renders at
                 all sizes. Hamburger button keeps its own lg:hidden so it
@@ -580,14 +582,14 @@ function AppShellInner({ children }: AppShellProps) {
                 <>
                   {explorerOpen && (
                     <div
-                      className="fixed inset-0 bg-black/20 z-20 lg:hidden"
+                      className="absolute inset-0 bg-black/20 z-20 lg:hidden"
                       onClick={() => setExplorerOpen(false)}
                     />
                   )}
                   <div
                     data-testid="mobile-rail-tray"
                     className={cn(
-                      "fixed top-14 left-0 bottom-0 z-30 bg-background border-r border-outline-variant transition-transform duration-200 ease-tactical lg:hidden",
+                      "absolute top-0 left-0 bottom-0 z-30 bg-background border-r border-outline-variant transition-transform duration-200 ease-tactical lg:hidden",
                       "w-72 max-w-[85vw] flex flex-col",
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
