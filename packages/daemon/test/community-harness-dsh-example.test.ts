@@ -55,6 +55,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const text = message.params.prompt.map((part) => part.text).join("");
       const end = (stopReason) => reply({ stopReason });
       if (text.includes("EXIT")) process.exit(0);
+      if (text.includes("QUIETASK")) {
+        // Asks, then works on quietly after the answer until it's cancelled.
+        waiting.set("perm-4", (response) => { say("outcome " + JSON.stringify(response.result?.outcome ?? null)); held = () => end("cancelled"); });
+        return send({ id: "perm-4", method: "session/request_permission", params: { sessionId: session, toolCall: { toolCallId: "t5", title: "Edit d.txt", kind: "edit" },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } });
+      }
       if (text.includes("PERMIT")) {
         say("checking");
         waiting.set("perm-1", (response) => { say("outcome " + JSON.stringify(response.result?.outcome ?? null)); end(cancelled ? "cancelled" : "end_turn"); });
@@ -84,15 +90,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost";
-interface Hook { auth: string | undefined; body: Record<string, unknown> }
+type Permissions = "absent" | "deny" | "stale" | "revoked" | "broken" | "permitted" | "answer" | "words" | "saidno" | "unknown" | "readfail" | "pending" | "lost" | "late";
+interface Hook { auth: string | undefined; body: Record<string, unknown>; at: number }
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
 
 async function fakeOpenRig(permissions: Permissions) {
   const hooks: Hook[] = [];
-  const submits: Array<{ auth: string | undefined; body: Record<string, unknown> }> = [];
+  const submits: Array<{ auth: string | undefined; body: Record<string, unknown>; at: number }> = [];
   const withdraws: Array<{ askId: string; body: Record<string, unknown> }> = [];
   const server: Server = createServer((req, res) => {
     let raw = "";
@@ -101,10 +107,10 @@ async function fakeOpenRig(permissions: Permissions) {
       const json = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
       const url = new URL(req.url ?? "/", "http://openrig.test");
       const body = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-      if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body }); return json(200, { ok: true }); }
+      if (req.method === "POST" && url.pathname === "/api/activity/hooks") { hooks.push({ auth: req.headers.authorization, body, at: Date.now() }); return json(200, { ok: true }); }
       if (permissions === "absent") return json(404, { error: "not found" });
       if (req.method === "POST" && url.pathname === "/api/activity/permission-requests") {
-        submits.push({ auth: req.headers.authorization, body });
+        submits.push({ auth: req.headers.authorization, body, at: Date.now() });
         if (permissions === "deny") return json(409, { ok: false, code: "denied_by_seat", error: "This seat's operator chose to refuse its runner's permission requests." });
         if (permissions === "stale") return json(409, { ok: false, code: "stale_generation", error: "This request isn't from the seat's current occupant." });
         if (permissions === "broken") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
@@ -121,6 +127,8 @@ async function fakeOpenRig(permissions: Permissions) {
         if (permissions === "unknown") return json(200, { ok: true, state: "deferred" });
         if (permissions === "readfail") return json(500, { ok: false, code: "internal_error", error: "Something went wrong." });
         if (permissions === "lost") return json(404, { ok: false, code: "not_found", error: "No permission request ask-1 for this seat." });
+        // A person who answers after 11 s, longer than one beat interval.
+        if (permissions === "late" && Date.now() - submits[0]!.at >= 11_000) return json(200, { ok: true, state: "answered", optionId: "allow" });
         setTimeout(() => json(200, { ok: true, state: "pending" }), 100);
         return;
       }
@@ -246,6 +254,45 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(requests(seat.log(), "session/prompt")).toHaveLength(1);
   });
 
+  // The working beat (contract section 4) runs on its own 10 s interval, so these two cells take that long.
+  it("beats through a long, quiet turn, naming the accepted turn, and stops at the turn's end", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("HOLD this turn");
+    const accepted = await waitFor(() => has(openrig.hooks, "UserPromptSubmit/accepted"), "the accepted prompt");
+    const beat = await waitFor(() => has(openrig.hooks, "active/liveness"), "a working beat", 12_000);
+    expect(beat.body).toMatchObject({ turnId: "1", livenessSeconds: 30, generation: "gen-1", runtime: "dsh" });
+    expect(Number(beat.body.sequence)).toBeGreaterThan(Number(accepted.body.sequence));
+    expect(typeof beat.body.occurredAt).toBe("string");
+    seat.type("/abort");
+    await waitFor(() => has(openrig.hooks, "Stop/cancelled"), "the cancelled turn end");
+    const stopAt = seen(openrig.hooks).indexOf("Stop/cancelled");
+    await new Promise((done) => setTimeout(done, 10_500)); // one more beat interval
+    expect(seen(openrig.hooks).slice(stopAt + 1)).not.toContain("active/liveness");
+  }, 35_000);
+
+  it("holds the beat while a person's ask is open, then posts permission_resolved before beating again", async () => {
+    const openrig = await fakeOpenRig("late");
+    const seat = start(openrig);
+    await waitFor(seat.launch, "the launch record");
+    seat.type("QUIETASK an edit");
+    const answer = await waitFor(() => responseTo(seat.log(), "perm-4"), "the person's answer, given to the agent", 16_000);
+    expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
+    const resolved = await waitFor(() => has(openrig.hooks, "active/permission_resolved"), "permission_resolved");
+    expect(resolved.body).toMatchObject({ turnId: "1", askId: "ask-1" });
+    // The ask was open for more than a beat interval, and no beat went out while it was.
+    const asked = openrig.submits[0]!.at;
+    expect(resolved.at - asked).toBeGreaterThanOrEqual(10_000);
+    expect(openrig.hooks.filter((hook) => hook.body.subtype === "liveness" && hook.at > asked && hook.at < resolved.at)).toEqual([]);
+    // The same turn works on quietly after the answer, and beats again.
+    const after = await waitFor(() => openrig.hooks.find((hook) => hook.body.subtype === "liveness" && hook.at > resolved.at), "a beat after the answer", 12_000);
+    expect(after.body.turnId).toBe("1");
+    expect(Number(after.body.sequence)).toBeGreaterThan(Number(resolved.body.sequence));
+    seat.type("/abort");
+    await waitFor(() => has(openrig.hooks, "Stop/cancelled"), "the cancelled turn end");
+  }, 45_000);
+
   it.each(["absent", "permitted"] as const)("permits with the agent's own allow when no one can be asked (OpenRig %s)", async (permissions) => {
     const openrig = await fakeOpenRig(permissions);
     const seat = start(openrig);
@@ -255,16 +302,18 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+    expect(has(openrig.hooks, "active/permission_resolved"), "OpenRig opened no ask").toBeUndefined();
     expect(seat.out()).toMatch(/\[permission\] permitted/);
   });
 
+  // An ask OpenRig opened (the last two) showed the seat needing input, so the permit is followed by permission_resolved.
   it.each([
-    ["OpenRig can't be reached", "absent", { OPENRIG_URL: "http://127.0.0.1:1" }],
-    ["the submit is answered with a status the contract doesn't list", "broken", {}],
-    ["the submit's grant was revoked, which can happen to the live occupant", "revoked", {}],
-    ["reading the answer gets a state the contract doesn't list", "unknown", {}],
-    ["reading the answer gets an unexpected reply", "lost", {}],
-  ] as const)("permits with the agent's own allow when %s, since nobody can be asked", async (_case, permissions, env) => {
+    ["OpenRig can't be reached", "absent", { OPENRIG_URL: "http://127.0.0.1:1" }, false],
+    ["the submit is answered with a status the contract doesn't list", "broken", {}, false],
+    ["the submit's grant was revoked, which can happen to the live occupant", "revoked", {}, false],
+    ["reading the answer gets a state the contract doesn't list", "unknown", {}, true],
+    ["reading the answer gets an unexpected reply", "lost", {}, true],
+  ] as const)("permits with the agent's own allow when %s, since nobody can be asked", async (_case, permissions, env, opened) => {
     const openrig = await fakeOpenRig(permissions);
     const seat = start(openrig, env);
     await waitFor(seat.launch, "the launch record");
@@ -272,6 +321,13 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     const answer = await waitFor(() => responseTo(seat.log(), "perm-1"), "the runner's answer to the permission request");
     expect(answer.result).toEqual({ outcome: { outcome: "selected", optionId: "allow" } });
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+    if (opened) {
+      const resolved = await waitFor(() => has(openrig.hooks, "active/permission_resolved"), "permission_resolved");
+      expect(resolved.body).toMatchObject({ turnId: "1", askId: "ask-1" });
+    } else {
+      await waitFor(() => /turn end/.test(seat.out()), "the turn's end in the pane");
+      expect(has(openrig.hooks, "active/permission_resolved"), "OpenRig opened no ask").toBeUndefined();
+    }
   });
 
   it.each([
@@ -286,6 +342,7 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     expect(answer.result).toEqual({ outcome: { outcome: "cancelled" } });
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
+    expect(has(openrig.hooks, "active/permission_resolved"), "nothing was answered or permitted").toBeUndefined();
   });
 
   it("keeps the seat's own refusal held through a cancel, so the cancelled turn reads needs input, not idle", async () => {
@@ -366,6 +423,10 @@ process.stdout.write(JSON.stringify(chunks.map((chunk) => framer.push(chunk).fil
     await waitFor(() => has(openrig.hooks, "Stop/end_turn"), "the turn's idle report");
     expect(has(openrig.hooks, "Notification/permission_prompt")).toBeUndefined();
     expect(openrig.withdraws).toEqual([]);
+    // The person's answer reached the agent, so the seat's needs input clears for the rest of the turn, before its end.
+    const events = seen(openrig.hooks);
+    expect(has(openrig.hooks, "active/permission_resolved")!.body).toMatchObject({ turnId: "1", askId: "ask-1" });
+    expect(events.indexOf("active/permission_resolved")).toBeLessThan(events.indexOf("Stop/end_turn"));
   });
 
   it("gives the agent its option, then queues the person's own words as a prompt, after the turn", async () => {
