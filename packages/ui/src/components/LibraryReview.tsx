@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { resolveServerFileReference, serverPathIsWithin } from "../lib/server-path.js";
 import { useNavigate } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { WorkspacePage } from "./WorkspacePage.js";
@@ -108,17 +109,11 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
     const refPath = agentRef.slice("local:".length);
 
     // Resolve the ref path against the rig's source directory
-    const rigDir = review.sourcePath.replace(/\/[^/]+$/, "");
-    const segments = `${rigDir}/${refPath}`.split("/");
-    const resolved: string[] = [];
-    for (const seg of segments) {
-      if (seg === "..") { resolved.pop(); }
-      else if (seg !== "." && seg !== "") { resolved.push(seg); }
-    }
-    const resolvedDir = "/" + resolved.join("/");
+    const resolvedDir = resolveServerFileReference(review.sourcePath, refPath);
+    if (!resolvedDir) return null;
 
     // Match against library entries by sourcePath prefix (agent dir contains agent.yaml)
-    return agentEntries.find((entry) => entry.sourcePath.startsWith(resolvedDir + "/")) ?? null;
+    return agentEntries.find((entry) => serverPathIsWithin(entry.sourcePath, resolvedDir)) ?? null;
   };
 
   return (

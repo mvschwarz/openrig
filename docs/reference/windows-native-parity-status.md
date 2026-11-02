@@ -1,5 +1,11 @@
 # Native Windows parity: implementation and evidence
 
+## Browser references to native daemon paths (2026-11-02)
+
+Agent startup-file chips and library rig member drilldowns now resolve references using the daemon source path's syntax, independently of the browser host. The shared browser-safe resolver handles drive paths, UNC shares, extended drive/UNC prefixes, native or mixed separators and parent segments without climbing above the drive/share root. Drive-relative Windows refs are unavailable because the browser has no per-drive working directory. POSIX backslashes remain literal filename characters. Library lookup compares normalized whole segments and preserves case distinctions.
+
+Validation: three complete UI test files passed 25/25 on both Windows and ordinary-user WSL. Tests click actual Agent file chips and verify drawer selection targets; library tests click through actual member drilldowns for POSIX, drive and UNC sources. UI typecheck passed. React review found no new hooks, effects, fetches or dependencies; resolution stays a pure module function, and existing button interactions are retained. This is component-level acceptance, not a deployed browser or real network-share qualification.
+
 ## Dotdot-prefixed child path handling (2026-11-02)
 
 Home-isolation advisory checks, the native Pi npm entry resolver, and the dependency-root gate now distinguish an actual parent segment from a legal child whose name begins with two dots. Consistently isolated `..seat` and `..codex` paths no longer produce false advisories; a recognized npm shim can launch its package-owned `..dist/cli.js`. Actual parent and sibling traversal remains rejected. The gate accepts a lock-derived `packages/..cli` workspace target while rejecting its parent and outside sibling.
