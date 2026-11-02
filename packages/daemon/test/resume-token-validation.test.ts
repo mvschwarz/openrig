@@ -94,6 +94,19 @@ describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () =
       if (!result.ok) expect(result.error).not.toContain(token);
     }
   });
+  it.each(["pi", "omp"])("accepts equivalent Windows UNC separator spellings for %s", runtime => {
+    for (const token of [String.raw`\\server\share\测试 user\session.jsonl`, "//server/share/测试 user/session.jsonl", String.raw`\\server/share\测试 user/session.jsonl`]) {
+      expect(validateResumeToken(runtime, token, "win32")).toMatchObject({ ok: true, token });
+      expect(validateResumeToken(runtime, token, "linux").ok).toBe(false);
+    }
+  });
+  it.each(["pi", "omp"])("rejects Windows UNC device aliases and traversal with either separator for %s", runtime => {
+    for (const token of ["//./share/session.jsonl", String.raw`\/.\share/session.jsonl`, "//?/UNC/server/share/session.jsonl", "//server/share/../session.jsonl", String.raw`\\server/share\..\session.jsonl`, "//server/share/file:stream.jsonl"]) {
+      const result = validateResumeToken(runtime, token, "win32");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).not.toContain(token);
+    }
+  });
   const validPath = "/Users/someone/.openrig/state/pi/seat-a/sessions/2026-07-06T10-00-00_0197a2f0-1234-7abc-8def-0123456789ab.jsonl";
 
   it("accepts a valid absolute .jsonl session-file path and returns pi_session_file", () => {

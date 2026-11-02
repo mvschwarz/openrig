@@ -69,7 +69,7 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
   if (token.length > MAX_SESSION_FILE_LEN) {
     return { ok: false, error: `${label} session-file token is too long (max ${MAX_SESSION_FILE_LEN} characters).` };
   }
-  const windowsPath = platform === "win32" && (/^[A-Za-z]:[\\/]/.test(token) || /^\\\\[^\\]+\\[^\\]+\\/.test(token));
+  const windowsPath = platform === "win32" && (/^[A-Za-z]:[\\/]/.test(token) || /^[\\/]{2}[^\\/]+[\\/][^\\/]+[\\/]/.test(token));
   if (!token.startsWith("/") && !windowsPath) {
     return { ok: false, error: platform === "win32"
       ? `${label} session-file token must be an absolute path (a drive-rooted or UNC Windows path, or starting with '/').`
@@ -78,7 +78,7 @@ function validateSessionFileToken(resumeType: "pi_session_file" | "omp_session_f
   if (token.split(windowsPath ? /[\\/]/ : "/").includes("..")) {
     return { ok: false, error: `${label} session-file token must not contain a '..' path segment.` };
   }
-  const safeWindowsPath = windowsPath && !/^\\\\[?.]\\/.test(token)
+  const safeWindowsPath = windowsPath && !/^[\\/]{2}[?.][\\/]/.test(token)
     && /^[\p{L}\p{N}\p{M} ._/@~\\-]+$/u.test(token.replace(/^[A-Za-z]:/, ""));
   if (!(windowsPath ? safeWindowsPath : SESSION_FILE_CHARSET_RE.test(token))) {
     return {
