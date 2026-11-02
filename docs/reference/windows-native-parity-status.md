@@ -4425,3 +4425,42 @@ The latest scoped WSL viewer run passed 27 tests with nine native-only skips
 (viewer-wsl-3952477-20261103.json). The additional skip is the real Windows
 quoted-PATH filesystem regression; Windows passed it. Complete current-head
 Windows/WSL suites remain outstanding.
+
+### Complete CLI/TUI comparison at e998266 (2026-11-03)
+
+Both complete directory runs used source e998266b9bd9dd13a31f73099eb51fcdda6dbba2.
+Windows finished with 7,601 passed, two failed and 116 pending (7,719 total),
+with clean tracked source before and after. WSL finished with 7,523 passed,
+one failed and 194 pending (7,718 total); all 4,698 public regular files
+matched the snapshot before and after. One private file and six symlinks
+were excluded from that mirror verification. Runtime versions remain different
+(Windows Node 24.14.1, WSL Node 24.11.0).
+
+Windows still failed the known owned-PATH Windows Terminal discovery case;
+its bounded investigation is not reopened by this run. Both platforms also
+failed different live-events.test.ts wait conditions. The WSL complete run
+failed the oversized-empty-data-fields case, while a separate unchanged-source
+run passed that entire file 17/17. This does not clear the full-run failure.
+Windows failed the first real HTTP SSE delivery case. Its exact fixture port
+and failed wait phase were not captured, so neither a bad-port explanation nor
+a product parser defect is established. These results are not green parity.
+Receipts: workspace-cli-tui-e998266-metadata.json, cli-tui-wsl-e998266-metadata.json,
+their full reports, and live-events-wsl-e998266-scoped.json.
+
+### Recovery attach guidance quoting (2026-11-03)
+
+An actual PowerShell argument-witness function reproduced split session names
+containing spaces and a parse failure for names containing an apostrophe. The
+shared attach-guidance renderer now quotes the session word and uses native
+PowerShell apostrophe escaping on Windows, retaining POSIX escaping elsewhere.
+The same rule applies to server argument values. Ordinary safe names keep
+their existing command spelling.
+
+Actual platform-shell witnesses plus existing server tests passed 10/10 on
+Windows and 10/10 on WSL; daemon TypeScript checking passed. Receipts:
+attach-guidance-e998266-before.json, attach-guidance-before-20261103.json,
+attach-guidance-native-after-20261103.json and attach-guidance-wsl-after-20261103.json.
+The witnesses exercise shell parsing into function arguments, not native
+psmux argument parsing or a real session attachment. Cmd guidance, arbitrary
+native quote-bearing session names and the existing stock-pipe-name limitation
+are not qualified by these tests. No existing session, daemon or team changed.

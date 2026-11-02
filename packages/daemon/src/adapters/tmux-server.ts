@@ -61,7 +61,10 @@ export function daemonTmuxServerArgs(): readonly string[] {
 }
 
 function shellWord(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  // Native recovery guidance is entered in PowerShell; its single-quote
+  // escaping differs from POSIX shells even though ordinary quoted paths match.
+  return "'" + value.replace(/'/g, process.platform === "win32" ? "''" : "'\"'\"'") + "'";
 }
 
 /** `tmux`, with the daemon's server flags when it isn't on the default server. */
@@ -72,5 +75,5 @@ function tmuxOnDaemonServer(): string {
 
 /** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
 export function tmuxAttachCommand(session: string): string {
-  return `${tmuxOnDaemonServer()} attach -t ${session}`;
+  return `${tmuxOnDaemonServer()} attach -t ${shellWord(session)}`;
 }
