@@ -19,6 +19,7 @@ import { windowsCmdBridgeInvocation, windowsPosixBridgeInvocation } from "../dom
 import { windowsScopedLaunch } from "./windows-scoped-launch.js";
 import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "../domain/native-runtime-switch-exchange.js";
 import type { NativeExchangeTerminal } from "../domain/native-runtime-switch-journal.js";
+import { NativeNameTransition, type NativePhysicalObservation, type NativePhysicalSession } from "../domain/native-name-transition.js";
 import { readPlatformEnv } from "../domain/platform-env.js";
 import { tmuxFormatLiteral, tmuxSessionNameFormat } from "./tmux-format.js";
 const execFileAsync = promisify(execFile);
@@ -1181,6 +1182,38 @@ export class TmuxAdapter {
         staging: {state:"present",generation:identity.successorGeneration}, parking:{state:"absent"},
       }, "forward").state !== "rename") throw new Error("Invalid native runtime exchange backend or identity");
     const ownsLifecycle = () => !this.deliveryGuard || this.deliveryGuard.ownsLifecycle(nodeId);
+    const physicalObserve = async (physical: string): Promise<NativePhysicalObservation> => {
+      try {
+        if (!await this.nativeSessionExists(physical)) return {state:"absent"};
+        const values = (await this.nativeRaw(["tmux","display-message","-p","-t",`=${physical}:`,
+          `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{==:#{session_name},${tmuxFormatLiteral(physical)}}`])).trim().split("|");
+        if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || values[8] !== "0" || values[9] !== "1"
+          || !/^[1-9]\d*$/.test(values[0]!) || !/^\$\d+$/.test(values[1]!) || !/^\d+$/.test(values[2]!)) return {state:"unknown"};
+        return {state:"present",session:{serverPid:values[0]!,sessionId:values[1]!,sessionCreated:values[2]!,nodeId:values[3]!,generation:values[4]!,marker:values[5] || undefined}};
+      } catch { return {state:"unknown"}; }
+    };
+    const physicalWrite = async (physical: string, expected: NativePhysicalSession, command: string): Promise<void> => {
+      if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
+      const terms = [
+        ["pid",expected.serverPid],["session_id",expected.sessionId],["session_created",expected.sessionCreated],
+        ["session_name",physical],["OPENRIG_NODE_ID",expected.nodeId],["OPENRIG_OCCUPANT_GENERATION",expected.generation],
+        [NATIVE_LOGICAL_SESSION_OPTION,expected.marker ?? ""],["session_windows","1"],["window_panes","1"],["pane_dead","0"],
+      ].map(([key,value]) => `#{==:#{${key}},${tmuxFormatLiteral(value!)}}`);
+      const condition = terms.reduce((left,right) => `#{&&:${left},${right}}`);
+      const refused = `openrig-native-exchange-refused-${randomUUID()}`;
+      const output = await this.nativeRaw(["tmux","if-shell","-F","-t",`=${physical}:`,condition,command,`display-message -p ${refused}`]);
+      if (output.includes(refused)) throw new Error("Native exchange source occupant changed; no write was performed");
+    };
+    const transition = new NativeNameTransition(nodeId, {
+      ownsLifecycle, observe:physicalObserve,
+      rename: async (from,to,expected) => {
+        if (await this.nativeSessionExists(to)) throw new Error("Native exchange destination is not proven absent");
+        await physicalWrite(from,expected,`rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(tmuxSessionNameFormat(to))}`);
+      },
+      writeMarker: async (physical,marker,expected) => physicalWrite(physical,expected,marker === undefined
+        ? `set-option -u -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION}`
+        : `set-option -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION} ${shellQuote(marker)}`),
+    });
     const observe = async (session: string): Promise<NativeExchangeSlot> => {
       try {
         const probe = await this.probeSession(session);
@@ -1195,11 +1228,32 @@ export class TmuxAdapter {
     };
     return {
       ownsLifecycle,
+      prepareRename: async (from,to,generation) => {
+        const names = [identity.canonical,identity.staging,identity.parking];
+        if (!names.includes(from) || !names.includes(to)
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) {
+          throw new Error("Native exchange preparation is outside its custody");
+        }
+        return transition.prepare(from,to,generation);
+      },
+      resumeRename: async intent => {
+        const names = [identity.canonical,identity.staging,identity.parking];
+        if (!names.includes(intent.from) || !names.includes(intent.to)
+          || ![identity.predecessorGeneration,identity.successorGeneration].includes(intent.generation)) {
+          throw new Error("Native exchange recovery intent is outside its custody");
+        }
+        await transition.resume(intent);
+      },
       observe: async () => ({canonical:await observe(identity.canonical),staging:await observe(identity.staging),parking:await observe(identity.parking)}),
-      rename: async (from,to,generation) => {
+      rename: async (from,to,generation,intent) => {
         const names=[identity.canonical,identity.staging,identity.parking];
         if (!ownsLifecycle() || !names.includes(from) || !names.includes(to) || from===to
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) throw new Error("Native exchange rename is outside its custody");
+        if (intent) {
+          if (intent.from !== from || intent.to !== to || intent.generation !== generation) throw new Error("Native exchange rename intent differs from its command");
+          await transition.resume(intent);
+          return;
+        }
         if ((await this.probeSession(to)).state !== "absent") throw new Error("Native exchange destination is not proven absent");
         if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
         const refused=`openrig-native-exchange-refused-${randomUUID()}`;

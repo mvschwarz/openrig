@@ -1,5 +1,24 @@
 # Native Windows parity: implementation and evidence
 
+## Runtime exchange transport now opts into durable intents (2026-11-03)
+
+The production native runtime-exchange adapter now supplies prepare/recovery
+hooks to the journal coordinator. Physical observations bind server PID, session
+ID, creation time, node, generation, marker and a live sole pane/window. Each
+intent-driven rename or marker repair uses an if-shell predicate that repeats
+those identity checks at the write. Recovery and preparation refuse slots or
+generations outside the backend's exchange identity. The selected terminal
+server arguments are preserved on observation and mutation.
+
+Controlled adapter tests exercise lost replies after an applied rename without
+replaying it, server-side predicate refusal and foreign-custody rejection. These
+tests inspect production command construction through an injected argv transport;
+they do not establish real psmux support for every format field or rename behavior.
+The five selected transport/transition/journal/planner/runtime-service files passed
+131 tests with five skips; daemon build and whitespace checks passed.
+The planner's encoded-name restriction and client-follow mapping still remain;
+no deployment, user-team operation or public push occurred.
+
 ## Qualified physical name-transition recovery foundation (2026-11-03)
 
 A separate transition implementation now reobserves the source and destination
