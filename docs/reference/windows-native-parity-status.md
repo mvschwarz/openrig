@@ -4211,3 +4211,61 @@ This is installed-package acceptance for that source, not publication, actual de
 The product-factory-vps profile is a POSIX VPS baseline (id, sshd -T, UFW and ss). A registry entry explicitly selecting PowerShell previously ran those commands anyway and could turn missing POSIX tools into false account/firewall failures. Such entries now receive all nine checks as unknown with Windows-native assessment guidance, without dispatching shell commands or public-address probes for an inapplicable profile. Absent/POSIX remote-shell selection retains the existing profile behavior. The new regression failed before the change; the complete host file passes on Windows and WSL, and CLI TypeScript noEmit passes.
 
 This is a diagnostic correction, not implementation or acceptance of an equivalent Windows security-posture baseline. Windows account/administrator, effective OpenSSH policy, firewall ingress and listener checks remain an explicit implementation/qualification gap. The broader parity goal is incomplete.
+
+### 2026-11-03: explicit Windows host posture collector and CLI entry
+
+`rig host doctor windows-test --posture product-factory-windows --json` now
+selects a separate native baseline for an SSH registry entry with
+`remoteShell: powershell`. The original `product-factory-vps` remains POSIX.
+The registry's paired `rigPath` is still required by the ordinary doctor legs.
+No remote OS is inferred from the caller's OS.
+
+The fixed read-only collector reports nine checks: an enabled non-administrator
+local `openrig` account, default OpenSSH administrator denial and authentication
+settings, effective Windows Firewall profile defaults, an explicit Tailscale
+interface Allow rule, Tailscale trust settings, standard-port daemon listener
+addresses, and two optional outside-vantage TCP observations. The native account
+census uses the Administrators SID; unresolved nested groups stay unknown.
+Firewall defaults come from ActiveStore and require all three profiles; missing
+or NotConfigured actions stay unknown. A rule's presence is distinguished in its
+detail from actual port reachability. Listener addresses use IP validation and
+the loopback/CGNAT ranges. Failed public dials retain their refusal/filter/timeout
+scope rather than proving a specific firewall configuration.
+
+Microsoft documents Windows OpenSSH administrator restrictions through
+[DenyGroups](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh-server-configuration)
+and the effective firewall policy store through
+[ActiveStore](https://learn.microsoft.com/en-us/powershell/module/netsecurity/get-netfirewallprofile).
+This collector reads only a bare executable from the registered sshd service;
+alternate service arguments/config files and unavailable settings stay unknown.
+Its SSH rows describe default service-wide settings, not all Match/user-specific
+overrides. Exact literal administrator-group denial is recognized; ambiguous
+group patterns remain unknown. Authentication observations require public-key
+support and disabled password, keyboard-interactive, GSSAPI and hostbased methods.
+No policy, account, service or credential is modified.
+
+The collector travels as trusted shipped script bytes over SSH stdin behind a
+small fixed encoded bootstrap. This avoids nesting the whole script in Windows
+command-line limits; the complete native SSH command is tested below 8191
+characters. Direct PowerShell `-Command -` failed to execute this compound stdin
+script; the fixed bootstrap reads the complete stdin and then executes it as one
+script. That failed experiment is not counted as acceptance. No keys, raw sshd
+configuration, user SIDs or Tailscale account data are returned by the collector.
+
+Validation: complete host and Windows-posture files pass 50/50 on Windows and
+49/49 with one Windows-only real-process skip on WSL. CLI TypeScript noEmit
+passes. The ordinary CLI/registry path, malformed/oversized/versioned data,
+ambiguous facts, insecure observations and outside-probe outcomes are covered.
+The Windows test executes the actual read-only collector through both production
+PowerShell launch layers and stdin under owned Job custody, replacing only SSH
+network transport. Independent local stdin collection completed with one pass,
+one baseline failure and five unknowns; that is observed host state, not a green
+hardening verdict. Receipts: windows-posture-native-qualified-20261103.json,
+windows-posture-wsl-qualified-20261103.json and native-posture-stdin-local-r2-20261103.json.
+
+Real remote Windows SSH acceptance remains blocked by the existing endpoint's
+pre-authentication timeout. Full Match/custom-service qualification, indirect
+group resolution, effective rule-overlap/port access, nonstandard daemon-port
+selection and a complete same-head suite/installed-package rerun remain open.
+This implementation does not close the overall parity goal or authorize changes
+to the actual host's security configuration.

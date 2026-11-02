@@ -29,11 +29,12 @@ import { connect } from "node:net";
 import { execFile } from "node:child_process";
 import { getOpenRigHome } from "../openrig-compat.js";
 import { addHostEntry, updateHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry, type SshHostEntry } from "../host-registry.js";
-import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
+import { runCrossHostCommand, type CrossHostResult, type RunCrossHostCommandOpts } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
+import { WINDOWS_POSTURE_PROFILE_ID, windowsPostureCheck } from "../windows-host-posture.js";
 
 // ---------------------------------------------------------------------------
 // rig host pair — the approval wait is BOUNDED.
@@ -70,7 +71,7 @@ export interface CheckRow {
 }
 
 export interface DoctorDeps {
-  run: (host: HostEntry, argv: readonly string[]) => Promise<CrossHostResult>;
+  run: (host: HostEntry, argv: readonly string[], opts?: Pick<RunCrossHostCommandOpts, "stdin">) => Promise<CrossHostResult>;
   httpGet: (url: string, headers?: Record<string, string>) => Promise<{ status: number; body: string }>;
   /** OPR.0.4.6.MH1 FR-6: bounded JSON POST for the pair handshake.
    *  Optional so existing DoctorDeps fixtures keep compiling; the pair
@@ -143,7 +144,7 @@ function tailscaleRunSshFromPrefs(text: string): boolean | undefined {
 
 function defaultDoctorDeps(): DoctorDeps {
   return {
-    run: (host, argv) => runCrossHostCommand(host, argv),
+    run: (host, argv, opts) => runCrossHostCommand(host, argv, opts),
     httpGet: async (url, headers) => {
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
       return { status: res.status, body: await res.text() };
@@ -381,7 +382,7 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
   return rows;
 }
 
-/** FR-2 — THE one built-in posture profile (arch R13-2b: a named constant
+/** FR-2 — the POSIX built-in posture profile (a named constant
  *  table, no framework). Every item is three-valued; UNKNOWN is never
  *  smoothed to pass, and every non-pass carries its fix. */
 export const POSTURE_PROFILE_ID = "product-factory-vps";
@@ -1064,9 +1065,9 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
 
   cmd
     .command("doctor")
-    .description("Stepwise host verification (+ --posture for the product-factory-vps baseline)")
+    .description("Stepwise host verification with an explicit POSIX or Windows posture baseline")
     .argument("<id>", "Registered host id")
-    .option("--posture <profile>", `Run the posture baseline (only built-in profile: ${POSTURE_PROFILE_ID})`)
+    .option("--posture <profile>", `Run a posture baseline: ${POSTURE_PROFILE_ID} or ${WINDOWS_POSTURE_PROFILE_ID}`)
     .option("--public-addr <ip>", "Public address for the outside-vantage reachability probes (posture items 8-9)")
     .option("--json", "JSON output")
     .action(async (id: string, opts: { posture?: string; publicAddr?: string; json?: boolean }) => {
@@ -1084,15 +1085,15 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         process.exitCode = 1;
         return;
       }
-      if (opts.posture !== undefined && opts.posture !== POSTURE_PROFILE_ID) {
-        console.error(`unknown posture profile '${opts.posture}'. The only built-in profile is: ${POSTURE_PROFILE_ID}`);
+      if (opts.posture !== undefined && ![POSTURE_PROFILE_ID, WINDOWS_POSTURE_PROFILE_ID].includes(opts.posture)) {
+        console.error(`unknown posture profile '${opts.posture}'. Built-in profiles: ${POSTURE_PROFILE_ID}, ${WINDOWS_POSTURE_PROFILE_ID}`);
         process.exitCode = 1;
         return;
       }
 
       const rows = await doctorLegs(resolved.host, deps);
       if (opts.posture) {
-        rows.push(...await postureCheck(resolved.host, deps, { publicAddr: opts.publicAddr }));
+        rows.push(...await (opts.posture === WINDOWS_POSTURE_PROFILE_ID ? windowsPostureCheck : postureCheck)(resolved.host, deps, { publicAddr: opts.publicAddr }));
       }
       renderRows(rows, opts.json);
       if (rows.some((r) => r.status === "fail")) process.exitCode = 1;
