@@ -126,6 +126,15 @@ describe.skipIf(!hasTmux)("the runner conformance check", () => {
     expect(code).toBe(0);
   }, 90_000);
 
+  // Section 7 sets no time limit for a permit after a read OpenRig answered with a status it doesn't list. A runner that
+  // retries such a read a few times first keeps the contract, so the check waits its ordinary per-step bound for it.
+  it("passes 4b for a runner that retries a failed read three times, 1.5 s apart, before it permits", async () => {
+    const { code, report } = await check(["--cases", "4b"], " --read-retries 3");
+    expect(failing(report)).toEqual([]);
+    expect(report.results.map((r) => [r.id, r.status])).toEqual([["4b", "pass"]]);
+    expect(code).toBe(0);
+  }, 120_000);
+
   // The contract doesn't order a turn's Stop and its ask's withdraw. A runner that posts the Stop first keeps it.
   it("passes 4b for a runner that withdraws a cancelled or ended turn's ask after posting its Stop", async () => {
     const { code, report } = await check(["--cases", "4b"], " --withdraw-after-stop");
