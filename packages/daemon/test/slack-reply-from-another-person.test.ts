@@ -10,8 +10,8 @@ import { MissionControlWriteContract } from "../src/domain/mission-control/missi
 import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
 import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
 
-// A reply that comes through the gateway keeps its sender's identity: a different registered person's Slack reply to a
-// question parked on someone else reaches the agent as their own message and doesn't resume the question.
+// A reply that comes through the gateway keeps its sender's identity: in one trusted workspace, a different registered
+// person's Slack reply to a question parked on someone else resumes it, recorded as them on that person's ask.
 // Resolving from a terminal keeps that same registered-person identity.
 
 const person = (entityId: string): HumanFragment => ({
@@ -54,12 +54,13 @@ describe("a Slack reply from someone other than the person a question is parked 
   const slackReply = (qitemId: string, actorSession: string) =>
     makeHumanReplyResolver(repo, contract)({ qitemId, actorSession, decision: "go ahead", messageTs: "2.2" });
 
-  it("doesn't resume the question: it stays parked on its person and nothing is written to it", async () => {
+  it("resumes the question, recorded as Mike on Ana's ask", async () => {
     const parked = await parkOnAna();
-    const before = repo.listTransitions(parked.qitemId).length;
-    expect(await slackReply(parked.qitemId, MIKE)).toBe("not-applicable");
-    expect(repo.getById(parked.qitemId)).toMatchObject({ state: "blocked", blockedOn: "human-ana@host" });
-    expect(repo.listTransitions(parked.qitemId)).toHaveLength(before);
+    expect(await slackReply(parked.qitemId, MIKE)).toBe("resolved");
+    expect(repo.getById(parked.qitemId)?.state).toBe("in-progress");
+    const resolved = repo.listTransitions(parked.qitemId).filter((t) => t.ownerNotificationKind === "human-decision-resolved");
+    expect(resolved.map((t) => [t.actorSession, t.transitionNote]))
+      .toEqual([[MIKE, `go ahead; by ${MIKE}, a registered person, on ${ANA}'s ask`]]);
   });
 
   it("the person it's parked on still resumes it from Slack", async () => {
@@ -70,17 +71,12 @@ describe("a Slack reply from someone other than the person a question is parked 
       .toEqual([ANA]);
   });
 
-  it("a different registered person cannot resolve the question from a terminal either", async () => {
+  it("a different registered person resolves the question from a terminal too, as themselves on Ana's ask", async () => {
     const parked = await parkOnAna();
-    const before = repo.getById(parked.qitemId);
-    const history = repo.listTransitions(parked.qitemId);
-    const audit = log.listForQitem(parked.qitemId);
-    send.mockClear();
-    await expect(contract.act({ verb: "resolve", qitemId: parked.qitemId, actorSession: MIKE, decision: "go ahead", notify: true }))
-      .rejects.toMatchObject({ code: "answer_not_recorded" });
-    expect(repo.getById(parked.qitemId)).toEqual(before);
-    expect(repo.listTransitions(parked.qitemId)).toEqual(history);
-    expect(log.listForQitem(parked.qitemId)).toEqual(audit);
-    expect(send).not.toHaveBeenCalled();
+    await contract.act({ verb: "resolve", qitemId: parked.qitemId, actorSession: MIKE, decision: "go ahead", notify: false });
+    expect(repo.getById(parked.qitemId)?.state).toBe("in-progress");
+    expect(repo.listTransitions(parked.qitemId).at(-1)).toMatchObject({ actorSession: MIKE,
+      transitionNote: `go ahead; by ${MIKE}, a registered person, on ${ANA}'s ask` });
+    expect(log.listForQitem(parked.qitemId).at(-1)).toMatchObject({ actorSession: MIKE });
   });
 });
