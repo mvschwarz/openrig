@@ -4620,3 +4620,28 @@ The resume-metadata refresh probe was also inspected: its Windows branch
 already resolves the provider and uses renderWindowsLaunch, so it was not
 replaced with the presentation wrapper. Manual in-place restart recovery and
 other human-facing command surfaces still require separate coverage.
+
+### Pinned Windows in-place manual recovery (2026-11-03)
+
+An in-place restart previously returned its bare resume core as manual recovery
+guidance, omitting the observed executable, cwd and Codex home. For a process
+observed as native Windows, preflight now prepares a structured PowerShell
+recovery command using that executable path, exact resume argv, working
+directory and the observed CODEX_HOME plus HOME when available. It does not
+copy the full managed seat environment or resolve a new provider from PATH.
+Missing executable/path evidence refuses before stopping. All failure returns,
+including a thrown stop operation, retain the prepared recovery command.
+The actual managed restart launch remains unchanged.
+
+An owned Node receiver executed the command through real PowerShell with an
+unrelated PATH and ambient homes. It received the intended argv (including
+quoted reasoning-effort data), CODEX_HOME, HOME, cwd and exit status 7. Service
+fixtures also check exception-return metadata and refusal before effects when
+the executable was not observed. The two complete files passed 158 with one
+pre-existing skip on Windows, and 157 with two skips on WSL; daemon TypeScript
+checking passed. Receipts: pinned-recovery-native-home-final-20261103.json and
+pinned-recovery-wsl-home-final-20261103.json. Skips remain unverified coverage.
+Owned receiver files/directories were removed. No real provider, seat, daemon
+or team was stopped or restarted. Executable path pinning is not a file-hash
+or atomic replacement guarantee, and these fixtures do not qualify interactive
+console behavior or authenticated provider continuity.

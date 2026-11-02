@@ -1531,6 +1531,28 @@ function nativeCandidateRows(host = 'powershell.exe', pid = 200, startedAt = LST
       argv, command: argv.join(' '), startedAt }];
 }
 describe('native Windows restart boundaries', () => {
+  it('returns pinned native recovery metadata even when the stop operation throws', async () => {
+    const w = world({ throwAt: 'signalPid', facts: { 200: facts({ exe: 'C:/fixture/codex.exe', env: { CODEX_HOME: HOME, HOME: 'C:/fixture/user' } }) } });
+    w.setRows(nativeCandidateRows());
+    const result = await w.service.restartInPlace({ seatRef: SEAT, reason: 'synthetic stop exception' });
+    expect(result).toMatchObject({ ok: true, outcome: 'native_unknown' });
+    const command = (result as { recoveryCommand: string }).recoveryCommand;
+    const encoded = command.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/)?.[1];
+    expect(encoded).toBeTruthy();
+    const script = Buffer.from(encoded!, 'base64').toString('utf16le');
+    expect(script).toContain("$openrigStart.FileName = 'C:/fixture/codex.exe'");
+    expect(script).toContain(`$openrigStart.EnvironmentVariables['CODEX_HOME']='${HOME}'`);
+    expect(script).toContain("$openrigStart.EnvironmentVariables['HOME']='C:/fixture/user'");
+    expect(script).toContain("$openrigStart.WorkingDirectory = '/work'");
+    expect(script).toContain(TOKEN);
+    expect(w.launches).toEqual([]);
+  });
+  it('refuses an unobserved native executable before any stop', async () => {
+    const w = world({ facts: { 200: facts({ exe: null }) } });
+    w.setRows(nativeCandidateRows());
+    expect(await w.service.restartInPlace({ seatRef: SEAT, plan: true })).toMatchObject({ ok: false, code: 'relaunch_unavailable' });
+    expect(w.calls).toEqual([]); expect(w.launches).toEqual([]);
+  });
   it.each(['another receiver', 'unavailable console', 'changing console', 'failed console', 'changed pane'])('does not resume after exit with %s', async kind => {
     let foreground = 'codex.exe';
     let samples = 0;

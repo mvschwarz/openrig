@@ -21,6 +21,7 @@ import type { RunningCodexLaunch } from "../adapters/codex-runtime-adapter.js";
 import { emittedEffortFromArgv } from "./seat-effort.js";
 import { CODEX_NETWORK_DEFAULT_OVERRIDE } from "./codex-network-default.js";
 import { readWindowsProcessFacts } from "./windows-process-facts.js";
+import { pinnedWindowsRecoveryCommand } from "./provider-recovery-command.js";
 
 /**
  * OPR.0.7.0.5 — restart ONE Codex seat in place so it reads its Codex home's current account: the same
@@ -214,7 +215,7 @@ const NOT_VERIFIED = [
 interface Observed {
   ok: true; report: InPlaceRestartReport; codexPid: number; codexStartedAt: string | null; panePid: number;
   relaunch: { command: string; core: string }; priorRemainOnExit: string | null;
-  cwd: string; oldExe: string | null;
+  cwd: string; oldExe: string | null; recoveryCommand: string;
 }
 
 interface RestartProgress { stage: string; paneHeld: InPlaceRestartReport["paneHeld"] }
@@ -270,7 +271,7 @@ export class CodexInPlaceRestart {
       result = await this.restart(target, observed, progress);
     } catch (error) {
       result = {
-        ...report, outcome: "native_unknown", recoveryCommand: observed.relaunch.core,
+        ...report, outcome: "native_unknown", recoveryCommand: observed.recoveryCommand,
         ...(progress.paneHeld ? { paneHeld: progress.paneHeld } : {}),
         couldNotSee: [`what happened after an error during ${progress.stage}: ${error instanceof Error ? error.message : String(error)}`],
         message: `The restart stopped with an error during ${progress.stage}; the seat's state was not observed afterwards.`,
@@ -295,8 +296,9 @@ export class CodexInPlaceRestart {
     const { report, codexPid, codexStartedAt, panePid, relaunch, priorRemainOnExit, cwd, oldExe } = observed;
     const { sessionName } = target;
     const pane = report.pane;
-    // What resumes the original by hand: the exact relaunch command, without the seat environment wrapper.
-    const recoveryCommand = relaunch.core;
+    // Manual recovery retains only the observed native home/cwd/executable,
+    // never the managed seat environment wrapper or its unrelated values.
+    const recoveryCommand = observed.recoveryCommand;
 
     let launch: HarnessLaunchResult;
     if (report.paneShape === "shell_backed") {
@@ -548,6 +550,11 @@ export class CodexInPlaceRestart {
       priorRemainOnExit = prior;
     }
 
+    let recoveryCommand = relaunch.core;
+    if (process.platform === "win32") {
+      try { recoveryCommand = pinnedWindowsRecoveryCommand(relaunch.core, facts.exe ?? "", cwd, codexHome, facts.env.HOME); }
+      catch { return { ok: false, code: "relaunch_unavailable", message: "The observed native executable, working directory and Codex home could not form a pinned manual recovery command. Nothing was stopped." }; }
+    }
     const report: InPlaceRestartReport = {
       ok: true, planOnly: seenStartedSeq === null, message: "", seat, sessionName, pane, paneShape,
       conversationId: token, conversationProof,
@@ -569,7 +576,7 @@ export class CodexInPlaceRestart {
       ...history,
       warnings: [],
     };
-    return { ok: true, report, codexPid: top.pid, codexStartedAt: top.startedAt ?? null, panePid, relaunch, priorRemainOnExit, cwd, oldExe: facts.exe };
+    return { ok: true, report, codexPid: top.pid, codexStartedAt: top.startedAt ?? null, panePid, relaunch, priorRemainOnExit, cwd, oldExe: facts.exe, recoveryCommand };
   }
 
   /** Refuses while a restart of this seat is in flight under THIS daemon, or ran while the request waited.
