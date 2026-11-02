@@ -5207,6 +5207,23 @@ pending installed-export check above only; the broader parity requirements,
 real GUI/provider acceptance and full daemon-suite limitations remain open.
 # Scoped native SFTP filename qualification — 2026-11-03
 
+Mapped native view/tile attachment now carries canonical physical-name/marker
+data in its generated wrapper. The PowerShell helper verifies exact presence,
+marker and legacy ambiguity before selecting the physical route, rechecks on
+replacement observation, and refuses an unverified initial mapped target rather
+than falling back to direct attach. Logical labels/messages stay unchanged.
+Native view recovery commands use that same verified wrapper for mapped names;
+altered binding payloads fail canonical-wrapper admission.
+
+Six tile/view tests passed, including actual Windows PowerShell execution over
+controlled native executables: literal argv, replacement following, changed
+identity, binding loss, initial absence, read-only flags and SSH forwarding.
+Daemon build passed. An implementation error where ScriptBlock-local target
+state differed from script scope was diagnosed from command receipts and fixed
+using a shared routing-state object. These are helper/control-flow checks, not
+stock-psmux desktop acceptance. General inventory/direct attach guidance and
+installed-package qualification of the modified asset remain unfinished.
+
 Physical-name phase 3 preserves existing ordinary native names beginning with
 the codec prefix: an exact positive presence probe and an absent logical marker
 qualify the legacy name. New creation refuses an already occupied legacy name.

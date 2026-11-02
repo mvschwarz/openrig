@@ -9,6 +9,25 @@ import { buildGridRoot } from '../src/domain/terminal/herdr-adapter.js';
 import { buildRexGrid } from '../src/domain/terminal/rex-layout.js';
 import { composeView } from '../src/domain/terminal/view-composer.js';
 import {writeWindowsNodeFixture} from '../../../scripts/windows-node-fixture.mjs';
+import { bindNativeSessionName } from '../src/domain/terminal/native-session-name.js';
+import { readWindowsTileAttachArgv } from '../src/domain/terminal/windows-tile-attach.js';
+import { powershellQuote } from '../src/adapters/windows-launch.js';
+
+test('mapped view recovery uses the same canonical verified wrapper and rejects altered binding data', () => {
+ const logical='owned|logical',binding=bindNativeSessionName(logical);
+ const view=composeView('v',[{seat:logical,label:'Logical label',tmuxSession:logical,host:null,readOnly:true,alive:true}],{resolveHost:()=>null,localPlatform:'win32',localTmux:'C:/owned/psmux.exe',localTmuxServer:['-L','owned-home']});
+ const pane=view.opened[0],argv=pane.attachArgv!;
+ assert.equal(pane.label,'Logical label');
+ assert.equal(pane.recoveryCommand,'& '+argv.map(powershellQuote).join(' '));
+ assert.equal(readWindowsTileAttachArgv(argv)?.session,logical);
+ assert.ok(isWindowsTileAttachArgv(argv));
+ const code=Buffer.from(argv[5]!, 'base64').toString('utf16le'),match=code.match(/ '([A-Za-z0-9+/]+={0,2})'$/)!;
+ const payload=JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
+ assert.equal(payload.nativeBinding.physical,binding.physical);
+ payload.nativeBinding.marker='foreign';
+ const altered=[...argv];altered[5]=Buffer.from(code.replace(match[1],Buffer.from(JSON.stringify(payload),'utf8').toString('base64')),'utf16le').toString('base64');
+ assert.equal(isWindowsTileAttachArgv(altered),false);
+});
 
 test.skipIf(process.platform !== 'win32')('native tile returns an attach refusal instead of reporting a later successful detach', () => {
  const root=fs.mkdtempSync(join(tmpdir(),'native tile refusal-'));
@@ -79,18 +98,22 @@ test.skipIf(process.platform !== 'win32')('native SSH tile forwards the exact re
 test.skipIf(process.platform !== 'win32')('native tile preserves identity, argv and bounded replacement following', () => {
  const root=fs.mkdtempSync(join(tmpdir(),'native tile [owned]-'));
  try {
-  const source = "import fs from 'node:fs';const a=process.argv.slice(2),mode=process.env.TEST_TILE_MODE;fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]!=='-t'||a[3]!=='='+process.env.TEST_TILE_SESSION)process.exit(9);let s=JSON.parse(fs.readFileSync(process.env.TEST_TILE_STATE));const cmd=a[4];if(cmd==='display-message'){if(mode==='initial-missing'||mode==='missing'&&s.attaches.length)process.exit(1);console.log('500 '+(mode==='replacement'&&s.attaches.length?'$2':'$1')+':'+process.env.TEST_TILE_SESSION);}else if(cmd==='show-environment'){if(mode==='unmanaged')process.exit(1);console.log('OPENRIG_NODE_ID='+(mode==='foreign'&&s.attaches.length?'different-node':'original-node'));}else if(cmd==='attach'){s.attaches.push(a.at(-1));fs.writeFileSync(process.env.TEST_TILE_STATE,JSON.stringify(s));}else process.exit(8);";
+  const source = "import fs from 'node:fs';const a=process.argv.slice(2),mode=process.env.TEST_TILE_MODE;fs.appendFileSync(process.env.TEST_TILE_LOG,JSON.stringify(a)+'\\n');if(a[2]==='has-session'){if(a[4]!=='='+process.env.TEST_TILE_SESSION)process.exit(9);process.exit(mode==='initial-missing'?1:0);}if(a[2]!=='-t'||a[3]!=='='+process.env.TEST_TILE_SESSION)process.exit(9);let s=JSON.parse(fs.readFileSync(process.env.TEST_TILE_STATE));const cmd=a[4];if(cmd==='show-options'){console.log(mode==='binding-lost'&&s.attaches.length?'wrong-marker':process.env.TEST_TILE_BINDING);}else if(cmd==='display-message'){if(mode==='initial-missing'||mode==='missing'&&s.attaches.length)process.exit(1);console.log('500 '+(mode==='replacement'&&s.attaches.length?'$2':'$1')+':'+process.env.TEST_TILE_SESSION);}else if(cmd==='show-environment'){if(mode==='unmanaged')process.exit(1);console.log('OPENRIG_NODE_ID='+(mode==='foreign'&&s.attaches.length?'different-node':'original-node'));}else if(cmd==='attach'){s.attaches.push(a.at(-1));fs.writeFileSync(process.env.TEST_TILE_STATE,JSON.stringify(s));}else process.exit(8);";
   const tmux=writeWindowsNodeFixture(root,'tmux',source);
   const session="seat 'quote' \"double\" 中文 %PATH%",server='owned server;# "quote" \\slash\\ 中文\\';
-  for(const mode of ['detach','replacement','foreign','missing','unmanaged','initial-missing']) {
+  const binding=bindNativeSessionName(session);
+  for(const mode of ['detach','replacement','foreign','missing','binding-lost','unmanaged','initial-missing']) {
    const state=join(root,mode+'.json'),log=join(root,mode+'.jsonl');fs.writeFileSync(state,JSON.stringify({attaches:[]}));
    const argv=windowsTileAttachArgv(tmux,['-L',server],session,mode==='detach',mode==='detach'?4:2);
-   const run=spawnSync(argv[0],argv.slice(1),{env:{...process.env,TEST_TILE_MODE:mode,TEST_TILE_STATE:state,TEST_TILE_LOG:log,TEST_TILE_SESSION:session},encoding:'utf8',windowsHide:true,timeout:15000});
-   assert.equal(run.status,mode==='foreign'?1:0,mode+': '+run.stderr);
+   const run=spawnSync(argv[0],argv.slice(1),{env:{...process.env,TEST_TILE_MODE:mode,TEST_TILE_STATE:state,TEST_TILE_LOG:log,TEST_TILE_SESSION:binding.physical,TEST_TILE_BINDING:binding.marker},encoding:'utf8',windowsHide:true,timeout:15000});
+   assert.equal(run.status,mode==='foreign'||mode==='initial-missing'?1:0,mode+': '+run.stderr+' calls='+fs.readFileSync(log,'utf8'));
    const attaches=JSON.parse(fs.readFileSync(state,'utf8')).attaches;
-   assert.deepEqual(attaches,mode==='replacement'?['$1','$2']:mode==='initial-missing'?['='+session]:['$1'],mode);
+   assert.deepEqual(attaches,mode==='replacement'?['$1','$2']:mode==='initial-missing'?[]:['$1'],mode);
    const calls=fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse);
-   for(const call of calls)assert.deepEqual(call.slice(0,4),['-L',server,'-t','='+session],mode);
+   for(const call of calls) {
+    if(call[2]==='has-session')assert.deepEqual(call,['-L',server,'has-session','-t','='+binding.physical],mode);
+    else assert.deepEqual(call.slice(0,4),['-L',server,'-t','='+binding.physical],mode);
+   }
    for(const call of calls.filter(a=>a[4]==='attach')) {
     if(mode==='detach')assert.deepEqual(call.slice(5,7),['-r','-t']);
     else assert.deepEqual(call.slice(5,8),['-f','ignore-size','-t']);

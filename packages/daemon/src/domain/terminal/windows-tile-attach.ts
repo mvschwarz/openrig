@@ -1,6 +1,7 @@
 import { win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { powershellQuote, renderWindowsLaunchArgv } from '../../adapters/windows-launch.js';
+import { bindNativeSessionName, nativeSessionNameMayBeLegacy } from './native-session-name.js';
 
 /** Execute the remote POSIX command as one SSH argument, without a local sh. */
 export function windowsSshTileAttachArgv(destination: string, command: string, ssh = 'ssh'): string[] {
@@ -27,7 +28,9 @@ export function isWindowsTileAttachArgv(argv: readonly string[]): boolean {
 /** A short data-only tile command; the installed helper owns reattachment. */
 export function windowsTileAttachArgv(tmux: string, server: readonly string[], session: string, readOnly: boolean, retrySeconds = 30): string[] {
   const helper=fileURLToPath(new URL('../../../assets/terminal/windows-tile-attach.ps1',import.meta.url));
-  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds}), 'utf8').toString('base64');
+  const binding = bindNativeSessionName(session);
+  const payload=Buffer.from(JSON.stringify({tmux,server,session,readOnly,retrySeconds,
+    ...(binding.marker ? { nativeBinding: { physical: binding.physical, marker: binding.marker, legacy: nativeSessionNameMayBeLegacy(session) } } : {})}), 'utf8').toString('base64');
   const code="& ([ScriptBlock]::Create([IO.File]::ReadAllText("+powershellQuote(helper)+"))) "+powershellQuote(payload);
   return [win32.join(process.env.SystemRoot ?? 'C:\\Windows','System32/WindowsPowerShell/v1.0/powershell.exe'),
     '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(code,'utf16le').toString('base64')];
@@ -46,6 +49,7 @@ export function readWindowsTileAttachArgv(argv: readonly string[]): WindowsTileT
       || !Array.isArray(value.server) || value.server.some(v => typeof v !== 'string' || v.includes('\0'))
       || typeof value.session !== 'string' || !value.session || /[\x00-\x1f]/.test(value.session)
       || typeof value.readOnly !== 'boolean' || !Number.isSafeInteger(value.retrySeconds) || value.retrySeconds < 0) return null;
-    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds)) === JSON.stringify(argv) ? value : null;
+    return JSON.stringify(windowsTileAttachArgv(value.tmux, value.server, value.session, value.readOnly, value.retrySeconds)) === JSON.stringify(argv)
+      ? { tmux: value.tmux, server: value.server, session: value.session, readOnly: value.readOnly, retrySeconds: value.retrySeconds } : null;
   } catch { return null; }
 }

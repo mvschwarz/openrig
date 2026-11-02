@@ -22,6 +22,7 @@
 import { tileAttachArgv } from "./tile-attach.js";
 import { windowsTileAttachArgv, windowsSshTileAttachArgv } from "./windows-tile-attach.js";
 import { powershellQuote } from "../../adapters/windows-launch.js";
+import { bindNativeSessionName } from "./native-session-name.js";
 import type { HostEntry } from "../hosts/hosts-registry-reader.js";
 import type {
   AbsentSeat,
@@ -224,8 +225,8 @@ export function composeView(
       label: m.label,
       paneCommand: attachArgv.map(shellQuote).join(" "),
       recoveryCommand: ctx.localPlatform === "win32"
-        ? "& " + [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
-          ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession].map(powershellQuote).join(" ")
+        ? "& " + (bindNativeSessionName(m.tmuxSession).marker ? attachArgv : [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
+          ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession]).map(powershellQuote).join(" ")
         : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
       recoveryShell: ctx.localPlatform === "win32" ? "powershell" : "sh",
       attachArgv,
