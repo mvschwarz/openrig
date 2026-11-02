@@ -27,6 +27,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="assess-stdin") { using(var file=new SafeFileHandle(GetStdHandle(-10),false))Console.Write(Assess(file)); }
       else if(args[0]=="directory-write-access")DirectoryWriteAccess(args[1]);
       else if(args[0]=="flush-file" || args[0]=="flush-directory")FlushOwnedPath(args[1],args[0]=="flush-directory");
+      else if(args[0]=="owned-pipe")OwnedPipe(args[1]);
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
@@ -48,6 +49,9 @@ public static class OpenRigOwnedText {
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe,out uint pid);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern uint GetFileType(SafeFileHandle file);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);
   [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
@@ -59,6 +63,20 @@ public static class OpenRigOwnedText {
   [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle file,int type,uint requested,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
+  static void OwnedPipe(string name) {
+    using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",name,System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.None)) {
+      pipe.Connect(1500); uint pid;
+      if(!GetNamedPipeServerProcessId(pipe.SafePipeHandle,out pid))throw new Win32Exception(Marshal.GetLastWin32Error());
+      using(var process=System.Diagnostics.Process.GetProcessById((int)pid)) {
+        IntPtr token;
+        if(!OpenProcessToken(process.Handle,8,out token))throw new Win32Exception(Marshal.GetLastWin32Error());
+        try { using(var owner=new WindowsIdentity(token))using(var caller=WindowsIdentity.GetCurrent()) {
+          if(owner.User.Value!=caller.User.Value)throw new InvalidOperationException("Pipe server must belong to the current user");
+          Console.Write(pid+"\t"+process.StartTime.ToUniversalTime().Ticks+"\t"+owner.User.Value);
+        } } finally { CloseHandle(token); }
+      }
+    }
+  }
   static void FlushOwnedPath(string path,bool directory) {
     var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
     using(var file=CreateFile(path,0x40020000u,7,ref security,3,0x02200000u,IntPtr.Zero)) {
@@ -429,6 +447,17 @@ export function ensureWindowsPrivateDirectory(directory: string): void {
   execFileSync(nativeHelper(), ["auth-directory", toNamespacedPath(directory)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+/** Observe the local pipe's real server process and require the caller's SID. */
+export function inspectWindowsOwnedPipe(pipe: string): { pid: number; started: string; sid: string } {
+  if (!/^\\\\\.\\pipe\\[A-Za-z0-9_.-]+$/i.test(pipe)) throw new Error("Select a local named pipe with a single literal name");
+  const output = execFileSync(nativeHelper(), ["owned-pipe", pipe.slice(9)], {
+    windowsHide: true, timeout: 10_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  const [pid, started, sid] = output.split("\t");
+  if (!pid || !/^[1-9][0-9]*$/.test(pid) || !started || !/^[0-9]+$/.test(started) || !sid || !/^S-1-[0-9-]+$/.test(sid)) throw new Error("Incomplete native pipe identity");
+  return { pid: Number(pid), started, sid };
 }
 
 /** Replace an existing file using Windows metadata-preserving replacement.

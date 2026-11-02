@@ -15,8 +15,7 @@ and ordinary Windows file-copy planning for binary SFTP Unicode/space paths and
 absolute `/C:/` roots. These are implementation and scoped verification, not a
 full same-head platform acceptance result. The corresponding receipts are below.
 
-Remaining implementation/contract work includes local Windows OpenShell/Podman
-engine observation and cleanup, terminal-backend behavior mapping, stock psmux
+Remaining implementation/contract work includes terminal-backend behavior mapping, stock psmux
 initial/respawn environment privacy, and file-transfer archive metadata semantics.
 Remaining acceptance includes same-head full Windows/Linux comparison, remote
 real-provider continuity after renewed Pi OAuth login, other harness lifecycles,
@@ -2344,3 +2343,31 @@ three skips. Local sftp-server integration is unavailable on this host and is
 not counted as passed. The existing real remote transport receipt predates
 this planner change and exercised the executor directly; it does not renew the
 ordinary CLI end-to-end acceptance. Archive metadata equivalence remains open.
+
+### Windows rootless engine observation (2026-11-02)
+
+The existing `--engine-socket` option now also accepts a local Windows named
+pipe. A native client handle supplies the real pipe server PID; a process token
+must match the caller SID, and the retained identity includes process creation
+time. Remote pipe names and malformed paths refuse before connection. Inventory
+still only reads the selected endpoint, with bounded HTTP bodies and deadlines.
+
+Windows additionally requires `/libpod/info` to confirm a Linux rootless engine
+with a nonzero mapped host UID, hostname and storage root. Their fingerprint is
+retained with the pipe witness. Capture and absence observation both recheck the
+pipe; a changed owner/process or engine fingerprint, a rootful engine, missing
+inventory, or failed volume query cannot establish cleanup. Exact workload,
+supervisor and volume attribution retains the Linux rules. No engine mutation,
+machine startup, default-connection change or global-empty requirement is added.
+
+Three observer tests now execute the production HTTP reader over a real owned
+Windows named pipe, using synthetic Podman responses. They check the native
+server PID/SID, exact capture, unrelated-resource retention, changed engine and
+rootful refusal. Together with lifecycle and driver checks, 35 tests pass without
+skips. The helper's existing file/auth/flush regression checks also pass. This is
+real native pipe/process observation with controlled engine data, not actual
+Podman/OpenShell deployment acceptance: Podman is not installed on this host.
+Cross-user pipe refusal and actual guest engine deletion/recovery remain untested.
+
+The Windows pipe route follows Podman's documented [Windows API pipe](https://github.com/containers/podman/blob/main/docs/tutorials/podman-for-windows.md)
+and [rootless info fields](https://docs.podman.io/en/latest/markdown/podman-info.1.html).
