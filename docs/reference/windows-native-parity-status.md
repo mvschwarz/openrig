@@ -2576,3 +2576,9 @@ No complete Windows Herdr/following, desktop or reboot claim is made.
 The viewer can decode only this build’s exact Windows tile wrapper and inspect its psmux server/session/node binding without evaluating its PowerShell text. Native cwd attribution accepts Herdr’s case/separator spelling and trailing separator while rejecting sibling and relative paths. Shell command rendering supports quoted PowerShell and POSIX shells; cmd remains unqualified because Windows argv quoting does not prevent cmd expansion.
 
 Validation: native viewer preparation plus existing viewer state-machine tests: 24/24 passed. Daemon typecheck passed before the cwd-only follow-up. The Windows viewer/follow entry remains gated: native private journals, foreground attachment verification, following explanation strip and desktop launch still require implementation and real acceptance. This does not resolve the separately recorded Herdr fixture cleanup EPERM.
+
+### Native Herdr viewer state machine — 2026-11-02
+
+Windows viewer provisioning now uses current-SID private directory DACLs and private atomic journal replacement. Before pane run it requires one foreground process whose PID equals the reported shell PID, then renders the exact tile argv through a supported shell. Native psmux foreground verification uses the decoded server/session binding. Windows is admitted by the viewer state machine; CLI desktop/follow entry remains separately incomplete.
+
+Validation: 26/26 targeted tests passed, including Windows private filesystem writes, case/trailing-separator provider cwd readback, verified attach, and journal reuse across viewer object restart without duplicate create/run. Daemon typecheck passed. The new state-machine provider is controlled: this is not a claim of real Herdr plus psmux desktop acceptance. cmd shell, following strip and real end-to-end acceptance remain open.

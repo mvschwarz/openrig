@@ -10,3 +10,16 @@ export function nativeViewerCommand(argv: readonly string[], shell: string): str
   if (["bash", "sh", "dash", "zsh", "ksh"].includes(kind)) return [argv[0]!.replaceAll("\\", "/"), ...argv.slice(1)].map(shellQuote).join(" ");
   throw new Error("The new viewer's foreground shell is unqualified; no command was sent");
 }
+
+/** Never type an attach command into an editor, REPL, or a child foreground job. */
+export function nativeViewerShellCommand(argv: readonly string[], info: unknown): string {
+  if (!info || typeof info !== "object") throw new Error("Viewer shell identity is unavailable");
+  const value = info as { shell_pid?: unknown; foreground_processes?: Array<{ pid?: unknown; argv?: unknown }> };
+  const foreground = value.foreground_processes;
+  if (!Number.isSafeInteger(value.shell_pid) || Number(value.shell_pid) <= 0 || !Array.isArray(foreground) || foreground.length !== 1)
+    throw new Error("Viewer shell identity is unavailable");
+  const current = foreground[0]!;
+  if (current.pid !== value.shell_pid || !Array.isArray(current.argv) || typeof current.argv[0] !== "string")
+    throw new Error("Viewer foreground is not its shell");
+  return nativeViewerCommand(argv, current.argv[0]);
+}

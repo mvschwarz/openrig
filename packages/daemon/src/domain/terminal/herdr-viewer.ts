@@ -8,6 +8,9 @@ import { resolveOnPath } from "../../adapters/tmux-exec.js";
 import type { ComposedPane } from "./terminal-provider.js";
 import { readPlatformEnv } from "../platform-env.js";
 import { readWindowsTileAttachArgv } from "./windows-tile-attach.js";
+import { ensureWindowsPrivateDirectory } from "../windows-owned-text.js";
+import { replaceWindowsPrivateTextFile } from "../private-text-file.js";
+import { nativeViewerShellCommand } from "./native-viewer-command.js";
 
 export interface ViewerKey { hostId: string; nodeId: string }
 export interface ViewerMapping { workspaceId: string; paneId: string; terminalId: string; readOnly: boolean }
@@ -118,6 +121,17 @@ export class HerdrViewer {
     private readonly platform = process.platform, private readonly root = getDefaultOpenRigPath("private/terminal-viewers"),
     private readonly inspect: InspectViewerSeat = inspectSeat) {}
 
+  private privateDirectory(directory: string): void {
+    if (this.platform === "win32") ensureWindowsPrivateDirectory(directory);
+    else mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  private saveJournal(file: string, journal: Journal): void {
+    const content = `${JSON.stringify(journal)}\n`;
+    if (this.platform === "win32") { replaceWindowsPrivateTextFile(file, content); return; }
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    writeFileSync(temporary, content, { mode: 0o600 }); renameSync(temporary, file);
+  }
+
   ensure(key: ViewerKey, target: ComposedPane, stillCurrent: () => Promise<boolean> = async () => true, createPane?: CreateViewerPane): Promise<ViewerResult> {
     // ponytail: one endpoint queue; per-seat locks if creation throughput needs it.
     const result = this.pending.then(() => this.ensureOnce(key, target, true, stillCurrent, createPane));
@@ -135,7 +149,7 @@ export class HerdrViewer {
     let entry: Entry | undefined;
     const unconfirmed = (error: string): ViewerResult => ({ ok: false, code: "viewer_unconfirmed", error, ...(entry ? { phase: entry.phase } : {}) });
     try {
-      if (this.platform !== "linux") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer is qualified on Linux Herdr 0.9.5/protocol 22 only." };
+      if (this.platform !== "linux" && this.platform !== "win32") return { ok: false, code: "viewer_unsupported", error: "Ensure-viewer requires Linux or Windows Herdr 0.9.5/protocol 22." };
       const status = body(await this.run(["status", "server", "--json"]));
       if (status.version !== "0.9.5" || status.protocol !== 22 || status.running !== true || status.socket !== this.socketPath) {
         return unconfirmed("The qualified Herdr version/protocol or selected socket was not confirmed.");
@@ -144,7 +158,7 @@ export class HerdrViewer {
       if (!target.attachArgv) return unconfirmed("Only verified local tmux bindings support ensure-viewer.");
       const binding = await this.inspect(target.attachArgv);
       if (binding.nodeId !== key.nodeId) return unconfirmed("The current tmux binding does not match this member’s node identity.");
-      if (provision) mkdirSync(this.root, { recursive: true, mode: 0o700 });
+      if (provision) this.privateDirectory(this.root);
       const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
       const file = path.join(this.root, `${endpoint}.json`);
       let journal: Journal;
@@ -154,10 +168,7 @@ export class HerdrViewer {
         journal = { version: 1, entries: {} };
       }
       if (journal.version !== 1 || !journal.entries || typeof journal.entries !== "object" || Array.isArray(journal.entries)) return unconfirmed("Viewer provenance is unreadable; no provider mutation was attempted.");
-      const save = () => {
-        const tmp = `${file}.${randomUUID()}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify(journal)}\n`, { mode: 0o600 }); renameSync(tmp, file);
-      };
+      const save = () => this.saveJournal(file, journal);
       const id = JSON.stringify([key.hostId, key.nodeId]);
       entry = journal.entries[id];
       let created = false;
@@ -168,7 +179,7 @@ export class HerdrViewer {
         if (!provision) return { ok: false, code: "viewer_not_provisioned", error: "No owned viewer has been provisioned for this member." };
         if (Object.keys(journal.entries).length >= 256) return unconfirmed("This endpoint has 256 retained viewer records; inspect its viewer provenance before adding more.");
         const token = randomUUID();
-        const cwd = path.join(this.root, endpoint, token); mkdirSync(cwd, { recursive: true, mode: 0o700 });
+        const cwd = path.join(this.root, endpoint, token); this.privateDirectory(cwd);
         entry = { cwd, label: `openrig-viewer-${token}`, command: target.paneCommand, argv: target.attachArgv, readOnly: target.readOnly, phase: "creating" };
         journal.entries[id] = entry; save();
         // No retry here. A timeout is reconciled by enumeration on the next request.
@@ -222,23 +233,29 @@ export class HerdrViewer {
         if (!await stillCurrent()) return unconfirmed("Task membership changed before the viewer process started.");
         const beforeRun = await this.inspect(target.attachArgv);
         if (beforeRun.nodeId !== key.nodeId || beforeRun.sessionId !== binding.sessionId) return unconfirmed("The seat binding changed before the viewer process started.");
+        let command = entry.command;
+        if (this.platform === "win32") {
+          const observed = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
+          command = nativeViewerShellCommand(entry.argv, observed.process_info);
+        }
         entry.phase = "starting"; save();
         // pane run rc0/empty stdout is not proof. It is sent ONCE then checked.
-        await this.run(["pane", "run", current.pane_id, entry.command]);
+        await this.run(["pane", "run", current.pane_id, command]);
       }
       const process = body(await this.run(["pane", "process-info", "--pane", current.pane_id]));
       const info = process.process_info as { foreground_processes?: Array<{ argv?: unknown }> } | undefined;
       // The foreground tmux client carries the exact server/session argv. The
       // shared attach wrapper may be its parent; no mutable title/agent label.
       const argv = entry.argv;
-      const server = argv.slice(6); // tileAttachArgv: sh,-c,script,name,session,tmux,...server
+      const native = readWindowsTileAttachArgv(argv);
+      const server = native?.server ?? argv.slice(6);
       // A writable tile drops ignore-size when its session has no other sizing client (tile-attach).
       const flags = entry.readOnly ? [["-r"]] : [["-f", "ignore-size"], []];
-      const targetName = argv[4]!;
+      const targetName = native?.session ?? argv[4]!;
       const verified = info?.foreground_processes?.some(p => {
         const actual = p.argv;
         return Array.isArray(actual) && flags.some(flag => {
-          const expected = [argv[5]!, ...server, "attach", ...flag, "-t"];
+          const expected = [native?.tmux ?? argv[5]!, ...server, "attach", ...flag, "-t"];
           return expected.every((word, index) => actual[index] === word)
             && actual.length === expected.length + 1
             && (actual[expected.length] === `=${targetName}` || actual[expected.length] === binding.sessionId);
@@ -259,7 +276,7 @@ export class HerdrViewer {
     const result = this.pending.then(async () => {
       try {
         const status = body(await this.run(["status", "server", "--json"]));
-        if (this.platform !== "linux" || status.version !== "0.9.5" || status.protocol !== 22
+        if ((this.platform !== "linux" && this.platform !== "win32") || status.version !== "0.9.5" || status.protocol !== 22
           || status.running !== true || status.socket !== this.socketPath) return false;
         const endpoint = createHash("sha256").update(this.socketPath).digest("hex");
         const file = path.join(this.root, `${endpoint}.json`);
@@ -273,8 +290,7 @@ export class HerdrViewer {
         if ((await this.ownedPanes(entry)).length !== 0) return false;
         try { rmdirSync(entry.cwd); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
         delete journal.entries[id];
-        const temporary = `${file}.${randomUUID()}.tmp`;
-        writeFileSync(temporary, JSON.stringify(journal) + "\n", { mode: 0o600 }); renameSync(temporary, file);
+        this.saveJournal(file, journal);
         return true;
       } catch { return false; }
     });

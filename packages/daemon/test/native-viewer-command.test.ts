@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { nativeViewerCommand } from "../src/domain/terminal/native-viewer-command.js";
+import { nativeViewerCommand, nativeViewerShellCommand } from "../src/domain/terminal/native-viewer-command.js";
 import { windowsTileAttachArgv, readWindowsTileAttachArgv } from "../src/domain/terminal/windows-tile-attach.js";
 import { sameViewerCwd } from "../src/domain/terminal/herdr-viewer.js";
 
@@ -24,4 +24,12 @@ test("viewer command quotes shell data and refuses an unqualified foreground", (
   expect(nativeViewerCommand(["C:\\owned path\\tool.exe", "$x"], "bash.exe")).toBe("'C:/owned path/tool.exe' '$x'");
   for (const shell of ["node.exe", "cmd.exe", "unknown"]) expect(() => nativeViewerCommand(["tool", "%PATH%"], shell)).toThrow(/unqualified/);
   expect(() => nativeViewerCommand(["bad\0arg"], "pwsh.exe")).toThrow(/Invalid/);
+});
+
+test("native viewer dispatch requires the sole foreground process to be its shell", () => {
+  expect(nativeViewerShellCommand(["tool"], {shell_pid:42,foreground_processes:[{pid:42,argv:["pwsh.exe"]}]})).toBe("& 'tool'");
+  for (const info of [{}, {shell_pid:42,foreground_processes:[{pid:43,argv:["pwsh.exe"]}]},
+    {shell_pid:42,foreground_processes:[{pid:42,argv:["node.exe"]}]},
+    {shell_pid:42,foreground_processes:[{pid:42,argv:["pwsh.exe"]},{pid:43,argv:["editor.exe"]}]}])
+    expect(() => nativeViewerShellCommand(["tool"], info)).toThrow();
 });
