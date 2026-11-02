@@ -174,7 +174,8 @@ stand-in follows.
 
 ## [0.7.7]
 
-**Not yet published.** 0.7.7 is a separate reliability patch for 0.7.6. Its three
+Published 2026-11-02 as `@openrig/cli@0.7.7`, built from the commit tagged
+`v0.7.7` (`f3d8bac4`). 0.7.7 is a separate reliability patch for 0.7.6. Its three
 fixes are also in 0.7.8.
 
 OpenRig 0.7.7 is 0.7.6 with three reliability fixes for managed Claude seats: an
