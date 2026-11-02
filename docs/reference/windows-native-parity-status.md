@@ -1,5 +1,13 @@
 # Native Windows parity: implementation and evidence
 
+## Restore settings through native PowerShell and a stock pane (2026-11-02)
+
+Six existing native pinned-launch scenarios now distribute the three Windows home-prefix forms across fresh, fork, resume, legacy-resume and JS-script launches. Actual PowerShell execution into synthetic Node receivers preserves one parseable settings JSON, exact custom-file grants (including bracket escaping), member deny/allow rules and conversation arguments. The daemon and receiver user-home fixtures are deliberately aligned; differing account-home semantics are not qualified by these cases.
+
+A new opt-in case runs the actual Claude adapter, SeatLaunchEnvironment and TmuxAdapter through an independently owned stock psmux 3.4.0 pane. Its synthetic Node receiver records the settings JSON and launched session ID; the configured OPENRIG_HOME prefix resolves to the exact intended rule. The test verifies successful owned-session stop and subsequent absence, then removes its owned server/directory resources. The complete native file passed 7/7 with stock psmux enabled.
+
+This qualifies the fresh-launch transport through a real pane and the six direct PowerShell command scenarios. It does not qualify real Claude execution/authentication, all fork/resume modes through stock psmux, visible desktop rendering, mismatched account homes, Linux execution of this Windows-only file or the running main instance.
+
 ## Native managed-restore read regression harness (2026-11-02)
 
 The previously failing managed-read fixture now runs the generated POSIX command text through a Git Bash script file on Windows and `/bin/sh` on POSIX. A private shell function records argv, so no provider is executed. The file avoids Windows `-c` argument reparsing of nested quotes/backslashes, which had corrupted the synthetic hook-command JSON. Expected permission paths use the protocol's forward separators, native canonical fixture roots and drive-aware prompt extraction; existing exact-grant, deny/ask preservation, symlink spelling and canonical-seat assertions remain active.

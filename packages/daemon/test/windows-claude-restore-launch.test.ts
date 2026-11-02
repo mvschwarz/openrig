@@ -7,11 +7,50 @@ import { writeWindowsNodeFixture } from "../../../scripts/windows-node-fixture.m
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { SeatLaunchEnvironment } from "../src/domain/seat-launch-environment.js";
-import type { TmuxAdapter } from "../src/adapters/tmux.js";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { ownedWindowsTerminalInvoker } from "./helpers/windows-terminal-owned.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
 const child = "11111111-1111-4111-8111-111111111111";
 const parent = "22222222-2222-4222-8222-222222222222";
+
+it.runIf(process.platform === "win32" && !!process.env.OPENRIG_TEST_PSMUX)("carries restore settings through an actual isolated stock psmux pane", async () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(tmpdir(), "claude pane restore [owned]-")));
+  const invoke = ownedWindowsTerminalInvoker(root);
+  const tmux = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
+  const session = `owned-restore-${process.pid}-${Date.now()}`;
+  try {
+    const home = path.join(root, "instance"), cwd = path.join(root, "seat's workspace");
+    fs.mkdirSync(home); fs.mkdirSync(cwd);
+    const output = path.join(root, "received.json"), script = path.join(root, "owned receiver.mjs"), cli = path.join(root, "rig.mjs");
+    fs.writeFileSync(script, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(output)},JSON.stringify(process.argv.slice(2)));`);
+    fs.writeFileSync(cli, "// inert CLI alias target");
+    expect((await tmux.createSession(session, cwd, { OPENRIG_NODE_ID: "owned-node", OPENRIG_SESSION_NAME: session, OPENRIG_HOME: home })).ok).toBe(true);
+    const environment = new SeatLaunchEnvironment(tmux, { ...invoke.environment, OPENRIG_HOME: home }, root, cli, undefined, "win32");
+    const adapter = new ClaudeCodeAdapter({ tmux, stateDir: home, seatLaunchEnvironment: environment, sessionIdFactory: () => child,
+      restoreReadPolicy: () => ({ extraInstructionFile: "${OPENRIG_HOME}\\extra [owned].md" }),
+      fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
+    const binding = { nodeId: "owned-node", cwd, tmuxSession: session, claudeExecutable: process.execPath, claudeScript: script,
+      claudePermissions: { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] }, launchPosture: "floor", teamPermissionDefault: true } as NodeBinding;
+    expect((await adapter.launchHarness(binding, { name: session })).ok).toBe(true);
+    await expect.poll(() => fs.existsSync(output), { timeout: 8000 }).toBe(true);
+    const argv: string[] = JSON.parse(fs.readFileSync(output, "utf8"));
+    expect(argv.filter(value => value === "--settings")).toHaveLength(1);
+    const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]!);
+    expect(settings.permissions.deny).toEqual(["Read(./private/**)"]);
+    expect(settings.permissions.allow).toContain("Read(./work/**)");
+    const custom = path.join(home, "extra [owned].md").replaceAll("\\", "/").replaceAll("[", "\\[").replaceAll("]", "\\]");
+    expect(settings.permissions.allow).toContain(`Read(/${custom})`);
+    expect(argv[argv.indexOf("--session-id") + 1]).toBe(child);
+    expect((await tmux.probeSession(session)).state).toBe("present");
+    expect(await tmux.killSession(session)).toEqual({ ok: true });
+    expect((await tmux.probeSession(session)).state).toBe("absent");
+  } finally {
+    await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
+    await invoke(["tmux", "kill-server"]).catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}, 20000);
 
 it.skipIf(process.platform !== "win32").each(["fresh", "fork", "resume", "legacy-resume", "script-fresh", "script-resume"] as const)(
   "native pinned Claude %s preserves restore settings through PowerShell", async scenario => {
@@ -20,6 +59,7 @@ it.skipIf(process.platform !== "win32").each(["fresh", "fork", "resume", "legacy
     try {
       const cwd = path.join(root, "seat's workspace"), home = path.join(root, "instance");
       fs.mkdirSync(cwd); fs.mkdirSync(home);
+      vi.stubEnv("HOME", home); vi.stubEnv("USERPROFILE", home);
       const script = scenario.startsWith("script-") ? path.join(root, "claude entry.mjs") : undefined;
       if (script) fs.writeFileSync(script, "console.log(JSON.stringify(process.argv.slice(2)));\n");
       const executable = script ? process.execPath
@@ -36,11 +76,13 @@ it.skipIf(process.platform !== "win32").each(["fresh", "fork", "resume", "legacy
         sendShellCommand: vi.fn(async (_session: string, command: string) => { commands.push(command); return { ok: true }; }),
         sendKeys: vi.fn(async () => ({ ok: true })),
       } as unknown as TmuxAdapter;
-      const custom = path.join(root, "extra [owned].md");
+      const custom = path.join(home, "extra [owned].md");
+      const prefixes = ["~\\", "${OPENRIG_HOME}\\", "$OPENRIG_HOME\\"];
+      const configuredExtra = prefixes[["fresh", "fork", "resume", "legacy-resume", "script-fresh", "script-resume"].indexOf(scenario) % prefixes.length]! + "extra [owned].md";
       const seatLaunchEnvironment = new SeatLaunchEnvironment(tmux, env, root, cli, undefined, "win32");
       const adapter = new ClaudeCodeAdapter({ tmux, stateDir: home, sessionIdFactory: () => child,
         seatLaunchEnvironment,
-        restoreReadPolicy: () => ({ extraInstructionFile: custom }),
+        restoreReadPolicy: () => ({ extraInstructionFile: configuredExtra }),
         fsOps: { readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {} } });
       // This checks command construction/OS execution, not provider readiness.
       vi.spyOn(adapter as any, "verifyResumeLaunch").mockResolvedValue({ ok: true });
@@ -49,7 +91,7 @@ it.skipIf(process.platform !== "win32").each(["fresh", "fork", "resume", "legacy
         claudePermissions: { allow: ["Read(./work/**)"], deny: ["Read(./private/**)"] },
         launchPosture: "floor", teamPermissionDefault: true } as NodeBinding;
       const legacy = new ClaudeResumeAdapter(tmux, { openrigHome: home, seatLaunchEnvironment,
-        restoreReadPolicy: () => ({ extraInstructionFile: custom }) });
+        restoreReadPolicy: () => ({ extraInstructionFile: configuredExtra }) });
       vi.spyOn(legacy as any, "verifyResume").mockResolvedValue({ ok: true });
       const result = kind === "legacy-resume"
         ? await legacy.resume("owner@rig", "claude_id", child, cwd, "floor", undefined, undefined,
@@ -75,6 +117,6 @@ it.skipIf(process.platform !== "win32").each(["fresh", "fork", "resume", "legacy
       expect(argv[argv.indexOf(kind === "fresh" ? "--session-id" : "--resume") + 1]).toBe(kind === "fork" ? parent : child);
       expect(argv.includes("--fork-session")).toBe(kind === "fork");
       expect(tmux.sendKeys).not.toHaveBeenCalled();
-    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    } finally { vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true }); }
   }, 20000,
 );
