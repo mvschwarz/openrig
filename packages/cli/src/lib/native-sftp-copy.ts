@@ -6,7 +6,7 @@ import path from "node:path";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { SftpClient, type SftpAttrs } from "./sftp-protocol.js";
 import { looksLikePermissionGate } from "../cross-host-executor.js";
-import { isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
+import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile } from "@openrig/daemon/windows-owned-files";
 
 interface Endpoint {
   paths: typeof path.posix;
@@ -107,7 +107,11 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         }
         const names = await source.names(src);
         if (destination === local && process.platform === "win32" && new Set(names.map(name => name.toLowerCase())).size !== names.length) {
-          throw new Error(`Directory contains names that collide on Windows: ${src}`);
+          let selected=dst;
+          while(!await local.stat(selected)){
+            const parent=path.dirname(selected);if(parent===selected)throw new Error("Cannot establish destination case sensitivity");selected=parent;
+          }
+          if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
         }
         for (const name of names) {
           // A remote directory entry must remain exactly one native filename.

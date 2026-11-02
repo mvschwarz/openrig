@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,6 +10,27 @@ import { planFileCopy } from "../src/lib/file-transfer.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native recursive SFTP copy", () => {
+  it("retains case-distinct names only in a confirmed case-sensitive destination", async context => {
+    const root=await mkdtemp(path.join(os.tmpdir(),"sftp-case-distinct-"));
+    const source=path.join(root,"source"),strict=path.join(root,"strict"),ordinary=path.join(root,"ordinary");
+    try{
+      for(const dir of [source,strict,ordinary])await mkdir(dir);
+      for(const dir of [source,strict])if(spawnSync(path.join(process.env.SystemRoot!,"System32","fsutil.exe"),["file","setCaseSensitiveInfo",dir,"enable"],{windowsHide:true}).status!==0)context.skip();
+      await writeFile(path.join(source,"Name.txt"),"upper");await writeFile(path.join(source,"name.txt"),"lower");
+      const plan=(dst:string,dryRun=false):CopyPlan=>({src:{kind:"remote",path:"/"+source.replaceAll("\\","/")+"/",host:{id:"fixture",target:"fixture",transport:"ssh"}},dst:{kind:"local",path:dst},dryRun});
+      const start=()=>spawn(server,[],{stdio:"pipe",windowsHide:true});
+      const refused=await runNativeSftpCopy(plan(ordinary),start);
+      expect(refused.ok).toBe(false);expect(refused.stderr).toContain("collide");expect(await readdir(ordinary)).toEqual([]);
+      const preview=await runNativeSftpCopy(plan(strict,true),start);
+      expect(preview.ok,preview.stderr).toBe(true);expect(preview.filesTransferred).toBe(2);expect(await readdir(strict)).toEqual([]);
+      for(const dst of [strict,path.join(strict,"new-directory")]){
+        const result=await runNativeSftpCopy(plan(dst),start);
+        expect(result.ok,result.stderr).toBe(true);
+        expect(await readFile(path.join(dst,"Name.txt"),"utf8")).toBe("upper");
+        expect(await readFile(path.join(dst,"name.txt"),"utf8")).toBe("lower");
+      }
+    }finally{await rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:50});}
+  });
   it("retains an existing dangling directory link when SFTP cannot establish its referent type", async () => {
     const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-dangling-"));
     const source=path.join(root,"source"),destination=path.join(root,"destination");

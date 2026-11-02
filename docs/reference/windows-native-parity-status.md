@@ -27,6 +27,26 @@ the existing main instance. No overall parity claim is made.
 
 ## Current open requirements (2026-11-02)
 
+### SFTP case-distinct names on qualified NTFS directories (2026-11-02)
+
+SFTP now queries the actual destination directory's FileCaseSensitiveInfo through
+a no-final-reparse native handle before accepting names that differ only in case.
+A new dry-run directory checks the closest existing parent; actual copying checks
+the created destination. Ordinary case-insensitive destinations still refuse the
+collision before writing files. Unknown/unsupported case-query capability does
+not permit collision-prone writes. On this host, real OpenSSH SFTP fixtures prove
+distinct Name.txt/name.txt bytes survive in an enabled directory and an inherited
+new subdirectory, while an ordinary destination stays empty on refusal. Nine SFTP
+tests plus the native local identity fixture pass; daemon build/CLI typecheck
+pass. This does not make reserved Win32 names representable.
+
+The nine-file native-crash prefix bisects into passing groups: the first five
+files pass 1,070/five pending; the remaining four also complete without an
+unexpected worker exit. Both observers restore the original dependency hash.
+The combined nine-file access violation therefore remains a composition or
+intermittent condition; neither passing half establishes a root cause or a
+passing full native suite.
+
 ### Option-shaped native environment names (2026-11-02)
 
 The native private config and session read/unset commands now insert psmux's

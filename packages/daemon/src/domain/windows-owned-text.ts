@@ -32,6 +32,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
+      else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
       else Write(args[1],Convert.FromBase64String(Console.In.ReadToEnd()));
       return 0;
     } catch(Exception error) {
@@ -50,6 +51,7 @@ public static class OpenRigOwnedText {
   static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SecurityAttributes security,uint disposition,uint flags,IntPtr template);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool ReplaceFile(string replaced,string replacement,string backup,uint flags,IntPtr exclude,IntPtr reserved);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle file,out FileInformation info);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle file,int kind,out uint info,uint size);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle file);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe,out uint pid);
   [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
@@ -91,6 +93,20 @@ public static class OpenRigOwnedText {
       try { using(var identity=WindowsIdentity.GetCurrent()) { if(new SecurityIdentifier(owner).Value!=identity.User.Value)throw new InvalidOperationException("Flush path must be owned"); } }
       finally { LocalFree(descriptor); }
       if(!FlushFileBuffers(file))throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+  }
+  static void DirectoryCaseSensitive(string path) {
+    var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+    using(var file=CreateFile(path,0x80u,7,ref security,3,0x02200000u,IntPtr.Zero)) {
+      if(file.IsInvalid)throw new Win32Exception(Marshal.GetLastWin32Error());
+      FileInformation info;if(!GetFileInformationByHandle(file,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
+      if((info.attributes&0x410u)!=0x10u)throw new InvalidOperationException("Case query requires an ordinary directory");
+      uint flags;
+      // FILE_INFO_BY_HANDLE_CLASS.FileCaseSensitiveInfo = 23; enabled flag = 1.
+      if(!GetFileInformationByHandleEx(file,23,out flags,4)) {
+        int error=Marshal.GetLastWin32Error();if(error==87 || error==50){Console.Write("false");return;}throw new Win32Exception(error);
+      }
+      Console.Write((flags&1u)!=0?"true":"false");
     }
   }
   static SafeFileHandle Open(string path,bool write,bool fresh=false,bool seal=false) {
@@ -482,6 +498,12 @@ export function replaceWindowsCopiedFile(target: string, staging: string): void 
 /** Inspect the link entry itself; following a file-typed link to a directory fails on NTFS. */
 export function isWindowsDirectoryLink(file: string): boolean {
   return execFileSync(nativeHelper(), ["directory-link", toNamespacedPath(file)], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  }) === "true";
+}
+
+export function isWindowsDirectoryCaseSensitive(file: string): boolean {
+  return execFileSync(nativeHelper(), ["directory-case-sensitive", toNamespacedPath(file)], {
     encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   }) === "true";
 }
