@@ -362,6 +362,9 @@ export function Explorer({
           ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
           : "z-40 bg-[hsl(var(--background)/0.035)] supports-[backdrop-filter]:bg-[hsl(var(--background)/0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
         // Mobile: slide-over from left below the 48px top bar (h-12).
+        // Opaque on phones: the desktop glass background let the page
+        // underneath bleed through the panel.
+        !isOverlay && "max-lg:!bg-background",
         "fixed top-12 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
         // Desktop (>=lg): persistent column at 280px (lg:w-72) per
