@@ -74,6 +74,41 @@ it("reconciles a lost latch reply without issuing another grant or rewriting an 
   expect(f.activity).toHaveBeenCalledTimes(1); expect(f.guest.mock.calls.filter(call => call[1][0] === "--prepare")).toHaveLength(1);
   expect(sha256(f.files.get("/sandbox/openrig/control/launch.pending.json")!)).toBe(before);
 });
+it.each(["old-helper", "transport"])("preserves launch custody and distinguishes %s prepare failure guidance", async failure => {
+  const f = await fixture(), bin = join(f.root, "bin"), calls = join(f.root, "vendor-calls.jsonl");
+  mkdirSync(bin);
+  const stderr = failure === "old-helper"
+    ? "usage: guest.py [-h] [--prepare]\nguest.py: error: unrecognized arguments: --first-input-required\n"
+    : "connection reset by peer\n";
+  // A local stand-in exercises the real driver's execFile error boundary; no vendor/provider runs.
+  writeFileSync(join(bin, "openshell"), `#!${process.execPath}
+const fs = require("node:fs"), args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");
+if (args[5] === "get") process.stdout.write(${JSON.stringify(JSON.stringify(f.resource))});
+else if (args.includes("--prepare")) { process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 2; }
+else { process.stderr.write("unexpected stand-in command"); process.exitCode = 9; }
+`, { mode: 0o700 });
+  const realDriver = new OpenShellDriver();
+  Object.assign(f.platform.driver, { guest: realDriver.guest.bind(realDriver) });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  try {
+    const error = await f.startup.launch(f.binding, { firstInputText: "Selected startup input" }, f.tmux).catch(error => error);
+    expect(error).toMatchObject({ code: "openshell_transport_unconfirmed" });
+    expect(f.db.prepare("SELECT state FROM environment_operations WHERE kind='launch'").all()).toEqual([{ state: "requested" }]);
+    expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
+    const dispatched = readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+    expect(dispatched.filter(args => args.includes("--prepare"))).toHaveLength(1);
+    expect(dispatched.at(-1)).toContain("--first-input-required");
+    if (failure === "old-helper") {
+      expect(error.message).toContain("predates first input");
+      expect(error.message).toContain("Rebuild");
+      expect(error.message).toContain("README");
+    } else {
+      expect(error.message).toBe("OpenShell did not return a confirmed result; reconcile the saved operation");
+    }
+  } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
+});
 it("blocks a changed required source before issuing a grant or preparing native", async () => {
   const f = await fixture(), role = join(f.root, "role.md"); writeFileSync(role, "selected source");
   await f.startup.deliverStartup([{ path: "role.md", absolutePath: role, ownerRoot: f.root, deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], f.binding);
