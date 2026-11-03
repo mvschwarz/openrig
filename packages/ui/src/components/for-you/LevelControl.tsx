@@ -69,16 +69,15 @@ export function LevelControl() {
   const interactive = !unavailable && !isMutating;
 
   return (
-    <div data-testid="level-control" role="tablist" aria-label="Feed level" className="border-b border-outline-variant">
-      <div className="flex gap-1">
+    <div data-testid="level-control" className="border-b border-outline-variant">
+      <div role="group" aria-label="Feed level" className="flex gap-1">
       {ORDER.map((level) => {
         const active = current === level;
         return (
           <button
             key={level}
             type="button"
-            role="tab"
-            aria-selected={active}
+            aria-pressed={active}
             disabled={!interactive}
             data-testid={OPTION_TESTID[level]}
             data-active={active ? "true" : "false"}

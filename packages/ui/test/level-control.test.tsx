@@ -53,7 +53,7 @@ function mockHighlights(posted: Record<string, string>) {
 }
 
 describe("LevelControl (OPR.0.4.1.27 Unit 3)", () => {
-  it("renders the 3 named levels as sentence-case tabs (C11 Inbox v2)", async () => {
+  it("renders the 3 named levels as toggle buttons (C11 Inbox v2)", async () => {
     mockHighlights({});
     const { findByTestId } = withQC(<LevelControl />);
     expect(await findByTestId("level-control")).toBeTruthy();
@@ -71,6 +71,22 @@ describe("LevelControl (OPR.0.4.1.27 Unit 3)", () => {
     });
     expect((await findByTestId("level-control-option-needs-you")).getAttribute("data-active")).toBe("false");
     expect((await findByTestId("level-control-option-all-activity")).getAttribute("data-active")).toBe("false");
+  });
+
+  // F6 (#2417): toggle-button semantics — group wrapper, no tablist/tabs,
+  // aria-pressed carries the active state.
+  it("uses toggle buttons in a group, not tabs in a tablist (F6)", async () => {
+    mockHighlights({});
+    const { findByTestId } = withQC(<LevelControl />);
+    const control = await findByTestId("level-control");
+    expect(control.getAttribute("role")).toBeNull();
+    expect(control.querySelector('[role="tablist"]')).toBeNull();
+    expect(control.querySelector('[role="tab"]')).toBeNull();
+    const group = control.querySelector('[role="group"]');
+    expect(group?.getAttribute("aria-label")).toBe("Feed level");
+    const highlights = await findByTestId("level-control-option-highlights");
+    await waitFor(() => expect(highlights.getAttribute("aria-pressed")).toBe("true"));
+    expect((await findByTestId("level-control-option-needs-you")).getAttribute("aria-pressed")).toBe("false");
   });
 
   it("shows a plain-language readout for the current level", async () => {
