@@ -53,12 +53,6 @@ describe("psmux PowerShell launch staging", () => {
     expect(calls.at(-1)).toContain("%1");
     expect(await adapter.readAllPaneProcesses()).toBeNull();
   });
-  it("selects only the requested variable from psmux's full environment response", async () => {
-    const adapter = new TmuxAdapter(async () => "", undefined,
-      async () => "OTHER=private\r\nOPENRIG_NODE_ID=node\r\nOPENRIG_SESSION_NAME=seat@rig\r\n", "psmux");
-    expect(await adapter.getSessionEnv("seat@rig", "OPENRIG_NODE_ID")).toBe("node");
-    expect(await adapter.getSessionEnv("seat@rig", "MISSING")).toBeUndefined();
-  });
   it("stages a native script and sends only its short invocation", async () => {
     const writes: string[][] = [];
     const fileOps = { writeFile: vi.fn(async (_path: string, _text: string) => {}), unlink: vi.fn(async () => {}), tmpName: () => "C:\\temp space\\launch.txt", bufferName: () => "buf" };

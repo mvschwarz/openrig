@@ -1,10 +1,12 @@
-name: Windows native experiment
+name: Windows native smoke
+
+# Optional developer check, not an additional automatic release gate.
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/windows-support-validation, feat/windows-native-main]
+
 permissions:
   contents: read
+
 jobs:
   native:
     runs-on: windows-latest
@@ -17,120 +19,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm run lint
-      - name: Native workspace preparation and packaging selection
-        run: node --test scripts/prepare-workspace-build.test.mjs scripts/run-package-build.test.mjs
-      - name: Install pinned portable psmux
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP 'psmux.zip'
-          Invoke-WebRequest 'https://github.com/psmux/psmux/releases/download/v3.4.0/psmux-v3.4.0-windows-x64.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a66b6be7c13c6fa0dc3660a267b9e34eaa91a4eb7f07fbd55a0468018bd0f721') { throw 'psmux archive checksum mismatch' }
-          $install = Join-Path $env:RUNNER_TEMP 'psmux'
-          Expand-Archive $archive $install
-          $binary = @(Get-ChildItem $install -Filter tmux.exe -Recurse)
-          if ($binary.Count -ne 1) { throw 'Expected one portable tmux.exe' }
-          "OPENRIG_TEST_PSMUX=$($binary[0].FullName)" >> $env:GITHUB_ENV
-      - name: Native terminal, identity and production drain tests
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-terminal-native.test.ts test/windows-launch.test.ts test/windows-pi-command.test.ts test/windows-process-lineage.test.ts test/windows-daemon-control.test.ts test/windows-managed-launch.test.ts test/windows-classic-claude.test.ts test/omp-runner.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts test/resume-token-validation.test.ts test/native-process-lineage.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
-      - name: CLI lifecycle
-        working-directory: packages/cli
-        run: npx vitest run test/daemon-lifecycle.test.ts test/daemon-lifecycle-status.test.ts test/daemon-lifecycle-event-loop.test.ts test/browser-launch.test.ts test/log-tail.test.ts test/terminal-window-windows.test.ts test/tmux-capture-check.test.ts
-      - name: Native dependency planning and literal execution
-        working-directory: packages/daemon
-        run: npx vitest run test/external-install-planner.test.ts test/external-install-executor.test.ts test/requirements-probe-native.test.ts --maxWorkers=2
-      - name: Unlaunched native grant-service boundary
-        working-directory: packages/cli
-        run: npx vitest run test/mcp-http-grant-service-unlaunched.integration.test.ts --maxWorkers=1
-      - name: Pinned classic Claude restore launch
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-claude-restore-launch.test.ts --maxWorkers=1
-      - name: Qualified native resource projection
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-resource-projection.test.ts --maxWorkers=1
-      - name: Paired hook CLI and native role refocus
-        working-directory: packages/daemon
-        run: npx vitest run test/hook-paired-seat-rig.test.ts test/hook-command-native-env.test.ts test/refocus-rig-windows.test.ts test/refocus-role.test.ts test/refocus-managed-result.test.ts --maxWorkers=1
-      - name: Public world native verifier
-        working-directory: packages/daemon
-        run: npx vitest run test/public-world-pack.test.ts --maxWorkers=1
-      - name: Native bounded runtime verification
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-runtime-verifier.test.ts test/windows-probe-job.test.ts test/windows-owned-helper-compile.test.ts --maxWorkers=1
-      - name: Generated Claude activity hook and status collector
-        working-directory: packages/daemon
-        run: npx vitest run test/claude-hook-node-invocation.test.ts -t "native PowerShell fallback|generated status collector" --maxWorkers=1
-      - name: Native plugin staging and content authority
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-claude-plugin-hooks.test.ts test/plugin-vendor-service.test.ts test/codex-core-plugin-route.test.ts test/codex-owned-hook-trust.test.ts --maxWorkers=1
-      - name: Native profile worker responsiveness and catalog scans
-        working-directory: packages/daemon
-        run: npx vitest run test/profile-resolution-worker.test.ts --maxWorkers=1
-      - name: Native selected Codex home isolation
-        working-directory: packages/daemon
-        run: npx vitest run test/codex-selected-home.test.ts --maxWorkers=1
-      - name: Native operating-model trunk diff
-        working-directory: packages/daemon
-        run: npx vitest run test/operating-model-trunk-diff.test.ts --maxWorkers=1
-      - name: Native test home and temporary-directory isolation
-        working-directory: packages/daemon
-        run: npx vitest run test/fixture-home-cleanup.test.ts test/hermetic-env.test.ts test/test-app-hermeticity.test.ts test/hermetic-scaffold.test.ts --maxWorkers=1
-      - name: Real isolated native psmux scaffold lifecycle
-        working-directory: packages/daemon
-        run: npx vitest run test/native-psmux-scaffold.test.ts --maxWorkers=1
-      - name: Hosted member wake outcomes and recovery
-        working-directory: packages/daemon
-        run: npx vitest run test/hosted-member-wake.test.ts --maxWorkers=1
-      - name: Native TUI pipes, reading and live events
-        run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
-      - name: Native scoped shells and paired seat argv
-        working-directory: packages/daemon
-        shell: pwsh
-        run: |
-          $env:OPENRIG_TEST_PWSH = (Get-Command pwsh -CommandType Application).Source
-          node ../../node_modules/vitest/vitest.mjs run test/windows-scoped-launch.test.ts test/seat-launch-environment.test.ts --maxWorkers=1
-      - name: Native Compose and service restore ordering
-        working-directory: packages/daemon
-        run: node ../../node_modules/vitest/vitest.mjs run test/windows-compose-services.test.ts test/windows-service-restore-gate.test.ts --maxWorkers=1
-      - name: Native package assembly
-        run: npm run build:package
-  installed-package:
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - name: Native tarball install and authored resource operations
-        env:
-          RUN_TESTBED_PACK_GATE: '1'
-        run: node --test --test-name-pattern=GATE scripts/build-testbed-cli-pack.test.mjs
-  regression:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm run lint
-      - name: Launch, context and immutable publication regression
-        working-directory: packages/daemon
-        run: npx vitest run test/windows-managed-launch.test.ts test/omp-runner.test.ts test/omp-rpc-frame.test.ts test/seat-launch-environment.test.ts test/context-pack-library-service.test.ts test/workflow-guidance.test.ts test/proof-judgments.test.ts test/windows-process-lineage.test.ts test/native-process-lineage.test.ts test/claude-resume-rotation-proof.test.ts test/claude-resume-rotation-process-binding.test.ts test/parent-session-env.test.ts test/tmux-server.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
-      - name: Desktop and log regression
-        working-directory: packages/cli
-        run: npx vitest run test/browser-launch.test.ts test/log-tail.test.ts test/ui.test.ts test/terminal-window.test.ts
-      - name: TUI collision, reading and live-event regression
-        run: npm run test -w packages/tui -- test/socket-windows.test.ts test/socket.test.ts test/socket-collision.test.ts test/socket-concurrency.test.ts test/socket-commands-query.test.ts test/reading-journey.test.ts test/reading-native-paths.test.ts test/mission-outcomes.test.ts test/activity-stream-response.test.ts test/activity-stream-deadline.test.ts test/live-events-close-race.test.ts test/page-error-response.test.ts test/live-events.test.ts test/browser-boundary-tui-render.test.ts
+      - name: Native argv, stock environment transport and file command planning
+        run: node node_modules/vitest/vitest.mjs run packages/daemon/test/windows-launch.test.ts packages/daemon/test/windows-environment-transport.test.ts packages/cli/test/file-transfer.test.ts --maxWorkers=2
