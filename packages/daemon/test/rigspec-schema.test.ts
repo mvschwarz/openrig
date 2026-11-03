@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 
 const VALID_RIG = {
   version: "0.2",
@@ -692,5 +693,43 @@ describe("a Claude member's own agent, prompt file and plugin folders (OPR.0.7.0
     expect(errors(withFields(0, { plugin_dirs: "plugins/review" }))).toMatch(/plugin_dirs: must be a list/);
     expect(errors(withFields(0, { plugin_dirs: ["a", "./a"] }))).toMatch(/plugin_dirs\[1\]: listed twice/);
     expect(errors(withFields(0, { plugin_dirs: ["x/review", "y/review"] }))).toMatch(/plugin_dirs\[1\]: would be copied where plugin_dirs\[0\] is/);
+  });
+});
+
+describe("a Claude member's own plugin channels (#2044)", () => {
+  const withFields = (index: number, fields: Record<string, unknown>) => {
+    const rig = structuredClone(VALID_RIG);
+    Object.assign(rig.pods[0]!.members[index] as Record<string, unknown>, fields);
+    return rig;
+  };
+  const errors = (rig: unknown) => RigSpecSchema.validate(rig).errors.join(" | ");
+
+  it("reads plugin entries on a Claude member, in order, and the codec writes them back", () => {
+    const rig = withFields(0, { plugin_channels: ["plugin:example-channel@example", "plugin:a.b_c-1@market_place.2"] });
+    expect(RigSpecSchema.validate(rig)).toMatchObject({ valid: true, errors: [] });
+    const member = RigSpecSchema.normalize(rig).pods[0]!.members[0]!;
+    expect(member.pluginChannels).toEqual(["plugin:example-channel@example", "plugin:a.b_c-1@market_place.2"]);
+    const again = RigSpecSchema.normalize(RigSpecCodec.parse(RigSpecCodec.serialize(RigSpecSchema.normalize(rig))) as Record<string, unknown>);
+    expect(again.pods[0]!.members[0]!.pluginChannels).toEqual(member.pluginChannels);
+  });
+
+  it("takes an empty list, or no field, as none", () => {
+    expect(RigSpecSchema.validate(withFields(0, { plugin_channels: [] })).valid).toBe(true);
+    expect(RigSpecSchema.normalize(withFields(0, {})).pods[0]!.members[0]!.pluginChannels).toBeUndefined();
+    expect(RigSpecCodec.serialize(RigSpecSchema.normalize(withFields(0, { plugin_channels: [] })))).not.toContain("plugin_channels");
+  });
+
+  it("is only for Claude members", () => {
+    expect(errors(withFields(1, { plugin_channels: ["plugin:example-channel@example"] }))).toMatch(/members\[1\]\.plugin_channels: only for Claude members/);
+  });
+
+  it("refuses a server entry, a flag, a malformed entry, a non-list and a repeated entry, each by name", () => {
+    expect(errors(withFields(0, { plugin_channels: "plugin:example-channel@example" }))).toMatch(/plugin_channels: must be a list of plugin:<name>@<marketplace> entries/);
+    expect(errors(withFields(0, { plugin_channels: ["server:example"] }))).toMatch(/plugin_channels\[0\]: "server:example" is a server entry; only plugin:<name>@<marketplace> entries are supported/);
+    for (const bad of ["--dangerously-load-development-channels", "plugin:no-marketplace", "plugin:@market", "plugin:name@", "example",
+      "plugin:a@b --settings", "plugin:a@b;x", "plugin:a b@c", "", 7, null]) {
+      expect(errors(withFields(0, { plugin_channels: ["plugin:ok@market", bad] })), JSON.stringify(bad)).toMatch(/plugin_channels\[1\]: must be plugin:<name>@<marketplace>/);
+    }
+    expect(errors(withFields(0, { plugin_channels: ["plugin:a@b", "plugin:a@b"] }))).toMatch(/plugin_channels\[1\]: listed twice \("plugin:a@b"\)/);
   });
 });

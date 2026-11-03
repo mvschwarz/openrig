@@ -2426,18 +2426,20 @@ export class PodRigInstantiator {
       keptSkillWarnings.push(...ensureSeatSkillPlugin(seatSkills));
       // OPR.0.7.0.9 — the member's own agent, prompt file and plugin folders, copied into the seat's storage. Asking for
       // none removes an earlier request. A missing or refused source fails this seat by name; the rest still launch.
+      // #2044 — its plugin channels are recorded beside them (names only, nothing copied).
       const beside = (path: string) => nodePath.resolve(input.rigRoot, path);
       const prepared = input.keepRecordedAdditions ? { ok: true as const, notes: [] } : prepareSeatLaunchAdditions(seatSkills, {
         ...(input.member.agentFile ? { agentFile: beside(input.member.agentFile) } : {}),
         ...(input.member.appendSystemPromptFile ? { appendSystemPromptFile: beside(input.member.appendSystemPromptFile) } : {}),
         ...(input.member.pluginDirs?.length ? { pluginDirs: input.member.pluginDirs.map(beside) } : {}),
+        ...(input.member.pluginChannels?.length ? { pluginChannels: input.member.pluginChannels } : {}),
       });
       // A linked seat-storage ancestor: the seat starts without its additions, each named; nothing goes through the link.
       // A missing or refused source still fails the seat.
       const linked = !prepared.ok && prepared.code === "seat_storage_refused" ? seatSkillLocation(seatSkills).refuseMutation?.() : undefined;
       if (!prepared.ok && !linked) return { status: "failed", error: prepared.message, sessionName: canonicalSessionName };
       if (linked) {
-        const asked = [input.member.agentFile, input.member.appendSystemPromptFile, ...(input.member.pluginDirs ?? [])].filter((ref): ref is string => !!ref);
+        const asked = [input.member.agentFile, input.member.appendSystemPromptFile, ...(input.member.pluginDirs ?? []), ...(input.member.pluginChannels ?? [])].filter((ref): ref is string => !!ref);
         for (const ref of asked) keptSkillWarnings.push(`seat_launch_addition_not_delivered: ${ref}: ${linked}; the seat starts without it`);
       }
       keptSkillWarnings.push(...(prepared.ok ? prepared.notes ?? [] : []));

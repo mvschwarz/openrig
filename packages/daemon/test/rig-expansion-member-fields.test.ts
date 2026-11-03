@@ -93,6 +93,7 @@ describe("expansion member fidelity", () => {
     const spy = vi.spyOn(setup.podInstantiator, "materializeStructured").mockResolvedValue({ ok: false, code: "validation_failed", errors: ["stop at validator"] });
     const raw = { ...member(), env: { CLAUDE_CONFIG_DIR: "/homes/selected" }, effort: "high", advisor: "haiku", role: "reviewer",
       startup: { files: [], actions: [] }, agent_file: "AGENT.md", append_system_prompt_file: "prompt.md", plugin_dirs: ["plugins"],
+      plugin_channels: ["plugin:example-channel@example"],
       compaction_strategy: "harness_native", mechanic: "harness_native", future_member_setting: { preserved: true } };
     await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "qa", label: "QA", members: [raw], edges: [] } });
     const spec = spy.mock.calls[0]![0] as { pods: Array<{ members: unknown[] }> };
