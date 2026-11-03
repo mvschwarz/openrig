@@ -13,6 +13,7 @@
 // Guidance problems never block the exact resume. What can't be put back is reported.
 
 import nodePath from "node:path";
+import { lstatSync } from "node:fs";
 import type Database from "better-sqlite3";
 import {
   MANAGED_BLOCK_START,
@@ -62,6 +63,25 @@ export function seatGuidanceFile(
     ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
     : runtime === "codex" || runtime === "pi" || runtime === "omp" ? "AGENTS.md" : null;
   return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+export type LinkInfo = (path: string) => { link: boolean; nlink: number } | null;
+
+/** An lstat of a path: whether it's a symlink and its hard-link count, or null when it doesn't exist. */
+export const lstatLinkInfo: LinkInfo = (path) => {
+  try { const st = lstatSync(path); return { link: st.isSymbolicLink(), nlink: st.nlink }; } catch { return null; }
+};
+
+/** #875: a seat's own guidance file (a Pi seat's `<seat>/agent/AGENTS.md`) is its alone only while neither the file, its
+ *  folder nor that folder's parent is a symlink and the file has one name. Otherwise other sessions (a person's own Pi
+ *  home, a shared file) could read what's written there. Returns the linked path, or null. Checked when a launch chooses
+ *  the file and again wherever a recorded file is written, since a link can be made after the launch recorded it. */
+export function guidanceFileSharedByLink(file: string, linkInfo: LinkInfo): string | null {
+  for (const path of [nodePath.dirname(nodePath.dirname(file)), nodePath.dirname(file), file]) {
+    const info = linkInfo(path);
+    if (info && (info.link || (path === file && info.nlink > 1))) return path;
+  }
+  return null;
 }
 
 /** The guidance file a node's last launch recorded (#875), or null: none recorded, or a database from before the column. */

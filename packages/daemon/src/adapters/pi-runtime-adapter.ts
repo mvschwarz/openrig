@@ -23,6 +23,7 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { isPerSeatRoleGuidance, mergeManagedBlock, perSeatRoleSkipWarning } from "../domain/managed-blocks.js";
+import { guidanceFileSharedByLink } from "../domain/restore-guidance.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
@@ -186,7 +187,8 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             // ADDITIVE context-file merge (Omnigent best-practice: never
             // replace Pi's default system prompt). Pi reads AGENTS.md from its
             // agent folder and from the managed cwd as context files.
-            const targetPath = this.guidanceTarget(binding);
+            const targetPath = this.guidanceTarget(binding, warnings);
+            if (!targetPath) continue; // not written through a link: not counted as delivered
             const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -448,26 +450,26 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
    *  (a person's own Pi home, a shared file) would read this rig's guidance. */
   guidanceFileFor(binding: NodeBinding): { file: string | null; note?: string } {
     if (!binding.tmuxSession) return { file: null };
-    const { seatRoot, agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
-    const file = nodePath.join(agentDir, "AGENTS.md");
-    for (const path of [seatRoot, agentDir, file]) {
-      const info = this.fs.linkInfo?.(path);
-      if (info && (info.link || (path === file && info.nlink > 1))) {
-        return { file: null, note: `${this.runtime}: ${path} is a link, so this seat's managed guidance stays in its repository AGENTS.md` };
-      }
-    }
-    return { file };
+    const file = nodePath.join(piSeatPaths(this.stateRoot, binding.tmuxSession).agentDir, "AGENTS.md");
+    const linked = guidanceFileSharedByLink(file, (path) => this.fs.linkInfo?.(path) ?? null);
+    return linked ? { file: null, note: `${this.runtime}: ${linked} is a link, so this seat's managed guidance stays in its repository AGENTS.md` } : { file };
   }
 
   /** The file this launch merges guidance into: the one its startup chose (guidanceFileFor, or a restore's saved choice),
-   *  else the repository AGENTS.md in the managed cwd. */
-  private guidanceTarget(binding: NodeBinding): string {
-    return binding.guidanceFile ?? nodePath.join(binding.cwd, "AGENTS.md");
+   *  else the repository AGENTS.md in the managed cwd. Null when a chosen file has since become a link (#2432): nothing is
+   *  written through it, and nothing falls back to the repository file. */
+  private guidanceTarget(binding: NodeBinding, warnings: string[]): string | null {
+    if (!binding.guidanceFile) return nodePath.join(binding.cwd, "AGENTS.md");
+    const linked = guidanceFileSharedByLink(binding.guidanceFile, (path) => this.fs.linkInfo?.(path) ?? null);
+    if (!linked) return binding.guidanceFile;
+    warnings.push(`${this.runtime}: ${linked} is now a link, so this seat's managed guidance wasn't written to ${binding.guidanceFile}, which other sessions could read`);
+    return null;
   }
 
   private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = this.guidanceTarget(binding);
+      const targetPath = this.guidanceTarget(binding, warnings);
+      if (!targetPath) return false;
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings, entry.absolutePath);
     }
