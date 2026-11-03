@@ -95,6 +95,22 @@ describe("Command palette (C08)", () => {
     expect(screen.getByPlaceholderText(SEARCH_PLACEHOLDER)).toBeTruthy();
   });
 
+  // F8 (#2417): the cmdk dialog overlay + content carry theme classes
+  // (cmdk ships unstyled — without these the palette is unpositioned).
+  // NOTE: cmdk Dialog portals to document.body, outside the RTL container.
+  it("palette dialog renders themed overlay and content classes", async () => {
+    await openPalette();
+    const palette = screen.getByTestId("command-palette");
+    const content = palette.closest("[role='dialog']") as HTMLElement | null;
+    expect(content?.className).toContain("cmdk-content");
+    const overlay = document.body.querySelector(".cmdk-overlay");
+    expect(overlay).toBeTruthy();
+    // Inner command elements carry their theme classes too.
+    expect(palette.querySelector(".cmdk-input")).toBeTruthy();
+    expect(palette.querySelector(".cmdk-list")).toBeTruthy();
+    expect(palette.querySelectorAll(".cmdk-item").length).toBeGreaterThan(0);
+  });
+
   it("typing topology shows Rigs in the Go to group", async () => {
     const { input } = await openPalette();
     fireEvent.change(input, { target: { value: "topology" } });

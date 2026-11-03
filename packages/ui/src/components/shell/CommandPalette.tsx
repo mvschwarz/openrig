@@ -66,30 +66,34 @@ export function CommandPalette(): React.JSX.Element {
         open={open}
         onOpenChange={setOpen}
         label="Command palette"
+        overlayClassName="cmdk-overlay"
+        contentClassName="cmdk-content"
       >
         <div data-testid="command-palette">
           <DialogTitle className="sr-only">Command palette</DialogTitle>
-          <Command.Input placeholder={SEARCH_PLACEHOLDER} />
-          <Command.List>
-            <Command.Empty>No results found.</Command.Empty>
-            <Command.Group heading="Go to">
+          <Command.Input placeholder={SEARCH_PLACEHOLDER} className="cmdk-input" />
+          <Command.List className="cmdk-list">
+            <Command.Empty className="cmdk-empty">No results found.</Command.Empty>
+            <Command.Group heading="Go to" className="cmdk-group">
               {navItems.map((item) => (
                 <Command.Item
                   key={item.id}
                   value={`${item.label} ${(item.keywords ?? []).join(" ")}`}
                   onSelect={() => go(item.to)}
+                  className="cmdk-item"
                 >
                   {item.label}
                 </Command.Item>
               ))}
             </Command.Group>
             {rigs.length > 0 ? (
-              <Command.Group heading="Rigs">
+              <Command.Group heading="Rigs" className="cmdk-group">
                 {rigs.map((rig) => (
                   <Command.Item
                     key={rig.id}
                     value={rig.name}
                     onSelect={() => go("/topology/rig/$rigId", { rigId: rig.id })}
+                    className="cmdk-item"
                   >
                     <span data-testid={`palette-rig-${rig.id}`}>
                       <StatusDot status={rigStatus(rig.id, rig.lifecycleState)} />
@@ -99,17 +103,17 @@ export function CommandPalette(): React.JSX.Element {
                 ))}
               </Command.Group>
             ) : null}
-            <Command.Group heading="Actions">
-              <Command.Item value="New rig" onSelect={() => go("/specs/rig")}>
+            <Command.Group heading="Actions" className="cmdk-group">
+              <Command.Item value="New rig" onSelect={() => go("/specs/rig")} className="cmdk-item">
                 New rig
               </Command.Item>
-              <Command.Item value="Import a rig" onSelect={() => go("/import")}>
+              <Command.Item value="Import a rig" onSelect={() => go("/import")} className="cmdk-item">
                 Import a rig
               </Command.Item>
-              <Command.Item value="Bootstrap a host" onSelect={() => go("/bootstrap")}>
+              <Command.Item value="Bootstrap a host" onSelect={() => go("/bootstrap")} className="cmdk-item">
                 Bootstrap a host
               </Command.Item>
-              <Command.Item value="Toggle dark mode" onSelect={toggleDarkMode}>
+              <Command.Item value="Toggle dark mode" onSelect={toggleDarkMode} className="cmdk-item">
                 Toggle dark mode
               </Command.Item>
               <Command.Item
@@ -118,6 +122,7 @@ export function CommandPalette(): React.JSX.Element {
                   setOpen(false);
                   setShortcutsOpen(true);
                 }}
+                className="cmdk-item"
               >
                 Keyboard shortcuts
               </Command.Item>
@@ -130,6 +135,8 @@ export function CommandPalette(): React.JSX.Element {
         open={shortcutsOpen}
         onOpenChange={setShortcutsOpen}
         label="Keyboard shortcuts"
+        overlayClassName="cmdk-overlay"
+        contentClassName="cmdk-content"
       >
         <div data-testid="keyboard-shortcuts">
           <DialogTitle className="sr-only">Keyboard shortcuts</DialogTitle>
