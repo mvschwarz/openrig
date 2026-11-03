@@ -1,7 +1,7 @@
 // #2446: an opt-in decision revision. A client reads the decision with its revision, and a settling act sent with that
 // revision runs only on that decision. Real SQLite (all migrations), the real queue, the Mission Control route and write
 // contract, and the queue's single-row read; the route-wiring cells stub the contract and the remote fetch. Nothing native.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { Hono } from "hono";
 import { migrate } from "../src/db/migrate.js";
@@ -51,8 +51,17 @@ function fixture() {
     return row.qitemId;
   };
   // A runner's permission request: the person's typed answer is recorded on the ask itself, with no reply row.
-  const permissionAsk = async () => (await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Allow the runner to write?",
-    summary: "Allow?", humanIntent: "decision", tags: ["runner-permission", "permission-node:node-1", "permission-generation:gen-1"], nudge: false })).qitemId;
+  const permissionAsk = async (opts: { question?: boolean } = {}) => {
+    if (opts.question) {
+      // The runner's own seat, at the generation the request names, so the ask isn't closed as stale.
+      db.exec(`INSERT OR IGNORE INTO rigs(id,name) VALUES ('rig-1','test-rig'); INSERT OR IGNORE INTO nodes(id,rig_id,logical_id,runtime) VALUES ('node-1','rig-1','dev.runner','codex');
+        INSERT OR IGNORE INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('t-1','node-1',1,'gen-1','fresh');`);
+    }
+    return (await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Allow the runner to write?",
+      summary: "Allow?", humanIntent: "decision", tags: ["runner-permission", "permission-node:node-1", "permission-generation:gen-1"],
+      ...(opts.question ? { humanQuestions: [{ id: "permission", question: "Allow?", options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }] }] } : {}),
+      nudge: false })).qitemId;
+  };
   const revision = async (id: string) => (await (await app.request(`/api/queue/${id}`)).json() as { decisionRevision?: unknown }).decisionRevision;
   const act = async (body: Record<string, unknown>) => {
     const response = await app.request("/api/mission-control/action", { method: "POST",
@@ -116,6 +125,29 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     expect(results.map(r => r.status).sort()).toEqual([200, 409]);
     expect(results.find(r => r.status === 409)!.body.error).toBe("decision_revision_changed");
     expect(f.written(id)).toMatchObject({ row: { state: "done" }, actions: 1 });
+  });
+
+  it("a choice on a runner's permission ask whose answers were already complete conflicts when a deny lands during its return", async () => {
+    const f = fixture(); const id = await f.permissionAsk({ question: true });
+    // An interrupted return: the complete set is recorded and the ask is still pending, so this choice writes nothing first.
+    f.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify({ permission: "allow" }), id);
+    const read = await f.revision(id);
+    const original = f.repo.createHumanAnswer.bind(f.repo);
+    vi.spyOn(f.repo, "createHumanAnswer").mockImplementationOnce(async input => {
+      const returned = await original(input);
+      expect(await f.act({ verb: "deny", qitemId: id, reason: "not now" })).toMatchObject({ status: 200 });
+      return returned;
+    });
+    const result = await f.act({ verb: "answer", qitemId: id, questionId: "permission", optionId: "allow", expectedRevision: read });
+    expect(result).toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+    expect(f.db.prepare("SELECT action_verb FROM mission_control_actions WHERE qitem_id = ?").all(id)).toEqual([{ action_verb: "deny" }]);
+  });
+
+  it("a choice on a runner's permission ask that records its answer closes it (the writing choice, compared before its write)", async () => {
+    const f = fixture(); const id = await f.permissionAsk({ question: true });
+    const read = await f.revision(id);
+    expect(await f.act({ verb: "answer", qitemId: id, questionId: "permission", optionId: "allow", expectedRevision: read }))
+      .toMatchObject({ status: 200, body: { answer: { outcome: "answered" }, closedQitem: { state: "done", humanAnswers: { permission: "allow" } } } });
   });
 
   it("a typed-gate park resolved and parked again on the same gate is a new decision; a note on a park isn't", async () => {
