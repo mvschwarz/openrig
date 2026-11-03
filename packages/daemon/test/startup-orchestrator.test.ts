@@ -495,6 +495,87 @@ describe("StartupOrchestrator", () => {
     }
   });
 
+  // #2456 part 3: a start records what it wrote in each managed block, so a later start refreshes a block it wrote and keeps a
+  // block a person has edited since, naming it, instead of replacing their edit.
+  describe("a start and a managed block it wrote before (#2456)", () => {
+    let cwd: string;
+    let source: string;
+    const fsOps = {
+      readFile: (f: string) => nodeFs.readFileSync(f, "utf8"), writeFile: (f: string, c: string) => nodeFs.writeFileSync(f, c),
+      exists: (f: string) => nodeFs.existsSync(f), mkdirp: (d: string) => { nodeFs.mkdirSync(d, { recursive: true }); },
+      copyFile: (a: string, b: string) => nodeFs.copyFileSync(a, b), listFiles: (d: string) => nodeFs.readdirSync(d), homedir: "",
+    };
+    const tmuxNever = new Proxy({}, { get() { throw new Error("no tmux calls in delivery"); } }) as never;
+    const files = (): ResolvedStartupFile[] => [{ path: "culture.md", absolutePath: source, ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start", "restore"] }];
+    const read = (file: string) => nodeFs.readFileSync(file, "utf8");
+    beforeEach(() => {
+      cwd = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "block-refresh-"));
+      fsOps.homedir = cwd;
+      source = nodePath.join(cwd, "spec", "culture.md");
+      nodeFs.mkdirSync(nodePath.dirname(source), { recursive: true });
+      nodeFs.writeFileSync(source, "Culture v1.\n");
+    });
+    afterEach(() => { nodeFs.rmSync(cwd, { recursive: true, force: true }); });
+    function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
+      const real = runtime === "codex"
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+      // Codex's own projection is what queues launch developer instructions; with an empty plan it does nothing else.
+      return mockAdapter({ runtime, ...(real instanceof CodexRuntimeAdapter ? { project: real.project.bind(real) as RuntimeAdapter["project"] } : {}),
+        deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"], ...overrides });
+    }
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start refreshes a block the last start wrote when its source changed", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.includes("guidance_block_edited")), JSON.stringify(second.warnings)).toBe(false);
+    });
+
+    it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start keeps a block a person edited since the last start, and names it", async (runtime) => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, runtime === "codex" ? "AGENTS.md" : "CLAUDE.md");
+      const adapter = realAdapter(runtime);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      const second = await start();
+      expect(second.ok).toBe(true);
+      // The person's bytes first: on a build without the record, the start replaces the edit.
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(read(guidance)).not.toContain("Culture v2.");
+      expect(second.warnings?.some((w) => w.includes("guidance_block_edited:") && w.includes("culture.md")), JSON.stringify(second.warnings)).toBe(true);
+    });
+
+    // Q3: a Codex start that carries its guidance as launch developer instructions writes nothing to AGENTS.md, so a block an
+    // earlier start wrote there would stay stale, and the launch text asks Codex to follow AGENTS.md. It's refreshed by the
+    // same rule.
+    it("a Codex start on launch developer instructions refreshes the AGENTS.md block an earlier start wrote", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "AGENTS.md");
+      let launchInstructions = false;
+      const adapter = realAdapter("codex", {
+        guidanceFileFor: vi.fn(() => (launchInstructions ? { file: null, launchInstructions: true as const } : { file: null })),
+      } as Partial<RuntimeAdapter>);
+      const start = () => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files() }));
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(source, "Culture v2.\n");
+      launchInstructions = true;
+      expect((await start()).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v2.");
+      expect(read(guidance)).not.toContain("Culture v1.");
+    });
+  });
+
   // A link refusing a seat's first plugin manifest or catalog: its skills are refused there and named, never written into
   // the project; a seat that never had storage (no link) keeps the project, as before.
   describe.each(["codex", "claude-code"] as const)("through the real %s adapter, a seat whose storage a link refused", (runtime) => {

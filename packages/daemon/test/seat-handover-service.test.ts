@@ -27,6 +27,7 @@ import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { DefaultOccupantInvalidator, type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
+import { managedBlockText } from "../src/domain/managed-blocks.js";
 
 describe("SeatHandoverService", () => {
   let db: Database.Database;
@@ -248,6 +249,70 @@ describe("SeatHandoverService", () => {
       expect(atLaunch).toContain("Team culture.");
       if (file !== "CLAUDE.md") expect(fs.existsSync(path.join(root, "CLAUDE.md"))).toBe(false);
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // #2456 part 3: a block already in the guidance file. OpenRig keeps a record of what it last wrote there, so a handover
+  // refreshes a block it wrote whose source has changed, keeps a block a person edited and names it, and names a block it
+  // has no record of as possibly stale instead of replacing it.
+  describe("a Claude handover and a block already in its guidance file (#2456)", () => {
+    let root: string;
+    let culture: string;
+    let guidance: string;
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-refresh-"));
+      const { node } = seedSeat({ runtime: "claude-code" });
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      culture = path.join(root, "spec", "culture.md");
+      fs.mkdirSync(path.dirname(culture), { recursive: true });
+      fs.writeFileSync(culture, "Team culture.\n");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
+        .run(node.id, JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(culture),
+          resourcePath: "culture.md", absolutePath: culture, mergeStrategy: "managed_block", target: "CLAUDE.md" }]));
+      guidance = path.join(root, "CLAUDE.md");
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+    });
+    afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+    /** One fresh handover; returns its notes and the guidance file as the successor launched with it. */
+    async function handOver(): Promise<{ notes: string[]; atLaunch: string | null }> {
+      let atLaunch: string | null = null;
+      launchHarness.mockImplementation(async () => {
+        atLaunch = fs.existsSync(guidance) ? fs.readFileSync(guidance, "utf8") : null;
+        return { ok: true, resumeToken: "claude-successor", resumeType: "claude_id" };
+      });
+      const claude = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+        tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+      const result = await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source: "fresh" });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      return { notes: (result as { result: { launchAdditionNotes?: string[] } }).result.launchAdditionNotes ?? [], atLaunch };
+    }
+
+    it("refreshes a block OpenRig wrote whose source has changed since", async () => {
+      expect((await handOver()).atLaunch).toContain("Team culture.");
+      fs.writeFileSync(culture, "Team culture, revised.\n");
+      const { atLaunch } = await handOver();
+      expect(atLaunch).toContain("Team culture, revised.");
+      expect(atLaunch).not.toContain("Team culture.\n");
+    });
+
+    it("keeps a block a person edited, and names it", async () => {
+      await handOver();
+      fs.writeFileSync(guidance, fs.readFileSync(guidance, "utf8").replace("Team culture.", "Team culture. My own note."));
+      fs.writeFileSync(culture, "Team culture, revised.\n");
+      const { notes, atLaunch } = await handOver();
+      expect(atLaunch).toContain("Team culture. My own note.");
+      expect(atLaunch).not.toContain("Team culture, revised.");
+      expect(notes.some((note) => note.includes("guidance_block_edited") && note.includes("culture.md")), JSON.stringify(notes)).toBe(true);
+    });
+
+    it("leaves a block it has no record of writing, and says it may be stale", async () => {
+      fs.writeFileSync(guidance, `# Notes\n\n${managedBlockText("culture.md", "Older culture.")}\n`);
+      const { notes, atLaunch } = await handOver();
+      expect(atLaunch).toContain("Older culture.");
+      expect(atLaunch).not.toContain("Team culture.");
+      expect(notes.some((note) => note.includes("guidance_block_may_be_stale") && note.includes("culture.md")), JSON.stringify(notes)).toBe(true);
+    });
   });
 
   it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
