@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
@@ -235,12 +235,12 @@ function createMockDaemon() {
   return {
     server,
     close: () => new Promise<void>((r) => server.close(() => r())),
-    listen: () => new Promise<number>((r) => {
-      server.listen(0, () => {
+    listen: () => new Promise<number>((r, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server, {}).then(() => {
         allowOwnedHttpFixture(server);
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }

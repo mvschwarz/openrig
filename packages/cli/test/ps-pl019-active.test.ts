@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // PL-019 item 1: --filter agentActivity.state=<state> + --active sugar.
 // Focused tests; the existing ps.test.ts covers the broader filter
 // machinery surface. We mirror its mock-daemon harness so this stays
@@ -176,7 +177,7 @@ describe("PL-019 ps --filter agentActivity.state + --active", () => {
         res.end();
       }
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     port = (server.address() as { port: number }).port;
   });
 

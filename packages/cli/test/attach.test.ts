@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import { allowFetchTarget } from "./fetch-guard.js";
 import http from "node:http";
@@ -92,7 +93,7 @@ describe("Attach CLI", () => {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server, {}).then(resolve, rejectOwnedListen));
     port = (server.address() as { port: number }).port;
     allowFetchTarget(`http://127.0.0.1:${port}`);
   });

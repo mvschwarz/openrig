@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { DaemonClient, DaemonConnectionError, formatDaemonHostForUrl } from "../src/client.js";
@@ -59,8 +59,8 @@ describe("DaemonClient", () => {
 
   beforeAll(async () => {
     echoServer = createEchoServer();
-    await new Promise<void>((resolve) => {
-      echoServer.server.listen(0, () => {
+    await new Promise<void>((resolve, rejectOwnedListen) => {
+      listenOwnedHttpFixture(echoServer.server, {}).then(() => {
         allowOwnedHttpFixture(echoServer.server);
         const addr = echoServer.server.address();
         if (addr && typeof addr === "object") {
@@ -68,7 +68,7 @@ describe("DaemonClient", () => {
           baseUrl = `http://localhost:${addr.port}`;
         }
         resolve();
-      });
+      }, rejectOwnedListen);
     });
   });
 

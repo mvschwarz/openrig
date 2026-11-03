@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.5.3.5 recap-write atom — the outgoing occupant's write verb (the Q2
 // boundary requirement the store alone does not satisfy). Daemon-independent
 // like trace: seat dir resolves from topology.root CONFIG (slice-06 D1 layout),
@@ -230,7 +231,7 @@ describe.skipIf(process.getuid?.() === 0)("rig context recap-write when this pro
         res.end(JSON.stringify({ path: "/daemon/topology/rigs/r1/seats/s1/RECAP.md", superseded: 1 }));
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     const port = (server.address() as { port: number }).port;
     allowFetchTarget(`http://127.0.0.1:${port}`);
     const rigDir = join(tmp, "topology", "rigs", "r1");

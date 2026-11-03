@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // S5b final fix, R2 F1 (row r054-s5b-final-fix) — `rig up` must RENDER the
 // locked teaching refusal for rig_name_running verbatim, not the generic
 // "Up failed: unknown error ... validate your spec" fallback. The stub serves
@@ -64,7 +65,7 @@ describe("rig up rendering — rig_name_running teaching refusal (S5b F1)", () =
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
-    await new Promise<void>((resolve) => { server.listen(0, "127.0.0.1", resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen); });
     port = (server.address() as { port: number }).port;
   });
 

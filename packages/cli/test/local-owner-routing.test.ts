@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -24,7 +25,7 @@ beforeEach(async () => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(req.url === "/healthz" ? { pid: healthPid } : []));
   });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   allowFetchTarget(base);
 });

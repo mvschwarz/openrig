@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // 51-08 A4 — `rig usage` CLI (plan-lock rev-1, PM decision 4: the SAME projection
 // serves CLI + HTTP). Param-faithful daemon-backed grammar per the provider.ts
 // precedent: values must ARRIVE at the route (option-parity doctrine), --json is
@@ -92,7 +92,7 @@ describe("rig usage CLI grammar (daemon-backed)", () => {
       else if ((req.url ?? "").includes("since=garbage")) res.end(JSON.stringify(ADVISED_PAYLOAD));
       else res.end(JSON.stringify(SERIES_PAYLOAD));
     });
-    await new Promise<void>((resolve) => server.listen(0, () => resolve()));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server, {}).then(() => resolve(), rejectOwnedListen));
     allowOwnedHttpFixture(server);
     port = (server.address() as { port: number }).port;
   });

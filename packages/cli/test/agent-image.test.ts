@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // PL-016 hardening v0+1 — `rig agent-image create` --image-version flag
 // regression test.
 //
@@ -81,11 +82,11 @@ function createMockDaemon(captured: CapturedCall[]) {
   return {
     server,
     close: () => new Promise<void>((r) => server.close(() => r())),
-    listen: () => new Promise<number>((r) => {
-      server.listen(0, "127.0.0.1", () => {
+    listen: () => new Promise<number>((r, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server).then(() => {
         const addr = server.address();
         r(typeof addr === "object" && addr ? addr.port : 0);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }

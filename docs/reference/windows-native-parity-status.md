@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Callback-preserving HTTP fixture migration (2026-11-03)
+
+Thirty-nine additional direct port-zero HTTP calls in 33 CLI fixture files now
+bind through the existing owned high-port helper. Their callback bodies, numeric
+port results, explicit loopback/wildcard choice and subsequent listener lifecycle
+are retained. Binding rejection reaches the enclosing Promise rather than leaving
+its resolver waiting. This batch excluded fetch-guard's own port-zero behavior
+test and all structurally mixed/TCP files pending individual review.
+
+The 33 changed files passed 660 tests with five skips and no failures using two
+workers; CLI typecheck and whitespace checks passed. This is not a full directory
+or real-provider acceptance result. The updated structural inventory finds 18
+direct port-zero calls and no imported Hono port-zero call. Manual inspection of
+the mixed cases distinguishes five remaining real HTTP fixtures from one TCP
+listener used to obtain a closed port for a not-running refusal. The remaining
+TCP, dynamic-import HTTP and explicit guard-behavior cases are still tracked;
+neither their classification nor the wider parity goal is marked complete.
+
+No original team, real-provider/psmux opt-in, exhausted desktop-discovery fixture,
+deployment or public push was exercised. File identity mapping and other real
+acceptance gaps remain separate outstanding work.
+
 ## Hono owned high-port listener migration (2026-11-03)
 
 All 18 previously inventoried imported Hono `serve({port:0})` calls in 17 CLI

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.4.6.MH4 C4 — the http transport branch + §4 target-sugar/precedence
 // matrix for the four cross-host coordination verbs. Everything runs through
 // the shipped depsOverride injection (mock clientFactory + hostRegistryLoader
@@ -385,7 +386,7 @@ describe("send --host (http branch)", () => {
         }, 6_000);
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     try {
       const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       allowFetchTarget(url);

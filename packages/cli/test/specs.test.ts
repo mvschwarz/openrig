@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
@@ -330,7 +330,7 @@ describe("Specs CLI", () => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(req.url?.endsWith("/review") ? review : [entry]));
     });
-    await new Promise<void>(resolve => { previewServer.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(previewServer, {}).then(resolve, rejectOwnedListen); });
     try {
       for (const json of [false, true]) {
         allowOwnedHttpFixture(previewServer);

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // OPR.0.4.6.MH1 rev1-r1 B (fixback) — the `rig host select` COMMAND
 // itself: registry validation, the one daemon write, the structured
 // unknown-id error (persisting nothing), select-local, and the
@@ -41,7 +42,7 @@ describe("rig host select (OPR.0.4.6.MH1 FR-1 command path)", () => {
         res.end(JSON.stringify({ ok: true }));
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve, rejectOwnedListen) => listenOwnedHttpFixture(server).then(resolve, rejectOwnedListen));
     port = (server.address() as { port: number }).port;
     process.env.OPENRIG_URL = `http://127.0.0.1:${port}`;
     allowFetchTarget(process.env.OPENRIG_URL);

@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
@@ -75,7 +76,7 @@ describe("Restore CLI (L3)", () => {
       res.writeHead(404);
       res.end();
     });
-    await new Promise<void>((resolve) => { server.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(server, {}).then(resolve, rejectOwnedListen); });
     port = (server.address() as { port: number }).port;
     allowFetchTarget(`http://127.0.0.1:${port}`);
   });

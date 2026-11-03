@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { createProgram } from "../src/index.js";
@@ -9,7 +10,7 @@ import { allowFetchTarget } from "./fetch-guard.js";
 
 function stubParkedDaemon(payload: unknown): Promise<{ server: Server; url: string; urls: string[] }> {
   const urls: string[] = [];
-  return new Promise((resolve) => {
+  return new Promise((resolve, rejectOwnedListen) => {
     const server = createServer((req, res) => {
       const u = new URL(req.url!, "http://x");
       urls.push(req.url!);
@@ -17,11 +18,11 @@ function stubParkedDaemon(payload: unknown): Promise<{ server: Server; url: stri
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(payload));
     });
-    server.listen(0, "127.0.0.1", () => {
+    listenOwnedHttpFixture(server).then(() => {
       const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
       allowFetchTarget(url);
       resolve({ server, url, urls });
-    });
+    }, rejectOwnedListen);
   });
 }
 

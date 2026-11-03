@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import { createProgram } from "../src/index.js";
@@ -82,13 +82,13 @@ function createDaemonServer(
     server,
     port: 0,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
-    listen: () => new Promise<number>((resolve) => {
-      server.listen(0, () => {
+    listen: () => new Promise<number>((resolve, rejectOwnedListen) => {
+      listenOwnedHttpFixture(server, {}).then(() => {
         allowOwnedHttpFixture(server);
         const addr = server.address();
         const port = typeof addr === "object" && addr ? addr.port : 0;
         resolve(port);
-      });
+      }, rejectOwnedListen);
     }),
   };
 }
@@ -539,12 +539,12 @@ describe("rig status", () => {
         server,
         port: 0,
         close: () => new Promise<void>((r) => server.close(() => r())),
-        listen: () => new Promise<number>((r) => {
-          server.listen(0, () => {
+        listen: () => new Promise<number>((r, rejectOwnedListen) => {
+          listenOwnedHttpFixture(server, {}).then(() => {
             allowOwnedHttpFixture(server);
             const addr = server.address();
             r(typeof addr === "object" && addr ? addr.port : 0);
-          });
+          }, rejectOwnedListen);
         }),
       };
       port = await srv.listen();
@@ -752,7 +752,7 @@ describe("rig status --json", () => {
       if (url.pathname === "/healthz") { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); return; }
       res.writeHead(404); res.end();
     });
-    const port = await new Promise<number>((r) => server.listen(0, () => r((server.address() as { port: number }).port)));
+    const port = await new Promise<number>((r, rejectOwnedListen) => listenOwnedHttpFixture(server, {}).then(() => r((server.address() as { port: number }).port), rejectOwnedListen));
     allowOwnedHttpFixture(server);
     try {
       process.exitCode = undefined;

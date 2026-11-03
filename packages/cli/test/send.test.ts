@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture, allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
 import * as fs from "node:fs";
@@ -810,7 +810,7 @@ describe("Send CLI", () => {
         setTimeout(() => res.socket?.destroy(), 20);
       });
     });
-    await new Promise<void>((resolve) => { cut.listen(0, resolve); });
+    await new Promise<void>((resolve, rejectOwnedListen) => { listenOwnedHttpFixture(cut, {}).then(resolve, rejectOwnedListen); });
     try {
       let thrown: unknown;
       const { logs } = await captureLogs(async () => {
