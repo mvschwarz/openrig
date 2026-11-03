@@ -99,6 +99,26 @@ describe("accepted queue re-estimates (#2453)", () => {
     expect(claim(row.qitemId)).toEqual(before);
   });
 
+  it("renews a passed deadline after its prior finding closes even when the owner has no activity telemetry", async () => {
+    vi.stubEnv("OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES", "3");
+    const row = await overdue(), before = claim(row.qitemId);
+    const finding = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")!;
+    expect(finding.action).toBe("created");
+    expect((await accept(row.qitemId)).status).toBe(200);
+    expect((await sweep()).findings).toContainEqual({ ...finding, action: "closed" });
+    expect(repo.getById(finding.findingQitemId)?.state).toBe("done");
+    vi.setSystemTime(new Date(Date.parse(later) + 1));
+    expect(repo.getById(row.qitemId)?.pickup?.state).toBe("stalled-after-claim");
+    expect(repo.findOverdue().map(r => r.qitemId)).toContain(row.qitemId);
+    const expired = await sweep();
+    const live = repo.list({ limit: 100 }).filter(r => ["pending", "in-progress", "blocked"].includes(r.state) && r.tags?.includes(`recovery-for:${row.qitemId}`));
+    expect(live).toHaveLength(1);
+    expect(expired.findings).toContainEqual({ kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: live[0]!.qitemId, action: "created" });
+    expect(live[0]!.qitemId).not.toBe(finding.findingQitemId);
+    expect((await sweep()).findings).toContainEqual({ kind: "stalled-after-claim", qitemId: row.qitemId, findingQitemId: live[0]!.qitemId, action: "refreshed" });
+    expect(claim(row.qitemId)).toEqual(before);
+  });
+
   it("creates one live overdue after a post-estimate pickup recovery closes before the revised deadline", async () => {
     vi.stubEnv("OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES", "3");
     const row = await overdue(), before = claim(row.qitemId);
