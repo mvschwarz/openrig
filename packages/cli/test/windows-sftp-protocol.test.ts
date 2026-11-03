@@ -8,6 +8,17 @@ import { SftpClient } from "../src/lib/sftp-protocol.js";
 
 const server = process.env.OPENRIG_TEST_SFTP_SERVER ?? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "sftp-server.exe");
 describe.skipIf(process.platform !== "win32" || !existsSync(server))("native OpenSSH SFTP protocol", () => {
+  it("retains final handle timestamps after CLOSE on the native Windows server",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"openrig-sftp-handle-time-")),file="/"+path.join(root,"owned").replaceAll("\\","/");
+    const client=new SftpClient(spawn(server,[],{stdio:"pipe",windowsHide:true}));
+    try{
+      await client.ready;
+      await client.write(file,(async function*(){yield Buffer.from("owned handle metadata");})(),undefined,{mode:0o600,atime:1700000016,mtime:1700000017},0o200);
+      const after=await client.lstat(file);
+      expect(after).toMatchObject({atime:1700000016,mtime:1700000017});
+      expect(after!.mode! & 0o200).toBe(0o200);
+    }finally{await client.close();await rm(root,{recursive:true,force:true});}
+  });
   it("rejects an unknown lsetstat version without sending a metadata request", async () => {
     const script = `const u=n=>{const b=Buffer.alloc(4);b.writeUInt32BE(n);return b},s=t=>Buffer.concat([u(Buffer.byteLength(t)),Buffer.from(t)]);let seen=false;process.stdin.on('data',()=>{if(seen){process.exit(9);return}seen=true;const body=Buffer.concat([Buffer.from([2]),u(3),s('lsetstat@openssh.com'),s('2')]);process.stdout.write(Buffer.concat([u(body.length),body]));});`;
     const child=spawn(process.execPath,["-e",script],{stdio:"pipe",windowsHide:true});const client=new SftpClient(child);

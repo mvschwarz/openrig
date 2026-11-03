@@ -1,5 +1,35 @@
 # Native Windows parity: implementation and evidence
 
+## Uploaded regular-file metadata completes on the open handle (2026-11-03)
+
+Remote regular uploads now apply final mode/timestamps with FSETSTAT before
+closing the exclusively created stage handle, then verify them with FSTAT.
+Retained ownership is verified after this final metadata operation as well.
+The remote copy path no longer closes the stage and reopens its pathname for
+file SETSTAT. Directory and link metadata keep their distinct paths. Invalid
+SFTP-v3 timestamps reject before OPEN or source consumption; partial input and
+metadata refusal/nonapplication abort before rename publication.
+
+For a known Windows remote, verification keeps the existing representable
+readonly/writeable bit mask rather than claiming full POSIX permission bits;
+POSIX endpoints verify all requested mode bits. SID/DACL and source identity
+translation remain incomplete. These handle checks do not make the subsequent
+path-based rename atomic against a hostile directory actor.
+
+Nine selected files passed 69 tests with 15 skips and no failures. A separate
+native Windows OpenSSH protocol file, including a new after-CLOSE historical
+timestamp regression, passed five tests without skips. CLI typecheck and
+whitespace checks passed. Controlled copy cases cover ineffective and refused
+mode/time writes in addition to ownership failures.
+
+A real Windows-source upload into the owned WSL POSIX SFTP subsystem verified
+published mode, atime, mtime and existing uid/gid after close/rename. Its controlled
+foreign-UID refusal retained original content, identity and mtime. Exact public
+source hashes matched before/after; both owned temporary roots and subsystems
+were cleaned up. This is subsystem acceptance, not SSH authentication or a new
+complete cross-platform/full-suite checkpoint. No original team, user-file
+ownership, deployment or public push was changed.
+
 ## Native upload retains known existing POSIX destination identity (2026-11-03)
 
 When a source lacks POSIX uid/gid, the destination is a known existing regular

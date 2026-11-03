@@ -22,7 +22,7 @@ interface Endpoint {
   remove(file: string): Promise<void>;
   symlink(target: string, file: string, directory?: boolean): Promise<void>;
   read(file: string): AsyncIterable<Buffer>;
-  write(file: string, data: AsyncIterable<Buffer>, ownership?: {uid:number;gid:number}): Promise<void>;
+  write(file: string, data: AsyncIterable<Buffer>, ownership?: {uid:number;gid:number}, metadata?: SftpAttrs): Promise<void>;
   times(file: string, attrs: SftpAttrs): Promise<void>;
   linkTimes?(file: string, attrs: SftpAttrs): Promise<void>;
   rename(src: string, dst: string, replacing: boolean): Promise<void>;
@@ -121,7 +121,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
       followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), remove: file => client!.remove(file), symlink: (target, file) => client!.symlink(target, file),
-      read: file => client!.read(file), write: (file, data, ownership) => client!.write(file, data, ownership),
+      read: file => client!.read(file), write: (file, data, ownership, metadata) => client!.write(file, data, ownership, metadata, windowsRemote ? 0o200 : 0o7777),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
       ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
         ? { linkTimes: (file: string, attrs: SftpAttrs) => client!.setLinkTimes(file, attrs) } : {}),
@@ -264,9 +264,9 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         const retainedOwnership = destination === remote && !windowsRemote && attrs.uid === undefined && attrs.gid === undefined
           && kind(existing) === 0o100000 && existing?.uid !== undefined && existing.gid !== undefined
           ? {uid:existing.uid,gid:existing.gid} : undefined;
-        await destination.write(staged, verifiedSource(), retainedOwnership);
+        await destination.write(staged, verifiedSource(), retainedOwnership, destination === remote ? attrs : undefined);
         if (attrs.size === undefined) bytesTransferred += observedBytes;
-        await destination.times(staged, attrs);
+        if (destination !== remote) await destination.times(staged, attrs);
       }
       if (replacingDirectory) {
         directoryReplacementAttempted = true;
