@@ -425,15 +425,16 @@ describe("backup-sqlite helper", () => {
     db.close();
     const before = fs.readFileSync(source);
 
-    const nodeDir = path.dirname(process.execPath);
-    const safePath = process.platform === "win32"
-      ? `${nodeDir};${process.env.SystemRoot || "C:\\Windows"}\\System32`
-      : nodeDir;
+    const emptyPath = temporaryRoot();
+    const probe = spawnSync("sqlite3", ["-version"], {
+      env: { ...process.env, PATH: emptyPath, Path: emptyPath, OPENRIG_SQLITE_BIN: "" },
+    });
+    expect(probe.status).not.toBe(0);
 
     const receipt = runJson(
       "backup-sqlite.mjs",
       ["--source", source, "--destination", destination],
-      { PATH: safePath, Path: safePath, OPENRIG_SQLITE_BIN: "" },
+      { PATH: emptyPath, Path: emptyPath, OPENRIG_SQLITE_BIN: "" },
     );
     expect(receipt.ok).toBe(true);
     expect(receipt.integrity).toBe("ok");
