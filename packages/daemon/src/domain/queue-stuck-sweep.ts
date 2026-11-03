@@ -965,7 +965,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: existing.qitem_id, action: "refreshed" });
       } else if (!existing || evidenceIsNewer(c.evidenceAt, existing.ts_updated)) {
         const input = {
-          qitemId: recoveryId(deps.db, c.row.qitemId),
+          qitemId: recoveryId(deps.db, c.row.qitemId, renewedDeadline ? c.row.closureRequiredAt! : undefined),
           // The detector is machinery, not a seat: the obligation's own creator is the
           // finding's source (the workflow-exception precedent).
           sourceSession: c.row.sourceSession,
