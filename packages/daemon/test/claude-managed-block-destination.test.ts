@@ -29,6 +29,7 @@ import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { isSeatSkillsBootstrapLine } from "../src/domain/startup-orchestrator.js";
+import { managedBlockRecords } from "../src/domain/managed-block-records.js";
 
 // #25 — a rig can send Claude Code's OpenRig-managed blocks to CLAUDE.local.md
 // instead of the (often git-tracked) CLAUDE.md. These drive the real
@@ -145,7 +146,8 @@ function wire(db: ReturnType<typeof createDb>, home: string) {
   const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
   // This fixture checks file projection with a fixed mock pane, not native startup timing.
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => {} });
-  const claude = new ClaudeCodeAdapter({ tmux, fsOps: realFs(home), sleep: async () => {} });
+  // As the daemon wires it: the adapter's guidance writes keep OpenRig's record of each managed block (#2456).
+  const claude = new ClaudeCodeAdapter({ tmux, fsOps: realFs(home), sleep: async () => {}, managedBlockRecords: managedBlockRecords(db) });
   const resolverFs: AgentResolverFsOps = {
     readFile: (p) => fs.readFileSync(p, "utf-8"),
     exists: (p) => fs.existsSync(p),

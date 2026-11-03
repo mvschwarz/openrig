@@ -32,10 +32,7 @@ import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSk
 import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 import { heldMessagesNotice } from "./outbox-handler.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { keptGuidanceNote, keptGuidanceSeatLine, refreshedUnrecordedGuidanceNote, restoreMissingGuidance, seatGuidanceFile } from "./restore-guidance.js";
-import { isPerSeatRoleGuidance, managedBlockBodies, managedBlockBodyMatches, managedBlockStanding } from "./managed-blocks.js";
-import { managedBlockBodyHash, managedBlockRecords, type ManagedBlockRecords } from "./managed-block-records.js";
+import { keptGuidanceSeatLine } from "./restore-guidance.js";
 
 // Why a startup prompt's submission could not be confirmed, as told to the operator when the
 // proof line is held back.
@@ -442,17 +439,6 @@ export class StartupOrchestrator {
       deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
     }
 
-    // #2456: OpenRig records what it writes in each managed block of the seat's guidance file, so a start leaves out, and
-    // names, a block a person edited since OpenRig last wrote it, and writes the rest as before. A Codex start whose guidance
-    // rides its launch developer instructions writes none of them; the blocks already in its AGENTS.md get the same rule
-    // after delivery. The saved startup context keeps every entry either way.
-    const blockRecords = managedBlockRecords(this.db);
-    const guidanceTarget = this.managedGuidanceTarget(input);
-    const keptBlockNotes: string[] = [];
-    const entryBlocks = input.plan.entries.filter((e) => e.category === "guidance" && e.mergeStrategy === "managed_block")
-      .map((e) => ({ id: e.effectiveId, sourcePath: e.absolutePath }));
-    const editedEntries = guidanceTarget ? this.editedManagedBlocks(guidanceTarget, entryBlocks, blockRecords, warnings, keptBlockNotes) : new Set<string>();
-
     // 2. Project resources. A contained Claude resume has an intentionally empty
     // replay plan, not a newly selected profile with activity hooks removed.
     // RestoreOrchestrator already reconciled the saved activity selection before
@@ -460,12 +446,9 @@ export class StartupOrchestrator {
     let projectionResult: ProjectionResult;
     if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
       const skip = input.replaySkip;
-      const keptPlan = editedEntries.size > 0
-        ? { ...input.plan, entries: input.plan.entries.filter((e) => !(e.category === "guidance" && e.mergeStrategy === "managed_block" && editedEntries.has(e.effectiveId))) }
-        : input.plan;
       const projectedPlan = skip && skip.entryIds.size > 0
-        ? { ...keptPlan, entries: keptPlan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
-        : keptPlan;
+        ? { ...input.plan, entries: input.plan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
+        : input.plan;
       projectionResult = await input.adapter.project(projectedPlan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
@@ -517,12 +500,6 @@ export class StartupOrchestrator {
         preLaunchFiles.push(f);
       }
     }
-    // #2456: the same rule for the guidance files this start merges, classified from their content as the adapter does.
-    const fileBlocks = preLaunchFiles.filter((f) => (f.deliveryHint === "auto"
-      ? resolveConcreteHint(f.path, readTextOrEmpty(f.absolutePath), f.orientation) : f.deliveryHint) === "guidance_merge")
-      .map((f) => ({ id: f.path, sourcePath: f.absolutePath }));
-    const editedFiles = guidanceTarget ? this.editedManagedBlocks(guidanceTarget, fileBlocks, blockRecords, warnings, keptBlockNotes) : new Set<string>();
-    for (let i = preLaunchFiles.length - 1; i >= 0; i--) if (editedFiles.has(preLaunchFiles[i]!.path)) preLaunchFiles.splice(i, 1);
 
     // 4. Deliver pre-launch files (filesystem: guidance_merge, skill_install)
     // Always call even with empty list so adapters can provision runtime-specific config (e.g. context collectors)
@@ -538,24 +515,6 @@ export class StartupOrchestrator {
     } catch (err) {
       errors.push(`Pre-launch delivery error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors, undefined, false, undefined, false, "pre_launch_files", true);
-    }
-
-    // #2456: record what this start wrote; or, when its guidance rode the launch, refresh the blocks already in the rule
-    // file by the same rule, since the launch text asks Codex to follow that file where the two differ.
-    const writtenBlocks = [...entryBlocks.filter((b) => !editedEntries.has(b.id)), ...fileBlocks.filter((b) => !editedFiles.has(b.id))];
-    if (guidanceTarget) this.recordWrittenBlocks(guidanceTarget, writtenBlocks, blockRecords);
-    else if (input.binding.guidanceLaunchInstructions && input.binding.cwd) {
-      const target = seatGuidanceFile(input.adapter.runtime, input.binding.cwd, input.binding.claudeManagedBlockFile ?? null);
-      const items = writtenBlocks.filter((b) => !isPerSeatRoleGuidance(b.id, b.sourcePath)).map((b) => ({ blockId: b.id, sourcePath: b.sourcePath }));
-      if (target && items.length > 0) {
-        const repair = restoreMissingGuidance({ targetPath: target, items }, {
-          exists: existsSync, readFile: (path) => readFileSync(path, "utf-8"),
-          writeFile: (path, text) => writeFileSync(path, text, "utf-8"), mkdirp: (dir) => { mkdirSync(dir, { recursive: true }); },
-        }, { records: blockRecords, unrecorded: "refresh", addMissing: false });
-        if (repair.refreshed.length > 0) warnings.push(`guidance_block_refreshed: ${target}: ${repair.refreshed.join(", ")} refreshed from their current source files`);
-        warnings.push(...repair.refreshedUnrecorded, ...repair.kept, ...repair.gaps.map((gap) => `guidance_block_not_refreshed: ${target}: ${gap}`));
-        keptBlockNotes.push(...repair.kept);
-      }
     }
 
     // OPR.0.7.0.13 (router, R1.1): the bootstrap line, on its own: with a yes it is delivered into the seat's guidance file;
@@ -632,9 +591,10 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
     }
 
-    // #2456: the seat is told, in one line after it's ready, which managed blocks this start left as they are. The line is
-    // this start's own: it's added after the startup context is saved, so a later replay doesn't send it again.
-    const guidanceSeatLine = keptGuidanceSeatLine(keptBlockNotes);
+    // #2456: the seat is told, in one line after it's ready, which managed blocks the adapter's guidance writes left as they
+    // are (named in this start's warnings). The line is this start's own: it's added after the startup context is saved,
+    // so a later replay doesn't send it again. A resume types nothing into the resumed conversation; its result names them.
+    const guidanceSeatLine = input.resumeToken ? undefined : keptGuidanceSeatLine(warnings);
     if (guidanceSeatLine) {
       input = { ...input, startupActions: [...input.startupActions, { type: "send_text", value: guidanceSeatLine, phase: "after_ready", appliesOn: [context], idempotent: true }] };
       deliveryInput.startupActions = input.startupActions;
@@ -1138,46 +1098,6 @@ export class StartupOrchestrator {
     try { return this.readFile(path); } catch { return ""; }
   }
 
-  /** #2456: the file this start merges managed blocks into: the one the launch chose, else the runtime's rule file. Null
-   *  when the guidance rides the launch itself (Codex developer instructions) or the runtime keeps no such file. */
-  private managedGuidanceTarget(input: StartupInput): string | null {
-    if (input.binding.guidanceLaunchInstructions || !input.binding.cwd) return null;
-    return input.binding.guidanceFile ?? seatGuidanceFile(input.adapter.runtime, input.binding.cwd, input.binding.claudeManagedBlockFile ?? null);
-  }
-
-  /** #2456: the managed blocks among `blocks` that `target` holds as a person edited them since OpenRig last wrote them.
-   *  They're left out of this start's writes and named; a block that differs with no record is replaced, as before, and
-   *  named too. */
-  private editedManagedBlocks(target: string, blocks: Array<{ id: string; sourcePath: string }>, records: ManagedBlockRecords,
-    warnings: string[], keptNotes: string[]): Set<string> {
-    const edited = new Set<string>();
-    const content = readTextOrEmpty(target);
-    if (!content) return edited;
-    for (const block of blocks) {
-      if (isPerSeatRoleGuidance(block.id, block.sourcePath)) continue;
-      const source = readTextOrEmpty(block.sourcePath);
-      const standing = managedBlockStanding(content, block.id, source, records.get(target, block.id), managedBlockBodyHash);
-      if (standing === "edited") {
-        edited.add(block.id);
-        const note = keptGuidanceNote("edited", target, block.id, block.sourcePath);
-        warnings.push(note);
-        keptNotes.push(note);
-      } else if (standing === "unrecorded") warnings.push(refreshedUnrecordedGuidanceNote(target, block.id, block.sourcePath));
-    }
-    return edited;
-  }
-
-  /** #2456: record each block this start wrote, as the file now holds it (a block an adapter skipped isn't recorded). */
-  private recordWrittenBlocks(target: string, blocks: Array<{ id: string; sourcePath: string }>, records: ManagedBlockRecords): void {
-    const content = readTextOrEmpty(target);
-    if (!content) return;
-    for (const block of blocks) {
-      const source = readTextOrEmpty(block.sourcePath);
-      const bodies = managedBlockBodies(content, block.id);
-      if (bodies.length > 0 && bodies.every((body) => managedBlockBodyMatches(body, source))) records.set(target, block.id, source);
-    }
-  }
-
   private fail(
     input: StartupInput & { submissionDiagnostics?: StartupSubmissionDiagnostic[] },
     status: "attention_required" | "failed",
@@ -1562,9 +1482,4 @@ export class StartupOrchestrator {
 function isSessionIdentityAction(action: StartupAction): boolean {
   if (action.builtin === "session_identity") return true;
   return action.type === "send_text" && action.value.startsWith("OpenRig session identity:");
-}
-
-/** A file's text, or "" when it's missing or can't be read. */
-function readTextOrEmpty(path: string): string {
-  try { return existsSync(path) ? readFileSync(path, "utf-8") : ""; } catch { return ""; }
 }

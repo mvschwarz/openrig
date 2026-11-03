@@ -25,9 +25,8 @@ import {
   type ManagedBlockMergeFsOps,
   isPerSeatRoleGuidance,
   isPerSeatRoleStartupFile,
-  managedBlockStanding,
 } from "./managed-blocks.js";
-import { managedBlockBodyHash, type ManagedBlockRecords } from "./managed-block-records.js";
+import { decideManagedBlock, type ManagedBlockRecords } from "./managed-block-records.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type { NodeStartupSnapshot } from "./types.js";
@@ -192,27 +191,6 @@ export interface GuidanceRepair {
   /** #2456: blocks left as they are although they differ from their source, each named with the reason
    *  (`guidance_block_edited` or `guidance_block_may_be_stale`). The seat runs them as they are. */
   kept: string[];
-  /** #2456: a note for each block replaced from its source although OpenRig had no record of writing it
-   *  (`unrecorded: "refresh"`). */
-  refreshedUnrecorded: string[];
-}
-
-/** #2456: how `restoreMissingGuidance` treats a block already in the file. Without `records` it's left as it is, as
- *  before. With them, a block OpenRig wrote is refreshed from its source, an edited one is kept and named, and one with no
- *  record is kept and named as possibly stale (`unrecorded: "keep"`, exact resume and handover) or replaced from its
- *  source and named (`"refresh"`, a start, as a start replaced every block before the record existed). `addMissing:
- *  false` touches only blocks already present (a Codex start whose guidance rides its launch developer instructions). */
-export interface GuidanceRefresh {
-  records: ManagedBlockRecords;
-  unrecorded: "keep" | "refresh";
-  addMissing?: boolean;
-}
-
-/** The note for a block left as it is, named for the seat and the person. */
-export function keptGuidanceNote(standing: "edited" | "unrecorded", targetPath: string, blockId: string, sourcePath: string): string {
-  return standing === "edited"
-    ? `guidance_block_edited: ${targetPath}: ${blockId} was edited by hand since OpenRig wrote it, so it wasn't refreshed from ${sourcePath}`
-    : `guidance_block_may_be_stale: ${targetPath}: ${blockId} differs from ${sourcePath} and OpenRig has no record of writing it, so it was left as it is`;
 }
 
 const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_be_stale: "];
@@ -222,11 +200,6 @@ const KEPT_GUIDANCE_PREFIXES = ["guidance_block_edited: ", "guidance_block_may_b
 export function keptGuidanceSeatLine(notes: string[]): string | undefined {
   const kept = notes.filter((note) => KEPT_GUIDANCE_PREFIXES.some((prefix) => note.startsWith(prefix)));
   return kept.length > 0 ? `OpenRig guidance note: ${kept.join("; ")}.` : undefined;
-}
-
-/** The note for a block a start replaced although OpenRig had no record of writing it. */
-export function refreshedUnrecordedGuidanceNote(targetPath: string, blockId: string, sourcePath: string): string {
-  return `guidance_block_refreshed_unrecorded: ${targetPath}: ${blockId} was replaced from ${sourcePath}; OpenRig had no record of writing it, as for every block written before records were kept`;
 }
 
 /** Put back only the missing managed guidance blocks. Existing blocks and any other text in the
@@ -247,11 +220,13 @@ export function appendIsCleanupSafe(content: string, blocks: Array<{ blockId: st
   return stripManagedBlocks(candidate) === stripManagedBlocks(content);
 }
 
-/** Put back the missing managed guidance blocks, and with `refresh` (#2456) refresh the ones OpenRig wrote whose source has
- *  changed, as described on `GuidanceRefresh`. Any other text in the file is left exactly as it is, and nothing is written
- *  unless cleanup would later remove exactly what was written. Never throws: a failure becomes a reported gap. */
-export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps, refresh?: GuidanceRefresh): GuidanceRepair {
-  const repair: GuidanceRepair = { restored: [], gaps: [], refreshed: [], kept: [], refreshedUnrecorded: [] };
+/** Put back the missing managed guidance blocks. With `records` (#2456), a block already there that OpenRig wrote is
+ *  refreshed from its changed source, and one edited since, or with no record, is kept and named (`decideManagedBlock`).
+ *  Without them a block already there is left as it is, as before. Any other text in the file is left exactly as it is,
+ *  and nothing is written unless cleanup would later remove exactly what was written. Never throws: a failure becomes a
+ *  reported gap. */
+export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockMergeFsOps, records?: ManagedBlockRecords): GuidanceRepair {
+  const repair: GuidanceRepair = { restored: [], gaps: [], refreshed: [], kept: [] };
   let states: Map<string, BlockState>;
   let existing: string | null;
   try {
@@ -261,25 +236,23 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
     repair.gaps.push(`could not read ${guidance.targetPath}: ${(err as Error).message}`);
     return repair;
   }
-  const toWrite: Array<{ blockId: string; content: string; replaces?: "stale" | "unrecorded" }> = [];
+  const toWrite: Array<{ blockId: string; content: string; refresh?: true }> = [];
   for (const item of guidance.items) {
     const state = states.get(item.blockId);
     if (state === "complete") {
-      if (!refresh || item.unresolved) continue;
+      if (!records || item.unresolved) continue;
       let source: string;
       try {
         if (!fs.exists(item.sourcePath)) continue;
         source = fs.readFile(item.sourcePath);
       } catch { continue; }
-      const standing = managedBlockStanding(existing ?? "", item.blockId, source,
-        refresh.records.get(guidance.targetPath, item.blockId), managedBlockBodyHash);
-      if (standing === "current") refresh.records.set(guidance.targetPath, item.blockId, source);
-      else if (standing === "stale") toWrite.push({ blockId: item.blockId, content: source, replaces: "stale" });
-      else if (standing === "unrecorded" && refresh.unrecorded === "refresh") toWrite.push({ blockId: item.blockId, content: source, replaces: "unrecorded" });
-      else if (standing === "edited" || standing === "unrecorded") repair.kept.push(keptGuidanceNote(standing, guidance.targetPath, item.blockId, item.sourcePath));
+      // #2456: the same decision every adapter's guidance write makes; an exact resume and a handover keep an unrecorded block.
+      const decision = decideManagedBlock(existing ?? "", item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
+      if (decision.note) repair.kept.push(decision.note);
+      else if (decision.standing === "current") records.set(guidance.targetPath, item.blockId, source);
+      else if (decision.write) toWrite.push({ blockId: item.blockId, content: source, refresh: true });
       continue;
     }
-    if (refresh?.addMissing === false) continue;
     if (state === "incomplete") {
       repair.gaps.push(`${item.blockId}: ${guidance.targetPath} holds only part of this block (one marker); left as it is`);
       continue;
@@ -310,12 +283,8 @@ export function restoreMissingGuidance(guidance: SeatGuidance, fs: ManagedBlockM
   for (const block of toWrite) {
     try {
       mergeManagedBlock(fs, guidance.targetPath, block.blockId, block.content);
-      refresh?.records.set(guidance.targetPath, block.blockId, block.content);
-      if (block.replaces === "stale") repair.refreshed.push(block.blockId);
-      else if (block.replaces === "unrecorded") {
-        const item = guidance.items.find((candidate) => candidate.blockId === block.blockId)!;
-        repair.refreshedUnrecorded.push(refreshedUnrecordedGuidanceNote(guidance.targetPath, block.blockId, item.sourcePath));
-      } else repair.restored.push(block.blockId);
+      records?.set(guidance.targetPath, block.blockId, block.content);
+      (block.refresh ? repair.refreshed : repair.restored).push(block.blockId);
     } catch (err) {
       repair.gaps.push(`${block.blockId}: ${(err as Error).message}`);
     }
@@ -341,7 +310,7 @@ export function readNodeStartupSnapshot(db: Pick<Database.Database, "prepare">, 
  *  does: the seat-skills line only with the person's yes, and nothing through a recorded file that is now a link. A
  *  successor launch carries no guidance of its own, so every seat's handover needs this before its successor starts
  *  (#2456). With `records`, a block OpenRig wrote whose source changed is refreshed too, and a block left as it is is
- *  named (`keptGuidanceNote`). Never throws; returns what it did and what it couldn't. */
+ *  named. Never throws; returns what it did and what it couldn't. */
 export function putBackSeatGuidance(input: {
   startupCtx: NodeStartupSnapshot | null;
   cwd: string | null | undefined;
@@ -365,7 +334,7 @@ export function putBackSeatGuidance(input: {
   const linked = input.startupCtx?.guidanceFile ? guidanceFileSharedByLink(guidance.targetPath, input.linkInfo) : null;
   if (linked) return [...notes, `${linked} is now a link, so nothing was put back in ${guidance.targetPath}`];
   if (guidance.items.length === 0) return notes;
-  const repair = restoreMissingGuidance(guidance, input.fs, input.records ? { records: input.records, unrecorded: "keep" } : undefined);
+  const repair = restoreMissingGuidance(guidance, input.fs, input.records);
   if (repair.restored.length > 0) notes.push(`put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files`);
   if (repair.refreshed.length > 0) notes.push(`refreshed blocks ${repair.refreshed.join(", ")} in ${guidance.targetPath} from their current source files`);
   return [...notes, ...repair.kept, ...repair.gaps];

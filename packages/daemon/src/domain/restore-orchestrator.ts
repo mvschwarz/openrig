@@ -33,9 +33,8 @@ import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-re
 import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
-import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo, keptGuidanceNote } from "./restore-guidance.js";
-import { managedBlockBodyHash, managedBlockRecords } from "./managed-block-records.js";
-import { managedBlockStanding } from "./managed-blocks.js";
+import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks, guidanceFileSharedByLink, lstatLinkInfo } from "./restore-guidance.js";
+import { decideManagedBlock, managedBlockRecords } from "./managed-block-records.js";
 import type { DesiredClaudeActivityHooks } from "./desired-claude-activity-hooks.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -1559,8 +1558,8 @@ export class RestoreOrchestrator {
       if (item.unresolved) continue;
       let source: string;
       try { source = readFileSync(item.sourcePath, "utf-8"); } catch { continue; }
-      const standing = managedBlockStanding(content, item.blockId, source, records.get(guidance.targetPath, item.blockId), managedBlockBodyHash);
-      if (standing === "edited" || standing === "unrecorded") notes.push(keptGuidanceNote(standing, guidance.targetPath, item.blockId, item.sourcePath));
+      const { note } = decideManagedBlock(content, item.blockId, source, records, guidance.targetPath, { unrecorded: "keep", sourcePath: item.sourcePath });
+      if (note) notes.push(note);
     }
     return notes;
   }
@@ -1827,7 +1826,7 @@ export class RestoreOrchestrator {
           readFile: (path) => readFileSync(path, "utf-8"),
           writeFile: (path, content) => writeFileSync(path, content, "utf-8"),
           mkdirp: (path) => mkdirSync(path, { recursive: true }),
-        }, { records: managedBlockRecords(this.db), unrecorded: "keep" });
+        }, managedBlockRecords(this.db));
         if (repair.restored.length > 0) {
           warnings?.push(`Restore guidance: ${node.logicalId}: put back missing blocks ${repair.restored.join(", ")} in ${guidance.targetPath} from their current source files.`);
         }
