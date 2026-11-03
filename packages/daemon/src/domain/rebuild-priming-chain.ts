@@ -21,13 +21,14 @@ import { parseSessionName } from "./session-name.js";
  */
 export function buildRebuildPrimingChain(
   seatRef: string,
-  opts: { topologyRoot: string; openrigHome: string },
+  opts: { topologyRoot: string; openrigHome: string; logicalId: string },
 ): { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string } {
   const parsed = parseSessionName(seatRef);
   if (parsed.kind !== "canonical") {
     return { emptyReason: `seat ref '${seatRef}' did not parse as canonical <seat>@<rig> — no durable chain resolved, never guessed` };
   }
-  const seatDir = join(opts.topologyRoot, "rigs", parsed.rig, "seats", parsed.member);
+  // The canonical member label can differ from the native logical seat ID.
+  const seatDir = join(opts.topologyRoot, "rigs", parsed.rig, "seats", opts.logicalId);
   const artifacts = [
     { address: join(seatDir, RECAP_FILENAME), label: "authored seat recap (highest trust)" },
     { address: join(seatDir, "LEARNED.md"), label: "seat lineage lessons" },
