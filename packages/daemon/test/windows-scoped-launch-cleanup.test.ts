@@ -29,7 +29,6 @@ it.runIf(process.platform === "win32").each([
       },
     }, async argv => {
       if (argv.includes("show-options")) return argv.includes("default-shell") ? "powershell.exe" : "";
-      if (argv.includes("openrig-private-environment-capability")) throw Error("unknown command: openrig-private-environment-capability");
       if (argv.includes("new-session") || argv.includes("respawn-pane")) {
         expect(fs.existsSync(bootstrap)).toBe(true);
         if (outcome !== "success") throw failure;

@@ -73,8 +73,7 @@ function respond(cmd: string, failing: string[], composer = false): string {
 function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: boolean; composer?: boolean; psmux?: boolean } = {}): TmuxAdapter {
   const execs: string[] = [];
   const fileOps: TmuxFileOps = {
-    // Advertise the required capability, while proving that the no-assignment
-    // protocol branch does not create a private file.
+    // Commands without environment assignments do not create a private file.
     privateConfig: async () => { throw new Error("Unexpected private config write in legacy oracle"); },
     writeFile: async () => {},
     unlink: async () => {},
@@ -85,7 +84,6 @@ function recordingAdapter(calls: RunCall[], opts: { failing?: string[]; guard?: 
     execs.push(cmd);
     return respond(cmd, opts.failing ?? [], opts.composer);
   }, fileOps, opts.psmux ? async argv => {
-    if (argv.includes("openrig-private-environment-capability")) return "openrig-envfile-v1:new-session,respawn-pane";
     if (argv.includes("display-message")) return "$7\n";
     if (argv.includes("has-session")) throw new Error("can't find session: missing");
     return "";

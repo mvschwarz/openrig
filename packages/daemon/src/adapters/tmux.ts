@@ -818,56 +818,7 @@ export class TmuxAdapter {
    * A failed/uncertain call retains its private file: it may not have been consumed yet.
    */
   private async runEnvironmentCommand(argv: string[], legacy?: string, startServer = false, protectedLaunch = false): Promise<string> {
-    // Stock psmux 3.4 cannot bootstrap new-session through source-file. A
-    // versioned candidate accepts file references without serializing values.
-    if (this.terminalKind === "psmux") {
-      const capability = "openrig-envfile-v1:new-session,respawn-pane";
-      let supported = false;
-      try {
-        supported = (await this.run(["tmux", "openrig-private-environment-capability"])).trim() === capability;
-      } catch (error) {
-        // Stock 3.4.0 explicitly rejects this command. An unavailable transport
-        // is not evidence of an unsupported protocol and must not trigger retry.
-        if (!/unknown command: openrig-private-environment-capability/i.test(String(error))) throw error;
-      }
-      if (!supported) return this.runStockPrivateEnvironmentCommand(argv, protectedLaunch);
-      if (!this.fileOps.privateConfig) throw new Error("Native private environment file writer unavailable");
-      const entries: [string, string][] = [];
-      const rewritten: string[] = [];
-      let referenceIndex = -1;
-      for (let index = 0; index < argv.length; index++) {
-        const arg = argv[index]!;
-        if (arg === "--") { rewritten.push(...argv.slice(index)); break; }
-        if (arg !== "-e") { rewritten.push(arg); continue; }
-        const assignment = argv[++index] ?? "";
-        const separator = assignment.indexOf("=");
-        const key = assignment.slice(0, separator), value = assignment.slice(separator + 1);
-        if (separator < 1 || !isWindowsPrivateEnvironmentName(key) || value.includes("\0")) throw new Error("Invalid environment assignment");
-        entries.push([key, value]);
-        if (referenceIndex < 0) { rewritten.push("-e", ""); referenceIndex = rewritten.length - 1; }
-      }
-      // The advertised v1 -e protocol keeps identifier names; Windows names
-      // outside that grammar use the established private source-file API.
-      const extra = entries.filter(([key]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
-      const content = JSON.stringify({ schema: "openrig.psmux.environment/v1", entries: entries.filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) });
-      if (referenceIndex < 0) return this.run(argv, legacy);
-      if (Buffer.byteLength(content, "utf8") > 1024 * 1024) throw new Error("Native environment file exceeds protocol limit");
-      const file = await this.fileOps.privateConfig(content);
-      rewritten[referenceIndex] = `@openrig-env-v1:${file.path}`;
-      // Retain on an uncertain/failed command: a server may still be reading it.
-      // No fallback containing values is attempted after protocol selection.
-      const output = await this.run(rewritten);
-      if (extra.length) {
-        const creating = argv[1] === "new-session", targetIndex = argv.indexOf(creating ? "-s" : "-t"), target = argv[targetIndex+1];
-        if (targetIndex < 0 || !target) throw new Error("Native environment command lacks its exact target");
-        const supplement = await this.fileOps.privateConfig(extra.map(([key,value]) => psmuxPrivateEnvironmentLine(key,value)).join(""));
-        const supplementArgv = ["tmux","source-file","-t",creating ? exactTarget(target,"session") : target,supplement.path];
-        if (creating) await this.runNamedSession(supplementArgv, target); else await this.run(supplementArgv);
-        await supplement.dispose().catch(()=>{});
-      }
-      await file.dispose().catch(() => {});
-      return output;
-    }
+    if (this.terminalKind === "psmux") return this.runStockPrivateEnvironmentCommand(argv, protectedLaunch);
     const file = this.fileOps.tmpName();
     await this.fileOps.writeFile(file, (legacy ?? posixJoinArgv(argv)).slice("tmux ".length) + "\n", { mode: 0o600, flag: "wx" });
     const output = await this.run(["tmux", ...(startServer ? ["start-server", ";"] : []), "source-file", file]);

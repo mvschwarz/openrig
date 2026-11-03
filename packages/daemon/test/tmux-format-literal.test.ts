@@ -1,4 +1,6 @@
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+
+afterEach(() => vi.unstubAllEnvs());
 import { tmuxFormatLiteral, tmuxSessionNameFormat } from "../src/adapters/tmux-format.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -25,6 +27,7 @@ it.each(["tmux", "psmux"] as const)("uses literal name formatting in probe creat
 });
 
 it.each(["tmux", "psmux"] as const)("preserves format-looking names through private-environment creation on %s", async kind => {
+  if (kind === "psmux" && !process.env.SystemRoot) vi.stubEnv("SystemRoot", "C:/Windows");
   const name = "owned#{session_id}", calls: string[][] = [], files: string[] = [];
   const adapter = new TmuxAdapter(async () => { throw new Error("Unexpected shell"); }, {
     tmpName: () => "C:/owned/bootstrap.cmd", bufferName: () => "owned", unlink: async () => {},
@@ -32,7 +35,6 @@ it.each(["tmux", "psmux"] as const)("preserves format-looking names through priv
     privateConfig: async text => { files.push(text); return { path: "C:/owned/private.conf", dispose: async () => {} }; },
   }, async argv => {
     calls.push(argv);
-    if (argv[1] === "openrig-private-environment-capability") return "openrig-envfile-v1:new-session,respawn-pane";
     if (argv[1] === "show-options") return "cmd.exe\n";
     if (argv[1] === "new-session" || argv.includes("source-file")) return "%1\n";
     return "";

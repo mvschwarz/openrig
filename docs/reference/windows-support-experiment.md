@@ -61,8 +61,9 @@ environment-engine integrations, not replacements for PowerShell or psmux.
 Using one requires a usable selected client/engine path. An unsuccessful native
 OpenShell source build does not prevent ordinary native OpenRig operation.
 
-The psmux environment-file source patch in scripts/windows is an optional
-experiment; installing a patched psmux binary is not required by this branch.
+Stock psmux is the supported native adapter path. Initial/respawn environment
+values use its existing launch and configuration mechanisms; no custom psmux
+source patch or OpenRig-specific capability command is required.
 
 ## Review scope
 

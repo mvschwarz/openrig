@@ -3,7 +3,7 @@ import { TmuxAdapter, type ArgvExecFn } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
-it.each([true, false])("persists a colon-bearing created session on the verified server (file protocol=%s)", async advertised => {
+it("persists a colon-bearing created stock session on the verified server", async () => {
   // The simulated native bootstrap constructs system binary paths; it never
   // executes them. Linux hosts have no SystemRoot unless this fixture supplies it.
   if (!process.env.SystemRoot) vi.stubEnv("SystemRoot", "C:\\Windows");
@@ -11,10 +11,6 @@ it.each([true, false])("persists a colon-bearing created session on the verified
   let present = false, marker = "";
   const invoke: ArgvExecFn = Object.assign(async (argv: string[]) => {
     calls.push(argv); const command = argv[1] === "-t" ? argv[3] : argv[1];
-    if (command === "openrig-private-environment-capability") {
-      if (advertised) return "openrig-envfile-v1:new-session,respawn-pane";
-      throw new Error("unknown command: openrig-private-environment-capability");
-    }
     if (command === "has-session") { if (present) return ""; throw Object.assign(new Error("absent"), { code: 1, stdout: "", stderr: "" }); }
     if (command === "show-options") return argv.includes("-t") ? marker + "\n" : "cmd.exe\n";
     if (command === "new-session") { expect(argv[argv.indexOf("-s") + 1]).toBe(binding.physical); present = true; return "%1\n"; }
