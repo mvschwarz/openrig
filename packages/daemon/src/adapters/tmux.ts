@@ -924,7 +924,9 @@ export class TmuxAdapter {
         beforePaste: async () => {
           let checked = false;
           const checks = async () => { await options?.beforePaste?.(); beforeWrite(); beforeInput?.(); checked = true; };
-          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter: async () => (await this.sendKeysUnchecked(pane, ["Enter"])).ok });
+          // The synchronous checks run again just before the key: the guard's re-read awaits after `checks`.
+          const enter = async () => { beforeWrite(); beforeInput?.(); return (await this.sendKeysUnchecked(pane, ["Enter"])).ok; };
+          if (checkDraft) await guard!.beforeInput(identity, false, text, { checks, enter });
           if (!checked) await options?.beforePaste?.();
         },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },

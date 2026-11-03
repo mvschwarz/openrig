@@ -458,8 +458,11 @@ export class SeatDeliveryGuard {
         await leftover.checks();
         const still = await read();
         const owned = !!still && this.ownsLeftover(target, still);
-        this.leftovers.delete(target.nodeId);
-        if (owned && await leftover.enter()) {
+        if (!owned) this.leftovers.delete(target.nodeId);
+        // `enter` repeats the synchronous checks before its key; one that refuses throws here and keeps the record.
+        const entered = owned && await leftover.enter();
+        if (owned) this.leftovers.delete(target.nodeId);
+        if (entered) {
           lease.ownLeftover = "submitted";
           await this.sleep(OWN_INPUT_REREAD_MS);
           const after = await read();
