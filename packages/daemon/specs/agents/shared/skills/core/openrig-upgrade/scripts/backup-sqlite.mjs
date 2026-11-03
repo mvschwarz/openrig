@@ -16,20 +16,14 @@ process.emitWarning = (warning, ...args) => {
   return originalEmitWarning.call(process, warning, ...args);
 };
 
+let sqliteModule;
 let DatabaseSync;
 try {
-  const sqliteModule = await import("node:sqlite");
+  sqliteModule = await import("node:sqlite");
   DatabaseSync = sqliteModule.DatabaseSync;
 } catch {
+  sqliteModule = undefined;
   DatabaseSync = undefined;
-}
-
-let BetterSqlite3;
-try {
-  const betterModule = await import("better-sqlite3");
-  BetterSqlite3 = betterModule.default || betterModule;
-} catch {
-  BetterSqlite3 = undefined;
 }
 
 function argument(name) {
@@ -62,69 +56,63 @@ if (destinationPath.includes("'") || destinationPath.includes("\n")) {
 
 fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
 
+const sqliteBin = process.env.OPENRIG_SQLITE_BIN || "sqlite3";
+const probe = spawnSync(sqliteBin, ["-version"], { encoding: "utf8" });
+const hasCli = probe.status === 0;
+
 let integrity;
 
-if (!process.env.OPENRIG_SQLITE_BIN && (DatabaseSync || BetterSqlite3)) {
-  if (DatabaseSync) {
-    try {
-      const srcDb = new DatabaseSync(sourcePath, { readOnly: true });
-      try {
-        srcDb.exec(`VACUUM INTO '${destinationPath}';`);
-      } finally {
-        srcDb.close();
-      }
-    } catch (err) {
-      fs.rmSync(destinationPath, { force: true });
-      fail(
-        err?.message || "sqlite backup failed via node:sqlite",
-        "resolve locking/path/tooling errors, then choose a fresh destination",
-      );
-    }
+if (hasCli) {
+  const backup = spawnSync(sqliteBin, [sourcePath, `.backup '${destinationPath}'`], { encoding: "utf8" });
+  if (backup.status !== 0) {
+    fs.rmSync(destinationPath, { force: true });
+    fail(
+      backup.stderr?.trim() || backup.stdout?.trim() || backup.error?.message || "sqlite3 backup failed",
+      `run ${sqliteBin} against the source directly, resolve locking/path/tooling errors, then choose a fresh destination`,
+    );
+  }
 
+  const check = spawnSync(sqliteBin, [destinationPath, "PRAGMA integrity_check;"], { encoding: "utf8" });
+  integrity = check.stdout?.trim();
+  if (check.status !== 0 || integrity !== "ok") {
+    fail(
+      check.stderr?.trim() || `backup integrity result was ${JSON.stringify(integrity)}`,
+      "preserve the failed backup for diagnosis only; do not use it for rollback",
+    );
+  }
+} else if (DatabaseSync) {
+  try {
+    const srcDb = new DatabaseSync(sourcePath, { readOnly: true });
     try {
-      const backupDb = new DatabaseSync(destinationPath, { readOnly: true });
-      try {
-        const rows = backupDb.prepare("PRAGMA integrity_check;").all();
-        integrity = rows[0]?.integrity_check;
-      } finally {
-        backupDb.close();
-      }
-    } catch (err) {
-      fail(
-        err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
-        "preserve the failed backup for diagnosis only; do not use it for rollback",
-      );
-    }
-  } else {
-    try {
-      const srcDb = new BetterSqlite3(sourcePath, { readonly: true });
-      try {
+      if (typeof sqliteModule?.backup === "function") {
+        await sqliteModule.backup(srcDb, destinationPath);
+      } else {
         srcDb.exec(`VACUUM INTO '${destinationPath}';`);
-      } finally {
-        srcDb.close();
       }
-    } catch (err) {
-      fs.rmSync(destinationPath, { force: true });
-      fail(
-        err?.message || "sqlite backup failed via better-sqlite3",
-        "resolve locking/path/tooling errors, then choose a fresh destination",
-      );
+    } finally {
+      srcDb.close();
     }
+  } catch (err) {
+    fs.rmSync(destinationPath, { force: true });
+    fail(
+      err?.message || "sqlite backup failed via node:sqlite",
+      "resolve locking/path/tooling errors, then choose a fresh destination",
+    );
+  }
 
+  try {
+    const backupDb = new DatabaseSync(destinationPath, { readOnly: true });
     try {
-      const backupDb = new BetterSqlite3(destinationPath, { readonly: true });
-      try {
-        const rows = backupDb.prepare("PRAGMA integrity_check;").all();
-        integrity = rows[0]?.integrity_check;
-      } finally {
-        backupDb.close();
-      }
-    } catch (err) {
-      fail(
-        err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
-        "preserve the failed backup for diagnosis only; do not use it for rollback",
-      );
+      const rows = backupDb.prepare("PRAGMA integrity_check;").all();
+      integrity = rows[0]?.integrity_check;
+    } finally {
+      backupDb.close();
     }
+  } catch (err) {
+    fail(
+      err?.message || `backup integrity result was ${JSON.stringify(integrity)}`,
+      "preserve the failed backup for diagnosis only; do not use it for rollback",
+    );
   }
 
   if (integrity !== "ok") {
@@ -134,24 +122,10 @@ if (!process.env.OPENRIG_SQLITE_BIN && (DatabaseSync || BetterSqlite3)) {
     );
   }
 } else {
-  const sqlite = process.env.OPENRIG_SQLITE_BIN || "sqlite3";
-  const backup = spawnSync(sqlite, [sourcePath, `.backup '${destinationPath}'`], { encoding: "utf8" });
-  if (backup.status !== 0) {
-    fs.rmSync(destinationPath, { force: true });
-    fail(
-      backup.stderr?.trim() || backup.stdout?.trim() || backup.error?.message || "sqlite3 backup failed",
-      `run ${sqlite} against the source directly, resolve locking/path/tooling errors, then choose a fresh destination`,
-    );
-  }
-
-  const check = spawnSync(sqlite, [destinationPath, "PRAGMA integrity_check;"], { encoding: "utf8" });
-  integrity = check.stdout?.trim();
-  if (check.status !== 0 || integrity !== "ok") {
-    fail(
-      check.stderr?.trim() || `backup integrity result was ${JSON.stringify(integrity)}`,
-      "preserve the failed backup for diagnosis only; do not use it for rollback",
-    );
-  }
+  fail(
+    "neither sqlite3 CLI nor node:sqlite is available to create a backup",
+    "install sqlite3 CLI or run on Node with node:sqlite support",
+  );
 }
 
 process.stdout.write(`${JSON.stringify({

@@ -412,6 +412,40 @@ describe("backup-sqlite helper", () => {
     }
   });
 
+  it("creates a verified backup in-process when sqlite3 CLI is absent from PATH", () => {
+    const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
+    if (!DatabaseSync) return;
+
+    const root = temporaryRoot();
+    const source = path.join(root, "openrig.sqlite");
+    const destination = path.join(root, "openrig.inprocess.backup.sqlite");
+
+    const db = new DatabaseSync(source);
+    db.exec("CREATE TABLE proof(value TEXT); INSERT INTO proof VALUES ('kept');");
+    db.close();
+    const before = fs.readFileSync(source);
+
+    const nodeDir = path.dirname(process.execPath);
+    const safePath = process.platform === "win32"
+      ? `${nodeDir};${process.env.SystemRoot || "C:\\Windows"}\\System32`
+      : nodeDir;
+
+    const receipt = runJson(
+      "backup-sqlite.mjs",
+      ["--source", source, "--destination", destination],
+      { PATH: safePath, Path: safePath, OPENRIG_SQLITE_BIN: "" },
+    );
+    expect(receipt.ok).toBe(true);
+    expect(receipt.integrity).toBe("ok");
+    expect(receipt.destination).toBe(destination);
+    expect(fs.readFileSync(source)).toEqual(before);
+
+    const verifyDb = new DatabaseSync(destination, { readOnly: true });
+    const row = (verifyDb.prepare("SELECT value FROM proof;").get() as { value: string })?.value;
+    verifyDb.close();
+    expect(row).toBe("kept");
+  });
+
   it("refuses to overwrite an existing destination", () => {
     const hasSqlite = spawnSync("sqlite3", ["-version"], { encoding: "utf8" }).status === 0;
     const DatabaseSync = (process as any).getBuiltinModule?.("node:sqlite")?.DatabaseSync;
