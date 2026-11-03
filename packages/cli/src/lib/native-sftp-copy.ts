@@ -22,7 +22,7 @@ interface Endpoint {
   remove(file: string): Promise<void>;
   symlink(target: string, file: string, directory?: boolean): Promise<void>;
   read(file: string): AsyncIterable<Buffer>;
-  write(file: string, data: AsyncIterable<Buffer>, ownership?: {uid:number;gid:number}, metadata?: SftpAttrs): Promise<void>;
+  write(file: string, data: AsyncIterable<Buffer>, metadata?: SftpAttrs): Promise<void>;
   times(file: string, attrs: SftpAttrs): Promise<void>;
   linkTimes?(file: string, attrs: SftpAttrs): Promise<void>;
   rename(src: string, dst: string, replacing: boolean): Promise<void>;
@@ -121,7 +121,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
       followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), remove: file => client!.remove(file), symlink: (target, file) => client!.symlink(target, file),
-      read: file => client!.read(file), write: (file, data, ownership, metadata) => client!.write(file, data, ownership, metadata, windowsRemote ? 0o200 : 0o7777),
+      read: file => client!.read(file), write: (file, data, metadata) => client!.write(file, data, metadata, windowsRemote ? 0o200 : 0o7777),
       times: async (file, attrs) => {
         if (kind(attrs) === 0o040000 && kind(await client!.lstat(file)) !== 0o040000) throw new Error(`SFTP directory metadata target changed: ${file}`);
         await client!.setTimes(file, attrs);
@@ -285,10 +285,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
         // A native Windows source has no POSIX identity to translate. Retain a
         // known existing regular/empty-directory destination's same-server identity rather than
         // silently replacing it with the staging creator's owner/group.
-        const retainedOwnership = destination === remote && !windowsRemote && attrs.uid === undefined && attrs.gid === undefined
-          && [0o100000,0o040000].includes(kind(existing)) && existing?.uid !== undefined && existing.gid !== undefined
-          ? {uid:existing.uid,gid:existing.gid} : undefined;
-        await destination.write(staged, verifiedSource(), retainedOwnership, destination === remote ? attrs : undefined);
+        await destination.write(staged, verifiedSource(), destination === remote ? attrs : undefined);
         if (attrs.size === undefined) bytesTransferred += observedBytes;
         if (destination !== remote) await destination.times(staged, attrs);
       }

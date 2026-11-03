@@ -13,7 +13,7 @@ describe.skipIf(process.platform !== "win32" || !existsSync(server))("native Ope
     const client=new SftpClient(spawn(server,[],{stdio:"pipe",windowsHide:true}));
     try{
       await client.ready;
-      await client.write(file,(async function*(){yield Buffer.from("owned handle metadata");})(),undefined,{mode:0o600,atime:1700000016,mtime:1700000017},0o200);
+      await client.write(file,(async function*(){yield Buffer.from("owned handle metadata");})(),{mode:0o600,atime:1700000016,mtime:1700000017},0o200);
       const after=await client.lstat(file);
       expect(after).toMatchObject({atime:1700000016,mtime:1700000017});
       expect(after!.mode! & 0o200).toBe(0o200);

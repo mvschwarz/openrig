@@ -8,7 +8,7 @@ it.each([-1,4294967296,1.5,NaN])("rejects an unrepresentable final timestamp %s 
   try{
     await client.ready;
     const chunks=async function*(){consumed=true;yield Buffer.from("not consumed");};
-    await expect(client.write("/owned/stage",chunks(),undefined,{mode:0o640,atime,mtime:1700000000})).rejects.toThrow("SFTP v3 timestamps");
+    await expect(client.write("/owned/stage",chunks(),{mode:0o640,atime,mtime:1700000000})).rejects.toThrow("SFTP v3 timestamps");
     expect(consumed).toBe(false);
   }finally{await client.close();}
   expect(child.exitCode).toBe(0);

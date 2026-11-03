@@ -66,6 +66,8 @@ The additional local-copy protected-DACL cloning and merge-time ACL changes
 were reverted. Basic local copy functionality remains. Do not reintroduce them
 as a Linux archive-mode requirement: that command does not request full ACL
 preservation. POSIX permissions and Windows access control remain OS-specific.
+SFTP upload ownership is assigned by the receiving account/server; ordinary
+replacement does not require changing the stage back to an old target's UID/GID.
 
 Keep function-level regression coverage and honest error reporting. Do not turn
 old failing suites, skipped optional checks or separate host-security exercises

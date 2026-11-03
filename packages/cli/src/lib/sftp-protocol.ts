@@ -15,12 +15,6 @@ function timestamp(value: number): Buffer {
   if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error("SFTP v3 timestamps require integer seconds from 0 to 4294967295; this server protocol cannot preserve the source time");
   return u32(value);
 }
-function ownershipAttrs(uid: number, gid: number): Buffer {
-  if (![uid,gid].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) {
-    throw new Error("SFTP v3 owner and group IDs require unsigned 32-bit integers");
-  }
-  return Buffer.concat([u32(2),u32(uid),u32(gid)]);
-}
 function modeTimeAttrs(attrs: SftpAttrs): Buffer | undefined {
   const mode = attrs.mode === undefined ? [] : [u32(attrs.mode & 0o7777)];
   const times = attrs.atime === undefined || attrs.mtime === undefined ? [] : [timestamp(attrs.atime),timestamp(attrs.mtime)];
@@ -178,8 +172,7 @@ export class SftpClient {
       }
     } finally { await this.request(4, str(handle), 101); }
   }
-  async write(file: string, chunks: AsyncIterable<Buffer>, ownership?: { uid: number; gid: number }, metadata?: SftpAttrs, modeMask: 0o200 | 0o7777 = 0o7777): Promise<void> {
-    const retainedOwnership = ownership && ownershipAttrs(ownership.uid,ownership.gid);
+  async write(file: string, chunks: AsyncIterable<Buffer>, metadata?: SftpAttrs, modeMask: 0o200 | 0o7777 = 0o7777): Promise<void> {
     const finalMetadata = metadata && modeTimeAttrs(metadata);
     // Restrict at OPEN, before yielding source bytes. Final source permissions
     // are installed only after the complete staged file has been written.
@@ -187,17 +180,9 @@ export class SftpClient {
     try {
       let offset = 0;
       for await (const data of chunks) { await this.request(6, Buffer.concat([str(handle), u64(offset), str(data)]), 101); offset += data.length; }
-      if (ownership && retainedOwnership) {
-        // FSTAT/FSETSTAT bind this operation to the newly opened stage, never a
-        // path which another actor could replace with a link after OPEN.
-        const before = (await this.request(8,str(handle),105)).attrs();
-        if ((before.mode! & 0o170000) !== 0o100000 || before.uid === undefined || before.gid === undefined) throw new Error("SFTP staged file ownership cannot be qualified");
-        if (before.uid !== ownership.uid || before.gid !== ownership.gid) await this.request(10,Buffer.concat([str(handle),retainedOwnership]),101);
-      }
       if (finalMetadata) await this.request(10,Buffer.concat([str(handle),finalMetadata]),101);
-      if (ownership || finalMetadata) {
+      if (finalMetadata) {
         const verified = (await this.request(8,str(handle),105)).attrs();
-        if (ownership && (verified.uid !== ownership.uid || verified.gid !== ownership.gid)) throw new Error("SFTP staged file ownership was not preserved");
         if (metadata && (metadata.mode !== undefined && (verified.mode === undefined || (verified.mode & modeMask) !== (metadata.mode & modeMask))
           || metadata.atime !== undefined && metadata.mtime !== undefined && (verified.atime !== metadata.atime || verified.mtime !== metadata.mtime))) {
           throw new Error("SFTP staged file mode or timestamps were not preserved");
@@ -208,11 +193,6 @@ export class SftpClient {
   async setTimes(file: string, attrs: SftpAttrs): Promise<void> {
     const payload = modeTimeAttrs(attrs);
     if (payload) await this.request(9,Buffer.concat([str(file),payload]),101);
-  }
-  /** Explicit numeric server identities. Callers must qualify their mapping;
-   * reading ownership does not authorize applying those IDs to another host. */
-  async setOwnership(file: string, uid: number, gid: number): Promise<void> {
-    await this.request(9, Buffer.concat([str(file),ownershipAttrs(uid,gid)]),101);
   }
   async setLinkTimes(file: string, attrs: SftpAttrs): Promise<void> {
     await this.ready;
