@@ -421,7 +421,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       rows.push(line.slice(prefix));
     }
     if (!valid) continue;
-    // A suggestion is a wholly dim suffix beginning at the current cursor.
+    // A suggestion is a dim suffix beginning at the current cursor: every character drawn is dim, while the spaces
+    // between its words may not be, as capture's classifier reads it (#2428).
     // A literal placeholder or text before a moved cursor remains authored input.
     const cursorRow = y - start;
     let ghost: ComposerInput["ghost"];
@@ -438,7 +439,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
         text: row.slice(i === 0 ? cursorOffset : 0),
         faint: styled[y + i]!.faintCells.slice(prefix + (i === 0 ? cursorOffset : 0), prefix + row.length),
       }));
-      if (suffix.some(row => row.text.length > 0) && suffix.every(row => row.faint.every(Boolean))) {
+      const drawn = (row: (typeof suffix)[number], dim: boolean) => row.faint.some((faint, i) => faint === dim && /\S/.test(row.text[i]!));
+      if (suffix.some(row => drawn(row, true)) && !suffix.some(row => drawn(row, false))) {
         suggestionRows = suffix.map(row => row.text);
         ghost = { line: y, offset: prefix + cursorOffset, continuationRows: rows.length - cursorRow - 1 };
         rows.splice(cursorRow + 1);

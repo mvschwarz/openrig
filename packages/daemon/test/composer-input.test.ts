@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { annotateInputBox, classifyPaneActivity, inspectComposerInput } from "../src/domain/session-transport.js";
 import { composerContainsOwnedText, ownCollapsedPaste, type ComposerSnapshot } from "../src/domain/composer-prompts.js";
@@ -73,6 +75,22 @@ describe("cursor-bound composer input", () => {
     const ghost = "Summarize the recent changes";
     expect(inspectComposerInput(claude(`\x1b[2m${ghost}\x1b[22m`, { x: 2, y: 2 })).state).toBe("empty");
     expect(inspectComposerInput(claude(ghost, { x: 2, y: 2 })).state).toBe("text");
+  });
+
+  it("ignores a suggestion whose words are dim and whose spaces aren't, as capture does, in a native Claude frame (#2428)", () => {
+    const lines = readFileSync(join(import.meta.dirname, "fixtures/input-box/claude-code-2.1.296/openrig-seat-accept-edits-idle.txt"), "utf8")
+      .replace(/\n$/, "").split("\n");
+    const row = lines.findLastIndex(line => line.startsWith("❯"));
+    const prompt = (text: string): ComposerSnapshot => {
+      const screen = [...lines]; screen[row] = `\x1b[0m❯ ${text}`;
+      return { screen: screen.join("\n"), cursor: { x: 2, y: row, width: 80, height: lines.length }, inMode: false };
+    };
+    const dim = (text: string) => `\x1b[2m${text}\x1b[22m`;
+    const suggestion = prompt(["fix", "typecheck", "errors"].map(dim).join(" "));
+    expect(annotateInputBox(suggestion.screen, suggestion.cursor, "claude-code")).toMatchObject({ status: "likely-suggestion", confidence: "high" });
+    expect(inspectComposerInput(suggestion)).toMatchObject({ state: "empty", suggestionRows: ["fix typecheck errors"] });
+    // A word the person typed among dim ones keeps it a draft.
+    expect(inspectComposerInput(prompt(`fix ${dim("typecheck")} ${dim("errors")}`)).state).toBe("text");
   });
 
   it("excludes only a wholly dim suffix after the cursor when identifying staged text", () => {
