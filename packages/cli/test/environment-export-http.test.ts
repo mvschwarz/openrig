@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
 import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
@@ -7,7 +8,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { serve } from "@hono/node-server";
+
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -50,9 +51,7 @@ it("returns real artifact bytes under the authenticated work grant, refusing wro
   // This is the existing queue writer, not a separate guest task store.
   const created = await fixture.app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "x-openrig-session": "coordinator@team" }, body: JSON.stringify({ qitemId: "export-task", destinationSession: "worker@team", body: "Return the selected report" }) });
   expect(created.status, JSON.stringify(await created.clone().json())).toBeLessThan(300);
-  const daemon = await new Promise<ReturnType<typeof serve>>(resolve => {
-    const server = serve({ fetch: fixture.app.fetch, hostname: "127.0.0.1", port: 0 }, () => resolve(server));
-  });
+  const daemon = await serveOwnedHonoFixture(fixture.app.fetch);
   cleanup.push(() => new Promise<void>(resolve => daemon.close(() => resolve())));
   const daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   allowFetchTarget(daemonUrl);

@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // rig mcp serve --http --grant-service against the daemon's real routes and a fake grant service speaking
@@ -9,7 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type Database from "better-sqlite3";
@@ -74,7 +75,7 @@ describe("rig mcp serve --http --grant-service on the daemon's routes", () => {
     setup = createTestApp(db, { appDeps: { queueRepo: repo, filesAllowlist: [{ name: "proof", canonicalPath: shared }] } });
     broken = undefined;
     const fetchRoute = (...args: Parameters<typeof setup.app.fetch>) => broken?.(args[0]) ?? setup.app.fetch(...args);
-    daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: fetchRoute, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    daemon = await serveOwnedHonoFixture(fetchRoute);
     allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
     setSelfHostId(INSTANCE);

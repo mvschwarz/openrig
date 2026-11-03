@@ -1,6 +1,7 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, expect, it, vi } from "vitest";
-import { serve } from "@hono/node-server";
+
 import { Hono } from "hono";
 import { Command } from "commander";
 import { psCommand } from "../src/commands/ps.js";
@@ -24,8 +25,7 @@ async function fixture() {
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("psProjectionService" as never, new PsProjectionService({ db }) as never); await next(); });
   app.route("/api/ps", psRoutes);
-  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
-  await new Promise<void>((resolve) => server.on("listening", resolve));
+  const server = await serveOwnedHonoFixture(app.fetch);
   allowOwnedHttpFixture(server);
   const port = (server.address() as { port: number }).port;
   close = () => new Promise<void>((resolve, reject) => { server.close((err) => { db.close(); err ? reject(err) : resolve(); }); });
@@ -77,8 +77,7 @@ async function remoteFixture(status: 200 | 401 | 403 | 404 | 429 | 500) {
         captureDurationMs: 10, activeIntervalMs: 2000, maxIdleIntervalMs: 6000, lines: 1000 } });
     return c.json({ error: "fixture failure" }, status);
   });
-  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
-  await new Promise<void>((resolve) => server.on("listening", resolve));
+  const server = await serveOwnedHonoFixture(app.fetch);
   allowOwnedHttpFixture(server);
   const port = (server.address() as { port: number }).port;
   close = () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { serve } from "@hono/node-server";
@@ -65,13 +66,9 @@ describe("workflow project typed acceptance — real CLI to HTTP boundary", () =
       await next();
     });
     app.route("/api/workflow", workflowRoutes());
-    await new Promise<void>((resolve) => {
-      server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 }, (info) => {
-        url = `http://127.0.0.1:${info.port}`;
-        allowFetchTarget(url);
-        resolve();
-      });
-    });
+    server = await serveOwnedHonoFixture(app.fetch);
+    url = `http://127.0.0.1:${(server.address() as {port:number}).port}`;
+    allowFetchTarget(url);
     vi.stubEnv("OPENRIG_URL", url);
     vi.stubEnv("OPENRIG_SESSION_NAME", "gate@rig");
     dir = mkdtempSync(join(tmpdir(), "workflow-acceptance-cli-"));

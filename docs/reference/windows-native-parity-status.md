@@ -1,5 +1,29 @@
 # Native Windows parity: implementation and evidence
 
+## Hono owned high-port listener migration (2026-11-03)
+
+All 18 previously inventoried imported Hono `serve({port:0})` calls in 17 CLI
+fixture files now use a dedicated owned-listener helper. It retains Hono's
+request adapter on a bound, registered high-port HTTP server. Callback-produced
+ports and cleanup lists use the actual listener's address/object; two old
+unconditional listening-event waits were removed because the helper has already
+waited for that event. Existing guarded waits and origin registration remain
+compatible. The generic HTTP helper does not acquire a Hono runtime dependency.
+
+The 17 changed files and two helper regressions passed 114 tests with 13 skips
+and no failures. CLI typecheck and whitespace checks passed. Skips include eight
+opt-in desktop-wake cases and five platform-specific terminal budget/preview
+cases; their migrated setup paths are not counted as executed acceptance. The
+new real helper regression verifies POST body handling, response status/headers,
+bound high port and continued refusal of the canonical daemon origin.
+
+A new structural inventory finds zero calls of the previously imported Hono
+port-zero form and still finds 57 direct `listen(0)` calls requiring semantic
+review. This is not a full-directory green result, real ACP/provider acceptance,
+completed file identity mapping or full native parity. No original team,
+exhausted ACP connector/desktop-discovery fixture, deployment or public push
+was exercised.
+
 ## Wildcard-binding HTTP fixture migration (2026-11-03)
 
 The high-port fixture helper now accepts explicit host options while retaining

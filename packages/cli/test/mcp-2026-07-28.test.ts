@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // MCP clients on protocol 2026-07-28 reach the same durable work loop as 2025 clients: discovery, then a task created by
@@ -10,7 +11,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import type Database from "better-sqlite3";
@@ -53,7 +54,7 @@ describe("MCP 2026-07-28 clients on the daemon's queue routes", () => {
         queueRepo: repo,
       },
     });
-    daemon = await new Promise<ServerType>((resolve) => { const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s)); });
+    daemon = await serveOwnedHonoFixture(app.fetch);
     allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   });

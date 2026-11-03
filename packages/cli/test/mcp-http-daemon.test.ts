@@ -1,3 +1,4 @@
+import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
 import { allowFetchTarget } from "./fetch-guard.js";
 import { expectPrivateFile } from "./helpers/private-file.js";
 import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
@@ -11,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { type ServerType } from "@hono/node-server";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type Database from "better-sqlite3";
@@ -75,9 +76,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       },
     });
     const { app } = setup;
-    daemon = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
+    daemon = await serveOwnedHonoFixture(app.fetch);
     allowOwnedHttpFixture(daemon);
     daemonUrl = `http://127.0.0.1:${(daemon.address() as AddressInfo).port}`;
   });
