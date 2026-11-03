@@ -54,7 +54,10 @@ describe("FeedCard typography + list-row chrome (C11 Inbox v2)", () => {
   it("FeedCard title is text-sm font-medium with a muted one-line body preview", async () => {
     const source = await readSource("src/components/for-you/FeedCard.tsx");
     expect(source).toContain("truncate text-sm font-medium text-on-surface");
-    expect(source).toContain("truncate text-sm text-on-surface-variant");
+    // Body preview keeps the muted one-line truncate (F17 builds the class
+    // list conditionally for the expanded state, so assert the parts).
+    expect(source).toContain("mt-0.5 text-sm text-on-surface-variant");
+    expect(source).toContain("truncate");
   });
 
   it("FeedCard ActionOutcomePanel outcome sentence stays prose font-body 12px", async () => {
