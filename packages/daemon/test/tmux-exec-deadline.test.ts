@@ -19,12 +19,13 @@ it.each(["argv", "shell"] as const)("kills a stalled %s client and releases the 
   const home = mkdtempSync(join(tmpdir(), "openrig-tmux-deadline-"));
   const pidFile = join(home, "child.json"), calls = join(home, "calls"), script = join(home, "client.cjs");
   const seat = "deadline-worker@fixture";
-  const execute = (verb: string) => mode === "argv"
-    ? execArgvCommand(["tmux", verb, "-p", "-t", seat])
-    : execTmuxCommand(`tmux ${verb} -p -t ${shellQuote(seat)}`);
+  // Exercise both -s meanings without adding more 30-second waits.
+  const stalled = mode === "argv" ? ["tmux", "list-panes", "-s", "-t", seat] : ["tmux", "set-option", "-s", "exit-empty", "off"];
+  const execute = (argv: string[]) => mode === "argv"
+    ? execArgvCommand(argv) : execTmuxCommand(`tmux ${argv.slice(1).map(shellQuote).join(" ")}`);
   writeFileSync(script, `const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(calls)}, process.argv[2] + "\\n");
-if (process.argv[2] === "capture-pane") {
+if (process.argv[2] === ${JSON.stringify(stalled[1])}) {
   process.on("SIGTERM", () => {});
   fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ pid: process.pid, owner: ${JSON.stringify(home)} }));
   setInterval(() => {}, 1000);
@@ -39,7 +40,7 @@ if (process.argv[2] === "capture-pane") {
   const guard = new SeatDeliveryGuard(db as never, name => name === seat ? target : null);
   let pid: number | undefined, settled = false, nextStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const first = guard.operation(seat, () => execute("capture-pane"))
+  const first = guard.operation(seat, () => execute(stalled))
     .then(value => { settled = true; return { kind: "resolved" as const, value }; },
       error => { settled = true; return { kind: "rejected" as const, error }; });
   let next: Promise<unknown> | undefined;
@@ -54,21 +55,22 @@ if (process.argv[2] === "capture-pane") {
     pid = ownedPid();
     next = guard.operation(seat, async () => {
       nextStarted = true;
-      return execute("display-message");
+      return execute(["tmux", "display-message", "-p", "-t", seat]);
     });
     expect(nextStarted).toBe(false);
     const result = await Promise.race([first, new Promise<{ kind: "not-settled" }>(resolve => {
       timer = setTimeout(() => resolve({ kind: "not-settled" }), 40_000);
     })]);
-    expect(result).toMatchObject({ kind: "rejected", error: { killed: true, signal: "SIGKILL" } });
+    expect(result).toMatchObject({ kind: "rejected", error: {
+      killed: true, signal: "SIGKILL", message: expect.stringContaining("the write may still have happened. Check with rig capture before resending."),
+    } });
     expect(() => process.kill(pid!, 0)).toThrow(/ESRCH/);
     expect(await next).toBe("next operation completed\n");
     expect(nextStarted).toBe(true);
-    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["capture-pane", "display-message"]);
-    const warnings = JSON.stringify(warn.mock.calls);
-    expect(warnings).toContain("capture-pane");
-    expect(warnings).toContain(seat);
-    expect(warnings).toContain("30000");
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual([stalled[1], "display-message"]);
+    expect(warn).toHaveBeenCalledWith("[tmux] execution deadline exceeded; client killed", {
+      command: stalled[1], target: mode === "argv" ? seat : "(server)", timeoutMs: 30_000,
+    });
   } finally {
     if (timer) clearTimeout(timer);
     if (!settled && existsSync(pidFile)) {

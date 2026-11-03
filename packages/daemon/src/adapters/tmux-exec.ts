@@ -17,11 +17,14 @@ function warnTmuxDeadline(err: unknown, started: number, argv: string[]): void {
   if (!failure?.killed || failure.signal !== "SIGKILL" || performance.now() - started < TMUX_EXEC_TIMEOUT_MS) return;
   let command = 1;
   while (argv[command]?.startsWith("-")) command += ["-L", "-S", "-f", "-c", "-T"].includes(argv[command]!) ? 2 : 1;
-  const target = argv.findIndex(arg => arg === "-t" || arg === "-s");
+  const paneTarget = argv.indexOf("-t", command + 1);
+  const sessionTarget = ["new-session", "detach-client"].includes(argv[command] ?? "") ? argv.indexOf("-s", command + 1) : -1;
+  const target = paneTarget >= 0 ? paneTarget : sessionTarget;
   // Name the operation and target, never payloads, environment values or whole command lines.
   console.warn("[tmux] execution deadline exceeded; client killed", {
     command: argv[command] ?? argv[0], target: target < 0 ? "(server)" : argv[target + 1] ?? "(unknown)", timeoutMs: TMUX_EXEC_TIMEOUT_MS,
   });
+  if (err instanceof Error) err.message = "tmux did not answer within 30 s and its client was ended; the write may still have happened. Check with rig capture before resending.\n" + err.message;
 }
 
 /**
@@ -88,11 +91,11 @@ export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
   }
 };
 
-/** POSIX legacy tmux calls replace the shell, so the deadline kills the client rather than leaving it behind. */
+/** Replace the shell only for tmux clients; other adapter commands keep shell builtins such as kill. */
 export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
   const started = performance.now();
   try {
-    return (await execFileAsync("/bin/sh", ["-c", `exec ${cmd}`], tmuxExecOptions)).stdout;
+    return (await execFileAsync("/bin/sh", ["-c", /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd], tmuxExecOptions)).stdout;
   } catch (err) {
     // Tokens are diagnostic labels only; the command is executed by the shell without rewriting its arguments.
     const labels = (cmd.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(word => word.replace(/^(['"])(.*)\1$/, "$2"));
