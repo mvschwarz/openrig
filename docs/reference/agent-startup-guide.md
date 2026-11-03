@@ -369,6 +369,8 @@ Each startup file and action specifies when it applies:
 
 **An exact resume delivers neither.** When a restore reopens the seat's saved conversation (`rig up <rig> --existing` with a resume token), OpenRig types no startup actions and delivers no startup files, `restore` ones included: the conversation already has them, and typing them again would add turns to it. The one exception: a managed guidance block missing from the guidance file is put back before the harness starts.
 
+**A seat handover does the same put-back.** Before a fresh, fork or rebuild successor starts, the handover puts the seat's missing managed guidance blocks back in its guidance file from the saved startup context. That's the rig's Claude file (`CLAUDE.md`, or `CLAUDE.local.md` when the rig uses it) for Claude, and `AGENTS.md` for Codex, Pi and omp. So a seat rebuilt into a new working directory keeps its guidance. Blocks already in the file are left as they are.
+
 Use this to avoid re-sending context that a fresh conversation doesn't need twice. For example, a one-time project briefing might only apply on `fresh_start`, while identity grounding should apply on both, so a seat that comes back fresh gets it again.
 
 ---

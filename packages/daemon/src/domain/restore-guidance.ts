@@ -276,8 +276,8 @@ export function readNodeStartupSnapshot(db: Pick<Database.Database, "prepare">, 
 
 /** #875: put a seat's missing managed blocks back in its guidance file from its saved startup context, as an exact resume
  *  does: the seat-skills line only with the person's yes, and nothing through a recorded file that is now a link. A
- *  successor launch carries no guidance of its own, so a Codex seat whose launch sent it as developer instructions needs
- *  this before its successor starts. Never throws; returns what it did and what it couldn't. */
+ *  successor launch carries no guidance of its own, so every seat's handover needs this before its successor starts
+ *  (#2456). Never throws; returns what it did and what it couldn't. */
 export function putBackSeatGuidance(input: {
   startupCtx: NodeStartupSnapshot | null;
   cwd: string | null | undefined;

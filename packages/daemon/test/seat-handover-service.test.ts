@@ -214,6 +214,42 @@ describe("SeatHandoverService", () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  // #2456: a Claude successor's launch carries no guidance either, so a rebuild into a working directory without the seat's
+  // blocks (after `rig seat set-cwd`, say) started without them. The handover puts them back in the rig's Claude file first.
+  it.each([
+    ["fresh", "CLAUDE.md"],
+    ["rebuild", "CLAUDE.md"],
+    ["fresh", "CLAUDE.local.md"],
+    ["rebuild", "CLAUDE.local.md"],
+  ] as const)("a %s Claude successor starts with the seat's guidance in the rig's %s (#2456)", async (source, file) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "handover-guidance-claude-"));
+    try {
+      const { rig, node } = seedSeat({ runtime: "claude-code" });
+      if (file !== "CLAUDE.md") rigRepo.setRigClaudeManagedBlockFile(rig.id, file);
+      db.prepare("UPDATE nodes SET cwd = ? WHERE id = ?").run(root, node.id);
+      const culture = path.join(root, "spec", "culture.md");
+      fs.mkdirSync(path.dirname(culture), { recursive: true });
+      fs.writeFileSync(culture, "Team culture.\n");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, '[]', '[]', 'claude-code')")
+        .run(node.id, JSON.stringify([{ category: "guidance", effectiveId: "culture.md", sourceSpec: "base", sourcePath: path.dirname(culture),
+          resourcePath: "culture.md", absolutePath: culture, mergeStrategy: "managed_block", target: "CLAUDE.md" }]));
+      const guidance = path.join(root, file);
+      capturePaneScreen.mockResolvedValue("Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)");
+      let atLaunch: string | null = null;
+      launchHarness.mockImplementation(async () => {
+        atLaunch = fs.existsSync(guidance) ? fs.readFileSync(guidance, "utf8") : null;
+        return { ok: true, resumeToken: "claude-successor", resumeType: "claude_id" };
+      });
+      const claude = new SeatHandoverService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus,
+        tmuxAdapter: tmux(), runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
+        predecessorRecapResolver: resolvePredecessorRecap as never, readinessTimeoutMs: 50, sleep: async () => {} });
+      const result = await claude.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source });
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
+      expect(atLaunch).toContain("Team culture.");
+      if (file !== "CLAUDE.md") expect(fs.existsSync(path.join(root, "CLAUDE.md"))).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
     for (const provenance of ["adopted", "discovered", "launched"] as const) {
       const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
