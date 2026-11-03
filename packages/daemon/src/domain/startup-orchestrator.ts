@@ -1012,11 +1012,11 @@ export class StartupOrchestrator {
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
     // Held messages are never replayed, so a seat that starts with some is told once, as the launch is (#2431).
-    let held = 0;
-    try { held = new OutboxHandler(this.db).retentionUsage(input.nodeId).count; } catch { /* no held-message store: nothing to tell */ }
-    if (held && input.binding.tmuxSession) {
+    let heldMessages = 0;
+    try { heldMessages = new OutboxHandler(this.db).retentionUsage(input.nodeId).count; } catch { /* no held-message store: nothing to tell */ }
+    if (heldMessages && input.binding.tmuxSession) {
       const seat = input.sessionName ?? input.binding.tmuxSession;
-      const notice = `${held} held message${held === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${held === 1 ? "it" : "them"} with rig seat held-messages ${seat}.`;
+      const notice = `${heldMessages} held message${heldMessages === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${heldMessages === 1 ? "it" : "them"} with rig seat held-messages ${seat}.`;
       warnings.push(notice);
       await this.sessionTransport.send(input.binding.tmuxSession, notice, { openrigNotice: true }).catch(() => undefined);
     }
