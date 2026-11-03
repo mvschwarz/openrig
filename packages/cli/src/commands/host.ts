@@ -34,7 +34,6 @@ import { recordHostObservation, loadHostBindings, describeBindingConflict, defau
 import { DaemonClient } from "../client.js";
 import { readOwnHostName, readSelectedHost } from "../host-selection.js";
 import { parseFeedHostSubscriptionKey } from "../config-store.js";
-import { WINDOWS_POSTURE_PROFILE_ID, windowsPostureCheck } from "../windows-host-posture.js";
 import { resolvePosturePorts, type PostureOptions } from "../host-posture-options.js";
 
 // ---------------------------------------------------------------------------
@@ -1085,9 +1084,9 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
 
   cmd
     .command("doctor")
-    .description("Stepwise host verification with an explicit POSIX or Windows posture baseline")
+    .description("Stepwise host verification with an optional POSIX posture baseline")
     .argument("<id>", "Registered host id")
-    .option("--posture <profile>", `Run a posture baseline: ${POSTURE_PROFILE_ID} or ${WINDOWS_POSTURE_PROFILE_ID}`)
+    .option("--posture <profile>", `Run the optional POSIX posture baseline: ${POSTURE_PROFILE_ID}`)
     .option("--public-addr <ip>", "Public address for the outside-vantage reachability probes (posture items 8-9)")
     .option("--daemon-port <port>", "Posture daemon listener/public-probe port (default: 7433)")
     .option("--ssh-port <port>", "Posture public SSH probe port (default: 22)")
@@ -1107,8 +1106,8 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
         process.exitCode = 1;
         return;
       }
-      if (opts.posture !== undefined && ![POSTURE_PROFILE_ID, WINDOWS_POSTURE_PROFILE_ID].includes(opts.posture)) {
-        console.error(`unknown posture profile '${opts.posture}'. Built-in profiles: ${POSTURE_PROFILE_ID}, ${WINDOWS_POSTURE_PROFILE_ID}`);
+      if (opts.posture !== undefined && opts.posture !== POSTURE_PROFILE_ID) {
+        console.error(`unknown posture profile '${opts.posture}'. Built-in profile: ${POSTURE_PROFILE_ID}`);
         process.exitCode = 1;
         return;
       }
@@ -1121,7 +1120,7 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
 
       const rows = await doctorLegs(resolved.host, deps);
       if (opts.posture) {
-        rows.push(...await (opts.posture === WINDOWS_POSTURE_PROFILE_ID ? windowsPostureCheck : postureCheck)(resolved.host, deps, { publicAddr: opts.publicAddr, ...ports }));
+        rows.push(...await postureCheck(resolved.host, deps, { publicAddr: opts.publicAddr, ...ports }));
       }
       renderRows(rows, opts.json);
       if (rows.some((r) => r.status === "fail")) process.exitCode = 1;

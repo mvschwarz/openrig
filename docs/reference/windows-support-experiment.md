@@ -70,6 +70,8 @@ source patch or OpenRig-specific capability command is required.
 The goal is Linux/WSL user-function coverage and remote interoperability using
 appropriate native implementations. It is not identical OS security primitives,
 every historical test passing, or exhaustive reboot/power-loss acceptance.
+Ordinary host doctor connectivity checks remain available; the extra Windows
+firewall/account/sshd hardening profile is outside this native feature port.
 Keep the focused regression checks relevant to changed functions. Historical
 probe logs and repeated suite counts are not the product specification.
 This document does not claim stable native support or a fresh deployment.

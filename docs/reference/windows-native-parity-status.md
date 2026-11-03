@@ -23,7 +23,7 @@ completion requirements. Ordinary native operation uses PowerShell and psmux.
 | Remote commands | Host registry shell/SSH options, PowerShell execution, remote lifecycle and provider-recovery command rendering |
 | UI/TUI | Native reading and navigation, server-path syntax, named pipes, Ctrl-C, window commands and viewer integration |
 | Services and resources | Native Compose/readiness, package/install helpers, authored resource operations, skill mirrors and portable shipped scripts |
-| Optional engines | Windows Podman named-pipe observation and OpenShell adapter changes; actual use still requires a usable engine/client |
+| Optional engines | Windows Podman named-pipe observation and the existing OpenShell driver; actual use still requires a usable engine/client |
 
 Implemented does not mean every optional client, provider, architecture or host
 combination has been exercised. Keep actual missing functions distinct from
