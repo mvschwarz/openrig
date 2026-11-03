@@ -8,6 +8,24 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 // exec's 1 MiB default holds about a dozen 1000-line panes; a batched capture chains 24 (#161). A bound, not an allocation.
 export const TMUX_MAX_BUFFER = 64 * 1024 * 1024;
+export const TMUX_EXEC_TIMEOUT_MS = 30_000;
+
+const tmuxExecOptions = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER, timeout: TMUX_EXEC_TIMEOUT_MS, killSignal: "SIGKILL" as const };
+
+function warnTmuxDeadline(err: unknown, started: number, argv: string[]): void {
+  const failure = err as { killed?: boolean; signal?: string } | null;
+  if (!failure?.killed || failure.signal !== "SIGKILL" || performance.now() - started < TMUX_EXEC_TIMEOUT_MS) return;
+  let command = 1;
+  while (argv[command]?.startsWith("-")) command += ["-L", "-S", "-f", "-c", "-T"].includes(argv[command]!) ? 2 : 1;
+  const paneTarget = argv.indexOf("-t", command + 1);
+  const sessionTarget = ["new-session", "detach-client"].includes(argv[command] ?? "") ? argv.indexOf("-s", command + 1) : -1;
+  const target = paneTarget >= 0 ? paneTarget : sessionTarget;
+  // Name the operation and target, never payloads, environment values or whole command lines.
+  console.warn("[tmux] execution deadline exceeded; client killed", {
+    command: argv[command] ?? argv[0], target: target < 0 ? "(server)" : argv[target + 1] ?? "(unknown)", timeoutMs: TMUX_EXEC_TIMEOUT_MS,
+  });
+  if (err instanceof Error) err.message = "tmux did not answer within 30 s and its client was ended; the write may still have happened. Check with rig capture before resending.\n" + err.message;
+}
 
 /**
  * The first regular executable `name` on `pathEnv`, in execvp order. Null when there is none, or when an
@@ -73,6 +91,19 @@ export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
   }
 };
 
+/** Replace the shell only for tmux clients; other adapter commands keep shell builtins such as kill. */
+export const execTmuxCommand: ExecFn = async (cmd: string): Promise<string> => {
+  const started = performance.now();
+  try {
+    return (await execFileAsync("/bin/sh", ["-c", /^tmux\s/.test(cmd) ? `exec ${cmd}` : cmd], tmuxExecOptions)).stdout;
+  } catch (err) {
+    // Tokens are diagnostic labels only; the command is executed by the shell without rewriting its arguments.
+    const labels = (cmd.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(word => word.replace(/^(['"])(.*)\1$/, "$2"));
+    warnTmuxDeadline(err, started, labels);
+    throw withExecOutput(err);
+  }
+};
+
 /**
  * Production ArgvExecFn for TmuxAdapter.
  * Runs argv[0] directly via execFile: no shell, no quoting layer. On POSIX
@@ -83,9 +114,10 @@ export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
 export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<string> => {
   const [bin, ...args] = argv;
   if (!bin) throw new Error("execArgvCommand: empty argv");
+  const started = performance.now();
   // Nothing ran when no file was found: a shell also finds tmux through an entry the lookup skips, such as a literal
   // `~/bin`, and reports a missing one as the shell transport does.
-  const opts = { windowsHide: true, maxBuffer: TMUX_MAX_BUFFER };
+  const opts = tmuxExecOptions;
   const run = (file: string | null) => file ? execFileAsync(file, args, opts) : execFileAsync("/bin/sh", ["-c", 'exec "$0" "$@"', bin, ...args], opts);
   try {
     if (process.platform === "win32") return (await execFileAsync(bin, args, opts)).stdout;
@@ -100,6 +132,7 @@ export const execArgvCommand: ArgvExecFn = async (argv: string[]): Promise<strin
       return (await run(null)).stdout;
     }
   } catch (err) {
+    warnTmuxDeadline(err, started, argv);
     throw withExecOutput(err);
   }
 };
