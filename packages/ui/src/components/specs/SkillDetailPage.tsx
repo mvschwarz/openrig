@@ -108,7 +108,7 @@ export function SkillDetailPage({
   return (
     <div
       data-testid="skill-detail-page"
-      className="h-full overflow-hidden px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+      className="flex h-full flex-col overflow-hidden px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
       <PageHeader
         title={skill.name}
@@ -134,7 +134,7 @@ export function SkillDetailPage({
 
       <div
         data-testid="skill-detail-docs-browser"
-        className="flex h-[calc(100%-5rem)] flex-col rounded-lg border bg-surface-lowest shadow-sm sm:flex-row"
+        className="flex min-h-0 flex-1 flex-col rounded-lg border bg-surface-lowest shadow-sm sm:flex-row"
       >
         <div
           data-testid="skill-detail-tree"

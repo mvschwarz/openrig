@@ -1,10 +1,11 @@
 // ui-redesign C06: sidebar shell tests.
 
 import { describe, it, expect, vi } from "vitest";
-import { screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { setupAppShellTestEnv, renderAppShellAt } from "./helpers/app-shell-env.js";
 import { AppShell } from "../src/components/AppShell.js";
 import { SIDEBAR_MODE_STORAGE_KEY } from "../src/lib/sidebar-mode.js";
+import { SidebarSection } from "../src/components/shell/SidebarSection.js";
 
 setupAppShellTestEnv();
 
@@ -82,5 +83,39 @@ describe("Sidebar shell (C06)", () => {
     fireEvent.click(screen.getByTestId("sidebar-search"));
     expect(spy).toHaveBeenCalledTimes(1);
     window.removeEventListener("openrig:open-palette", spy);
+  });
+
+  // F9 (#2417): folding two sections keeps both folded (no stale-state clobber).
+  it("folding one section preserves other sections' folded state", () => {
+    window.localStorage.clear();
+    const { unmount } = render(
+      <>
+        <SidebarSection id="fleet" label="Fleet" collapsed={false}>
+          <span>fleet-body</span>
+        </SidebarSection>
+        <SidebarSection id="work" label="Work" collapsed={false}>
+          <span>work-body</span>
+        </SidebarSection>
+      </>,
+    );
+    fireEvent.click(screen.getByLabelText("Collapse Fleet section"));
+    fireEvent.click(screen.getByLabelText("Collapse Work section"));
+    unmount();
+    cleanup();
+
+    // Reload: both sections re-read from storage.
+    render(
+      <>
+        <SidebarSection id="fleet" label="Fleet" collapsed={false}>
+          <span>fleet-body</span>
+        </SidebarSection>
+        <SidebarSection id="work" label="Work" collapsed={false}>
+          <span>work-body</span>
+        </SidebarSection>
+      </>,
+    );
+    expect(screen.getByLabelText("Expand Fleet section")).toBeTruthy();
+    expect(screen.getByLabelText("Expand Work section")).toBeTruthy();
+    cleanup();
   });
 });

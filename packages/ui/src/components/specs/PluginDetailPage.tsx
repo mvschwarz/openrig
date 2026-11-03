@@ -103,7 +103,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
   return (
     <div
       data-testid="plugin-detail-page"
-      className="h-full overflow-hidden px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+      className="flex h-full flex-col overflow-hidden px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
       <PageHeader
         title={entry.name}
@@ -144,7 +144,7 @@ export function PluginDetailPage({ pluginId }: PluginDetailPageProps) {
 
       <div
         data-testid="plugin-detail-docs-browser"
-        className="flex h-[calc(100%-7rem)] flex-col rounded-lg border bg-surface-lowest shadow-sm sm:flex-row"
+        className="flex min-h-0 flex-1 flex-col rounded-lg border bg-surface-lowest shadow-sm sm:flex-row"
       >
         <div
           data-testid="plugin-detail-tree"

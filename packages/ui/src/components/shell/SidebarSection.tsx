@@ -21,11 +21,12 @@ export function SidebarSection({ id, label, collapsed, children }: SidebarSectio
   const foldable = label !== null && id !== "top" && !collapsed;
 
   const setOpen = (open: boolean) => {
-    setFolded((prev) => {
-      const next = open ? prev.filter((v) => v !== id) : [...prev.filter((v) => v !== id), id];
-      writeFoldedSections(next);
-      return next;
-    });
+    // F9: re-read current storage instead of the mount-time snapshot, and
+    // write outside the state updater (StrictMode may run updaters twice).
+    const current = readFoldedSections().filter((v) => v !== id);
+    const next = open ? current : [...current, id];
+    writeFoldedSections(next);
+    setFolded(next);
   };
 
   const heading = label && !collapsed ? (
