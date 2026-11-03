@@ -1,30 +1,22 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { randomUUID } from "node:crypto";
 import { OpenShellPodmanObserver, type PodmanCleanupSelection } from "./openshell-podman-observer.js";
 import type { NativeObservation } from "../domain/environment-lifecycle.js";
 import { EnvironmentError, regularBytes, sha256, type EnvironmentBinding, type EnvironmentDriver, type EnvironmentResource, type Placement } from "../domain/environment-platform.js";
-import { createWindowsPrivateDirectoryAsync, openPrivateTextHandle } from "../domain/private-text-file.js";
-import { execWindowsJobFile } from "../domain/windows-job-exec.js";
 
 const runFile = promisify(execFile);
 export type OpenShellCommand = (args: string[]) => Promise<string>;
-/** Only the finite CLI client is owned here; gateway operations may already
- * have been applied when a reply is lost, so they are never retried here. */
-export async function runOpenShellCommand(args: string[], timeoutMs = 30_000): Promise<string> {
-  try {
-    return (await (process.platform === "win32"
-      ? execWindowsJobFile("openshell", args, { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 })
-      : runFile("openshell", args, { timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024 }))).stdout;
-  } catch { throw new EnvironmentError("openshell_transport_unconfirmed", "OpenShell did not return a confirmed result; reconcile the saved operation", 503); }
-}
 /** Maintained OpenShell 0.1.6 CLI driver. No shell, dynamic plugin loader or credential copying. */
 export class OpenShellDriver implements EnvironmentDriver {
   readonly version = 1 as const;
-  constructor(private readonly command: OpenShellCommand = runOpenShellCommand) {}
+  constructor(private readonly command: OpenShellCommand = async args => {
+    try { return (await runFile("openshell", args, { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout; }
+    catch { throw new EnvironmentError("openshell_transport_unconfirmed", "OpenShell did not return a confirmed result; reconcile the saved operation", 503); }
+  }) {}
   private prefix(place: Placement): string[] { return ["--gateway", place.gateway, "--workspace", place.workspace, "sandbox"]; }
   private resource(value: unknown): EnvironmentResource {
     const row = value as Record<string, any>;
@@ -43,12 +35,9 @@ export class OpenShellDriver implements EnvironmentDriver {
   async create(input: { operationId: string; placement: Placement }): Promise<EnvironmentResource> {
     const p = input.placement, bytes = regularBytes(p.policy);
     if (sha256(bytes) !== p.policySha256) throw new EnvironmentError("environment_policy_changed", "The selected provider policy changed before create");
-    const stage = process.platform === "win32" ? await createWindowsPrivateDirectoryAsync(tmpdir()) : mkdtempSync(join(tmpdir(), "openrig-policy-"));
-    const policy = join(stage, "policy.yaml");
-    try {
-      const handle=await openPrivateTextHandle(policy);
-      try { await handle.writeFile(bytes); } finally { await handle.close(); }
-      return this.resource(JSON.parse(await this.command([...this.prefix(p), "create", "--name", p.name, "--from", p.image,
+    const stage = mkdtempSync(join(tmpdir(), "openrig-policy-"));
+    const policy = join(stage, "policy.yaml"); writeFileSync(policy, bytes, { mode: 0o600 });
+    try { return this.resource(JSON.parse(await this.command([...this.prefix(p), "create", "--name", p.name, "--from", p.image,
       "--provider", p.provider, "--no-auto-providers", "--cpu", "1", "--memory", "2Gi", "--policy", policy,
       "--label", `openrigoperation=${input.operationId}`, "--tty", "--detach", "--restart-policy", "never", "--output", "json",
       "--", "python3", "/opt/openrig/guest.py"]))); } finally { rmSync(stage, { recursive: true }); }
@@ -89,8 +78,7 @@ export class OpenShellDriver implements EnvironmentDriver {
   }
   async download(binding: EnvironmentBinding, source: string, destination: string): Promise<void> {
     const bytes = await this.read(binding, source);
-    const handle=await openPrivateTextHandle(destination);
-    try { await handle.writeFile(bytes); } finally { await handle.close(); }
+    writeFileSync(destination, bytes, { flag: "wx", mode: 0o600 });
   }
   async captureCleanup(binding: EnvironmentBinding, socket: string): Promise<PodmanCleanupSelection> {
     await this.checked(binding, false);
