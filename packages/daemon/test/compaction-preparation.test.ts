@@ -85,6 +85,19 @@ it.each(['unknown','typed'] as const)('keeps a readable %s composer from authori
  expect(compacts(f)).toHaveLength(0);
  expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
 });
+it('submits managed /compact when readable redraw settling exceeds the ordinary one-second idle wait',async()=>{
+ const f=await tinyPane();
+ expect((await f.transport.capture(seat,{inputBox:true,readable:{width:120,height:40}})).inputBox).toMatchObject({status:'empty',confidence:'high'});
+ const screen=f.tmux.capturePaneScreen.getMockImplementation()!;
+ let looks=0;
+ f.tmux.capturePaneScreen.mockImplementation(async()=>++looks<=8?`redrawing ${looks}`:screen());
+ const started=f.clock();
+ await f.e.maybeAutoCompact(input);
+ expect(f.clock()-started).toBeGreaterThan(1000);
+ expect(looks).toBeGreaterThan(8);
+ expect(f.window).toEqual({width:11,height:20,own:null,recorded:''});
+ expect(compacts(f)).toHaveLength(1);
+});
 it.each(['incomplete-map','completed-map','cancel-after-compact'] as const)('persists the computed end reason for %s',async end=>{
  const f=fixture();await f.e.maybeAutoCompact(input);
  if(end!=='incomplete-map')stageMap(f);
