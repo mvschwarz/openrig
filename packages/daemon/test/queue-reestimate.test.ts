@@ -73,7 +73,9 @@ describe("accepted queue re-estimates (#2453)", () => {
     expect((await accept(row.qitemId)).status).toBe(200);
     expect(repo.findOverdue().map(r => r.qitemId)).not.toContain(row.qitemId);
     expect((await sweep()).findings.filter(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")).toEqual([]);
+    repo.attachActivityReader(() => ({ activity: "working", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks" }));
     vi.setSystemTime(new Date(Date.parse(later) + 1));
+    expect(repo.getById(row.qitemId)?.pickup?.state).toBe("working");
     expect(repo.findOverdue().map(r => r.qitemId)).toContain(row.qitemId);
     expect((await sweep()).findings).toContainEqual(expect.objectContaining({ qitemId: row.qitemId, kind: "overdue-claim", action: "created" }));
   });
@@ -88,7 +90,9 @@ describe("accepted queue re-estimates (#2453)", () => {
     expect((await sweep()).findings).toContainEqual({ ...finding, action: "closed" });
     expect(repo.getById(finding.findingQitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", sourceSession: owner.sourceSession, destinationSession: owner.destinationSession });
     expect(claim(row.qitemId)).toEqual(before);
+    repo.attachActivityReader(() => ({ activity: "working", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks" }));
     vi.setSystemTime(new Date(Date.parse(later) + 1));
+    expect(repo.getById(row.qitemId)?.pickup?.state).toBe("working");
     const expired = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")!;
     expect(expired.action).toBe("created");
     expect(expired.findingQitemId).not.toBe(finding.findingQitemId);
