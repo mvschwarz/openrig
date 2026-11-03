@@ -1,4 +1,5 @@
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { CodexInPlaceRestart } from "../src/domain/seat-restart-in-place.js";
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
@@ -169,6 +170,60 @@ describe("SeatHandoverService", () => {
       db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all(),
     ])));
   }
+
+  it.each(["fresh", "fork:dev-impl@seat-rig", "rebuild"])("records a %s successor as launched without changing its handover tenure or lineage", async source => {
+    const { rig, node, sessionId } = seedSeat();
+    sessionRegistry.updateResumeToken(sessionId!, "codex_id", "codex-thread-1", "hook");
+    const previous = db.prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal").all(node.id);
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "replace occupant", source });
+    expect(result).toMatchObject({ ok: true, result: { sideEffects: { provenanceRecordWritten: true } } });
+    const tenures = db.prepare("SELECT * FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal").all(node.id);
+    expect(tenures).toHaveLength(previous.length + 1);
+    expect(tenures.slice(0, -1)).toEqual(previous);
+    expect(tenures.at(-1)).toMatchObject({ kind: "handover", generation_ordinal: 2,
+      generation_uuid: respawnPane.mock.calls[0]![2]!.env.OPENRIG_OCCUPANT_GENERATION });
+    expect(sessionRegistry.getSessionsForRig(rig.id).find(session => session.id === sessionId)?.status).toBe("superseded");
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.handover_completed' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ nodeId: node.id, previousOccupant: "dev-impl@seat-rig", currentOccupant: "dev-impl@seat-rig", source });
+    expect(db.prepare("SELECT origin FROM sessions WHERE node_id = ? AND status = 'running'").get(node.id)).toEqual({ origin: "launched" });
+  });
+
+  it.each(["stop", "restart", "clean"] as const)("allows %s for a launched handover but refuses discovered and directly adopted occupants", async operation => {
+    for (const provenance of ["adopted", "discovered", "launched"] as const) {
+      const { node, sessionId } = seedSeat({ rigName: `${operation}-${provenance}` });
+      const seatRef = `dev-impl@${operation}-${provenance}`;
+      if (provenance === "adopted") {
+        sessionRegistry.markSuperseded(sessionId!);
+        sessionRegistry.registerClaimedSession(node.id, seatRef);
+      } else {
+        const source = provenance === "launched" ? "fresh" : `discovered:${seedDiscovery().id}`;
+        expect(await service.handover({ seatRef, reason: "replace occupant", source })).toMatchObject({ ok: true });
+      }
+      const current = sessionRegistry.getBindingForNode(node.id)!;
+      const adapter = Object.assign(tmux(), { probeSession: vi.fn(async () => ({ state: operation === "clean" ? "absent" as const : "present" as const })) });
+      const restartAdapter = Object.assign(codexAdapter(), { buildResumeCommand: vi.fn(), verifyResumeInPane: vi.fn(), sendResumeCommand: vi.fn() });
+      const lifecycle = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: adapter, runtimeAdapters: { codex: restartAdapter } });
+      // The restart engine has its own process/OS fixtures. This cell exercises handover registration
+      // through the real lifecycle eligibility checks, stopping at that engine's native-effect boundary.
+      const restart = vi.spyOn(CodexInPlaceRestart.prototype, "execute").mockResolvedValue({ ok: true } as never);
+      killSession.mockClear();
+      try {
+        const input = { seatRef, reason: "selected lifecycle operation" };
+        const result = operation === "stop" ? await lifecycle.stopSeat(input)
+          : operation === "clean" ? await lifecycle.cleanSeat(input) : await lifecycle.restartInPlace(input);
+        if (provenance === "launched") {
+          expect(result).toMatchObject({ ok: true });
+          if (operation === "stop") expect(killSession).toHaveBeenCalledWith(current.tmuxSession);
+          if (operation === "clean") expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
+          if (operation === "restart") expect(restart).toHaveBeenCalledWith(expect.objectContaining({ seat: expect.objectContaining({ nodeId: node.id }), sessionName: current.tmuxSession }), expect.anything());
+        } else {
+          expect(result).toMatchObject({ ok: false, code: "claimed_session" });
+          expect(killSession).not.toHaveBeenCalled(); expect(restart).not.toHaveBeenCalled();
+          expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe(current.tmuxSession);
+        }
+      } finally { restart.mockRestore(); }
+    }
+  });
 
   it("binds an active seat to an already-created discovered successor", async () => {
     const { rig, node, sessionId } = seedSeat();

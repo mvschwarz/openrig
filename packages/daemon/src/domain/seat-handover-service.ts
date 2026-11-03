@@ -1189,6 +1189,10 @@ export class SeatHandoverService {
         "handover",
         input.occupantGeneration,
       );
+      // Keep the handover tenure/ready registration; only discovered successors are adopted.
+      if (input.reportedSource.mode !== "discovered") {
+        this.db.prepare("UPDATE sessions SET origin = 'launched' WHERE id = ?").run(newSession.id);
+      }
       // The receipt's lineage record: that mint is best-effort (a failure is logged and swallowed), so read it back.
       const tenure = this.readOccupantTenure(input.node.id);
       const provenanceRecordWritten = tenure !== null && tenure.kind === "handover" && tenure.id !== tenureBefore?.id
