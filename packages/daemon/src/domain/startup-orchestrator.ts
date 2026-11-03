@@ -52,7 +52,7 @@ export function startupProofHeldBackWarning(reason: string | undefined): string 
 
 type PendingForkContext = { parentToken: string; isRestore: boolean };
 export type PendingStartupContext = { eventSeq: number } & (
-  | { mode: "fresh" }
+  | { mode: "fresh"; guidanceLaunchInstructions?: true }
   | ({ mode: "fork" } & PendingForkContext)
 );
 
@@ -62,7 +62,9 @@ export function readPendingStartupContext(db: Database.Database, nodeId: string,
   if (!row) return null;
   const event = JSON.parse(row.payload);
   if (event.type !== "node.startup_failed" || event.sessionId !== sessionId) return null;
-  if (event.freshContextPending === true) return { eventSeq: row.seq, mode: "fresh" };
+  if (event.freshContextPending === true) {
+    return { eventSeq: row.seq, mode: "fresh", ...(event.guidanceLaunchInstructions === true ? { guidanceLaunchInstructions: true as const } : {}) };
+  }
   const fork = event.forkContextPending;
   if (typeof fork?.parentToken === "string" && fork.parentToken.trim() && typeof fork.isRestore === "boolean") {
     return { eventSeq: row.seq, mode: "fork", parentToken: fork.parentToken, isRestore: fork.isRestore };
@@ -410,13 +412,6 @@ export class StartupOrchestrator {
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
     if (input.adapter.environment) input = { ...input, binding: { ...input.binding, launchGeneration: input.binding.launchGeneration ?? launchGeneration } };
-    // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
-    // older snapshot), so the adapter isn't asked again and an existing seat isn't silently repointed.
-    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
-      const chosen = input.adapter.guidanceFileFor(input.binding);
-      if (chosen.note) warnings.push(chosen.note);
-      input = { ...input, binding: { ...input.binding, guidanceFile: chosen.file } };
-    }
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -428,6 +423,20 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", [`Startup proof selection: ${(err as Error).message}`], undefined, false, undefined, false, "proof_selection", true);
     }
     this.eventBus.emit({ type: "node.startup_pending", rigId: input.rigId, nodeId: input.nodeId, startupProof });
+
+    // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
+    // older snapshot), and a continuation carries its launch's choice, so the adapter isn't asked again and an existing
+    // seat isn't silently repointed. This runs after the pending mark: a continuation claims its attempt before any await.
+    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+      // A continuation launches nothing, so it never chooses guidance that only a launch carries.
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource || input.skipHarnessLaunch) });
+      const chosen = answer instanceof Promise ? await answer : answer;
+      if (chosen.note) warnings.push(chosen.note);
+      const guidance = { guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) };
+      input = { ...input, binding: { ...input.binding, ...guidance } };
+      // A failure recorded from the delivery input keeps the choice for a later continuation too.
+      deliveryInput.binding = { ...deliveryInput.binding, ...guidance };
+    }
 
     // 2. Project resources. A contained Claude resume has an intentionally empty
     // replay plan, not a newly selected profile with activity hooks removed.
@@ -1112,7 +1121,8 @@ export class StartupOrchestrator {
       nodeId: input.nodeId,
       error: errors.join("; "),
       sessionId: input.sessionId,
-      ...(pendingContext === true ? { freshContextPending: true }
+      // A fresh launch that carried its guidance as developer instructions says so, so its continuation keeps that choice (#875).
+      ...(pendingContext === true ? { freshContextPending: true, ...(input.binding.guidanceLaunchInstructions ? { guidanceLaunchInstructions: true } : {}) }
         : pendingContext ? { forkContextPending: pendingContext } : {}),
       ...(input.submissionDiagnostics?.length ? { submissionDiagnostics: input.submissionDiagnostics } : {}),
       ...(stage ? { stage } : {}),
