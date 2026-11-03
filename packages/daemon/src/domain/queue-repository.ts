@@ -47,6 +47,9 @@ function humanAnswerId(askId: string, episodeKey?: string): string {
   return `qitem-human-answer-${createHash("sha256").update(episodeKey ? `${askId}\n${episodeKey}` : askId).digest("hex").slice(0, 20)}`;
 }
 
+/** A row's nudge result when its wake couldn't be staged: the row stands, and its wake is owed. */
+const WAKE_NOT_RETAINED = "failed:wake not retained: ";
+
 export const QUEUE_STATES = [
   "pending",
   "in-progress",
@@ -1255,6 +1258,18 @@ export class QueueRepository {
     });
   }
 
+  /** A handoff's wake, staged as create stages one: a recipient whose held-message quota is full still gets the row,
+   *  which records its wake as not retained, so work keeps moving between other seats (#2430). Any other staging
+   *  failure rolls the act back. */
+  private stageHandoffWake(successorQitemId: string, fromSession: string, toSession: string, identityProvenance: string | null, nudge: boolean | undefined): void {
+    try {
+      this.db.transaction(() => this.stageWakeIntent(successorQitemId, fromSession, toSession, identityProvenance, nudge))();
+    } catch (err) {
+      if ((err as { code?: string }).code !== "retained_quota_full") throw err;
+      this.recordNudgeAttempt(successorQitemId, `${WAKE_NOT_RETAINED}${(err as Error).message}`);
+    }
+  }
+
   private recordWakeIntent(input: {
     outboxId: string;
     auditPointer: string;
@@ -1361,7 +1376,8 @@ export class QueueRepository {
     const src = this.getById(sourceQitemId);
     if (!src || !isTerminalState(src.state)) return; // not a terminal close
     const intent = this.outbox.getById(`${WAKE_INTENT_PREFIX}${successorQitemId}`);
-    if (!intent) {
+    // A successor whose wake a full held-message quota refused records that instead, and stands (#2430).
+    if (!intent && !this.getById(successorQitemId)?.lastNudgeResult?.startsWith(WAKE_NOT_RETAINED)) {
       throw new QueueRepositoryError(
         "terminal_close_without_wake_intent",
         `terminal closure of ${sourceQitemId} committed without staging its wake intent for ${successorQitemId} — one act or none is violated`,
@@ -1904,7 +1920,7 @@ export class QueueRepository {
           this.db.transaction(() => this.stageWakeIntent(created.qitemId, wakeFrom, input.destinationSession, sideEffectProvenance(input.identityProvenance), input.nudge, input.wakeTrigger))();
           wakeStaged = true;
         } catch (err) {
-          this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
+          this.recordNudgeAttempt(created.qitemId, `${WAKE_NOT_RETAINED}${err instanceof Error ? err.message : String(err)}`);
         }
       }
       return created;
@@ -2340,8 +2356,9 @@ export class QueueRepository {
 
       // W1-a: the durable wake intent joins the SAME transaction as the close +
       // successor create. If this (or anything above) throws, the whole act rolls
-      // back — one act or none.
-      this.stageWakeIntent(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
+      // back — one act or none. A recipient's full held-message quota is the one
+      // exception: the successor records its wake as not retained (#2430).
+      this.stageHandoffWake(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
 
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
@@ -2517,8 +2534,8 @@ export class QueueRepository {
       });
 
       // W1-a: the durable wake intent joins the SAME transaction as the close +
-      // successor create — one act or none (symmetric with handoff()).
-      this.stageWakeIntent(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
+      // successor create — one act or none (symmetric with handoff(), including its full-quota exception).
+      this.stageHandoffWake(newId, input.fromSession, input.toSession, sideEffectProvenance(input.identityProvenance), input.nudge);
 
       const handoffEvent = this.eventBus.persistWithinTransaction({
         type: "queue.handed_off",
