@@ -2,7 +2,7 @@
 // Dismiss hides it and persists across remount. Cache seeded via setQueryData
 // using the hooks' exact keys (no fetch mocking).
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { screen, cleanup, fireEvent } from "@testing-library/react";
+import { screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import type { QueryClient } from "@tanstack/react-query";
 import { renderDashboard as renderWithClient } from "./helpers/dashboard-harness.js";
 import { GETTING_STARTED_DISMISSED_KEY } from "../src/components/dashboard/GettingStarted.js";
@@ -94,6 +94,8 @@ describe("Getting started (C15)", () => {
     // The /healthz stub returns ok with no eventLoop evidence → isSuccess →
     // daemonStatus label "Healthy" once the query settles.
     await screen.findByText("Connect to the daemon");
-    expect(card.textContent).toContain("Connect to the daemon");
+    // Library and ps are empty in this fixture, so the daemon step is the
+    // only one that can show the done glyph.
+    await waitFor(() => expect(card.textContent).toContain("✓"));
   });
 });

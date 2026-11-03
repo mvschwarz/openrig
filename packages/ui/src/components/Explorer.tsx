@@ -313,7 +313,7 @@ export function Explorer({
         aria-label="Expand explorer"
         onClick={onDesktopToggle}
         className={cn(
-          "hidden lg:flex absolute top-8 left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
+          "hidden lg:flex absolute top-8 left-[calc(var(--sidebar-current-width)+0.25rem)] z-30 h-8 w-8 items-center justify-center",
           "rounded-full border border-outline-variant bg-background/90 text-on-surface",
           "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors",
           "hover:bg-surface-low hover:text-on-surface",

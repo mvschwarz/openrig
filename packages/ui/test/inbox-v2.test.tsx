@@ -29,6 +29,9 @@ import {
 } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Feed } from "../src/components/for-you/Feed.js";
+import { FeedCard } from "../src/components/for-you/FeedCard.js";
+import type { FeedCard as FeedCardModel } from "../src/lib/feed-classifier.js";
+import type { QueueItemDetail } from "../src/hooks/useSlices.js";
 import { DrawerSelectionContext } from "../src/components/AppShell.js";
 import { __test_internals as topologyHubInternals } from "../src/lib/topology-events.js";
 
@@ -192,11 +195,68 @@ describe("Inbox v2 (C11)", () => {
     // Observation card via the SSE hub: its action container carries
     // opacity-0 until hover/focus-within.
     await emitObservationHub();
-    const obsActions = await findByTestId("feed-card-actions-watchdog.note-901", undefined, {
+    const obsActions = await findByTestId("feed-card-footer-watchdog.note-901", undefined, {
       timeout: 5000,
     });
     expect(obsActions.textContent).toContain("Live terminal");
     expect(obsActions.className).toContain("opacity-0");
     await waitFor(() => expect(obsActions.isConnected).toBe(true));
+  });
+
+  it("a decided card (done queue item) keeps Show context and Live terminal in its footer", async () => {
+    const card = {
+      id: "queue.enqueued-42",
+      kind: "approval",
+      title: "Ship the cut",
+      body: "closed",
+      receivedAt: 1234567890,
+      createdAt: new Date(1234567890 * 1000).toISOString(),
+      source: {
+        seq: 42,
+        type: "queue.enqueued",
+        payload: { qitem_id: "q-done-1", source_session: "dev-owner@rig", humanQuestions: null },
+      },
+    } as unknown as FeedCardModel;
+    const queueItem = {
+      qitemId: "q-done-1",
+      tsCreated: "2026-11-01T00:00:00Z",
+      tsUpdated: "2026-11-01T00:05:00Z",
+      sourceSession: "dev-owner@rig",
+      destinationSession: "human@host",
+      state: "done",
+      priority: "normal",
+      tier: null,
+      tags: null,
+      body: "closed",
+      closureReason: "approved",
+      humanQuestions: null,
+    } as unknown as QueueItemDetail;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const rootRoute = createRootRoute({ component: () => <Outlet /> });
+    const indexRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/",
+      component: () => (
+        <DrawerSelectionContext.Provider value={{ selection: null, setSelection: vi.fn() }}>
+          <FeedCard card={card} queueItem={queueItem} />
+        </DrawerSelectionContext.Provider>
+      ),
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([indexRoute]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    const actions = await view.findByTestId("feed-card-footer-queue.enqueued-42");
+    expect(actions.textContent).toContain("Show context");
+    expect(actions.textContent).toContain("Live terminal");
+    // Decided: no approve verb, and the footer reveals on hover.
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.queryByTestId("feed-card-actions-queue.enqueued-42")).toBeNull();
+    expect(actions.className).toContain("opacity-0");
   });
 });

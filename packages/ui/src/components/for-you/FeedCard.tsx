@@ -425,10 +425,11 @@ export function FeedCard({
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
   const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
   const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
-  // C11 Inbox v2: the row-level action container is hidden once a decision
-  // lands (outcome receipt) or the queue item is terminal. Otherwise every
-  // card gets one: actionable kinds show it always; other kinds reveal it
-  // on hover/focus-within.
+  // C11 Inbox v2: the decision verbs are hidden once a decision lands
+  // (outcome receipt) or the queue item is terminal. The row's footer links
+  // (Show context, Live terminal, evidence, review) stay on every card:
+  // actionable kinds show them always; other cards, including decided and
+  // shipped ones, reveal them on hover/focus-within.
   const hideActions = renderedOutcome != null || isTerminalQueueItem(queueItem);
   // OPR.0.4.1.27 Unit 6 — sender-or-owner terminal address.
   const terminalSession = resolveCardTerminalSession(card.kind, source, destination);
@@ -575,11 +576,8 @@ export function FeedCard({
           </div>
         ) : null}
         <div className="flex items-center justify-between gap-3 text-xs text-on-surface-variant">
-          {!hideActions ? (
           <div
-            {...(!(isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData)
-              ? { "data-testid": `feed-card-actions-${card.id}` }
-              : {})}
+            data-testid={`feed-card-footer-${card.id}`}
             className={
               isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData
                 ? "flex min-w-0 items-center gap-2"
@@ -631,7 +629,6 @@ export function FeedCard({
               </Link>
             ) : null}
           </div>
-          ) : null}
         </div>
       </div>
       {proofPreview ? (
