@@ -209,6 +209,24 @@ describe("OMP executable resolution before the seat HOME applies", () => {
     };
     expect(resolveRuntimeExecutable("omp", { PATH: "/home/op/.local/share/mise/shims" }, fake)).toMatchObject({ ok: false, error: expect.stringContaining("ENOENT") });
   });
+
+  it("resolves an absolute executable path directly", () => {
+    const fake = ops({ "/usr/local/bin/omo": "/usr/local/bin/omo" });
+    expect(resolveRuntimeExecutable("/usr/local/bin/omo", {}, fake)).toEqual({ ok: true, path: "/usr/local/bin/omo" });
+  });
+
+  it("parses --command flag in runner arguments", () => {
+    const parsed = parseRunnerArgs([
+      "--session-name", "omo-seat@rig",
+      "--state-root", "/state/pi",
+      "--cwd", "/work",
+      "--launch-id", "launch-1",
+      "--command", "omo",
+      "--no-approve",
+    ]);
+    expect(parsed.command).toBe("omo");
+    expect(parsed.sessionName).toBe("omo-seat@rig");
+  });
 });
 
 describe("OMP RPC lifecycle", () => {

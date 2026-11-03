@@ -1,0 +1,13 @@
+# Install as $OPENRIG_HOME/community-harnesses/omo.yaml.
+# OmO Native (npm omo-ai 5.1.48) on the senpi engine — a Pi fork speaking Pi's RPC protocol.
+# With protocol: pi-rpc, OpenRig runs OmO through its Pi runner: structured activity, prompt/steer,
+# transcript isolation, and session file resumption.
+format: 1
+name: omo
+command: omo
+maintainer: Your name or team
+protocol: pi-rpc
+limits:
+  - checked with omo 5.1.48 (senpi engine 2026.10.25-2)
+  - credentials resolved via omo's agent directory or models.json
+  - models declared via provider/id format (e.g. zai/glm-5.3-flash, openrouter/...)

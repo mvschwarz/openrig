@@ -201,7 +201,7 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime | string; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
@@ -210,6 +210,11 @@ export function buildPiChildEnv(
   }
   env.PI_CODING_AGENT_DIR = opts.agentDir;
   env.PI_CODING_AGENT_SESSION_DIR = opts.sessionsDir;
+  if (opts.runtime && opts.runtime !== "pi" && opts.runtime !== "omp") {
+    const prefix = String(opts.runtime).toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    env[`${prefix}_CODING_AGENT_DIR`] = opts.agentDir;
+    env[`${prefix}_CODING_AGENT_SESSION_DIR`] = opts.sessionsDir;
+  }
   const provider = providerFromModel(opts.model);
   const providerVar = provider ? (opts.runtime === "omp" ? OMP_PROVIDER_ENV_VARS : PI_PROVIDER_ENV_VARS)[provider] : undefined;
   if (providerVar && source[providerVar] !== undefined) {
@@ -244,6 +249,8 @@ export function buildPiChildEnv(
 export interface PiRunnerLaunchOpts {
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
   runtime?: RunnerRuntime;
+  /** Custom executable to spawn inside the runner (e.g. for Pi-fork community harnesses). */
+  command?: string;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -294,6 +301,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
       : [`--${opts.trust}`]),
   ];
+  if (opts.command) {
+    parts.push("--command", shellQuote(opts.command));
+  }
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
