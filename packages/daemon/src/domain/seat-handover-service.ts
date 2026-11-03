@@ -868,12 +868,15 @@ export class SeatHandoverService {
         runtime: input.node.runtime,
       });
     }
-    // Held messages are never replayed, so the successor is told once, as a started seat is (#2431); typed as the
-    // packets are, and best-effort: the handover has committed.
+    // Held messages are never replayed, so every source's result names them, as a started seat is told (#2431). The
+    // successor is also told, typed as its packets are, unless OpenRig types nothing more into it: a discovered session it
+    // didn't launch, or an unconfirmed packet, where an Enter could submit someone else's text. Best-effort: the handover
+    // has committed.
     const held = heldMessagesNotice(this.db, input.node.id, discovered.tmuxSession);
     if (held && "result" in committed) {
       committed.result.warnings = [held];
-      try { if ((await this.tmuxAdapter.sendText(discovered.tmuxSession, held)).ok) { await this.sleep(200); await this.tmuxAdapter.sendKeys(discovered.tmuxSession, ["Enter"]); } }
+      const typed = input.reportedSource.mode !== "discovered" && input.restorePacket?.status !== "unconfirmed";
+      try { if (typed && (await this.tmuxAdapter.sendText(discovered.tmuxSession, held)).ok) { await this.sleep(200); await this.tmuxAdapter.sendKeys(discovered.tmuxSession, ["Enter"]); } }
       catch { /* the notice is best-effort */ }
     }
     return committed;

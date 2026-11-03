@@ -381,7 +381,7 @@ describe("live seat runtime switch", () => {
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
   });
 
-  it("tells the successor of messages held for the seat once, with its activation, and names them in the switch's warnings (#2431)", async () => {
+  it("tells the successor of messages held for the seat once per activation attempt, and names them in the switch's warnings (#2431)", async () => {
     db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
     new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Real work for you" },
       { nodeId, session: SEAT, occupant: null, pane: null });
