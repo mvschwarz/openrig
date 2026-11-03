@@ -2829,6 +2829,17 @@ describe("a fresh Codex seat's managed guidance as launch developer instructions
     expect(chosen.note).toMatch(/repository AGENTS\.md/);
   });
 
+  // With no CODEX_HOME declared for the seat or the daemon, the launch's Codex uses the person's ~/.codex, so that's the
+  // home read. (One exported only in the person's shell startup, with the daemon started without it, isn't seen.)
+  it("reads the person's ~/.codex when neither the seat nor the daemon declares CODEX_HOME", async () => {
+    const withoutHome = (fs: CodexAdapterFsOps) => new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: { ...fs, homedir: "/person" },
+      listProcesses: () => [], sleep: async () => {}, resolveManagedConfigSettings: async () => ({ enabled: false, codexVersion: "0.164.0" }) });
+    expect(await withoutHome(mockFs()).guidanceFileFor(makeBinding())).toEqual({ file: null, launchInstructions: true });
+    const chosen = await withoutHome(mockFs({ "/person/.codex/config.toml": 'developer_instructions = "Mine."\n' })).guidanceFileFor(makeBinding());
+    expect(chosen.launchInstructions).toBeUndefined();
+    expect(chosen.note).toContain("/person/.codex/config.toml sets developer_instructions");
+  });
+
   it("sends the guidance with the fresh launch, writes neither the repository nor the home AGENTS.md, and keeps roles and the seat-skills line out", async () => {
     const fs = mockFs({ "/spec/culture.md": "Team culture.", "/spec/SOP.md": "How work flows here.", "/spec/rig-role.md": "Seat role text.",
       "/spec/openrig-seat-skills.md": "Seat skills line." }) as CodexAdapterFsOps & { _store: Record<string, string> };
