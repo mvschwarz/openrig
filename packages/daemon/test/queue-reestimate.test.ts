@@ -19,7 +19,10 @@ describe("accepted queue re-estimates (#2453)", () => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
     const bus = new EventBus(db), outbox = new OutboxHandler(db);
-    repo = new QueueRepository(db, bus, { validateRig: () => true, resolveOccupantGeneration: () => "estimate-generation" });
+    repo = new QueueRepository(db, bus, {
+      validateRig: () => true, resolveOccupantGeneration: () => "estimate-generation",
+      loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
     repo.attachOutbox(outbox);
     app = new Hono();
     app.use("*", async (c, next) => {
