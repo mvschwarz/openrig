@@ -1,5 +1,39 @@
 # Native Windows parity: implementation and evidence
 
+## Empty-directory replacement identity and Windows directory-mode fallback (2026-11-03)
+
+Regular file stages now retain known same-server uid/gid when replacing an empty
+POSIX directory as well as a regular file. Handle-bound identity qualification
+finishes before RMDIR, so a refusal leaves the old empty directory intact. This
+does not implement the reverse directory-over-file ownership translation.
+
+The first real recursive native upload exposed another production defect:
+Windows Node reports ordinary directory mode as `040666`, which the old path
+forwarded as POSIX permission bits. The fixture then became untraversable. Native
+Windows directory uploads to POSIX-shaped endpoints now retain a known existing
+destination directory's mode, or retain private `0700` for a new directory,
+instead of interpreting those compatibility bits as traversal/DACL information.
+Itemized mode-change reporting follows the mode actually applied. This fallback
+keeps directories usable without claiming source NTFS ACL translation; complete
+source permission/identity mapping remains outstanding.
+
+Six selected files passed 52 tests with five skips and no failures; CLI typecheck
+and whitespace checks passed. Controlled peers cover changed/refused identity
+before empty-directory removal, private new-directory mode, and retention of an
+existing POSIX directory mode. A real Windows-source recursive upload into the
+owned WSL SFTP subsystem replaced the empty directory with the intended file and
+retained uid/gid 1000/1000. A controlled foreign-UID refusal kept the old entry
+an empty directory with its original identity. Public source hashes matched
+before/after; that successful run's journaled workspace and WSL roots were removed.
+
+The first failed probe is not counted as acceptance: its exact WSL root was later
+observed absent, while cleanup of its unjournaled legacy Windows temporary root
+remains unconfirmed because parent enumeration was denied. No permission bypass
+or guessed deletion was attempted. Later probes journal their local roots before
+work. No SSH authentication, original-team action, user-file ownership change,
+deployment or public push occurred. SID/DACL mapping, source identity translation,
+directory-over-file identity, links and the broader real acceptance gaps remain.
+
 ## Directory metadata readback and failed access-change recovery (2026-11-03)
 
 Remote directory mode/time application now requires directory observations

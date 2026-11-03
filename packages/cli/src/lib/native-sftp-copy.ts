@@ -175,11 +175,17 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           retainedOriginal = undefined;
           return;
         }
+        // Windows stat's directory 0666/0444 bits are not POSIX traversal or
+        // DACL information. Keep known remote directory permissions, or the
+        // private creation mode for a new directory, until identity/ACL mapping
+        // can provide an actual permission translation.
+        const directoryAttrs = source === local && process.platform === "win32" && destination === remote && !windowsRemote
+          ? {...attrs,mode:existing?.mode ?? 0o040700} : attrs;
         if (!existing) { changes.push(`cd ${dst}`); if (!plan.dryRun) await destination.mkdir(dst); }
         else {
           const timeChanged = attrs.mtime !== undefined && attrs.mtime !== existing.mtime;
           const mask = destination === local && process.platform === "win32" ? 0 : 0o7777;
-          const modeChanged = attrs.mode !== undefined && existing.mode !== undefined && (attrs.mode & mask) !== (existing.mode & mask);
+          const modeChanged = directoryAttrs.mode !== undefined && existing.mode !== undefined && (directoryAttrs.mode & mask) !== (existing.mode & mask);
           if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
         }
         const names = await source.names(src);
@@ -217,7 +223,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           }
         } catch (error) { childError = error; }
         try {
-          if (!plan.dryRun) await destination.times(dst, attrs);
+          if (!plan.dryRun) await destination.times(dst, directoryAttrs);
         } catch (error) {
           if (borrowedMode !== undefined) {
             try { await destination.times(dst, { mode: 0o040000 | borrowedMode }); }
@@ -277,10 +283,10 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           if (attrs.size !== undefined && observedBytes !== attrs.size) throw sizeMismatch();
         };
         // A native Windows source has no POSIX identity to translate. Retain a
-        // known existing regular destination's same-server identity rather than
+        // known existing regular/empty-directory destination's same-server identity rather than
         // silently replacing it with the staging creator's owner/group.
         const retainedOwnership = destination === remote && !windowsRemote && attrs.uid === undefined && attrs.gid === undefined
-          && kind(existing) === 0o100000 && existing?.uid !== undefined && existing.gid !== undefined
+          && [0o100000,0o040000].includes(kind(existing)) && existing?.uid !== undefined && existing.gid !== undefined
           ? {uid:existing.uid,gid:existing.gid} : undefined;
         await destination.write(staged, verifiedSource(), retainedOwnership, destination === remote ? attrs : undefined);
         if (attrs.size === undefined) bytesTransferred += observedBytes;
