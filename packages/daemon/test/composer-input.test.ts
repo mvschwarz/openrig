@@ -165,6 +165,18 @@ describe("cursor-bound composer input", () => {
     expect(composerContainsOwnedText(inspectComposerInput(claude("one\ntwo")), "one two")).toBe(false);
   });
 
+  it("finds a delivery's own text in Claude's native wrapped rows, which wrap short of the box (#2429)", () => {
+    const fixtures = join(import.meta.dirname, "fixtures/input-box");
+    const lines = readFileSync(join(fixtures, "claude-code-2.1.296/staged-wrapped.raw.txt"), "utf8").replace(/\n$/, "").split("\n");
+    const text = readFileSync(join(fixtures, "texts/wrapped.txt"), "utf8").replace(/\n$/, "");
+    const last = lines.findLastIndex(line => line.startsWith("❯")) + 2;
+    const input = inspectComposerInput({ screen: lines.join("\n"), cursor: { x: lines[last]!.trimEnd().length, y: last, width: 120, height: lines.length }, inMode: false });
+    expect(input).toMatchObject({ state: "text", cursorAtEnd: true });
+    expect(input.rows).toHaveLength(3);
+    expect(composerContainsOwnedText(input, text)).toBe(true);
+    expect(composerContainsOwnedText(input, text.replace("asked", "ASKED"))).toBe(false);
+  });
+
   it("matches Unicode cell widths and treats an opaque paste as separately owned evidence", () => {
     const input = inspectComposerInput(claude("你好世界\nagain", { x: 7, y: 3 }, 10));
     expect(composerContainsOwnedText(input, "你好世界again")).toBe(true);
