@@ -919,7 +919,8 @@ export class TmuxAdapter {
       const identity = this.freshManaged.get(target)?.nodeId ?? target;
       const checkDraft = guard?.needsInputCheck(identity);
       const policy = checkDraft || options?.beforePaste ? {
-        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity, false, text); await options?.beforePaste?.(); },
+        // A paste the guard proves it left unsubmitted (#2429) is submitted first, under this lease.
+        beforePaste: async () => { if (checkDraft) await guard!.beforeInput(identity, false, text, async () => (await this.sendKeysUnchecked(pane, ["Enter"])).ok); await options?.beforePaste?.(); },
         afterPaste: async () => { if (checkDraft) await guard!.notePasted(identity, text); },
       } : undefined;
       return this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed, policy);

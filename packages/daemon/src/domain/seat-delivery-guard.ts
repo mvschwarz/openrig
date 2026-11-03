@@ -55,6 +55,8 @@ export type InterruptionLevel = (typeof INTERRUPTION_LEVELS)[number];
 export interface TypingGuardSettings { mode: TypingGuardMode; level?: InterruptionLevel }
 export interface TypingGuardConfig extends TypingGuardSettings { revision: string }
 const DEFAULT_GUARD: TypingGuardConfig = { mode: "off", revision: "legacy-off" };
+/** How long the guard waits before reading again an input it couldn't read right after its own paste or Enter (#2429). */
+const OWN_INPUT_REREAD_MS = 300;
 /** A terminal member with nothing set holds OpenRig's own notices and takes deliberate sends. */
 const TERMINAL_DEFAULT: TypingGuardConfig = { mode: "off", level: "sends-only", revision: "terminal-default" };
 /** The actor a guard change records when its request carries no seat identity, as from an ordinary terminal (#2350).
@@ -114,6 +116,8 @@ export class SeatDeliveryGuard {
   private readonly scope = new AsyncLocalStorage<Map<string, Lease>>();
   private readonly humanLeases = new Set<Lease>();
   private readonly humanEpochs = new Map<string, number>();
+  /** A paste this guard kept from being submitted because it couldn't read the input, per node (#2429). */
+  private readonly leftovers = new Map<string, { target: GuardTarget; humanEpoch: number; text: string; collapsedPaste: string | null }>();
   private inspectInput?: (target: GuardTarget, owned?: ComposerOwnership) => Promise<ComposerInput | null>;
   private inputAbsent?: (target: GuardTarget) => Promise<boolean>;
   private readonly hasModeConfig: boolean;
@@ -121,6 +125,7 @@ export class SeatDeliveryGuard {
   constructor(
     readonly db: Database.Database,
     private readonly resolve: (target: string) => GuardTarget | null,
+    private readonly sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
   ) {
     this.hasModeConfig = (db.prepare("PRAGMA table_info(seat_delivery_guards)").all() as Array<{ name: string }>).some(c => c.name === "desired_config");
   }
@@ -419,15 +424,36 @@ export class SeatDeliveryGuard {
     return !!lease?.active && lease.origin === "automatic" && !this.ownsFreshInput(lease) && lease.config?.mode === "draft-aware";
   }
 
-  /** Called at the paste/key boundary after file and buffer preparation. */
-  async beforeInput(name: string, submit = false, pasteText?: string): Promise<void> {
+  /** Called at the paste/key boundary after file and buffer preparation. Before a paste, `submitLeftover` lets the
+   * adapter submit a paste this guard left unsubmitted, once it's proven OpenRig's own (#2429). */
+  async beforeInput(name: string, submit = false, pasteText?: string, submitLeftover?: () => Promise<boolean>): Promise<void> {
     if (!this.needsInputCheck(name)) return;
     const target = this.target(name);
     const lease = this.scope.getStore()!.get(target.nodeId)!;
-    const owned = submit && lease.staged && lease.inputFrame ? { text: lease.staged.text, frame: lease.inputFrame } : undefined;
-    const input = await this.inspectInput?.(target, owned).catch(() => null) ?? null;
-    this.checkInput(name);
-    if (!input || input.state === "unknown") throw new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.");
+    const read = async () => {
+      const owned = submit && lease.staged && lease.inputFrame ? { text: lease.staged.text, frame: lease.inputFrame } : undefined;
+      const observed = await this.inspectInput?.(target, owned).catch(() => null) ?? null;
+      this.checkInput(name);
+      return observed;
+    };
+    const unknown = () => new DeliveryGuardError("draft_input_unknown", "The current input cannot be read. Automatic delivery is held.");
+    let input = await read();
+    // Claude may still be redrawing this lease's own paste: one bounded re-read before refusing its Enter.
+    if (submit && lease.staged && (!input || input.state === "unknown")) { await this.sleep(OWN_INPUT_REREAD_MS); input = await read(); }
+    if (!input || input.state === "unknown") {
+      // No Enter was sent, so the paste stays there unsubmitted, and the next delivery may recognize it as OpenRig's.
+      if (submit && lease.staged) this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged });
+      throw unknown();
+    }
+    if (!submit && submitLeftover && this.takeLeftover(target, input)) {
+      this.checkInput(name);
+      if (await submitLeftover()) {
+        await this.sleep(OWN_INPUT_REREAD_MS);
+        const after = await read();
+        if (!after || after.state === "unknown") throw unknown();
+        input = after;
+      }
+    }
     if (submit) {
       // The TUI may render the collapsed label only after notePasted's read.
       // If no label was recorded, recognize it in this same lease and original composer.
@@ -450,6 +476,15 @@ export class SeatDeliveryGuard {
       }
       lease.inputFrame = input.frame;
     }
+  }
+
+  /** A leftover paste is OpenRig's only while it's exactly there: the same occupant, no person's input through OpenRig
+   * since, and its text or the label recorded for it. A label first seen later proves nothing (#1871). One look uses it up. */
+  private takeLeftover(target: GuardTarget, input: ComposerInput): boolean {
+    const left = this.leftovers.get(target.nodeId);
+    this.leftovers.delete(target.nodeId);
+    return !!left && this.same(left.target, target) && left.humanEpoch === (this.humanEpochs.get(target.nodeId) ?? 0)
+      && (composerContainsOwnedText(input, left.text) || !!left.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === left.collapsedPaste);
   }
 
   expectStagedInput(name: string, text: string): void {
