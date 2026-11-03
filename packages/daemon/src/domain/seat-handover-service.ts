@@ -538,9 +538,10 @@ export class SeatHandoverService {
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
-      // #875: a Codex seat whose launch sent its guidance as developer instructions left none in its repository AGENTS.md,
-      // and a successor's launch carries none, so the missing blocks go back first, as an exact resume puts them back.
-      ...(node.runtime === "codex" ? this.putBackGuidance(node.id, node.cwd) : []).map((note) => `guidance_put_back: ${note}`),
+      // #875, #2456: a successor's launch carries no guidance of its own, whatever the runtime, so the seat's missing blocks
+      // go back first, as an exact resume puts them back: a Codex seat whose launch sent them as developer instructions,
+      // or any seat rebuilt into a working directory that doesn't hold them.
+      ...this.putBackGuidance(node.id, node.cwd, statusResult.status.rig_id).map((note) => `guidance_put_back: ${note}`),
     ];
     const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
@@ -722,14 +723,14 @@ export class SeatHandoverService {
   }
 
   /** #875: the seat's missing guidance blocks put back from its saved startup context, as an exact resume does. Returns notes. */
-  private putBackGuidance(nodeId: string, cwd: string | null | undefined): string[] {
+  private putBackGuidance(nodeId: string, cwd: string | null | undefined, rigId: string): string[] {
     let seatSkillsLineYes = false;
     try { seatSkillsLineYes = readFootprintAnswer(new SettingsStore()).state === "yes"; } catch { /* no recorded yes */ }
     let startupCtx;
     try { startupCtx = readNodeStartupSnapshot(this.db, nodeId); }
     catch (err) { return [`could not read the saved startup context: ${(err as Error).message}`]; }
     return putBackSeatGuidance({
-      startupCtx, cwd, claudeManagedBlockFile: null, seatSkillsLineYes, linkInfo: lstatLinkInfo,
+      startupCtx, cwd, claudeManagedBlockFile: this.rigRepo.getRigClaudeManagedBlockFile(rigId), seatSkillsLineYes, linkInfo: lstatLinkInfo,
       fs: { exists: existsSync, readFile: (file) => readFileSync(file, "utf-8"), writeFile: (file, content) => writeFileSync(file, content, "utf-8"),
         mkdirp: (dir) => mkdirSync(dir, { recursive: true }) },
     });
