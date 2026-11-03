@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // A daemon that is alive but busy answers its health check slowly, with an error or with a starved event
 // loop. Such a daemon gets the command's real request, under the request's normal timeout, instead of an
 // immediate "did not respond" refusal. Only a daemon confirmed down (connection refused, or a stale or
@@ -56,7 +57,7 @@ describe.skipIf(!fs.existsSync(cliEntry))("a busy but alive daemon gets the real
         res.writeHead(200, { "Content-Type": "application/json" }).end("[]");
       });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    await listenOwnedHttpFixture(server);
     port = (server.address() as net.AddressInfo).port;
   });
 

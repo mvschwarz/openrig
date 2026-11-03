@@ -12,6 +12,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import http from "node:http";
 import { allowFetchTarget, resetFetchAllowlist } from "./fetch-guard.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { nodeHttpFetch } from "../src/long-request-fetch.js";
 
 // The guard is installed by the shared setup (hermetic-env.setup.ts) for every file.
 describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
@@ -31,15 +33,29 @@ describe("fetch guard — allowlist by shape, fail-closed, three-sided", () => {
       // Windows can have a configured ephemeral range below the guard's
       // high-port shape. That does not authorize widening the guard.
       if (port < 32768) {
-        await expect(fetch(`${origin}/ping`)).rejects.toThrow(/FETCH GUARD/);
+        await expect(nodeHttpFetch(`${origin}/ping`)).rejects.toThrow(/FETCH GUARD/);
         allowFetchTarget(origin);
       }
-      const res = await fetch(`${origin}/ping`);
+      // node:http has no fetch bad-port list: this tests fixture registration,
+      // even when a configured OS ephemeral range happens to select such a port.
+      const res = await nodeHttpFetch(`${origin}/ping`);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
     } finally {
-      server.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     }
+  });
+
+  it("permits global fetch to a real high-port loopback fixture without registration",async()=>{
+    const server=http.createServer((_req,res)=>res.end("shape permitted"));
+    await listenOwnedHttpFixture(server);
+    try{
+      resetFetchAllowlist();
+      const port=(server.address() as {port:number}).port;
+      expect(await (await fetch(`http://127.0.0.1:${port}`)).text()).toBe("shape permitted");
+      await expect(fetch("http://127.0.0.1:7433/healthz")).rejects.toThrow(/FETCH GUARD/);
+    }finally{server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
   });
 
   it("the daemon client's long-request path (node:http) is guarded the same way", async () => {

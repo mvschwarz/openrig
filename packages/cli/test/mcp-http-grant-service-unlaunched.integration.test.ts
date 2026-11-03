@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // An external caller's seat created the way an operator creates one without a launch (`rig import --materialize-only`),
 // served by the built `rig mcp serve --http --grant-service` on a real private daemon: initialize, tools/list and a
 // create/show round trip as that seat, recorded with the grant's principal. The seat check only reads: no session, no
@@ -101,7 +102,7 @@ it("serves a materialized, never-launched caller seat over a grant service on a 
       seat, rigs: [RIG], artifact_roots: [], access_class: "work", objects: { queue: ["create", "show", "list"] },
     })));
   });
-  await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+  await listenOwnedHttpFixture(service);
   closers.push(() => new Promise<void>((resolve) => service.close(() => resolve())));
 
   // The built server, as an operator starts it, beside this daemon (its database proves the daemon is this host's).

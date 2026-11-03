@@ -1,5 +1,5 @@
 import { serveOwnedHonoFixture } from "./helpers/owned-hono-fixture.js";
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { allowOwnedHttpFixture, listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // #1642: what a cross-host queue write actually does, end to end. The compiled CLI runs as its own
 // process against real daemon apps on local ports: the sender's daemon, a receiver standing in for the
 // remote host, and another host. Each run records stdout, stderr, the process exit status, the writes the
@@ -255,7 +255,7 @@ describe.skipIf(!fs.existsSync(cliEntry))("#1642: cross-host queue writes throug
           setTimeout(() => res.destroy(), 20);
         });
       });
-      await new Promise<void>((resolve) => hangup.listen(0, "127.0.0.1", () => resolve()));
+      await listenOwnedHttpFixture(hangup);
       allowOwnedHttpFixture(hangup);
       hangupUrl = `http://127.0.0.1:${(hangup.address() as AddressInfo).port}`;
     });

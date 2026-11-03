@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { Command } from "commander";
@@ -41,8 +42,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
         res.end(JSON.stringify(mode === "success" ? { qitemId: requests[0]!.body.qitemId } : { error: "qitem_id_reuse" }));
       }
     });
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
+    await listenOwnedHttpFixture(server);
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("missing fixture address");
     allowFetchTarget(`http://127.0.0.1:${address.port}`);

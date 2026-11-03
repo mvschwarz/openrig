@@ -1,5 +1,31 @@
 # Native Windows parity: implementation and evidence
 
+## Final manually identified HTTP listeners and guard-test separation (2026-11-03)
+
+Eight real HTTP fixture listeners previously hidden in mixed/dynamic-import or
+event-wait forms now use the owned high-port helper. Their delayed responses,
+interrupted bodies, forwarding outcomes and explicit mock Slack HTTP service
+remain intact. The guard's deliberate OS-port-zero registration test remains,
+but exercises the guarded node:http path so fetch's own bad-port list cannot
+obscure registration. A separate actual high-port test clears registration and
+proves global fetch's loopback-shape permission while retaining canonical-daemon
+refusal. No guard permit rule was widened.
+
+The eight changed fixture files plus guard/helper regressions passed all 144
+tests with two workers and no skips. CLI typecheck and whitespace checks passed.
+The structural remainder is ten direct port-zero calls, with zero imported Hono
+port-zero calls. Seven serve pure TCP occupancy, PID ownership, exclusive binding
+or IPv6 probe tests and retain their original port semantics; one is the explicit
+guard registration test. Two closed-port TCP allocation helpers subsequently feed
+real fetch refusal tests and still need high-port qualification to establish an
+actual socket refusal rather than fetch's `bad port` error. Those two are not
+classified as fixed or harmless.
+
+This is not a fresh full-directory green result or completion of Windows parity.
+File identity mapping and real terminal/provider gaps remain outstanding. No
+original team, real-provider/psmux opt-in, exhausted desktop-discovery fixture,
+deployment or public push was exercised.
+
 ## Callback-preserving HTTP fixture migration (2026-11-03)
 
 Thirty-nine additional direct port-zero HTTP calls in 33 CLI fixture files now

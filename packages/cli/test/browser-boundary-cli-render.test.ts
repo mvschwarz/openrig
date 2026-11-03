@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The real `rig ps` / `rig send` code paths, real DaemonClient and real HTTP, rendering the exact
 // refusal body produced by the daemon's browser boundary. (A real CLI request cannot present an
 // unlisted target name without DNS: Node fetch sends the URL's host, not an explicit Host header.)
@@ -24,7 +25,7 @@ beforeAll(async () => {
   const res = await daemon.request("/api/ps", { headers: { Host: "unlisted.example:7433" } });
   refusalBody = await res.text();
   server = http.createServer((_req, res2) => { res2.writeHead(403, { "content-type": "application/json" }); res2.end(refusalBody); });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  await listenOwnedHttpFixture(server);
   port = (server.address() as AddressInfo).port;
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });

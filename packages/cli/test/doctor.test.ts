@@ -1,3 +1,4 @@
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { describe, it, expect, vi } from "vitest";
 import path from "node:path";
 import { createProgram } from "../src/index.js";
@@ -597,7 +598,7 @@ describe("runDoctorChecks", () => {
   it("settles a real listener's held /healthz body the same way, through the real fetch", async () => {
     const { createServer } = await import("node:http");
     const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true,'); });
-    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    await listenOwnedHttpFixture(server);
     const port = (server.address() as { port: number }).port;
     allowFetchTarget(`http://127.0.0.1:${port}`);
     try {
