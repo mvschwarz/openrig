@@ -18,6 +18,7 @@
 //   remains surface=none (no Explorer).
 
 import { describe, it, expect } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { setupAppShellTestEnv, renderAppShellAt } from "./helpers/app-shell-env.js";
@@ -37,6 +38,16 @@ const renderAt = (initialPath: string, opts: { innerWidth?: number } = {}) =>
   renderAppShellAt(AppShell, initialPath, opts);
 
 describe("AppShell — Phase 2 chrome", () => {
+  it("places the dismissible notice before the header inside the shell", async () => {
+    const view = await renderAt("/for-you", { innerWidth: 390 });
+    const notice = view.getByTestId("ui-maintenance-notice");
+    const header = view.getByTestId("app-topbar");
+    expect(notice.nextElementSibling).toBe(header);
+    fireEvent.click(view.getByRole("button", { name: "Dismiss maintenance notice" }));
+    expect(view.queryByTestId("ui-maintenance-notice")).toBeNull();
+    expect(header.parentElement?.firstElementChild).toBe(header);
+  });
+
   describe("SC-1: exactly 2 left chromes on desktop (rail + explore)", () => {
     it("renders exactly 2 left chromes at /topology desktop (rail + explore) — SC-1 strict count", async () => {
       const { container } = await renderAt("/topology");
@@ -236,6 +247,9 @@ describe("AppShell — Phase 2 chrome", () => {
       const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
       expect(tray).toBeTruthy();
       expect(tray.className).toContain("-translate-x-full");
+      // Keep every link reachable when the notice leaves a short viewport.
+      expect(tray.className).toContain("overflow-y-auto");
+      expect(tray.className).toContain("bottom-14");
     });
 
     // Slice 20 mobile: hamburger menu items stack vertically
@@ -264,7 +278,7 @@ describe("AppShell — Phase 2 chrome", () => {
       const rail = tray.querySelector("[data-testid='app-rail']") as HTMLElement;
       expect(rail.style.width).toBe("");
       expect(rail.className).toMatch(/\bw-full\b/);
-      expect(tray.className).toContain("top-12");
+      expect(tray.className).toContain("top-0");
       // The rail must be allowed to shrink so its link list scrolls
       // inside the tray instead of running under the bottom nav.
       expect(rail.className).toMatch(/\bmin-h-0\b/);

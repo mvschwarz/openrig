@@ -1185,7 +1185,11 @@ export class ClaudeCompactionEnforcer {
       this.reconcilePreparations();
     } while (attempt.status === "waiting");
     if (!idle.ok || attempt.status !== "waiting") {
-      const reason = attempt.reason ?? (!idle.ok ? idle.reason : "preparation_incomplete");
+      // The transport was given this attempt's remaining budget; name its timeout like preparation expiry.
+      const reason = attempt.reason ?? (idle.ok ? "preparation_incomplete"
+        : idle.reason === "wait_for_idle_timeout"
+          ? this.mapReady(attempt) ? "map_complete_seat_never_idle" : "preparation_incomplete"
+          : idle.reason);
       return failed(reason);
     }
     const compact = await this.sendPreparedCompact(input, attempt, opts.skipMap === true);

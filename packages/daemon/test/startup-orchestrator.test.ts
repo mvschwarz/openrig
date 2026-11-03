@@ -1478,6 +1478,34 @@ describe("StartupOrchestrator", () => {
     } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it("delivers contained identity, role and actions without host input when the viewer exits after readiness", async () => {
+    const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "contained-startup-race-"));
+    try {
+      const marker = nodePath.join(dir, "host-executed");
+      const seed = seedSession(); db.prepare("UPDATE nodes SET runtime='openshell-claude' WHERE id=?").run(seed.nodeId);
+      let passed: string | undefined; let viewerExited = false;
+      const contained = { platform: { forNode: () => ({ guestRoot: "/sandbox/openrig" }) }, preflight: async () => {}, project: async () => ({ projected: [], skipped: [], failed: [] }),
+        deliverStartup: async () => ({ delivered: 1, failed: [] }),
+        launch: async (_binding: unknown, opts: { firstInputText?: string }) => { passed = opts.firstInputText;
+          return { ok: true, ...(passed ? { firstInput: { path: "/guest/control/first-input.txt", submission: "unconfirmed" } } : {}) }; },
+        checkReady: async () => { viewerExited = true; return { ready: true }; } };
+      const adapter = new CommunityHarnessRuntimeAdapter("openshell-claude", { environmentStartup: contained as never,
+        tmux: { hasSession: async () => true, getPaneCommand: async () => { viewerExited = true; return "node"; }, sendShellCommand: async () => ({ ok: true }) } });
+      vi.mocked(tmux.sendText).mockImplementation(async (_target, text) => {
+        if (viewerExited) { try { execFileSync("/bin/sh", ["-c", text], { stdio: "ignore" }); } catch {} }
+        return { ok: true };
+      });
+      const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/role.md", ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+      const result = await createOrchestrator({ readFile: () => `Selected role\ntouch '${marker}'` }).startNode(makeInput(seed, { adapter,
+        resolvedStartupFiles: [role], startupActions: [makeIdentityAction(), makeAction({ type: "send_text", value: "selected after-ready instruction" })] }));
+      expect(nodeFs.existsSync(marker)).toBe(false);
+      expect(tmux.sendText).not.toHaveBeenCalled(); expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(passed).toContain("OpenRig-generated identity context");
+      expect(passed).toContain("role.md"); expect(passed).toContain("selected after-ready instruction");
+      expect(result.ok).toBe(true);
+    } finally { nodeFs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it.each([[false, false, false], [true, false, false], [true, true, false], [true, false, true]])("passes the composed first input at launch (%s), assistance (%s), uncertain launch (%s)", async (firstInput, assisted, uncertain) => {
     const dir = nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "first-input-"));
     try {

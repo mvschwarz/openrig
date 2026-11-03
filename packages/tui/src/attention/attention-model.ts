@@ -123,9 +123,13 @@ export function answerRequest(action: Extract<Action, { type: "act"; act: "answe
   return { ...input, authority: "primary-user" as const };
 }
 
-/** Who an act on the Feed is recorded as: the primary user once anyone is registered, else the served actor, as before. */
-export function actingAs(read: AttentionRead | null | undefined, served: string): string {
-  return read?.perspective ? read.perspective.actingAs.person ?? "the primary user" : served;
+/** What a terminal act is recorded as: the terminal names no responder, so it's unattributed. */
+const UNATTRIBUTED_AT_TERMINAL = "human@host (unattributed)";
+
+/** Who an act on the Feed is recorded as: unattributed, since the terminal names no responder (the served actor is the
+ *  asked person's address, not who typed), whoever is registered. */
+export function actingAs(_read: AttentionRead | null | undefined, _served: string): string {
+  return UNATTRIBUTED_AT_TERMINAL;
 }
 
 /** The TUI opens on the default person's Feed only when the participants file chose one, and only while the person hasn't
@@ -139,7 +143,7 @@ function feedTitle(p: AttentionRead["perspective"]): string {
   if (!p) return "FEED · Instance / All humans";
   const viewing = p.basis === "unknown" ? `no registered person "${p.requested}"` : p.viewing ?? "everyone";
   // One person's queue leaves others' asks out of view: say how to see everyone's.
-  return `FEED · Viewing ${viewing} · you act as ${p.actingAs.person ?? "the primary user"}${p.viewing ? " · whose all shows everyone" : ""}`;
+  return `FEED · Viewing ${viewing} · you act as ${UNATTRIBUTED_AT_TERMINAL}${p.viewing ? " · whose all shows everyone" : ""}`;
 }
 
 /** The `reply` command on the open request: the person's own words, answered on that row as the person the Feed served. */

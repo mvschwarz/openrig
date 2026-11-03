@@ -91,7 +91,7 @@ export function SharedDetailDrawer({
       // CORRECTIVE §7.2 — the LEFT reinvention is REVERTED (founder 2026-07-05):
       // back to the app-wide RIGHT edge, and the FR-11.1 z-bump comes out with
       // it (the right edge never contended with the sidebar's opaque z-40).
-      className="fixed top-14 right-0 bottom-0 left-0 z-30 pointer-events-none"
+      className="absolute top-0 right-0 bottom-0 left-0 z-30 pointer-events-none"
     >
       <button
         type="button"
@@ -107,8 +107,7 @@ export function SharedDetailDrawer({
         width="wide"
         onClose={onClose}
         testId="shared-detail-drawer"
-        // top-14 starts below the universal top bar (h-14, fixed at top); bottom-0
-        // anchors to viewport bottom so the drawer fills the remaining height.
+        // The shell content bounds keep the drawer below the notice and header.
         // Bounce-fix #3 width-coupling: 38rem (lg:w-[38rem]) per VellumSheet wide preset.
         className="absolute top-0 right-0 bottom-0 z-10 pointer-events-auto"
       >

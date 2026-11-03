@@ -15,7 +15,15 @@ export class OpenShellDriver implements EnvironmentDriver {
   readonly version = 1 as const;
   constructor(private readonly command: OpenShellCommand = async args => {
     try { return (await runFile("openshell", args, { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 })).stdout; }
-    catch { throw new EnvironmentError("openshell_transport_unconfirmed", "OpenShell did not return a confirmed result; reconcile the saved operation", 503); }
+    catch (error) {
+      const failure = error as { code?: unknown; stderr?: unknown };
+      const oldHelper = args.includes("/opt/openrig/guest.py") && args.includes("--prepare") && args.includes("--first-input-required")
+        && typeof failure?.code === "number" && failure.code !== 0 && typeof failure.stderr === "string"
+        && /^guest\.py: error: unrecognized arguments: --first-input-required[ \t\r]*$/m.test(failure.stderr);
+      throw new EnvironmentError("openshell_transport_unconfirmed", oldHelper
+        ? "The guest helper rejected --first-input-required and likely predates first input. Rebuild the maintained image with the guest.py shipped by this OpenRig version; see the OpenShell worker README. The saved launch remains unconfirmed; reconcile it before another launch."
+        : "OpenShell did not return a confirmed result; reconcile the saved operation", 503);
+    }
   }) {}
   private prefix(place: Placement): string[] { return ["--gateway", place.gateway, "--workspace", place.workspace, "sandbox"]; }
   private resource(value: unknown): EnvironmentResource {

@@ -426,6 +426,9 @@ export function TopologyTableView({ rigIdScope, podNameScope }: { rigIdScope?: s
 
   const table = useReactTable({
     data: activityData,
+    // This table has no pagination. Resetting an unused page index on fresh
+    // query results feeds a render/reset loop when filtering or sorting.
+    autoResetPageIndex: false,
     columns,
     state: { sorting, globalFilter: search },
     onSortingChange: setSorting,

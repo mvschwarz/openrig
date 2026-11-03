@@ -21,9 +21,9 @@ import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-rout
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
 import type { HumanFragment } from "../src/domain/gateway/human-registry.js";
 
-// An agent asks a person, then parks the ask on that same person. A colleague who writes in the ask's thread reaches the
-// agent that asked, as themselves, exactly as on a pending ask; the park stays on the person asked until they answer;
-// and the park's own post goes into the ask's thread rather than opening a second root. A person's Slack message, as it
+// An agent asks a person, then parks the ask on that same person. A registered colleague who writes in the ask's thread
+// answers it as themselves, once, exactly as on a pending ask, and the person asked writing afterwards is words for the
+// agent; the park's own post goes into the ask's thread rather than opening a second root. A person's Slack message, as it
 // arrived, is never posted back to Slack as an ask, so its internal routing lines and a shared channel's policy stay in
 // OpenRig; an agent that later parks that message on a person makes a new ask, which posts.
 
@@ -87,7 +87,7 @@ async function fixture() {
 }
 
 describe("an ask its asker parked on the person asked", () => {
-  it("a colleague's reply reaches the asker as theirs; the park stays on the person asked; its post stays in the ask's thread", async () => {
+  it("a colleague's reply answers the park as theirs; the person asked writing later doesn't answer again; its post stays in the ask's thread", async () => {
     const f = await fixture();
     const first = f.post((await f.alertFor(f.ask.qitemId))!);
     expect(first).toEqual({ threadTs: "1.1", newRoot: true });
@@ -99,28 +99,38 @@ describe("an ask its asker parked on the person asked", () => {
     // Same row, same person and seat: the park's post goes into the ask's thread, not a second top-level root.
     expect(f.post(park)).toEqual({ threadTs: "1.1", newRoot: false });
 
-    // A registered colleague types in that thread.
+    // A registered colleague types in that thread: their reply is the park's answer, as theirs.
     await f.typed("UMIKE", "afternoon", "1.1", "3.3");
-    expect(f.repliesFrom(MIKE)).toEqual([expect.objectContaining({ destination: ASKER, humanAnswer: false })]);
-    expect(f.state()).toEqual({ state: "blocked", blockedOn: ANA, answers: null, resolvedBy: [] });
+    expect(f.repliesFrom(MIKE)).toEqual([expect.objectContaining({ destination: ASKER, humanAnswer: true })]);
+    expect(f.state()).toEqual({ state: "in-progress", blockedOn: null, answers: null, resolvedBy: [MIKE] });
     // Nothing they wrote is owed a Slack post.
     for (const item of await f.alerts()) expect(item.sourceSession).not.toBe(MIKE);
 
-    // The person asked still answers in the same thread, and the answer is theirs.
+    // The person asked writing afterwards, in the same thread, is words for the agent: the answer stays the colleague's.
+    await f.typed("UANA", "morning", "1.1", "4.4");
+    expect(f.state()).toMatchObject({ state: "in-progress", resolvedBy: [MIKE] });
+    // The resolution's notice goes to the person who resolved it, as any resolve's does.
+    expect(await f.alertFor(f.ask.qitemId)).toMatchObject({ destinationSession: MIKE, sourceSession: ASKER, ownerNotificationKind: "human-decision-resolved" });
+  });
+
+  it("control: the person asked answers the park, and the resolution's notice posts in the ask's thread", async () => {
+    const f = await fixture();
+    f.post((await f.alertFor(f.ask.qitemId))!);
+    f.repo.update({ qitemId: f.ask.qitemId, actorSession: ASKER, state: "blocked", blockedOn: ANA, transitionNote: "parked on Ana" });
+    expect(f.post((await f.alertFor(f.ask.qitemId))!)).toEqual({ threadTs: "1.1", newRoot: false });
     await f.typed("UANA", "morning", "1.1", "4.4");
     expect(f.state()).toMatchObject({ state: "in-progress", resolvedBy: [ANA] });
-    // The resolution's notice is the asker's, and posts in the ask's thread.
     const resolved = (await f.alertFor(f.ask.qitemId))!;
     expect(resolved).toMatchObject({ destinationSession: ANA, sourceSession: ASKER, ownerNotificationKind: "human-decision-resolved" });
     expect(f.post(resolved)).toEqual({ threadTs: "1.1", newRoot: false });
   });
 
-  it("control: on a pending ask, the colleague's reply reaches the asker and the ask stays open", async () => {
+  it("control: on a pending ask, the colleague's reply reaches the asker as the answer, theirs", async () => {
     const f = await fixture();
     f.post((await f.alertFor(f.ask.qitemId))!);
     await f.typed("UMIKE", "afternoon", "1.1", "3.3");
-    expect(f.repliesFrom(MIKE)).toEqual([expect.objectContaining({ destination: ASKER, humanAnswer: false })]);
-    expect(f.state()).toEqual({ state: "pending", blockedOn: null, answers: null, resolvedBy: [] });
+    expect(f.repliesFrom(MIKE)).toEqual([expect.objectContaining({ destination: ASKER, humanAnswer: true })]);
+    expect(f.state()).toEqual({ state: "done", blockedOn: null, answers: null, resolvedBy: [MIKE] });
   });
 
   it("a person's Slack message that lands on another person (a root stamped with a person as its seat) isn't posted back", async () => {
@@ -133,6 +143,7 @@ describe("an ask its asker parked on the person asked", () => {
     // It isn't owed a Slack post (its body carries OpenRig's routing lines); it's on Steering and the TUI.
     expect(await f.alertFor(reply!.qitemId)).toBeNull();
     expect(f.repo.listAttention({ limit: 100 }).map((item) => item.qitemId)).toContain(reply!.qitemId);
+    // It reached another person, not the asker, so it doesn't settle the ask.
     expect(f.state()).toMatchObject({ state: "pending", answers: null, resolvedBy: [] });
   });
 

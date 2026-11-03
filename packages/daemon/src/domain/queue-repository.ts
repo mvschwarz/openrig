@@ -39,7 +39,7 @@ import {
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
-import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
+import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, formatHumanAnswers, humanAnswerText, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 import { slackMicros } from "./gateway/slack/state-store.js";
 
 /** A direct ask's answer row ID: from the ask, or from the ask and the park episode its answer belongs to. */
@@ -117,6 +117,9 @@ const FALLBACK_ACTOR = "system:queue-fallback";
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
  *  first-class, compact-visible, downstream-classifiable blocker (the ruling detail rides a transition). */
 export const TYPED_GATE_BLOCKER_PREFIXES = ["fold:", "auth:", "external:"] as const;
+
+/** The actor a terminal act is recorded as when it names no responder: explicitly unattributed, never a person. */
+export const UNATTRIBUTED_ACTOR = "human@host";
 export function typedGateBlockerPrefix(value: string): string | null {
   return TYPED_GATE_BLOCKER_PREFIXES.find((p) => value.startsWith(p)) ?? null;
 }
@@ -1850,6 +1853,9 @@ export class QueueRepository {
     const qitemId = humanAnswerId(input.inboundReplyTo, episodeKey);
     const existing = episodeKey ? this.getById(qitemId) : this.getHumanAnswer(input.inboundReplyTo, input.sourceSession);
     if (existing) return existing;
+    // One reply per ask: another person's answer already returned is the answer, so it comes back, and the caller says so.
+    const answered = this.getById(qitemId);
+    if (answered) return answered;
     return this.create({ ...create, qitemId, tags: [...new Set([...(input.tags ?? []), "human-answer"])] });
   }
 
@@ -2171,11 +2177,11 @@ export class QueueRepository {
     return registry.ok && resolveRegisteredHumanAddress(destination, registry.entities) !== null;
   }
 
-  /** Who may answer an ask: the asked person; and on a runner's permission request, any registered person, since a
-   *  person's yes counts however it arrives there. A shared channel never answers. */
+  /** Who may answer an ask: the asked person, and any other registered person in this workspace, who's recorded as
+   *  themselves with the asked person kept (one trusted workspace, equal authority). A shared channel never answers. */
   answersAsk(item: QueueItem, actorSession: string): boolean {
     if (item.destinationSession === actorSession) return true;
-    if (!runnerPermissionOrigin(item) || this.isSharedChannel(actorSession)) return false;
+    if (this.isSharedChannel(actorSession)) return false;
     const registry = this.loadHumanRegistryFn();
     return registry.ok && resolveRegisteredHumanAddress(actorSession, registry.entities) !== null;
   }
@@ -2190,8 +2196,8 @@ export class QueueRepository {
     return this.loadHumanRegistryFn();
   }
 
-  /** The asked person, when a different registered person is acting on what was asked of them; else null. An agent, the
-   *  asked person under another spelling, and an ask to no registered person aren't someone else. */
+  /** The asked person, when a different registered person is acting on what was asked of them, so the record names both;
+   *  else null. An agent, the asked person under another spelling, and an ask to no registered person aren't someone else. */
   askedSomeoneElse(actorSession: string, askedSession: string | null | undefined): string | null {
     const registry = this.loadHumanRegistryFn();
     if (!registry.ok) return null;
@@ -3796,29 +3802,56 @@ export class QueueRepository {
    * button set is already final; its resolve continuation must not overwrite those answers.
    */
   resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string; primaryUser?: boolean }): boolean {
+    let mine = true;
     const result = this.db.transaction(() => {
       const item = this.getById(input.qitemId);
       if (item?.state !== "pending" || item.humanIntent === "update"
         || (!this.answersAsk(item, input.actorSession) && !input.primaryUser)
         || !this.isPersonAddress(item.destinationSession)) return null;
-
-      let transitionNote = item.destinationSession === input.actorSession ? "direct human reply received"
-        : input.primaryUser ? `reply from ${input.actorSession}, the primary user at the terminal, on ${item.destinationSession}'s ask; not answered by ${item.destinationSession}`
-        : `reply from ${input.actorSession}, a registered person, on the runner permission request asked of ${item.destinationSession}`;
-      const placed = this.placeTypedReply(item, input.decision);
-      if (placed) transitionNote += `; ${placed}`;
-      return this.updateInTransactionalContext({
-        qitemId: input.qitemId,
-        actorSession: input.actorSession,
-        state: "done",
-        closureReason: "no-follow-on",
-        transitionNote,
-        ownerNotificationKind: "human-decision-resolved",
-      });
+      // One answer per ask: another person's committed return is the answer, so the ask closes as theirs, with their words,
+      // and this caller's don't settle it (false tells the caller so).
+      const winner = this.committedAnswerFromAnother(item.qitemId, input.actorSession);
+      if (winner) {
+        mine = false;
+        const questions = item.humanQuestions ?? [];
+        const decision = questions.length && unansweredQuestions(questions, item.humanAnswers ?? {}).length === 0
+          ? formatHumanAnswers(questions, item.humanAnswers ?? {}).join("; ") : humanAnswerText(winner.body);
+        return this.closeDirectAsk(item, winner.sourceSession, decision, !this.answersAsk(item, winner.sourceSession));
+      }
+      return this.closeDirectAsk(item, input.actorSession, input.decision, input.primaryUser === true);
     })();
     if (!result) return false;
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
-    return true;
+    return mine;
+  }
+
+  /** Another person's committed return to this ask: its shared reply (for a park's question, `episodeKey`'s). It's the
+   *  answer, so a different person's later attempt settles with it rather than their own. Null when there's none, or it's
+   *  this actor's. */
+  committedAnswerFromAnother(qitemId: string, actorSession: string, episodeKey?: string): QueueItem | null {
+    const row = this.getById(humanAnswerId(qitemId, episodeKey));
+    return row && row.replyTo === qitemId && row.sourceSession !== actorSession ? row : null;
+  }
+
+  /** Close a pending direct ask as `actor`, its typed words under the first unanswered question. Inside a transaction. */
+  private closeDirectAsk(item: QueueItem, actor: string, decision: string, primaryUser: boolean) {
+    const asked = item.destinationSession;
+    let transitionNote = asked === actor ? "direct human reply received"
+      : primaryUser && actor === UNATTRIBUTED_ACTOR
+        ? `reply from someone at the terminal OpenRig can't name (${UNATTRIBUTED_ACTOR}), unattributed, on ${asked}'s ask; not answered by ${asked}`
+      : primaryUser ? `reply from ${actor}, the primary user at the terminal, on ${asked}'s ask; not answered by ${asked}`
+      : runnerPermissionOrigin(item) ? `reply from ${actor}, a registered person, on the runner permission request asked of ${asked}`
+      : `reply from ${actor}, a registered person, on ${asked}'s ask; not answered by ${asked}`;
+    const placed = this.placeTypedReply(item, decision);
+    if (placed) transitionNote += `; ${placed}`;
+    return this.updateInTransactionalContext({
+      qitemId: item.qitemId,
+      actorSession: actor,
+      state: "done",
+      closureReason: "no-follow-on",
+      transitionNote,
+      ownerNotificationKind: "human-decision-resolved",
+    });
   }
 
   /** Store a typed reply under the first unanswered question, keeping earlier clicks; the placement note, or null. */
@@ -3857,7 +3890,7 @@ export class QueueRepository {
     clickedTs?: string }): RecordHumanAnswerResult {
     if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
     if (this.closeStaleRunnerPermission(input.qitemId)) return { status: "not-applicable", reason: "state-canceled" };
-    return this.db.transaction(() => {
+    const result = this.db.transaction((): RecordHumanAnswerResult => {
       const item = this.getById(input.qitemId);
       if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
       if (item.state !== "pending" && !this.answersPark(item, input.actorSession, input.clickedTs)) {
@@ -3870,10 +3903,18 @@ export class QueueRepository {
           ...(decidedForThem ? { decidedForThem } : {}) };
       }
       if (!this.answersAsk(item, input.actorSession) && !input.primaryUser) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
+      // One answer per question: another person's committed return is the answer (a park's, for its current question), so
+      // nothing of this person's is recorded.
+      const episodeKey = item.state === "pending" ? undefined : this.currentHumanRequiredEpisode(item.qitemId)?.key;
+      const winner = item.state === "pending" || episodeKey ? this.committedAnswerFromAnother(item.qitemId, input.actorSession, episodeKey) : null;
+      if (winner) return { status: "not-applicable" as const, reason: "answered", answeredBy: winner.sourceSession };
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
-      if (unansweredQuestions(item.humanQuestions, recorded).length === 0) {
+      // A park's set is final once this park has its answer: until then a complete set is an earlier park's, and a click
+      // on the re-park records over it.
+      if (unansweredQuestions(item.humanQuestions, recorded).length === 0
+        && (item.state === "pending" || this.currentEpisodeAnswer(item.qitemId, input.actorSession))) {
         return { status: "recorded" as const, answers: recorded, complete: true, questions: item.humanQuestions };
       }
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
@@ -3881,13 +3922,19 @@ export class QueueRepository {
       const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
       return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
     })();
+    // A pending ask's interrupted close finishes here, as theirs; a park resumes with it through the reply resolver.
+    if (result.status === "not-applicable" && result.answeredBy) {
+      this.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision: "", primaryUser: input.primaryUser });
+    }
+    return result;
   }
 
-  /** A decision parked on the person it asked takes that person's click or typed reply as its answer (makeHumanReplyResolver
-   *  resumes it): the park is on them by any of their addresses, and the answer came after its current question posted. */
+  /** A decision parked on the person it asked takes their click or typed reply, or another registered person's, as its
+   *  answer (makeHumanReplyResolver resumes it): the park is on a person, and the answer came after its current question
+   *  posted. */
   answersPark(item: QueueItem, actorSession: string, answeredTs: string | undefined): boolean {
     if (item.state !== "blocked" || !item.blockedOn || !this.isPersonAddress(item.blockedOn)) return false;
-    if (item.destinationSession !== actorSession || this.askedSomeoneElse(actorSession, item.blockedOn)) return false;
+    if (!this.isPersonAddress(item.destinationSession) || !this.answersAsk(item, actorSession)) return false;
     const posted = slackMicros(this.currentHumanRequiredEpisode(item.qitemId)?.receipt?.messageTs);
     const answered = slackMicros(answeredTs);
     return posted !== null && answered !== null && answered > posted;
@@ -4580,6 +4627,8 @@ export class QueueRepository {
       : item.state === "blocked"
         ? resolveRegisteredHumanAddress(item.blockedOn, registry.entities)
         : resolveRegisteredHumanAddress(item.destinationSession, registry.entities);
+    // A person with no connector is reached in the Feed and Steering only: nothing is posted to them, so nothing is owed.
+    if (humanAddress && registry.entities.find((entity) => entity.address === humanAddress)?.connectorBindings.length === 0) return "inactive";
     // An ask placed on Steering without an alert (RECORD) owes no post: its ledger reports a real receipt (a posting
     // dial set to RECORD posts it) and never a missing one.
     return humanAddress

@@ -90,16 +90,15 @@ describe("Steering resolves a registered person's park without changing its owne
     expect(repo.getById(sibling)).toEqual(siblingBefore);
   });
 
-  it("refuses a different registered person before any transition, audit or nudge, even if the body claims the asked person", async () => {
+  it("a different registered person settles it as themselves, on the asked person's park, even if the body claims the asked person", async () => {
     const id = await park();
-    const before = repo.getById(id);
-    const history = repo.transitionLog.listForQitem(id);
-    expect(await act(id, "other-person@external", "resolve", "No", "fixture-person@external"))
-      .toMatchObject({ status: 400, body: { error: "answer_not_recorded", asked: "fixture-person@external" } });
-    expect(repo.getById(id)).toEqual(before);
-    expect(repo.transitionLog.listForQitem(id)).toEqual(history);
-    expect(log.listForQitem(id)).toHaveLength(0);
-    expect(nudges).toHaveLength(0);
+    expect((await act(id, "other-person@external", "resolve", "No", "fixture-person@external")).status).toBe(200);
+    expect(repo.getById(id)).toMatchObject({ state: "in-progress", blockedOn: null });
+    expect(repo.transitionLog.listForQitem(id).at(-1)).toMatchObject({ actorSession: "other-person@external",
+      transitionNote: "No; by other-person@external, a registered person, on fixture-person@external's ask" });
+    expect(log.listForQitem(id)).toHaveLength(1);
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0]).toMatchObject({ session: "current-owner@fixture" });
   });
 
   it.each(["human@host", "human-review@kernel"])("keeps the legacy park %s settleable by an agent", async (blockedOn) => {
@@ -120,7 +119,6 @@ describe("Steering resolves a registered person's park without changing its owne
   it("keeps direct answers repeat-safe and addressed to the asker", async () => {
     const ask = await repo.create({ sourceSession: "asker@fixture", destinationSession: "fixture-person@external",
       body: "Ship?", summary: "Ship?", humanIntent: "decision", evidenceRef: "fixture/ship", nudge: false });
-    expect(await act(ask.qitemId, "other-person@external", "answer")).toMatchObject({ status: 400 });
     const first = await act(ask.qitemId, "fixture-person@external", "answer", "Ship it");
     expect(first.status).toBe(200);
     const replay = await act(ask.qitemId, "fixture-person@external", "answer", "Different words");

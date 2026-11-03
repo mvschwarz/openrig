@@ -42,6 +42,7 @@ import {
   TopologyOverlayProvider,
   useTopologyOverlay,
 } from "./topology/topology-overlay-context.js";
+import { UiMaintenanceNotice } from "./UiMaintenanceNotice.js";
 import { ThemeSelector } from "./ThemeSelector.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useClearPlacementOnHostSwitch } from "../hooks/useHosts.js";
@@ -312,6 +313,7 @@ function AppShellInner({ children }: AppShellProps) {
           }}
         >
           <div className="h-screen flex flex-col">
+            <UiMaintenanceNotice />
             {/* Top bar — universal across viewports per universal-shell.md
                 L40–L53. Single source of truth: same element renders at
                 all sizes. Hamburger button keeps its own lg:hidden so it
@@ -375,6 +377,7 @@ function AppShellInner({ children }: AppShellProps) {
 
             {/* Main: rail + explore + center + drawer */}
             <div
+              id="shell-content"
               className="flex flex-1 min-h-0 relative"
               style={{ "--sidebar-current-width": isWideLayout ? sidebarWidth : "0rem" } as CSSProperties}
             >
@@ -397,7 +400,7 @@ function AppShellInner({ children }: AppShellProps) {
                   {(explorerOpen || mobileExplorerOpen) && (
                     <div
                       data-testid="mobile-drawer-backdrop"
-                      className="fixed inset-0 bg-black/50 z-20 lg:hidden"
+                      className="absolute inset-0 bg-black/50 z-20 lg:hidden"
                       onClick={() => {
                         setExplorerOpen(false);
                         setMobileExplorerOpen(false);
@@ -408,8 +411,8 @@ function AppShellInner({ children }: AppShellProps) {
                     data-testid="mobile-rail-tray"
                     inert={!explorerOpen}
                     className={cn(
-                      "fixed top-12 left-0 bottom-0 z-30 bg-background transition-transform duration-200 ease-tactical lg:hidden",
-                      "w-72 max-w-[80vw] flex flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))]",
+                      "absolute top-0 left-0 bottom-14 mb-[env(safe-area-inset-bottom)] z-30 bg-background transition-transform duration-200 ease-tactical lg:hidden",
+                      "w-72 max-w-[80vw] flex flex-col overflow-y-auto",
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
                   >

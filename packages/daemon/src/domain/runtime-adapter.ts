@@ -224,7 +224,7 @@ export interface ForkSource {
  */
 export interface RuntimeAdapter {
   /** Optional environment-driver v1 operations. Absence means unsupported; the host launch path is unchanged. */
-  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate">;
+  readonly environment?: Pick<import("./environment-platform.js").EnvironmentPlatform, "protocolVersion" | "create" | "attach" | "project" | "validate" | "forNode">;
   preflightEnvironmentStartup?(binding: NodeBinding, opts: { resumeToken?: string; resumeType?: string; forkSource?: unknown }): Promise<void>;
   prepareEnvironmentStartup?(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
   /** Claude's managed capability/launch seam, shared with seat selection. */

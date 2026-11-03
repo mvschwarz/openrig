@@ -98,6 +98,8 @@ export type SuccessorLaunchResult =
       resumeToken?: string;
       resumeType?: string;
       appliedLaunch?: AppliedLaunchObservation;
+      /** How the departing occupant's process ended at the cutover: it exited on TERM, or was killed after the TERM window. */
+      retireeExit: "graceful" | "forced";
       /**
        * OPR.0.4.6.02 S1 — non-fatal tmux option-default warnings from the
        * fresh successor's launch (mouse/status/clipboard). Present only when
@@ -315,6 +317,7 @@ export class SuccessorSessionLauncher {
       resumeToken: started.resumeToken,
       resumeType: started.resumeType,
       appliedLaunch: started.appliedLaunch,
+      retireeExit: terminated.path,
       ...(respawned.warnings ? { warnings: respawned.warnings } : {}),
     };
   }
