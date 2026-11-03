@@ -103,6 +103,9 @@ const PROMPT_DRAFT_PATTERNS = [
 // Claude's permission-mode footers: default, accept edits, bypass, auto and plan, optionally after a
 // vim-mode marker such as "-- INSERT --" (#808). A suffix such as "· 1 shell" can follow the mode.
 const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts\b)/;
+// Claude Code wraps its input short of the box (#2429). In its native 2.1.296 wrapped frame (test fixtures/input-box) a
+// 118-column box wraps a 112-column row before a word that would still fit, so its text width there is 112 to 117.
+const CLAUDE_WRAP_SLACK = 6;
 
 // Sibling pattern identical to CLAUDE_MODE_FOOTER except that it ends in \? for shortcuts$,
 // keeping unframed-composer and selectionLines checks anchored on the default footer (#808).
@@ -462,7 +465,7 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
     const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
     const nativeCodex = prompt.glyph !== "❯" && codexFooterSeparator(lines) === end;
-    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), cursorAtEnd, collapsedPaste: label, frame,
+    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), ...(prompt.glyph === "❯" ? { wrapSlack: CLAUDE_WRAP_SLACK } : {}), cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
     // previously empty composer. A newly observed menu gains no such authority.
