@@ -371,11 +371,15 @@ export function RigScopePage() {
   // learns the selection itself.
   const { known: hostSelectionKnown, isLocal: hostSelectionLocal } = useHostSelection();
   const rigScopeIsRemote = hostSelectionKnown && !hostSelectionLocal;
-  const rigScopeActionsAllowed = hostSelectionKnown && hostSelectionLocal;
+  // F11 (#2417): useRigSummary uses keepPreviousData, so right after a
+  // remote→local switch the exposed summary can still be the REMOTE host's
+  // (placeholder). Actions target the LOCAL daemon — require a fresh,
+  // non-placeholder summary for the selected host and a matching rig.
+  const { data: rigs, isPlaceholderData: rigsPlaceholder } = useRigSummary();
+  const rigScopeActionsAllowed = hostSelectionKnown && hostSelectionLocal && !rigsPlaceholder;
   const { rigId } = useParams({ from: "/topology/rig/$rigId" });
-  const { data: rigs } = useRigSummary();
   const rigStatus = useRigStatusResolver();
-  const rig = rigs?.find((r) => r.id === rigId);
+  const rig = !rigsPlaceholder ? rigs?.find((r) => r.id === rigId) : undefined;
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
   const { isWideLayout } = useShellViewport();
   useOverlayForActiveTab(active);
