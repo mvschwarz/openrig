@@ -599,7 +599,7 @@ export class StartupOrchestrator {
           if (input.adapter.environment) {
             const selected = input.adapter.environment.forNode(input.nodeId, input.binding.tmuxSession ?? undefined);
             if (!selected) throw new Error("The selected environment destination is unavailable");
-            launchChallenge = shouldChallenge ? issueStartupChallenge(this.eventBus, {
+            launchChallenge = continuityOutcome === "fresh" && startupProof.mode === "authenticated" ? issueStartupChallenge(this.eventBus, {
               rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
             }) : null;
             const actions = input.startupActions.filter(a => a.type === "send_text" && !isSessionIdentityAction(a)

@@ -141,7 +141,7 @@ export class EnvironmentStartup {
     try {
       const selected = this.selected(binding);
       if (selected.generation !== binding.launchGeneration) throw new Error("The selected guest generation changed");
-      const native = new EnvironmentLifecycle(this.platform).native(selected);
+      const native = new EnvironmentLifecycle(this.platform, undefined, this.stageRoot).native(selected);
       const observed = await (this.platform.driver as OpenShellDriver).guest(selected, ["--identity"]);
       if (observed.nativeId !== native.nativeId || observed.generation !== native.generation || observed.running !== true)
         throw new Error("The selected guest execution is not running");
