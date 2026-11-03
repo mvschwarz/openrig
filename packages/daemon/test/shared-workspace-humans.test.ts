@@ -17,6 +17,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
+import { attentionRoutes } from "../src/routes/attention.js";
 import { addHumanFragment, humansDir, loadHumanRegistry, writeProjection } from "../src/domain/gateway/human-registry.js";
 import { resolveHumanDeliveryReadiness } from "../src/domain/gateway/human-readiness.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
@@ -249,6 +250,25 @@ describe("shared-workspace people", () => {
       expect(readiness.reason).toContain("Feed and Steering");
       expect((await act({ verb: "answer", qitemId: danas.qitemId, actorSession: "dana@external", decision: "Ship it" })).status).toBe(200);
       expect(repo.getById(danas.qitemId)?.state).toBe("done");
+    });
+
+    it("isn't told in the Feed to follow an ask or a park in Slack, and a Slack person still is", async () => {
+      register("sarah");
+      expect(addHumanFragment(dana, home)).toMatchObject({ ok: true });
+      app.route("/api/attention", attentionRoutes());
+      const feed = async (qitemId: string) => ((await (await app.request(`/api/attention?item=${encodeURIComponent(`queue:${qitemId}`)}`)).json()) as
+        { detail: { lines: string[] } }).detail.lines;
+      const park = await repo.create({ sourceSession: ASKER, destinationSession: "designer@rig", body: "Choose for Dana", nudge: false });
+      repo.update({ qitemId: park.qitemId, actorSession: "designer@rig", state: "blocked", blockedOn: "dana@external", summary: "Choose for Dana",
+        evidenceRef: "/fixture/choose", transitionNote: "parked" } as never);
+      for (const row of [await ask("dana@external"), park]) {
+        const lines = await feed(row.qitemId);
+        expect(lines).toContain("Slack: not sent: this person has no connector binding, so they're asked on Steering and in the Feed only");
+        expect(lines.some((line) => line.startsWith("Decision route: answer on Steering; it wasn't sent to Slack."))).toBe(true);
+      }
+      const sarahs = await feed((await ask("sarah@external")).qitemId);
+      expect(sarahs.some((line) => line.startsWith("Decision route: follow the correlated human request in Slack."))).toBe(true);
+      expect(sarahs.find((line) => line.startsWith("Slack: "))).not.toContain("no connector binding");
     });
   });
 });
