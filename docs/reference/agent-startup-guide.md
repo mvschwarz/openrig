@@ -214,7 +214,7 @@ After the files, OpenRig sends a session-identity message (rig, pod, member, log
 | Delivery Hint | When | How | Use For |
 |---------------|------|-----|---------|
 | `auto` | Depends on the file | Resolved per file: a `SKILL.md` (or content starting `# SKILL`) is `skill_install`, any other `.md` is `guidance_merge`, and any other file is `send_text` | Default — let OpenRig decide |
-| `guidance_merge` | Before harness boot | Merged as a managed block into `AGENTS.md` (Codex, Pi) or `CLAUDE.md` (Claude; `CLAUDE.local.md` with the rig's `managed_blocks: { claude-code: CLAUDE.local.md }`) | Role guidance, culture, project context |
+| `guidance_merge` | Before harness boot | Merged as a managed block into the repository `AGENTS.md` (Codex, OMP), a fresh Pi seat's own agent-directory `AGENTS.md` (see [Runtime Differences](#runtime-differences)), or `CLAUDE.md` (Claude; `CLAUDE.local.md` with the rig's `managed_blocks: { claude-code: CLAUDE.local.md }`). A fresh launch of Codex 0.164.0 or later can carry it as launch developer instructions instead (see [Codex guidance at launch](#codex-guidance-at-launch)) | Role guidance, culture, project context |
 | `skill_install` | Before harness boot | Copied to runtime's skill directory | Skills |
 | `send_text` | After harness is ready | Sent as text to agent's terminal via tmux | Boot-time grounding, identity hints, instructions to read skills |
 
@@ -528,6 +528,52 @@ This separates provider files, not OS users or accounts. Project-local resources
 still use the selected project directory; shared project and system settings
 remain shared.
 
+### Codex guidance at launch
+
+On a fresh launch of Codex 0.164.0 or later, OpenRig passes a seat's managed guidance (OpenRig's start file and the
+rig's and project's context, culture and SOP files) with the launch, as `-c developer_instructions=…`, instead of
+merging it into the repository `AGENTS.md`. Neither the tracked `AGENTS.md` nor the Codex home is written for it, and
+both still load as usual. The text opens: "OpenRig seat guidance for this session follows. Where it conflicts with
+AGENTS.md guidance in the repository or the Codex home, follow AGENTS.md."
+
+A launch value replaces a configured one, so this happens only when no Codex config layer OpenRig reads sets
+`developer_instructions`. OpenRig reads:
+
+- `/etc/codex/config.toml` and `/etc/codex/managed_config.toml`;
+- the Codex home's `config.toml`, profiles included, and the selected profile's `<profile>.config.toml`;
+- each `.codex/config.toml` from the seat's working directory up.
+
+The Codex home it reads is the seat's own (a `CODEX_HOME` in its `env:`, or a recorded account switch), else the
+daemon's `CODEX_HOME`, else `~/.codex`.
+
+The guidance still goes to the repository `AGENTS.md`, as before, when:
+
+- a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
+- the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
+  resume puts the guidance back in the repository `AGENTS.md`;
+- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+  recorded, which for Codex is the repository `AGENTS.md`;
+- Codex is older than 0.164.0, or its version is unknown.
+
+A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
+`AGENTS.md`.
+
+**If your shell sets `CODEX_HOME`.** When neither the seat nor the daemon declares a `CODEX_HOME`, a seat's pane keeps
+its own, and OpenRig reads `~/.codex`. A `CODEX_HOME` that only your shell startup sets (in `~/.zshrc`, for example),
+with the daemon started without it, isn't seen. A `developer_instructions` set in that home is then replaced by the
+launch value for the session. To have it checked, declare that same absolute path as `CODEX_HOME` in the member's or
+rig's `env:` (see [Launch environment](rig-spec.md#launch-environment), "A seat's own account"). OpenRig then reads
+that home at the seat's next fresh launch, and a `developer_instructions` set there keeps the repository `AGENTS.md`.
+The seat keeps the same home and login.
+
+**What it doesn't cover.** OpenRig doesn't read Codex's packaged defaults, or MDM- or enterprise-managed settings. A
+`developer_instructions` set there may be replaced for the session. Legacy MDM-managed config ranks above launch flags,
+so it can override OpenRig's guidance, and the seat then gets none of it.
+
+**Not established.** The order Codex assembles developer instructions and `AGENTS.md` in, and how it settles every
+conflict, aren't established; the opening sentence asks it to follow `AGENTS.md`. The native behaviour was observed on
+Codex 0.164.0 alone, on fresh launches without tools.
+
 ### Runtime Differences
 
 **Claude Code:**
@@ -558,7 +604,10 @@ remain shared.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 **Pi and OMP:**
-- Read `AGENTS.md` in the working directory; guidance is merged there, added to Pi's own system prompt
+- Read `AGENTS.md` in the working directory, added to Pi's own system prompt. Pi also reads the one in its agent
+  directory: on a fresh launch, a Pi seat's guidance is merged there, under OpenRig's state, not into the
+  repository's. When that file or its directory is a link, the repository `AGENTS.md` is used instead. A restore keeps
+  the file the seat launched with. OMP keeps its guidance in the repository `AGENTS.md`
 - Selected skills are projected into the seat's own agent directory under OpenRig's state, not into a shared
   workspace folder
 
