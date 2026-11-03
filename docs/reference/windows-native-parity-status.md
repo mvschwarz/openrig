@@ -1,5 +1,36 @@
 # Native Windows parity: implementation and evidence
 
+## Protected DACL during new directory recursion (2026-11-03)
+
+Native regression fixtures reproduced the directory counterpart of the private
+file-copy defect: both a new directory and a staged directory replacing a file
+inherited broader parent permissions instead of the source's protected DACL.
+
+For a protected source directory, native creation now supplies and verifies a
+protected current-user-only inheritable DACL before any children are copied.
+The source DACL is captured before recursion; after children and timestamps,
+the captured DACL is applied and verified through a no-follow directory handle
+qualified against the created volume/file identity. Restrictive source access
+therefore does not prevent child creation or timestamp application. A changed
+destination inode refuses finalization. The descriptor travels on stdin to
+avoid command-line length limits. Existing directory merges and unprotected
+source directory inheritance retain their previous behavior.
+
+Native validation: the five directory DACL cases passed, covering new and
+file-replacement destinations, inherited child permissions, restrictive final
+permissions, captured-source permissions, private initial staging and changed
+destination identity. The combined local-copy selection passed 38 tests with
+four skips and no failures; CLI type checking and daemon compilation passed.
+An intermediate restrictive fixture cleanup failed because its own child ACL
+was not restored; the fixture was corrected and the exact retained dummy root
+was restored and removed without elevation. These are scoped Windows checks,
+not fresh full-suite, WSL, package or deployed-runtime evidence.
+
+Remaining permission work includes unprotected ACL translation, existing
+directory ACL drift, directory-link DACLs and source owner/group translation.
+Ancestor pathname races and cross-process propagation are not made atomic by
+these handle checks. Complete Windows/Linux/WSL parity remains unproven.
+
 ## Protected DACL on new local file copies (2026-11-03)
 
 An owned native probe confirmed that the previous `fs.cp` new-file path copied

@@ -32,6 +32,8 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
       else if(args[0]=="copy-new")CopyNew(args[1],args[2]);
+      else if(args[0]=="copy-directory-new")CopyDirectoryNew(args[1],args[2]);
+      else if(args[0]=="copy-directory-finish")CopyDirectoryFinish(args[1],Console.In.ReadToEnd(),args[2],args[3],args[4]);
       else if(args[0]=="move-no-replace") { if(!MoveFileEx(args[1],args[2],8))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
@@ -125,6 +127,68 @@ public static class OpenRigOwnedText {
     var a=new byte[left.BinaryLength];var b=new byte[right.BinaryLength];left.GetBinaryForm(a,0);right.GetBinaryForm(b,0);
     for(int i=0;i<a.Length;i++)if(a[i]!=b[i])return false;
     return true;
+  }
+  static SafeFileHandle CopyDirectoryHandle(string path,bool write) {
+    var security=new SecurityAttributes();security.length=Marshal.SizeOf(security);
+    var file=CreateFile(path,write?0x60000u:0x20000u,7,ref security,3,0x02200000u,IntPtr.Zero);
+    if(file.IsInvalid){int error=Marshal.GetLastWin32Error();file.Dispose();throw new Win32Exception(error);}
+    try {CopyDirectoryInfo(file);return file;}catch{file.Dispose();throw;}
+  }
+  static FileInformation CopyDirectoryInfo(SafeFileHandle file) {
+    FileInformation info;
+    if(!GetFileInformationByHandle(file,out info))throw new Win32Exception(Marshal.GetLastWin32Error());
+    if(GetFileType(file)!=1 || (info.attributes&0x410u)!=0x10u)throw new InvalidOperationException("Copy requires an ordinary directory without a final reparse point");
+    return info;
+  }
+  static byte[] CopyDirectoryDacl(SafeFileHandle file) {
+    IntPtr owner,group,dacl,sacl,descriptor;
+    uint error=GetSecurityInfo(file,1,4,out owner,out group,out dacl,out sacl,out descriptor);
+    if(error!=0)throw new Win32Exception((int)error);
+    try {var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);return bytes;}
+    finally {LocalFree(descriptor);}
+  }
+  static void CopyDirectoryNew(string source,string destination) {
+    byte[] snapshot;
+    using(var input=CopyDirectoryHandle(source,false))snapshot=CopyDirectoryDacl(input);
+    bool protectedAcl=(new RawSecurityDescriptor(snapshot,0).ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0;
+    var attributes=new SecurityAttributes();attributes.length=Marshal.SizeOf(attributes);
+    GCHandle pinned=default(GCHandle);byte[] creationSecurity=null;
+    try {
+      // Restrictive final permissions must not prevent recursion. A protected
+      // source gets a current-user-only staging DACL from the creation instant;
+      // its captured source DACL is restored after children and timestamps.
+      if(protectedAcl)using(var identity=WindowsIdentity.GetCurrent()) {
+        var acl=new DirectorySecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
+        acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+        creationSecurity=acl.GetSecurityDescriptorBinaryForm();pinned=GCHandle.Alloc(creationSecurity,GCHandleType.Pinned);attributes.descriptor=pinned.AddrOfPinnedObject();
+      }
+      if(!CreateDirectory(destination,ref attributes))throw new Win32Exception(Marshal.GetLastWin32Error());
+    } finally {if(pinned.IsAllocated)pinned.Free();}
+    using(var output=CopyDirectoryHandle(destination,false)) {
+      var info=CopyDirectoryInfo(output);
+      if(protectedAcl) {
+        var actual=new RawSecurityDescriptor(CopyDirectoryDacl(output),0);var expected=new RawSecurityDescriptor(creationSecurity,0);
+        if((actual.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(expected.DiscretionaryAcl,actual.DiscretionaryAcl))throw new InvalidOperationException("Created directory private DACL did not persist");
+      }
+      Console.Write((protectedAcl?Convert.ToBase64String(snapshot):"-")+"\t"+info.volume+"\t"+info.indexHigh+"\t"+info.indexLow);
+    }
+  }
+  static void CopyDirectoryFinish(string destination,string encoded,string volume,string high,string low) {
+    var bytes=Convert.FromBase64String(encoded);var expected=new RawSecurityDescriptor(bytes,0);
+    if((expected.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0)throw new InvalidOperationException("Captured directory DACL is not protected");
+    using(var output=CopyDirectoryHandle(destination,true)) {
+      var info=CopyDirectoryInfo(output);
+      if(info.volume!=uint.Parse(volume) || info.indexHigh!=uint.Parse(high) || info.indexLow!=uint.Parse(low))throw new InvalidOperationException("Created directory identity changed");
+      var pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+      try {
+        bool present,defaulted;IntPtr dacl;
+        if(!GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),out present,out dacl,out defaulted))throw new InvalidOperationException("Captured directory DACL is invalid");
+        uint error=SetSecurityInfo(output,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,present?dacl:IntPtr.Zero,IntPtr.Zero);
+        if(error!=0)throw new Win32Exception((int)error);
+      } finally {pinned.Free();}
+      var actual=new RawSecurityDescriptor(CopyDirectoryDacl(output),0);
+      if((actual.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(expected.DiscretionaryAcl,actual.DiscretionaryAcl))throw new InvalidOperationException("Copied directory DACL did not persist");
+    }
   }
   static void OwnedPipe(string name) {
     using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",name,System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.None)) {
@@ -581,6 +645,25 @@ export function replaceWindowsCopiedFile(target: string, staging: string): void 
 export function copyWindowsFileNew(source: string, destination: string): void {
   execFileSync(nativeHelper(), ["copy-new", toNamespacedPath(source), toNamespacedPath(destination)], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+export interface WindowsCopiedDirectorySecurity { descriptor: string; volume: string; high: string; low: string }
+
+/** Create exclusively; protected source directories stay private throughout recursion. */
+export function createWindowsCopiedDirectory(source: string, destination: string): WindowsCopiedDirectorySecurity | undefined {
+  const output = execFileSync(nativeHelper(), ["copy-directory-new", toNamespacedPath(source), toNamespacedPath(destination)], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const [descriptor, volume, high, low] = output.split("\t");
+  if (!descriptor || !volume || !high || !low || ![volume, high, low].every(value => /^[0-9]+$/.test(value))) throw new Error("Incomplete created directory security identity");
+  return descriptor === "-" ? undefined : { descriptor, volume, high, low };
+}
+
+/** Apply the captured protected DACL only to the created ordinary directory inode. */
+export function finishWindowsCopiedDirectory(destination: string, security: WindowsCopiedDirectorySecurity): void {
+  execFileSync(nativeHelper(), ["copy-directory-finish", toNamespacedPath(destination), security.volume, security.high, security.low], {
+    input: security.descriptor, windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],
   });
 }
 
