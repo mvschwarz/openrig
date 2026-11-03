@@ -537,6 +537,10 @@ export interface RestoreNodeResult {
   /** Managed guidance block ids the seat's guidance file still lacks after restore. The seat keeps
    *  its own status (a resumed session is still running); this only discloses the gap. */
   guidanceGaps?: string[];
+  /** #2456: managed guidance blocks the seat runs as they are although they differ from their source, each named with the
+   *  reason (edited by hand since OpenRig wrote it, or no record of OpenRig writing it). Not a gap: the seat has guidance
+   *  there, and the rig's result doesn't change. */
+  guidanceNotes?: string[];
   /** Restore gaps that are not guidance: a resumed seat whose saved startup
    *  context lacked a selection the current specification still makes and
    *  whose re-apply was skipped, failed, or threw (e.g. the Claude
