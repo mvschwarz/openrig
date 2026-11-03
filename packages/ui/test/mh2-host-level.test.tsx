@@ -497,7 +497,7 @@ describe("SubscriptionToggleList HOSTS section (FR-5 — complete, don't rebuild
     });
     renderWithRouter(() => <SubscriptionToggleList />);
     await waitFor(() => expect(screen.getByTestId("subscription-host-toggle-list")).toBeTruthy());
-    expect(screen.getByTestId("subscription-host-toggle-local").textContent).toContain("forced ON");
+    expect(screen.getByTestId("subscription-host-toggle-local").textContent).toContain("Forced on");
     expect(screen.getByTestId("subscription-host-toggle-vps-a").getAttribute("data-on")).toBe("true");
     expect(screen.getByTestId("subscription-host-toggle-vps-b").getAttribute("data-on")).toBe("false");
     expect(screen.getByTestId("subscription-host-toggle-vps-gone").getAttribute("data-on")).toBe("true");

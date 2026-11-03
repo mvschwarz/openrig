@@ -86,8 +86,8 @@ function FolderNode({
   return (
     <li data-testid={`artifacts-tree-node-${path}`}>
       <div
-        className={`flex items-center gap-1 font-mono text-[11px] ${
-          isSelected ? "bg-surface-high/80 text-on-surface" : "text-on-surface hover:bg-surface-low"
+        className={`flex items-center gap-1 text-xs ${
+          isSelected ? "bg-surface-high text-on-surface" : "text-on-surface hover:bg-surface-low"
         }`}
         style={indent(depth)}
       >
@@ -115,14 +115,14 @@ function FolderNode({
       </div>
       {expanded ? (
         list.isLoading ? (
-          <div style={indent(depth + 1)} className="py-0.5 font-mono text-[10px] text-on-surface-variant">
+          <div style={indent(depth + 1)} className="py-0.5 text-xs text-on-surface-variant">
             Loading…
           </div>
         ) : list.isError ? (
           <div
             data-testid={`artifacts-tree-error-${path}`}
             style={indent(depth + 1)}
-            className="py-0.5 font-mono text-[10px] text-red-600"
+            className="py-0.5 text-xs text-destructive"
           >
             Error loading folder.
           </div>
@@ -155,7 +155,7 @@ function FolderNode({
                     path={joinPath(path, e.name)}
                     testId={`artifacts-tree-file-${joinPath(path, e.name)}`}
                     style={{ paddingLeft: `${(depth + 1) * 12 + 24}px` }}
-                    className="block w-full truncate py-0.5 text-left font-mono text-[11px] text-on-surface-variant hover:text-on-surface hover:underline"
+                    className="block w-full truncate py-0.5 text-left font-mono text-xs text-on-surface-variant hover:text-on-surface hover:underline"
                   >
                     {e.name}
                   </FileLink>
@@ -178,18 +178,18 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
     <div data-testid="artifacts-file-list" className="min-w-0 flex-1">
       <div
         data-testid="artifacts-file-list-header"
-        className="border-b border-outline-variant px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant"
+        className="border-b border-outline-variant px-3 py-2 text-xs font-medium text-on-surface-variant"
       >
         {header}
       </div>
       {list.isLoading ? (
-        <div className="px-3 py-2 font-mono text-[10px] text-on-surface-variant">Loading…</div>
+        <div className="px-3 py-2 text-xs text-on-surface-variant">Loading…</div>
       ) : list.isError ? (
-        <div data-testid="artifacts-file-list-error" className="px-3 py-2 font-mono text-[10px] text-red-600">
+        <div data-testid="artifacts-file-list-error" className="px-3 py-2 text-xs text-destructive">
           Error loading folder.
         </div>
       ) : files.length === 0 ? (
-        <div data-testid="artifacts-file-list-empty" className="px-3 py-2 font-mono text-[10px] text-on-surface-variant">
+        <div data-testid="artifacts-file-list-empty" className="px-3 py-2 text-xs text-on-surface-variant">
           No files in this folder.
         </div>
       ) : (
@@ -198,7 +198,7 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
             <li
               key={f.name}
               data-testid={`artifacts-file-row-${f.name}`}
-              className="font-mono text-[11px]"
+              className="font-mono text-xs"
             >
               {/* The ENTIRE row is one FileLink hitbox — badge, filename, size,
                   separator, and mtime all sit inside the existing button so a click
@@ -213,7 +213,7 @@ function FolderFileList({ root, path }: { root: string; path: string }) {
               >
                 <span
                   data-testid={`artifacts-file-badge-${f.name}`}
-                  className="w-10 shrink-0 border border-outline-variant px-1 py-0.5 text-center text-[8px] uppercase tracking-[0.08em] text-on-surface-variant"
+                  className="w-10 shrink-0 rounded-full border border-outline-variant px-1 py-0.5 text-center font-mono text-xs text-on-surface-variant"
                 >
                   {fileBadge(f.name)}
                 </span>
@@ -255,7 +255,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { sco
   if (remoteGated) {
     return (
       <EmptyState
-        label="LOCAL FILES NOT SHOWN"
+        label="Local files not shown"
         description={`Artifacts for ${scopeLabel} live on the selected host's filesystem, which the remote read view does not browse. Select the local host to browse local artifacts.`}
         variant="card"
         testId="artifacts-navigator-remote-gated"
@@ -265,7 +265,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { sco
 
   if (rootsQuery.isLoading) {
     return (
-      <div data-testid="artifacts-navigator-loading" className="font-mono text-[11px] text-on-surface-variant">
+      <div data-testid="artifacts-navigator-loading" className="text-xs text-on-surface-variant">
         Loading…
       </div>
     );
@@ -278,7 +278,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { sco
   if (!rootsQuery.data || isUnavailable(rootsQuery.data) || rootsQuery.data.roots.length === 0) {
     return (
       <EmptyState
-        label="FILES UNAVAILABLE"
+        label="Files unavailable"
         description={
           rootsQuery.data?.hint ||
           "No allowlist files root is configured, so the artifact navigator can't list files. Configure a workspace files root to browse artifacts."
@@ -293,7 +293,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { sco
   if (!resolved) {
     return (
       <EmptyState
-        label="ARTIFACTS OUT OF SCOPE"
+        label="Artifacts out of scope"
         description="This scope's folder is not under any configured files root, so its artifacts can't be listed."
         variant="card"
         testId="artifacts-navigator-no-scope"
@@ -311,7 +311,7 @@ export function ArtifactsNavigator({ scopePath, scopeLabel, remoteGated }: { sco
   return (
     <div
       data-testid="artifacts-navigator"
-      className="flex min-h-[20rem] border border-outline-variant bg-surface-lowest/20"
+      className="flex min-h-[20rem] rounded-lg border bg-surface-lowest shadow-sm"
     >
       <aside
         data-testid="artifacts-tree"

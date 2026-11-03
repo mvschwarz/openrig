@@ -91,12 +91,12 @@ export function TranscriptDrillPanel({ sessionName, deferUntilDetailsOpen = fals
   return (
     <div ref={rootRef} data-testid={`transcript-drill-${sessionName}`} className="mt-2 space-y-1 border border-outline-variant p-2">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-[10px] uppercase text-on-surface-variant">transcript · {sessionName}</span>
+        <span className="text-[11px] text-on-surface-variant">transcript · {sessionName}</span>
         <button
           type="button"
           data-testid="drill-tail"
           onClick={() => load("tail")}
-          className={`border px-2 py-0.5 font-mono text-[10px] uppercase ${state.mode === "tail" ? "border-outline bg-surface-variant" : "border-outline-variant hover:bg-surface-variant/50"}`}
+          className={`border px-2 py-0.5 text-[11px] ${state.mode === "tail" ? "border-outline bg-surface-variant" : "border-outline-variant hover:bg-surface-variant/50"}`}
         >
           Tail
         </button>
@@ -108,14 +108,14 @@ export function TranscriptDrillPanel({ sessionName, deferUntilDetailsOpen = fals
             if (e.key === "Enter" && pattern.trim()) load("grep", pattern);
           }}
           placeholder="grep pattern…"
-          className="border border-outline-variant bg-transparent px-2 py-0.5 font-mono text-[10px]"
+          className="border border-outline-variant bg-transparent px-2 py-0.5 font-mono text-[11px]"
         />
         <button
           type="button"
           data-testid="drill-grep"
           disabled={!pattern.trim()}
           onClick={() => load("grep", pattern)}
-          className="border border-outline-variant px-2 py-0.5 font-mono text-[10px] uppercase hover:bg-surface-variant/50 disabled:opacity-50"
+          className="border border-outline-variant px-2 py-0.5 text-[11px] hover:bg-surface-variant/50 disabled:opacity-50"
         >
           Search
         </button>
@@ -124,21 +124,21 @@ export function TranscriptDrillPanel({ sessionName, deferUntilDetailsOpen = fals
           type="button"
           data-testid="drill-full"
           onClick={() => load("full")}
-          className="border border-outline-variant px-2 py-0.5 font-mono text-[10px] uppercase hover:bg-surface-variant/50"
+          className="border border-outline-variant px-2 py-0.5 text-[11px] hover:bg-surface-variant/50"
         >
           Full
         </button>
       </div>
       {state.loading ? (
-        <p className="font-mono text-[10px] text-on-surface-variant">loading {state.mode}…</p>
+        <p className="font-mono text-[11px] text-on-surface-variant">loading {state.mode}…</p>
       ) : state.error ? (
-        <p data-testid="drill-error" className="font-mono text-[10px] text-red-700">
+        <p data-testid="drill-error" className="font-mono text-[11px] text-red-700">
           {state.error}
         </p>
       ) : (
         <pre
           data-testid="drill-content"
-          className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-surface-lowest/40 p-2 font-mono text-[10px] leading-relaxed"
+          className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-surface-lowest/40 p-2 font-mono text-[11px] leading-relaxed"
         >
           {state.content}
         </pre>

@@ -15,7 +15,7 @@
 // ?group=agent|slice), so every state is deep-link addressable.
 
 import { useMemo, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { PageHeader } from "../ui/page-header.js";
 import { useRigAgents } from "../../hooks/useReview.js";
 import { NeedsYouAccordion } from "./NeedsYouAccordion.js";
 import { AgentsBandView } from "./AgentsBandView.js";
@@ -76,55 +76,54 @@ export function RigAgentsPage() {
   }, [data, anchoredSlice]);
 
   if (isLoading) {
-    return <p className="p-4 font-mono text-[11px] text-on-surface-variant">composing the rig coordination story…</p>;
+    return <p className="p-4 text-xs text-on-surface-variant">composing the rig coordination story…</p>;
   }
   if (error || !data || !band) {
     return (
-      <p data-testid="rig-agents-error" className="p-4 font-mono text-[11px] text-red-700">
+      <p data-testid="rig-agents-error" className="p-4 text-sm text-red-700">
         rig agents panel unavailable: {error instanceof Error ? error.message : "composer unreachable"}
       </p>
     );
   }
 
   return (
-    <div data-testid="rig-agents-page" className="mx-auto max-w-4xl space-y-5 p-4">
+    <div data-testid="rig-agents-page" className="mx-auto w-full max-w-4xl space-y-5 p-4 text-sm">
       {/* MH-5: the fleet altitude's ambient band above the rig altitude. */}
       <FleetBand />
-      {/* Breadcrumb up the spine — one unbroken gesture both directions. */}
-      <nav className="flex items-center gap-2 font-mono text-[10px] uppercase text-on-surface-variant">
-        <Link to="/project" className="hover:underline">
-          project
-        </Link>
-        <span>/</span>
-        <span data-testid="rig-agents-crumb">agents (rig)</span>
-        {anchoredSlice ? (
-          <>
-            <span>·</span>
-            <span data-testid="rig-agents-anchor">anchored: {anchoredSlice}</span>
-            <a href="/agents" className="hover:underline" data-testid="rig-agents-unanchor">
-              [full rig]
-            </a>
-          </>
-        ) : null}
-      </nav>
-
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-[14px] font-semibold">AGENTS — the coordination story</h2>
-        <div className="flex items-center gap-1 font-mono text-[10px] uppercase">
-          <span className="text-on-surface-variant">group by</span>
-          {(["agent", "slice"] as const).map((g) => (
-            <button
-              key={g}
-              type="button"
-              data-testid={`rig-agents-group-${g}`}
-              onClick={() => setAddressableGrouping(g)}
-              className={`border px-2 py-0.5 ${grouping === g ? "border-outline bg-surface-variant" : "border-outline-variant hover:bg-surface-variant/50"}`}
-            >
-              {g}
-            </button>
-          ))}
-        </div>
-      </header>
+      <PageHeader
+        title="Agents"
+        description={
+          anchoredSlice
+            ? `Agents holding work on ${anchoredSlice} — the full rig is one step away.`
+            : "Pick a rig to see its agents. Coordination health, needs-you items, and settled handoffs for this rig."
+        }
+        actions={
+          <div className="flex items-center gap-1 text-xs">
+            <span className="text-on-surface-variant">Group by</span>
+            {(["agent", "slice"] as const).map((g) => (
+              <button
+                key={g}
+                type="button"
+                data-testid={`rig-agents-group-${g}`}
+                onClick={() => setAddressableGrouping(g)}
+                className={`border px-2 py-0.5 text-xs ${grouping === g ? "border-outline bg-surface-variant" : "border-outline-variant hover:bg-surface-variant/50"}`}
+              >
+                {g === "agent" ? "Agent" : "Slice"}
+              </button>
+            ))}
+          </div>
+        }
+        meta={
+          anchoredSlice ? (
+            <div className="flex items-center gap-2 text-xs text-on-surface-variant">
+              <span data-testid="rig-agents-anchor">Anchored: {anchoredSlice}</span>
+              <a href="/agents" className="underline hover:no-underline" data-testid="rig-agents-unanchor">
+                Full rig
+              </a>
+            </div>
+          ) : null
+        }
+      />
 
       {/* Band 1: NEEDS YOU — the attention band at rig scope. APPROVE is a
           slice-terminal act and is hidden here (zoom into the slice). */}
@@ -142,33 +141,33 @@ export function RigAgentsPage() {
       <AgentsBandView band={band} itemRef="rig" grouping={grouping} />
 
       {/* Band 3: SETTLED — the record band (today's closed handoffs). */}
-      <section data-testid="settled-band" className="space-y-1">
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">SETTLED</h3>
+      <section data-testid="settled-band" className="space-y-2 rounded-lg border bg-surface-lowest p-2">
+        <h3 className="text-xs text-on-surface-variant">Settled</h3>
         {data.settled.length === 0 ? (
-          <p data-testid="settled-empty" className="font-mono text-[11px] text-on-surface-variant">
+          <p data-testid="settled-empty" className="text-xs text-on-surface-variant">
             {data.settledProvenance}
           </p>
         ) : (
           <>
-            <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
+            <ul className="divide-y divide-outline-variant/50">
               {data.settled.map((row) => (
-                <li key={`${row.qitemId}-${row.closedAtIso}`} className="flex items-center gap-2 px-2 py-1.5">
-                  <span className="font-mono text-[10px] text-on-surface-variant">{sessionMemberLabel(row.fromSession)}</span>
+                <li key={`${row.qitemId}-${row.closedAtIso}`} className="flex items-center gap-2 px-2 py-1.5 text-sm">
+                  <span className="font-mono text-xs text-on-surface-variant" title={`from ${row.fromSession}`}>{sessionMemberLabel(row.fromSession)}</span>
                   <span className="text-on-surface-variant">→</span>
-                  <span className="font-mono text-[10px] text-on-surface-variant">{sessionMemberLabel(row.toSession)}</span>
-                  <span className="min-w-0 flex-1 truncate text-[11px]" data-testid={`settled-summary-${row.qitemId}`}>
+                  <span className="font-mono text-xs text-on-surface-variant" title={`to ${row.toSession}`}>{sessionMemberLabel(row.toSession)}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm" data-testid={`settled-summary-${row.qitemId}`} title={row.summary ?? row.qitemId}>
                     {row.summary ?? row.qitemId}
                   </span>
-                  <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(row.closedAtIso)}</span>
+                  <span className="font-mono text-xs text-on-surface-variant" title={`closed ${row.closedAtIso}`}>{ageLabel(row.closedAtIso)}</span>
                 </li>
               ))}
             </ul>
-            <p className="font-mono text-[10px] text-on-surface-variant">{data.settledProvenance}</p>
+            <p className="text-xs text-on-surface-variant">{data.settledProvenance}</p>
           </>
         )}
       </section>
 
-      <p className="font-mono text-[10px] text-on-surface-variant">composed {data.composedAt}</p>
+      <p className="font-mono text-xs text-on-surface-variant" title={`composed ${data.composedAt}`}>composed {data.composedAt}</p>
     </div>
   );
 }

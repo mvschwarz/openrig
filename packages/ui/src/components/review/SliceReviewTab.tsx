@@ -91,7 +91,7 @@ function InlineMedia({ media, ctx, full }: { media: ReviewMedia; ctx: EvidenceCo
           }}
           className="block w-full border border-outline-variant bg-stone-950"
         />
-        <figcaption className="mt-0.5 font-mono text-[9px] uppercase text-on-surface-variant">▶ {media.caption}</figcaption>
+        <figcaption className="mt-0.5 text-[11px] text-on-surface-variant">▶ {media.caption}</figcaption>
       </figure>
     );
   }
@@ -105,7 +105,7 @@ function InlineMedia({ media, ctx, full }: { media: ReviewMedia; ctx: EvidenceCo
         onClick={() => setZoom(true)}
         className="block w-full cursor-zoom-in border border-outline-variant"
       />
-      <figcaption className="mt-0.5 font-mono text-[9px] uppercase text-on-surface-variant">{media.caption}</figcaption>
+      <figcaption className="mt-0.5 text-[11px] text-on-surface-variant">{media.caption}</figcaption>
       {zoom ? <Lightbox src={src} alt={media.caption} onClose={() => setZoom(false)} /> : null}
     </figure>
   );
@@ -113,7 +113,7 @@ function InlineMedia({ media, ctx, full }: { media: ReviewMedia; ctx: EvidenceCo
 
 function LockStamp({ lock, label }: { lock: LockState | null; label: string }) {
   return (
-    <p className="font-mono text-[10px] text-on-surface-variant">
+    <p className="font-mono text-[11px] text-on-surface-variant">
       <span className={lock ? "text-on-surface" : ""}>{lock ? "✓" : "○"}</span> {label} —{" "}
       {lock ? (
         <>
@@ -143,7 +143,7 @@ function DeliveredSection({ d, ctx, attributed }: { d: ComposedSliceReview["deli
   });
   return (
     <section data-testid="delivered-section" className={cn(VELLUM_CARD, "space-y-0 p-0")}>
-      <h3 className="border-b border-outline-variant px-3 py-2 font-mono text-[11px] font-bold uppercase tracking-wide text-on-surface">Delivered</h3>
+      <h3 className="border-b border-outline-variant px-3 py-2 text-[11px] font-bold text-on-surface">Delivered</h3>
       {d.items.length === 0 ? (
         <p data-testid="delivered-empty" className="px-3 py-2 font-mono text-[11px] text-on-surface-variant">
           — no proof contract declared in the plan yet
@@ -161,19 +161,19 @@ function DeliveredSection({ d, ctx, attributed }: { d: ComposedSliceReview["deli
                 className="flex w-full flex-col gap-y-1 px-3 py-2 text-left hover:bg-surface-variant/30 sm:flex-row sm:flex-wrap sm:items-baseline sm:gap-x-3"
               >
                 <span className="min-w-0 flex-1 text-[12px] leading-snug text-on-surface">{item.promised.text}</span>
-                <span className={cn("shrink-0 font-mono text-[10px] uppercase tracking-wide", v.cls)}>{attributed ? item.verified === "verified" ? "✓ accepted under selected policy" : "◇ current acceptance absent" : v.label}</span>
+                <span className={cn("shrink-0 text-[11px] ", v.cls)}>{attributed ? item.verified === "verified" ? "✓ accepted under selected policy" : "◇ current acceptance absent" : v.label}</span>
               </button>
               {open ? (
                 <div data-testid={`delivered-item-open-${i}`} className="space-y-3 border-t border-outline-variant/60 px-3 py-3">
                   {item.promised.plannedRef ? (
                     <div>
-                      <p className="mb-1 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">planned (the locked mockup)</p>
+                      <p className="mb-1 text-[11px] text-on-surface-variant">planned (the locked mockup)</p>
                       <InlineMedia media={item.promised.plannedRef} ctx={ctx} full />
                     </div>
                   ) : null}
                   {item.proof.length > 0 ? (
                     <div className="space-y-2">
-                      <p className="mb-1 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">delivered (curated proof)</p>
+                      <p className="mb-1 text-[11px] text-on-surface-variant">delivered (curated proof)</p>
                       {item.proof.map((m, j) => (
                         <InlineMedia key={j} media={m} ctx={ctx} full />
                       ))}
@@ -202,7 +202,7 @@ function DeliveredSection({ d, ctx, attributed }: { d: ComposedSliceReview["deli
       )}
       {d.extraProof.length > 0 ? (
         <div className="space-y-2 px-3 py-2">
-          <p className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">additional proof (not tied to one deliverable)</p>
+          <p className="text-[11px] text-on-surface-variant">additional proof (not tied to one deliverable)</p>
           <div className="flex flex-wrap gap-3">
             {d.extraProof.map((m, j) => (
               <InlineMedia key={j} media={m} ctx={ctx} />
@@ -211,7 +211,7 @@ function DeliveredSection({ d, ctx, attributed }: { d: ComposedSliceReview["deli
         </div>
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
-        <span className="font-mono text-[10px] text-on-surface-variant">
+        <span className="font-mono text-[11px] text-on-surface-variant">
           curated set only — the fix-loop history stays in proof/
         </span>
         {d.proofDirPath ? (
@@ -262,7 +262,7 @@ export function SliceReviewTab({
       {data.readiness && <p role="status" data-testid="proof-readiness">Proof readiness: {review.updatesUnavailable ? "source updates unavailable; last confirmed state " + data.readiness.state : review.basisInvalidated ? "change observed; confirming current basis" : data.readiness.state} · last confirmed {data.readiness.revision.slice(0, 12)} · publication is separate</p>}
       {data.defects.length > 0 ? (
         <section data-testid="review-defects" className="border border-red-300 bg-red-50 p-2 dark:bg-red-950/40">
-          <ul className="space-y-0.5 font-mono text-[10px] text-red-800 dark:text-red-300">
+          <ul className="space-y-0.5 font-mono text-[11px] text-red-800 dark:text-red-300">
             {data.defects.map((d, i) => (
               <li key={i}>{d}</li>
             ))}
@@ -280,7 +280,7 @@ export function SliceReviewTab({
           top-to-bottom: did intent become a correct plan become a correct
           build. Phase highlights the current focus, never hides a section. */}
       <section data-testid="intent-section" className={cn(VELLUM_CARD, "p-3")}>
-        <h3 className="mb-1 font-mono text-[11px] font-bold uppercase tracking-wide text-on-surface">Intent</h3>
+        <h3 className="mb-1 text-[11px] font-bold text-on-surface">Intent</h3>
         {data.intent.text ? (
           <MarkdownViewer content={data.intent.text} hideFrontmatter hideRawToggle />
         ) : (
@@ -294,7 +294,7 @@ export function SliceReviewTab({
       </section>
 
       <section data-testid="plan-section" className={cn(VELLUM_CARD, "space-y-2 p-3")}>
-        <h3 className="font-mono text-[11px] font-bold uppercase tracking-wide text-on-surface">Plan</h3>
+        <h3 className="text-[11px] font-bold text-on-surface">Plan</h3>
         {data.plan.concise.text ? (
           <MarkdownViewer content={data.plan.concise.text} hideFrontmatter hideRawToggle />
         ) : (
@@ -315,12 +315,12 @@ export function SliceReviewTab({
         ) : null}
         {data.plan.lockedArtifacts.length > 0 ? (
           <div data-testid="plan-locked-set">
-            <p className="mb-1 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">the locked set (this is what gets built)</p>
+            <p className="mb-1 text-[11px] text-on-surface-variant">the locked set (this is what gets built)</p>
             <ul className="space-y-0.5">
               {data.plan.lockedArtifacts.map((a) => (
                 <li key={a.path} className="font-mono text-[11px]">
                   <EvidenceOpener evidenceRef={a.path} ctx={ctx} testId={`plan-artifact-${a.name}`} />
-                  <span className="ml-1 text-[9px] uppercase text-on-surface-variant">{a.kind}</span>
+                  <span className="ml-1 text-[11px] text-on-surface-variant">{a.kind}</span>
                 </li>
               ))}
             </ul>
@@ -331,7 +331,7 @@ export function SliceReviewTab({
           {data.plan.ssotPath ? (
             <FileReferenceTrigger
               testId="plan-full-prd"
-              className="font-mono text-[10px] uppercase text-on-surface-variant underline underline-offset-2 hover:text-on-surface"
+              className="text-[11px] text-on-surface-variant underline underline-offset-2 hover:text-on-surface"
               data={{
                 path: data.plan.ssotPath,
                 kind: "markdown",
@@ -362,7 +362,7 @@ export function SliceReviewTab({
 
       {/* Band 4: SETTLED — the two deliberate stamps (§4). */}
       <section data-testid="settled-band" className={cn(VELLUM_CARD, "space-y-1 p-3")}>
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">SETTLED</h3>
+        <h3 className="text-[11px] text-on-surface-variant">SETTLED</h3>
         <LockStamp lock={data.plan.lock} label="gate 1 · plan-lock (plan ↔ intent)" />
         <LockStamp lock={data.delivered.lock} label={data.readiness?.configured ? "historical proof-lock (current judgment shown above)" : "gate 2 · proof-lock (delivered ↔ plan) — recorded stamp"} />
       </section>

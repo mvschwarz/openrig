@@ -25,12 +25,12 @@ export function instanceAttentionRank(i: WorkflowInstanceWithDeadline): number {
 }
 
 function statusChip(i: WorkflowInstanceWithDeadline): { glyph: string; label: string; cls: string } {
-  if (i.status === "failed") return { glyph: "▲", label: "FAILED", cls: "text-red-700" };
-  if (i.deadline.state !== "healthy") return { glyph: "▲", label: i.deadline.state.toUpperCase(), cls: "text-amber-700" };
-  if (i.status === "waiting") return { glyph: "◐", label: "WAITING", cls: "text-on-surface-variant" };
-  if (i.status === "active") return { glyph: "●", label: "ACTIVE", cls: "text-emerald-800" };
-  if (i.status === "aborted") return { glyph: "⊘", label: "ABORTED", cls: "text-on-surface-variant" };
-  return { glyph: "○", label: "COMPLETED", cls: "text-on-surface-variant" };
+  if (i.status === "failed") return { glyph: "▲", label: "Failed", cls: "text-red-700" };
+  if (i.deadline.state !== "healthy") return { glyph: "▲", label: i.deadline.state.replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase()), cls: "text-amber-700" };
+  if (i.status === "waiting") return { glyph: "◐", label: "Waiting", cls: "text-on-surface-variant" };
+  if (i.status === "active") return { glyph: "●", label: "Active", cls: "text-emerald-800" };
+  if (i.status === "aborted") return { glyph: "⊘", label: "Aborted", cls: "text-on-surface-variant" };
+  return { glyph: "○", label: "Completed", cls: "text-on-surface-variant" };
 }
 
 function shortUlid(id: string): string {
@@ -62,29 +62,29 @@ export function WorkflowInstanceRow({ instance }: { instance: WorkflowInstanceWi
         to="/workflow/instance/$instanceId"
         params={{ instanceId: instance.instanceId }}
         data-testid={`workflow-instance-row-${instance.instanceId}`}
-        className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-surface-variant/50"
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-surface-variant/50"
       >
-        <span className={cn("font-mono text-[11px]", chip.cls)} aria-hidden>
+        <span className={cn("font-mono text-xs", chip.cls)} aria-hidden>
           {chip.glyph}
         </span>
-        <span className={cn("font-mono text-[9px] uppercase w-32 shrink-0", chip.cls)}>{chip.label}</span>
-        <span className="font-mono text-[11px] text-on-surface" title={instance.instanceId}>
+        <span className={cn("w-32 shrink-0 text-xs", chip.cls)}>{chip.label}</span>
+        <span className="font-mono text-xs text-on-surface" title={instance.instanceId}>
           {shortUlid(instance.instanceId)}
         </span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-on-surface">
+        <span className="min-w-0 flex-1 truncate text-xs text-on-surface">
           {positionLabel(instance)}
-          <span className="text-on-surface-variant"> · hop {instance.hopCount}</span>
+          <span className="font-mono text-xs text-on-surface-variant"> · hop {instance.hopCount}</span>
           {instance.resumeCount > 0 ? (
-            <span className="text-on-surface-variant"> · resumed {instance.resumeCount}×</span>
+            <span className="font-mono text-xs text-on-surface-variant"> · resumed {instance.resumeCount}×</span>
           ) : null}
         </span>
         {instance.deadline.state !== "healthy" && instance.deadline.evidence ? (
-          <span className="hidden font-mono text-[10px] text-amber-800 md:inline truncate max-w-64">
+          <span className="hidden truncate font-mono text-xs text-amber-800 md:inline max-w-64">
             {instance.deadline.evidence.ownerSession} · {Math.floor(instance.deadline.evidence.overdueBySeconds / 60)}m over
           </span>
         ) : null}
-        <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(instance.createdAt)}</span>
-        <span className="font-mono text-[10px] text-on-surface-variant" aria-hidden>
+        <span className="font-mono text-xs text-on-surface-variant">{ageLabel(instance.createdAt)}</span>
+        <span className="font-mono text-xs text-on-surface-variant" aria-hidden>
           →
         </span>
       </Link>
@@ -131,7 +131,7 @@ export function WorkflowInstancesBand({
   if (isLoading || rows.length === 0) {
     if (quietWhenEmpty) return null;
     return (
-      <p data-testid={testId ? `${testId}-empty` : undefined} className="font-mono text-[11px] text-on-surface-variant">
+      <p data-testid={testId ? `${testId}-empty` : undefined} className="text-xs text-on-surface-variant">
         {isLoading ? "Loading instances…" : "0 instances — computed from /api/workflow/list"}
       </p>
     );
@@ -140,11 +140,16 @@ export function WorkflowInstancesBand({
   const live = rows.filter((r) => r.status === "active" || r.status === "waiting").length;
   const exceptional = rows.filter((r) => instanceAttentionRank(r) <= 1).length;
 
+  // C14: the Library spec band keeps its shipped chrome (the LibraryReview
+  // zero-regression pin + C14b scope). Only the touched /workflows altitude
+  // path gets the new card chrome.
+  const touchedAltitude = testId == null && workflowName == null && workflowVersion == null;
+
   return (
-    <div data-testid={testId ?? "workflow-instances-band"} className="space-y-2">
-      <div className="font-mono text-[8px] uppercase tracking-[0.16em] text-on-surface-variant">
+    <div data-testid={testId ?? "workflow-instances-band"} className={touchedAltitude ? "space-y-2 text-sm" : "space-y-2"}>
+      <div className={touchedAltitude ? "text-xs text-on-surface-variant" : "text-[11px] text-on-surface-variant"}>
         Instances
-        <span className="ml-2 normal-case tracking-normal">
+        <span className={touchedAltitude ? "ml-2" : "ml-2 normal-case tracking-normal"}>
           {rows.length} total · {live} live{exceptional > 0 ? ` · ${exceptional} need attention` : ""}
         </span>
       </div>

@@ -14,7 +14,11 @@ import { SettingsTab } from "./SettingsTab.js";
 
 export function SettingsCenter() {
   return (
-    <SettingsPageShell testId="settings-center" title="Settings">
+    <SettingsPageShell
+      testId="settings-center"
+      title="Settings"
+      description="Workspace, file, and daemon defaults. Edit a value here or with the CLI."
+    >
       <SettingsTab />
     </SettingsPageShell>
   );

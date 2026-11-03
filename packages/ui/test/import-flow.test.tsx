@@ -152,10 +152,12 @@ describe("ImportFlow", () => {
       expect(result.textContent).toContain("imported-rig");
 
       const launchedEl = screen.getByTestId("inst-status-orchestrator");
-      expect(launchedEl.className).toContain("text-success");
+      expect(launchedEl.getAttribute("data-tone")).toBe("success");
+      expect(launchedEl.textContent).toContain("Launched");
 
       const failedEl = screen.getByTestId("inst-status-worker");
-      expect(failedEl.className).toContain("text-destructive");
+      expect(failedEl.getAttribute("data-tone")).toBe("danger");
+      expect(failedEl.textContent).toContain("Failed");
     });
   });
 
@@ -172,8 +174,8 @@ describe("ImportFlow", () => {
 
     await waitFor(() => expect(screen.getByTestId("import-errors")).toBeDefined());
 
-    // Find TRY AGAIN button
-    const tryAgainBtns = screen.getAllByText(/TRY AGAIN/);
+    // Find Try again button (sentence case per C14e sweep)
+    const tryAgainBtns = screen.getAllByText(/Try again/);
     const btn = tryAgainBtns.find((el) => el.closest("button"));
     fireEvent.click(btn!);
 
@@ -320,11 +322,11 @@ describe("ImportFlow", () => {
     });
   });
 
-  // T1-AS-T14: Step indicator shows "VALIDATE RIGSPEC" label
-  it("step indicator shows VALIDATE RIGSPEC label", async () => {
+  // T1-AS-T14: Step indicator shows "Validate rigspec" label (sentence case per C14e sweep)
+  it("step indicator shows Validate rigspec label", async () => {
     await renderImportFlow();
     const step1 = screen.getByTestId("step-1");
-    expect(step1.textContent).toContain("VALIDATE RIGSPEC");
+    expect(step1.textContent).toContain("Validate rigspec");
   });
 
   // T2-AS-T14: Validation errors render as structured list

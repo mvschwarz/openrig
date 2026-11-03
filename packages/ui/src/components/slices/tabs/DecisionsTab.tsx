@@ -39,17 +39,17 @@ export function DecisionsTab({ rows }: { rows: DecisionRow[] }) {
   }, [rows, verbFilter, actorFilter, search]);
 
   if (rows.length === 0) {
-    return <div className="p-4 font-mono text-[10px] text-on-surface-variant" data-testid="decisions-empty">No mission_control_actions rows found for this slice's qitem chain.</div>;
+    return <div className="p-4 text-xs text-on-surface-variant" data-testid="decisions-empty">No mission_control_actions rows found for this slice's qitem chain.</div>;
   }
 
   return (
-    <div data-testid="decisions-tab" className="flex h-full flex-col">
+    <div data-testid="decisions-tab" className="flex h-full flex-col text-sm">
       <div className="flex flex-wrap gap-2 border-b border-outline-variant bg-background p-3" data-testid="decisions-filters">
         <select
           data-testid="decisions-verb-filter"
           value={verbFilter}
           onChange={(e) => setVerbFilter(e.target.value)}
-          className="border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-[10px]"
+          className="rounded-md border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-xs"
         >
           {verbs.map((v) => (<option key={v} value={v}>{v}</option>))}
         </select>
@@ -57,7 +57,7 @@ export function DecisionsTab({ rows }: { rows: DecisionRow[] }) {
           data-testid="decisions-actor-filter"
           value={actorFilter}
           onChange={(e) => setActorFilter(e.target.value)}
-          className="border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-[10px]"
+          className="rounded-md border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-xs"
         >
           {actors.map((a) => (<option key={a} value={a}>{a}</option>))}
         </select>
@@ -67,9 +67,9 @@ export function DecisionsTab({ rows }: { rows: DecisionRow[] }) {
           placeholder="search verb / qitem / reason"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="flex-1 min-w-32 border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-[10px]"
+          className="min-w-32 flex-1 rounded-md border border-outline-variant bg-surface-lowest px-2 py-1 font-mono text-xs"
         />
-        <span className="font-mono text-[10px] text-on-surface-variant" data-testid="decisions-result-count">
+        <span className="font-mono text-xs tabular-nums text-on-surface-variant" data-testid="decisions-result-count">
           {filtered.length} / {rows.length}
         </span>
       </div>
@@ -91,22 +91,22 @@ function DecisionRowItem({ row }: { row: DecisionRow }) {
         className="w-full text-left"
       >
         <div className="flex items-center gap-2">
-          <span className="font-mono text-[9px] text-on-surface-variant shrink-0">{row.ts.slice(0, 19)}</span>
-          <span className="font-mono text-[10px] font-bold text-on-surface shrink-0">{row.verb}</span>
-          <span className="font-mono text-[9px] text-on-surface-variant shrink-0">{row.actor}</span>
-          <span className="font-mono text-[9px] text-on-surface-variant truncate">{row.qitemId}</span>
+          <span className="shrink-0 font-mono text-xs tabular-nums text-on-surface-variant">{row.ts.slice(0, 19)}</span>
+          <span className="shrink-0 font-mono text-xs font-semibold text-on-surface">{row.verb}</span>
+          <span className="shrink-0 font-mono text-xs text-on-surface-variant">{row.actor}</span>
+          <span className="truncate font-mono text-xs text-on-surface-variant">{row.qitemId}</span>
         </div>
         {row.reason && (
-          <div className="ml-[120px] font-mono text-[10px] text-on-surface">{row.reason}</div>
+          <div className="ml-[120px] text-xs text-on-surface">{row.reason}</div>
         )}
       </button>
       {expanded && (
         <div className="ml-[120px] mt-1 grid grid-cols-2 gap-2" data-testid={`decision-row-detail-${row.actionId}`}>
-          <pre className="overflow-x-auto bg-background p-2 font-mono text-[9px] text-on-surface">
+          <pre className="overflow-x-auto rounded-lg bg-background p-2 font-mono text-xs text-on-surface">
             <div className="text-on-surface-variant">before:</div>
             {row.beforeState ?? "null"}
           </pre>
-          <pre className="overflow-x-auto bg-background p-2 font-mono text-[9px] text-on-surface">
+          <pre className="overflow-x-auto rounded-lg bg-background p-2 font-mono text-xs text-on-surface">
             <div className="text-on-surface-variant">after:</div>
             {row.afterState ?? "null"}
           </pre>

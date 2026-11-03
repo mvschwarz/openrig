@@ -217,8 +217,8 @@ describe("LiveNodeDetails (slice 25 Overview + Details)", () => {
     expect(screen.getByTestId("seat-overview-header-context-percent")).toBeDefined();
     expect(screen.getByTestId("seat-overview-header-total-tokens")).toBeDefined();
 
-    // HG-6 (follow-on-2): header label is "tokens" not "total tokens".
-    expect(screen.getByTestId("seat-overview-header-total-tokens").textContent).toBe("tokens");
+    // HG-6 (follow-on-2): header label is "Tokens" not "Total tokens" (sentence case since C18).
+    expect(screen.getByTestId("seat-overview-header-total-tokens").textContent).toBe("Tokens");
 
     const dataRow = screen.getByTestId("seat-overview-data-row");
     expect(dataRow.getAttribute("data-row-shape")).toBe("data");

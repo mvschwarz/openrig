@@ -57,9 +57,10 @@ describe("SettingsTab — User Settings v0", () => {
     expect(screen.getByTestId("setting-daemon.port")).toBeDefined();
     expect(screen.getByTestId("setting-db.path")).toBeDefined();
 
-    // Source badge surfaces the env-resolved row honestly.
-    expect(screen.getByTestId("setting-progress.scan_roots").textContent).toContain("source: env");
-    expect(screen.getByTestId("setting-workspace.root").textContent).toContain("source: default");
+    // Source badge surfaces the env-resolved row honestly (C14d: small
+    // neutral StatusBadge whose label is the source value).
+    expect(screen.getByTestId("setting-progress.scan_roots").textContent).toContain("env");
+    expect(screen.getByTestId("setting-workspace.root").textContent).toContain("default");
   });
 
   it("Edit + Save sends POST to /api/config/:key with the value", async () => {

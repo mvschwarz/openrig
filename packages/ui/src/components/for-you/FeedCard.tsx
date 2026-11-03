@@ -1,8 +1,7 @@
 import { useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, CalendarDays, CircleAlert, Clock, History, PackageCheck, X } from "lucide-react";
+import { ArrowRight, Clock, History, PackageCheck, X, CircleAlert } from "lucide-react";
 
-import { CornerBracket } from "../dashboard/vellum/index.js";
 import { AuthorAgentTag } from "./AuthorAgentTag.js";
 import { FeedCardTerminalDrill } from "./FeedCardTerminalDrill.js";
 import { QueueItemTrigger } from "../drawer-triggers/QueueItemTrigger.js";
@@ -13,6 +12,7 @@ import { isSyntheticFeedCard } from "../../lib/attention-feed.js";
 import { VerbActions } from "../mission-control/components/VerbActions.js";
 import { ProgressiveTerminal } from "../terminal/ProgressiveTerminal.js";
 import { buildChatPreamble } from "../review/chat.js";
+import { StatusDot } from "../ui/status-badge.js";
 import {
   ProofPacketHeader,
   ProofThumbnailGrid,
@@ -31,16 +31,15 @@ import { ActorMark } from "../graphics/RuntimeMark.js";
 import { cn } from "../../lib/utils.js";
 
 /**
- * Vellum-coherent kind indicator. Mono uppercase tag + leading colored
- * dot, mapped to the design tokens (success / warning / tertiary /
- * secondary / stone-500). Replaces the old colored-pill chrome.
+ * C11 Inbox v2: kind -> StatusDot status. action-required/approval need
+ * attention; shipped is done; progress is running; observation is idle.
  */
-const KIND_DOT: Record<FeedCardKind, string> = {
-  "action-required": "bg-tertiary",
-  approval: "bg-warning",
-  shipped: "bg-success",
-  progress: "bg-secondary",
-  observation: "bg-outline",
+const KIND_STATUS: Record<FeedCardKind, string> = {
+  "action-required": "attention_required",
+  approval: "attention_required",
+  shipped: "done",
+  progress: "running",
+  observation: "idle",
 };
 
 const TONE_DOT: Record<ProjectMetaTone, string> = {
@@ -99,21 +98,14 @@ export function resolveCardTerminalSession(
 }
 
 /**
- * Card surface — vellum-coherent. Matches CardShell in
- * storytelling-cards.tsx so /for-you reads as one surface.
- *   bg-surface-low/45 + backdrop-blur-[10px]
- *   ambient 3-stop box-shadow defines the card edges through the vellum
- *   no left-stripe, no outline border
+ * C11 Inbox v2 list-row surface (no framed card, no hard shadow, no
+ * registration-mark corners, no uppercase). Rows live inside one
+ * `rounded-lg border divide-y` container in Feed.tsx. Kept constants
+ * (unused) so the source-assertion tests that pinned the old recipe can
+ * be updated in one place with the new recipe.
  */
-const CARD_SURFACE_CLASS =
-  "relative bg-surface-low/45 backdrop-blur-[10px] overflow-hidden group";
-const CARD_SHADOW_STYLE: React.CSSProperties = {
-  boxShadow: [
-    "0 2px 4px rgba(0, 0, 0, 0.14)",
-    "0 8px 20px rgba(0, 0, 0, 0.16)",
-    "0 0 40px rgba(0, 0, 0, 0.12)",
-  ].join(", "),
-};
+const CARD_SURFACE_CLASS = "group px-4 py-3";
+const CARD_SHADOW_STYLE: React.CSSProperties = {};
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
@@ -237,10 +229,10 @@ function outcomeToken(outcome: FeedActionOutcome): ProjectToken {
   return actionVerbToken(outcome.verb, "outcome");
 }
 
-/** Inline meta mark: mono uppercase pill replacement — colored dot + label. */
+/** Inline meta mark: muted sentence-case label with a leading colored dot. */
 function InlineMetaMark({ token }: { token: ProjectToken }) {
   return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface">
+    <span className="inline-flex items-center gap-1 text-[11px] text-on-surface-variant">
       <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", TONE_DOT[token.tone])} />
       {token.label}
     </span>
@@ -251,9 +243,8 @@ function InlineDateMark({ value }: { value: string | undefined | null }) {
   return (
     <time
       dateTime={value ?? undefined}
-      className="inline-flex items-center gap-1 font-mono text-[10px] text-on-surface-variant"
+      className="shrink-0 text-xs tabular-nums text-on-surface-variant"
     >
-      <CalendarDays className="h-3 w-3" strokeWidth={1.5} />
       {formatFriendlyDate(value)}
     </time>
   );
@@ -261,7 +252,7 @@ function InlineDateMark({ value }: { value: string | undefined | null }) {
 
 function InlineActor({ session }: { session: string | undefined | null }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[10px] text-on-surface-variant">
+    <span className="inline-flex min-w-0 items-center gap-1 font-mono text-[11px] text-on-surface-variant">
       <ActorMark actor={session} size="xs" decorative />
       <span className="truncate">{compactSessionLabel(session)}</span>
     </span>
@@ -319,10 +310,10 @@ function ActionOutcomePanel({ outcome }: { outcome: FeedActionOutcome }) {
             <Icon className="h-4 w-4" strokeWidth={1.8} />
           </span>
           <div className="min-w-0">
-            <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface">
+            <div className="text-sm text-on-surface">
               {meta.outcomeLabel}
             </div>
-            <div className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <div className="mt-0.5 text-[11px] text-on-surface-variant">
               Decision recorded
             </div>
           </div>
@@ -425,19 +416,17 @@ export function FeedCard({
   const actorSession = destination?.startsWith("human") ? destination : "human@host";
   const renderedOutcome = actionOutcome ?? fallbackOutcomeFromQueueItem(card.kind, queueItem);
   const primaryToken = renderedOutcome ? outcomeToken(renderedOutcome) : KIND_TOKEN[card.kind];
-  const primaryDotClass = renderedOutcome
-    ? TONE_DOT[primaryToken.tone]
-    : KIND_DOT[card.kind];
-  // OPR.0.4.1.27 Unit 5 — the kind glyph (mockup fidelity): render the kind's
-  // icon tone-colored instead of a bare dot when one is defined.
-  const PrimaryIcon = primaryToken.icon;
+  // C11 Inbox v2: the row-level action container is hidden once a decision
+  // lands (outcome receipt) or the queue item is terminal. Otherwise every
+  // card gets one: actionable kinds show it always; other kinds reveal it
+  // on hover/focus-within.
+  const hideActions = renderedOutcome != null || isTerminalQueueItem(queueItem);
   // OPR.0.4.1.27 Unit 6 — sender-or-owner terminal address.
   const terminalSession = resolveCardTerminalSession(card.kind, source, destination);
   return (
     <article
       data-testid={KIND_TESTID[card.kind]}
-      style={CARD_SHADOW_STYLE}
-      className={cn(CARD_SURFACE_CLASS, "mb-3")}
+      className="group px-4 py-3"
       {...(onDismiss
         ? {
             tabIndex: 0,
@@ -447,87 +436,69 @@ export function FeedCard({
           }
         : {})}
     >
-      {/* 4 corner brackets — register the card bounds through the vellum
-          without a hard border. */}
-      <CornerBracket position="tl" />
-      <CornerBracket position="tr" />
-      <CornerBracket position="bl" />
-      <CornerBracket position="br" />
-
-      <div className="px-4 py-3">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 space-y-2">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              {/* Kind tag — mono uppercase + leading colored dot. Replaces
-                  the old colored-pill chrome. */}
-              <span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-on-surface">
-                {PrimaryIcon ? (
-                  <PrimaryIcon aria-hidden="true" strokeWidth={1.7} className={cn("h-3.5 w-3.5 shrink-0", TONE_TEXT[primaryToken.tone])} />
-                ) : (
-                  <span aria-hidden="true" className={cn("inline-block w-1.5 h-1.5 rounded-full shrink-0", primaryDotClass)} />
-                )}
-                {primaryToken.label}
-              </span>
-              {/* OPR.0.4.1.27 real-data fidelity — only real event-derived cards
-                  show the source-event token. Synthetic attention/needs-input
-                  projection cards wrap a real qitem in an internal wrapper type
-                  (queue.attention.synthetic / activity.needs_input.synthetic);
-                  feeding that to eventToken humanized the code into a visible
-                  "...Synthetic" mark (an internal-string leak). Suppress it for
-                  synthetic cards — their kind tag + queue-state token + human
-                  title already carry the meaning. */}
-              {!isSyntheticFeedCard(card) ? <InlineMetaMark token={eventToken(card.source.type)} /> : null}
-              {qitemViewerData?.state ? <InlineMetaMark token={queueStateToken(qitemViewerData.state)} /> : null}
-              {/* OPR.0.4.4.15 — origin host chip on aggregated remote items
-                  only ('local'/absent renders nothing: zero-config DOM is
-                  byte-identical to today). */}
-              {card.hostId && card.hostId !== "local" ? (
-                <span
-                  data-testid="feed-card-host-chip"
-                  className="px-1 border border-outline-variant font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
-                >
-                  {card.hostId}
-                </span>
-              ) : null}
-            </div>
-            {/* Title — legibility north star: 16px headline bold. */}
-            <h3 className="font-headline text-[16px] font-bold leading-tight text-on-surface truncate">
-              {card.title}
-            </h3>
+      <div className="flex items-center gap-3">
+        {/* Left status dot by kind. */}
+        <StatusDot status={KIND_STATUS[card.kind]} className="shrink-0" />
+        <div className="min-w-0 flex-1">
+          {/* Kind label (sentence case) + event token for real event cards. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className="text-xs text-on-surface-variant">{primaryToken.label}</span>
+            {!isSyntheticFeedCard(card) ? <InlineMetaMark token={eventToken(card.source.type)} /> : null}
+            {qitemViewerData?.state ? <InlineMetaMark token={queueStateToken(qitemViewerData.state)} /> : null}
           </div>
-          <div className="flex items-start gap-2">
-            <InlineDateMark value={card.createdAt} />
-            {onDismiss ? (
-              <button
-                type="button"
-                data-testid="feed-card-dismiss"
-                aria-label="Dismiss card"
-                onClick={handleDismissClick}
-                className="opacity-0 group-hover:opacity-100 focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-outline transition-opacity inline-flex h-5 w-5 items-center justify-center border border-outline-variant bg-surface-lowest/80 text-on-surface-variant hover:text-on-surface hover:border-outline"
+          {/* Title: text-sm font-medium. */}
+          <h3 className="truncate text-sm font-medium text-on-surface">
+            {card.title}
+          </h3>
+          {body ? (
+            // Muted one-line body preview.
+            <p className="mt-0.5 truncate text-sm text-on-surface-variant">
+              {body.split("\n")[0]}
+            </p>
+          ) : null}
+          <div className="mt-1 flex min-w-0 items-center gap-2">
+            {/* Author session in mono. */}
+            {card.authorSession ? (
+              <AuthorAgentTag authorSession={card.authorSession} rigId={card.rigId} />
+            ) : null}
+            {card.hostId && card.hostId !== "local" ? (
+              <span
+                data-testid="feed-card-host-chip"
+                className="border border-outline-variant px-1 font-mono text-[11px] text-on-surface-variant"
               >
-                <X className="h-3 w-3" strokeWidth={1.8} />
-              </button>
+                {card.hostId}
+              </span>
             ) : null}
           </div>
         </div>
-        {body ? (
-          // Qitem / event body is prose. 12px body for legibility.
-          <p className="mt-3 font-body text-[12px] leading-relaxed text-on-surface whitespace-pre-line">
-            {body}
-          </p>
+        {/* Relative time right-aligned. */}
+        <InlineDateMark value={card.createdAt} />
+        {onDismiss ? (
+          <button
+            type="button"
+            data-testid="feed-card-dismiss"
+            aria-label="Dismiss card"
+            onClick={handleDismissClick}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center border border-outline-variant bg-surface-lowest/80 text-on-surface-variant opacity-0 transition-opacity hover:border-outline hover:text-on-surface focus:opacity-100 focus:outline-none focus:ring-1 focus:ring-outline group-hover:opacity-100 group-focus-within:opacity-100"
+          >
+            <X className="h-3 w-3" strokeWidth={1.8} />
+          </button>
         ) : null}
-        <div className="mt-3">
+      </div>
+      {/* Row-level details + actions, below the main row. */}
+      <div className="mt-2 space-y-2 pl-5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <InlineFlow source={source} destination={destination} />
         </div>
         {tags.length > 0 ? (
-          <div className="mt-3 flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             {tags.slice(0, 6).map((tag) => <TagPill key={tag} tag={tag} />)}
           </div>
         ) : null}
         {proofPreview && proofPreview.screenshots.length > 0 ? (
           <div
             data-testid={`feed-card-proof-preview-${card.id}`}
-            className="mt-3 bg-background/40 p-2"
+            className="bg-background/40 p-2"
           >
             <ProofPacketHeader
               title={`Proof packet · ${proofPreview.displayName}`}
@@ -544,10 +515,9 @@ export function FeedCard({
           </div>
         ) : null}
         {renderedOutcome ? <ActionOutcomePanel outcome={renderedOutcome} /> : null}
-        {qitemViewerData && isActionableCard(card.kind, queueItem, renderedOutcome) ? (
+        {!hideActions && isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData ? (
           <div
             data-testid={`feed-card-actions-${card.id}`}
-            className="mt-3 bg-background/40 p-3"
           >
             {/* CORRECTIVE §7.1 + founder live-review 2026-07-05: JUST the two
                 buttons — APPROVE (one-tap, the existing verb + write path) and
@@ -574,9 +544,9 @@ export function FeedCard({
                 disabled={!terminalSession}
                 title={terminalSession ? `Chat with ${terminalSession}` : "No owning agent resolves for this card"}
                 onClick={() => setChatOpen((v) => !v)}
-                className="border border-outline px-3 py-1 font-mono text-[11px] uppercase hover:bg-surface-variant disabled:opacity-50"
+                className="border border-outline px-3 py-1 text-[11px] hover:bg-surface-variant disabled:opacity-50"
               >
-                ⌨ Chat
+                Chat
               </button>
             </div>
             {chatOpen && terminalSession ? (
@@ -590,23 +560,29 @@ export function FeedCard({
             ) : null}
           </div>
         ) : null}
-        <div className="mt-3 flex items-center justify-between gap-3 font-mono text-[10px] text-on-surface-variant">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center justify-between gap-3 text-xs text-on-surface-variant">
+          {!hideActions ? (
+          <div
+            {...(!(isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData)
+              ? { "data-testid": `feed-card-actions-${card.id}` }
+              : {})}
+            className={
+              isActionableCard(card.kind, queueItem, renderedOutcome) && qitemViewerData
+                ? "flex min-w-0 items-center gap-2"
+                : "flex min-w-0 items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+            }
+          >
             {/* OPR.0.4.1.27 real-data fidelity — when there is no human author
                 session, render nothing here. Previously this fell back to the raw
                 card.source.type, which leaked the internal wrapper string
-                (e.g. activity.needs_input.synthetic) user-visible. The kind tag +
-                human title already identify the card. */}
-            {card.authorSession ? (
-              <AuthorAgentTag authorSession={card.authorSession} rigId={card.rigId} />
-            ) : null}
+                (e.g. activity.needs_input.synthetic) user-visible. */}
             {qitemViewerData ? (
               <QueueItemTrigger
                 data={qitemViewerData}
                 testId={`feed-card-show-context-${card.id}`}
-                className="font-mono text-[10px] uppercase tracking-wide text-on-surface hover:text-on-surface underline"
+                className="text-xs text-on-surface underline hover:text-on-surface-variant"
               >
-                show context
+                Show context
               </QueueItemTrigger>
             ) : null}
             {/* OPR.0.4.1.27 Unit 6 — drill into the live terminal of the right
@@ -621,7 +597,7 @@ export function FeedCard({
               <span
                 data-testid={`feed-card-evidence-${card.id}`}
                 title={card.evidenceRef}
-                className="max-w-48 truncate font-mono text-[10px] text-on-surface-variant"
+                className="max-w-48 truncate font-mono text-[11px] text-on-surface-variant"
               >
                 evidence: {card.evidenceRef}
               </span>
@@ -635,12 +611,13 @@ export function FeedCard({
                 params={{ sliceId: card.reviewSlice }}
                 hash={card.reviewAnchor ? `needs-you-${card.reviewAnchor}` : undefined}
                 data-testid={`feed-card-review-link-${card.id}`}
-                className="font-mono text-[10px] uppercase tracking-wide underline text-on-surface hover:text-on-surface-variant"
+                className="text-xs underline text-on-surface hover:text-on-surface-variant"
               >
                 review →
               </Link>
             ) : null}
           </div>
+          ) : null}
         </div>
       </div>
       {proofPreview ? (

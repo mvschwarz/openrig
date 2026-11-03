@@ -61,14 +61,14 @@ function AgentRowItem({
               {glyph.char}
             </span>
             <span className="text-[12px] font-medium">{row.agentName}</span>
-            <span className="border border-outline-variant px-1 font-mono text-[9px] uppercase text-on-surface-variant">
+            <span className="border border-outline-variant px-1 text-[11px] text-on-surface-variant">
               {row.runtime}
             </span>
             <span className="min-w-0 flex-1 truncate text-[11px] text-on-surface-variant">
               {row.doing ?? "—"}
             </span>
-            <span className="font-mono text-[10px] text-on-surface-variant">holds {row.holdsCount}</span>
-            <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(row.lastTransitionIso)}</span>
+            <span className="font-mono text-[11px] text-on-surface-variant">holds {row.holdsCount}</span>
+            <span className="font-mono text-[11px] text-on-surface-variant">{ageLabel(row.lastTransitionIso)}</span>
           </summary>
           {/* FR-6: the transcript drill — SHIPPED read routes, fetched only
               when opened (zero standing transcript cost). */}
@@ -78,13 +78,13 @@ function AgentRowItem({
           type="button"
           data-testid={`agent-chat-${row.sessionName}`}
           onClick={() => setOpenChat((cur) => !cur)}
-          className="border border-outline px-2 py-0.5 font-mono text-[10px] uppercase hover:bg-surface-variant"
+          className="border border-outline px-2 py-0.5 text-[11px] hover:bg-surface-variant"
         >
           Chat
         </button>
       </div>
       {row.exception ? (
-        <p data-testid={`agent-exception-${row.sessionName}`} className="mt-1 font-mono text-[10px] text-amber-800">
+        <p data-testid={`agent-exception-${row.sessionName}`} className="mt-1 font-mono text-[11px] text-amber-800">
           ▲ {row.exception.evidence} · threshold: {row.exception.threshold}
         </p>
       ) : null}
@@ -139,10 +139,10 @@ export function AgentsBandView({
 
   return (
     <section id="agents" data-testid="agents-band" className={cn(VELLUM_CARD, "space-y-1 p-2")}>
-      <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">AGENTS</h3>
+      <h3 className="text-[11px] text-on-surface-variant">AGENTS</h3>
       {/* FR-4: the one coordination-health line per scope. */}
       {band.coordinationHealth ? (
-        <p data-testid="agents-health" className="font-mono text-[10px] text-on-surface-variant">
+        <p data-testid="agents-health" className="font-mono text-[11px] text-on-surface-variant">
           {band.coordinationHealth}
         </p>
       ) : null}
@@ -151,7 +151,7 @@ export function AgentsBandView({
           {groups.map((group) => (
             <div key={group.label ?? "__flat"}>
               {group.label ? (
-                <p data-testid={`agents-group-${group.label}`} className="mt-1 font-mono text-[10px] uppercase text-on-surface-variant">
+                <p data-testid={`agents-group-${group.label}`} className="mt-1 text-[11px] text-on-surface-variant">
                   {group.label}
                 </p>
               ) : null}
@@ -167,7 +167,7 @@ export function AgentsBandView({
       )}
       {overflowRows.length > 0 ? (
         <details data-testid="agents-overflow" className="border border-outline-variant">
-          <summary className="cursor-pointer px-2 py-1.5 font-mono text-[10px] text-on-surface-variant">
+          <summary className="cursor-pointer px-2 py-1.5 font-mono text-[11px] text-on-surface-variant">
             +{overflowRows.length} more queue-scoped agents
           </summary>
           <ul className="divide-y divide-outline-variant/50 border-t border-outline-variant">
@@ -186,14 +186,14 @@ export function AgentsBandView({
       <div data-testid="agents-footer" className="flex items-center justify-between gap-3 border-t border-outline-variant/60 pt-1.5">
         <p
           data-testid={band.rows.length === 0 ? "agents-empty" : undefined}
-          className="font-mono text-[10px] text-on-surface-variant"
+          className="font-mono text-[11px] text-on-surface-variant"
         >
           {band.provenance}
         </p>
         {zoomHref ? (
           <a
             href={zoomHref}
-            className="shrink-0 font-mono text-[10px] uppercase text-on-surface-variant underline-offset-2 hover:underline"
+            className="shrink-0 text-[11px] text-on-surface-variant underline-offset-2 hover:underline"
           >
             all agents ↗
           </a>

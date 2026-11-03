@@ -45,7 +45,7 @@ export function SyntaxHighlight({
     <pre
       data-testid="syntax-highlight-block"
       data-language={lang}
-      className="overflow-x-auto bg-stone-900 p-3 font-mono text-[10px] leading-relaxed text-stone-100"
+      className="overflow-x-auto bg-stone-900 p-3 font-mono text-[11px] leading-relaxed text-stone-100"
     >
       <code>
         {tokens.map((tok, idx) => (

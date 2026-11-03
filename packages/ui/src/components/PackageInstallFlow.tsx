@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { StatusBadge } from "@/components/ui/status-badge.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 import {
   Table,
@@ -59,11 +60,11 @@ interface InstallResult {
 }
 
 const STEPS = [
-  { num: 1, label: "ENTER" },
-  { num: 2, label: "VALIDATE" },
-  { num: 3, label: "CONFIGURE" },
-  { num: 4, label: "PLAN" },
-  { num: 5, label: "APPLY" },
+  { num: 1, label: "Enter" },
+  { num: 2, label: "Validate" },
+  { num: 3, label: "Configure" },
+  { num: 4, label: "Plan" },
+  { num: 5, label: "Apply" },
 ] as const;
 
 function getStepNumber(step: Step): number {
@@ -81,7 +82,7 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
   const activeNum = currentStep === "error" ? errorAtStep : getStepNumber(currentStep);
 
   return (
-    <div className="flex items-center gap-spacing-2 mb-spacing-8 p-spacing-4 inset-light flex-wrap" data-testid="step-indicator">
+    <div className="flex items-center gap-spacing-2 mb-spacing-8 p-spacing-4 flex-wrap" data-testid="step-indicator">
       {STEPS.map((s, i) => {
         const isCompleted = activeNum > s.num;
         const isActive = activeNum === s.num;
@@ -89,16 +90,16 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
         return (
           <div key={s.num} className="flex items-center gap-spacing-2">
             {i > 0 && (
-              <div className={`w-6 h-px mx-spacing-1 ${isCompleted ? "bg-primary/40" : "bg-foreground-muted/20"}`} />
+              <div className={`w-6 h-px mx-spacing-1 ${isCompleted ? "bg-primary/40" : "bg-outline-variant"}`} />
             )}
             <span
               data-testid={`step-${s.num}`}
-              className={cn(
-                "text-label-sm uppercase tracking-[0.04em] font-mono px-spacing-2 py-spacing-1 transition-colors whitespace-nowrap",
-                isCompleted ? "text-foreground-muted" :
-                isActive ? "text-foreground bg-foreground/10" :
-                "text-foreground-muted/30"
-              )}
+              className={
+                `text-xs px-spacing-2 py-spacing-1 transition-colors whitespace-nowrap ` +
+                (isCompleted ? "text-on-surface-variant" :
+                isActive ? "text-on-surface bg-surface-mid" :
+                "text-on-surface-variant/50")
+              }
             >
               {isCompleted ? "\u2713" : ""} [ {s.num} {s.label} ]
             </span>
@@ -109,24 +110,25 @@ function StepIndicator({ currentStep, errorAtStep }: { currentStep: Step; errorA
   );
 }
 
-function policyStatusColor(status: string): string {
+function policyStatusKey(status: string): string {
   switch (status) {
-    case "approved": return "text-success";
-    case "rejected": return "text-warning";
-    case "deferred": return "text-foreground-muted";
-    case "conflict": return "text-destructive";
-    case "noop": return "text-foreground-muted/50";
-    default: return "";
+    case "approved": return "done";
+    case "rejected": return "failed";
+    case "deferred":
+    case "conflict": return "attention_required";
+    case "noop": return "idle";
+    default: return status;
   }
 }
 
-function policyStatusBg(status: string): string {
+function policyStatusLabel(status: string): string {
   switch (status) {
-    case "approved": return "bg-success/[0.08]";
-    case "rejected": return "bg-warning/[0.08]";
-    case "deferred": return "bg-foreground-muted/[0.04]";
-    case "conflict": return "bg-destructive/[0.08]";
-    default: return "";
+    case "approved": return "Approved";
+    case "rejected": return "Rejected";
+    case "deferred": return "Deferred";
+    case "conflict": return "Conflict";
+    case "noop": return "No-op";
+    default: return status.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
   }
 }
 
@@ -241,23 +243,18 @@ export function PackageInstallFlow() {
   return (
     <WorkspacePage>
     <div data-testid="install-flow">
-      {/* Header */}
-      <div className="mb-spacing-8">
-        <div>
-          <h2 className="text-headline-lg uppercase tracking-[0.06em]">INSTALL PACKAGE (Legacy)</h2>
-          <p className="text-label-md text-foreground-muted font-grotesk mt-spacing-1">
-            Validate, configure, and apply an agent package
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Install package (legacy)"
+        description="Validate, configure, and apply a legacy agent package."
+      />
 
       <StepIndicator currentStep={step} errorAtStep={errorAtStep} />
 
       {/* Step 1: Enter */}
       {step === "enter" && (
         <div>
-          <label className="text-label-md text-foreground-muted uppercase tracking-[0.04em] block mb-spacing-2">
-            PACKAGE PATH
+          <label className="text-xs text-on-surface-variant block mb-spacing-2">
+            Package path
           </label>
           <input
             data-testid="source-path-input"
@@ -265,39 +262,42 @@ export function PackageInstallFlow() {
             value={sourcePath}
             onChange={(e) => setSourcePath(e.target.value)}
             placeholder="/path/to/package"
-            className="w-full bg-transparent border-b border-foreground/20 focus:border-foreground px-0 py-spacing-2 text-body-md font-mono outline-none transition-colors"
+            className="w-full bg-transparent border-b border-foreground/20 focus:border-foreground px-0 py-spacing-2 text-sm font-mono outline-none transition-colors"
           />
-          <Button
-            variant="tactical"
-            data-testid="validate-btn"
-            onClick={handleValidate}
-            disabled={!sourcePath.trim()}
-            className="mt-spacing-4"
-          >
-            VALIDATE
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button
+              variant="default"
+              data-testid="validate-btn"
+              onClick={handleValidate}
+              disabled={!sourcePath.trim()}
+              className="mt-spacing-4"
+            >
+              Validate
+            </Button>
+          </div>
         </div>
       )}
 
       {/* Validating */}
       {step === "validating" && (
-        <div className="text-label-md text-foreground-muted" data-testid="validating-indicator">Validating...</div>
+        <div className="text-sm text-on-surface-variant" data-testid="validating-indicator">Validating...</div>
       )}
 
       {/* Step 2: Validated — show manifest summary */}
       {step === "validated" && manifest && (
         <div data-testid="manifest-summary">
-          <div className="card-dark p-spacing-4 mb-spacing-4">
+          <div className="rounded-lg border bg-surface-lowest p-spacing-4 mb-spacing-4 shadow-sm">
             <div className="flex items-baseline justify-between mb-spacing-2">
-              <span className="text-headline-md uppercase">{manifest.name}</span>
-              <span className="font-mono text-foreground-muted-on-dark">v{manifest.version}</span>
+              <span className="text-sm font-semibold text-on-surface">{manifest.name}</span>
+              <span className="font-mono text-xs text-on-surface-variant">v{manifest.version}</span>
             </div>
-            <p className="text-body-sm text-foreground-muted-on-dark mb-spacing-3">{manifest.summary}</p>
-            <div className="flex flex-wrap gap-spacing-3 text-label-sm">
-              <span>Skills: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.skills}</span></span>
-              <span>Guidance: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.guidance}</span></span>
-              <span>Agents: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.agents}</span></span>
-              <span>Hooks: <span className="font-mono text-foreground-on-dark">{manifest.exportCounts.hooks}</span></span>
+            <p className="text-sm text-on-surface-variant mb-spacing-3">{manifest.summary}</p>
+            <div className="flex flex-wrap gap-spacing-3 text-xs text-on-surface-variant">
+              <span>Skills: <span className="font-mono text-on-surface">{manifest.exportCounts.skills}</span></span>
+              <span>Guidance: <span className="font-mono text-on-surface">{manifest.exportCounts.guidance}</span></span>
+              <span>Agents: <span className="font-mono text-on-surface">{manifest.exportCounts.agents}</span></span>
+              <span>Hooks: <span className="font-mono text-on-surface">{manifest.exportCounts.hooks}</span></span>
               <span className="inline-flex min-w-0 items-center gap-1.5">
                 <span>Runtimes:</span>
                 <span className="inline-flex min-w-0 flex-wrap items-center gap-1">
@@ -307,16 +307,18 @@ export function PackageInstallFlow() {
                       runtime={rt}
                       size="xs"
                       compact
-                      className="border-white/20 bg-surface-lowest/10 text-foreground-on-dark"
                     />
                   ))}
                 </span>
               </span>
             </div>
           </div>
-          <Button variant="tactical" data-testid="configure-btn" onClick={() => setStep("configure")}>
-            CONFIGURE
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" data-testid="configure-btn" onClick={() => setStep("configure")}>
+              Configure
+            </Button>
+          </div>
         </div>
       )}
 
@@ -325,12 +327,12 @@ export function PackageInstallFlow() {
         <div data-testid="configure-step">
           <div className="space-y-spacing-4 mb-spacing-6">
             <div>
-              <label className="text-label-sm text-foreground-muted uppercase tracking-[0.04em] block mb-spacing-1">RUNTIME</label>
+              <label className="text-xs text-on-surface-variant block mb-spacing-1">Runtime</label>
               <select
                 data-testid="runtime-select"
                 value={runtime}
                 onChange={(e) => setRuntime(e.target.value)}
-                className="bg-transparent border-b border-foreground/20 py-spacing-1 text-body-md font-mono outline-none"
+                className="bg-transparent border-b border-foreground/20 py-spacing-1 text-sm outline-none"
               >
                 {manifest.runtimes.map((rt) => (
                   <option key={rt} value={rt}>{rt}</option>
@@ -339,24 +341,24 @@ export function PackageInstallFlow() {
             </div>
 
             <div>
-              <label className="text-label-sm text-foreground-muted uppercase tracking-[0.04em] block mb-spacing-1">TARGET ROOT</label>
+              <label className="text-xs text-on-surface-variant block mb-spacing-1">Target root</label>
               <input
                 data-testid="target-root-input"
                 type="text"
                 value={targetRoot}
                 onChange={(e) => setTargetRoot(e.target.value)}
-                className="w-full bg-transparent border-b border-foreground/20 px-0 py-spacing-1 text-body-md font-mono outline-none"
+                className="w-full bg-transparent border-b border-foreground/20 px-0 py-spacing-1 text-sm font-mono outline-none"
               />
             </div>
 
             {manifest.roles.length > 0 && (
               <div>
-                <label className="text-label-sm text-foreground-muted uppercase tracking-[0.04em] block mb-spacing-1">ROLE</label>
+                <label className="text-xs text-on-surface-variant block mb-spacing-1">Role</label>
                 <select
                   data-testid="role-select"
                   value={roleName}
                   onChange={(e) => setRoleName(e.target.value)}
-                  className="bg-transparent border-b border-foreground/20 py-spacing-1 text-body-md font-mono outline-none"
+                  className="bg-transparent border-b border-foreground/20 py-spacing-1 text-sm outline-none"
                 >
                   <option value="">All exports</option>
                   {manifest.roles.map((r) => (
@@ -374,41 +376,46 @@ export function PackageInstallFlow() {
                 onChange={(e) => setAllowMerge(e.target.checked)}
                 className="accent-primary"
               />
-              <label className="text-label-sm text-foreground-muted">
+              <label className="text-xs text-on-surface-variant">
                 Allow managed block merges into existing files
               </label>
             </div>
 
             {(manifest.requirements.cliTools.length > 0 || manifest.requirements.systemPackages.length > 0) && (
-              <div data-testid="requirements-section" className="p-spacing-3 bg-foreground/[0.04]">
-                <span className="text-label-sm text-foreground-muted uppercase block mb-spacing-1">REQUIREMENTS</span>
+              <div data-testid="requirements-section" className="rounded-lg border bg-surface-lowest p-spacing-3">
+                <span className="text-xs text-on-surface-variant block mb-spacing-1">Requirements</span>
                 {manifest.requirements.cliTools.map((t) => (
-                  <div key={t.name} className="text-body-sm font-mono">CLI: {t.name}</div>
+                  <div key={t.name} className="text-sm">CLI: <span className="font-mono">{t.name}</span></div>
                 ))}
                 {manifest.requirements.systemPackages.map((p) => (
-                  <div key={p.name} className="text-body-sm font-mono">System: {p.name}</div>
+                  <div key={p.name} className="text-sm">System: <span className="font-mono">{p.name}</span></div>
                 ))}
               </div>
             )}
           </div>
 
-          <Button variant="tactical" data-testid="plan-btn" onClick={handlePlan}>
-            PREVIEW PLAN
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <Button variant="ghost" data-testid="configure-back-btn" onClick={() => setStep("validated")}>
+              Back
+            </Button>
+            <Button variant="default" data-testid="plan-btn" onClick={handlePlan}>
+              Preview plan
+            </Button>
+          </div>
         </div>
       )}
 
       {/* Planning */}
       {step === "planning" && (
-        <div className="text-label-md text-foreground-muted" data-testid="planning-indicator">Planning...</div>
+        <div className="text-sm text-on-surface-variant" data-testid="planning-indicator">Planning...</div>
       )}
 
       {/* Step 4: Plan preview */}
       {step === "planned" && planResult && (
         <div data-testid="plan-preview">
-          <div className="flex flex-wrap gap-spacing-4 mb-spacing-4 text-label-sm">
-            <span>Approved: <span className="font-mono text-success" data-testid="plan-actionable">{planResult.actionable}</span></span>
-            <span>Deferred: <span className="font-mono text-foreground-muted" data-testid="plan-deferred">{planResult.deferred}</span></span>
+          <div className="flex flex-wrap gap-spacing-4 mb-spacing-4 text-xs">
+            <span>Approved: <span className="font-mono text-on-surface" data-testid="plan-actionable">{planResult.actionable}</span></span>
+            <span>Deferred: <span className="font-mono text-on-surface-variant" data-testid="plan-deferred">{planResult.deferred}</span></span>
             <span>Conflicts: <span className="font-mono text-destructive" data-testid="plan-conflicts">{planResult.conflicts}</span></span>
             <span>No-ops: <span className="font-mono" data-testid="plan-noops">{planResult.noOps}</span></span>
             {planResult.rejected > 0 && (
@@ -427,23 +434,23 @@ export function PackageInstallFlow() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>TYPE</TableHead>
-                <TableHead>NAME</TableHead>
-                <TableHead>STATUS</TableHead>
-                <TableHead>TARGET</TableHead>
+                <TableHead className="normal-case">Type</TableHead>
+                <TableHead className="normal-case">Name</TableHead>
+                <TableHead className="normal-case">Status</TableHead>
+                <TableHead className="normal-case">Target</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {planResult.entries.map((e, i) => (
-                <TableRow key={i} className={policyStatusBg(e.policyStatus)} data-testid="plan-entry" data-policy-status={e.policyStatus}>
-                  <TableCell className="font-mono text-label-sm">{e.exportType}</TableCell>
-                  <TableCell className="font-mono text-label-sm">{e.exportName}</TableCell>
-                  <TableCell className={cn("font-mono text-label-sm uppercase", policyStatusColor(e.policyStatus))}>
-                    {e.policyStatus}
-                    {e.deferReason && <span className="text-foreground-muted normal-case"> — {e.deferReason}</span>}
-                    {e.conflict && <span className="text-destructive normal-case"> — {e.conflict.reason}</span>}
+                <TableRow key={i} data-testid="plan-entry" data-policy-status={e.policyStatus}>
+                  <TableCell className="font-mono text-xs">{e.exportType}</TableCell>
+                  <TableCell className="font-mono text-xs">{e.exportName}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={policyStatusKey(e.policyStatus)} label={policyStatusLabel(e.policyStatus)} />
+                    {e.deferReason && <span className="text-on-surface-variant text-xs"> — {e.deferReason}</span>}
+                    {e.conflict && <span className="text-destructive text-xs"> — {e.conflict.reason}</span>}
                   </TableCell>
-                  <TableCell className="font-mono text-label-sm text-foreground-muted truncate max-w-[200px]">
+                  <TableCell className="font-mono text-xs text-on-surface-variant truncate max-w-[200px]">
                     {e.targetPath || "—"}
                   </TableCell>
                 </TableRow>
@@ -451,15 +458,22 @@ export function PackageInstallFlow() {
             </TableBody>
           </Table>
 
-          <div className="mt-spacing-4">
+          <div className="mt-spacing-4 flex items-center justify-between gap-2">
             <Button
-              variant="tactical"
+              variant="ghost"
+              data-testid="plan-back-btn"
+              onClick={() => setStep("configure")}
+            >
+              Back
+            </Button>
+            <Button
+              variant="default"
               data-testid="apply-btn"
               onClick={handleApply}
               disabled={hasConflicts}
               title={hasConflicts ? "Resolve conflicts before applying" : undefined}
             >
-              APPLY
+              Install package
             </Button>
           </div>
         </div>
@@ -467,7 +481,7 @@ export function PackageInstallFlow() {
 
       {/* Applying */}
       {step === "applying" && (
-        <div className="text-label-md text-foreground-muted" data-testid="applying-indicator">Applying...</div>
+        <div className="text-sm text-on-surface-variant" data-testid="applying-indicator">Applying...</div>
       )}
 
       {/* Step 5: Done */}
@@ -475,25 +489,28 @@ export function PackageInstallFlow() {
         <div data-testid="install-result">
           <Alert className="mb-spacing-4">
             <AlertDescription>
-              <span className="text-primary font-mono">{installResult.packageName}</span>
-              <span className="text-foreground-muted"> installed as </span>
-              <span className="font-mono" data-testid="result-install-id">{installResult.installId}</span>
+              <span className="text-primary font-mono text-sm">{installResult.packageName}</span>
+              <span className="text-on-surface-variant text-sm"> installed as </span>
+              <span className="font-mono text-sm" data-testid="result-install-id">{installResult.installId}</span>
             </AlertDescription>
           </Alert>
 
-          <div className="flex gap-spacing-4 text-label-sm mb-spacing-4">
-            <span>Applied: <span className="font-mono text-success" data-testid="result-applied">{installResult.applied.length}</span></span>
-            <span>Deferred: <span className="font-mono text-foreground-muted" data-testid="result-deferred">{installResult.deferred.length}</span></span>
-            <span>Verified: <span className={cn("font-mono", installResult.verification.passed ? "text-success" : "text-destructive")} data-testid="result-verified">{installResult.verification.passed ? "PASS" : "FAIL"}</span></span>
+          <div className="flex gap-spacing-4 text-xs mb-spacing-4 text-on-surface-variant">
+            <span>Applied: <span className="font-mono text-on-surface" data-testid="result-applied">{installResult.applied.length}</span></span>
+            <span>Deferred: <span className="font-mono" data-testid="result-deferred">{installResult.deferred.length}</span></span>
+            <span>Verified: {installResult.verification.passed
+              ? <StatusBadge status="done" label="Pass" testId="result-verified" />
+              : <StatusBadge status="failed" label="Fail" testId="result-verified" />}</span>
           </div>
 
-          <div className="flex gap-spacing-3">
+          <div className="flex items-center justify-between gap-2">
+            <span />
             <Button
-              variant="tactical"
+              variant="default"
               data-testid="detail-link"
               onClick={() => navigate({ to: "/packages/$packageId", params: { packageId: installResult.packageId } })}
             >
-              VIEW INSTALL DETAILS
+              View install details
             </Button>
           </div>
         </div>
@@ -507,21 +524,24 @@ export function PackageInstallFlow() {
               <AlertDescription className="text-destructive">{e}</AlertDescription>
             </Alert>
           ))}
-          <Button
-            variant="tactical"
-            className="mt-spacing-4"
-            data-testid="try-again-btn"
-            onClick={() => {
-              setStep("enter");
-              setErrors([]);
-              setManifest(null);
-              setPlanResult(null);
-              setInstallResult(null);
-              setErrorAtStep(0);
-            }}
-          >
-            TRY AGAIN
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button
+              variant="default"
+              className="mt-spacing-4"
+              data-testid="try-again-btn"
+              onClick={() => {
+                setStep("enter");
+                setErrors([]);
+                setManifest(null);
+                setPlanResult(null);
+                setInstallResult(null);
+                setErrorAtStep(0);
+              }}
+            >
+              Try again
+            </Button>
+          </div>
         </div>
       )}
     </div>

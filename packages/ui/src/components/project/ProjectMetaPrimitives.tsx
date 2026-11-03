@@ -212,8 +212,8 @@ export function ProjectPill({
     <span
       data-testid={testId}
       className={cn(
-        "inline-flex items-center gap-1 border font-mono uppercase tracking-[0.10em]",
-        compact ? "px-1.5 py-0.5 text-[8px]" : "px-2 py-1 text-[9px]",
+        "inline-flex items-center gap-1 rounded-full border",
+        compact ? "px-1.5 py-0.5 text-xs" : "px-2 py-1 text-xs",
         toneClass[token.tone],
         className,
       )}
@@ -245,7 +245,7 @@ export function QueueCountIcon({
       data-testid={testId}
       title={label}
       aria-label={label}
-      className="inline-flex shrink-0 items-center gap-1 border border-outline-variant bg-surface-lowest/45 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-on-surface-variant"
+      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-outline-variant bg-surface-lowest px-1.5 py-0.5 text-xs tabular-nums text-on-surface-variant"
     >
       <Inbox className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
       <span>{count}</span>
@@ -293,8 +293,8 @@ export function ActorChip({
   return (
     <span
       className={cn(
-        "inline-flex min-w-0 items-center gap-1 border px-1.5 py-0.5 font-mono text-[9px]",
-        muted ? "border-outline-variant bg-surface-lowest/35 text-on-surface-variant" : "border-outline-variant bg-surface-lowest/55 text-on-surface",
+        "inline-flex min-w-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-xs",
+        muted ? "border-outline-variant bg-surface-lowest text-on-surface-variant" : "border-outline-variant bg-surface-lowest text-on-surface",
       )}
     >
       <ActorMark actor={session} size="xs" decorative />
@@ -307,7 +307,7 @@ export function DateChip({ value }: { value: string | undefined | null }) {
   return (
     <time
       dateTime={value ?? undefined}
-      className="inline-flex items-center gap-1 border border-outline-variant bg-surface-lowest/45 px-1.5 py-0.5 font-mono text-[9px] text-on-surface-variant"
+      className="inline-flex items-center gap-1 rounded-full border border-outline-variant bg-surface-lowest px-1.5 py-0.5 text-xs text-on-surface-variant"
     >
       <CalendarDays className="h-3 w-3" strokeWidth={1.5} />
       {formatFriendlyDate(value)}
@@ -369,7 +369,7 @@ export function ProofThumbnailGrid({
             className="group relative block w-full text-left focus:outline-none focus:ring-2 focus:ring-on-surface/20"
           >
             {image}
-            <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 border border-amber-400/45 bg-surface-lowest/80 px-1.5 py-0.5 font-mono text-[8px] uppercase tracking-[0.10em] text-amber-950 backdrop-blur-sm">
+            <span className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded-full border border-amber-400/45 bg-surface-lowest px-1.5 py-0.5 text-xs text-amber-950">
               <ToolMark tool={rel} size="xs" decorative />
               Proof image
             </span>
@@ -388,7 +388,7 @@ export function ProofPacketHeader({
   badge: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+      <div className="flex items-center justify-between gap-2 text-xs text-on-surface-variant">
       <span className="truncate inline-flex items-center gap-1">
         <ToolMark tool="proof" size="xs" />
         {title}

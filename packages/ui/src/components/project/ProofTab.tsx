@@ -24,16 +24,17 @@ import { useScopeMarkdown } from "../../hooks/useScopeMarkdown.js";
 import { MarkdownViewer } from "../markdown/MarkdownViewer.js";
 import { SectionHeader } from "../ui/section-header.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
 import { FileLink } from "../ui/FileLink.js";
 // OPR.0.4.4.20: Lightbox extracted (verbatim) for reuse by the Review surface.
 import { Lightbox } from "./Lightbox.js";
 
 type Verdict = "PASS" | "PARTIAL" | "FAIL";
 
-const VERDICT_TONE: Record<Verdict, string> = {
-  PASS: "border-emerald-500/60 bg-emerald-50 text-emerald-800",
-  PARTIAL: "border-amber-500/60 bg-amber-50 text-amber-800",
-  FAIL: "border-red-500/60 bg-red-50 text-red-800",
+const VERDICT_STATUS: Record<Verdict, string> = {
+  PASS: "done",
+  PARTIAL: "partial",
+  FAIL: "failed",
 };
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
@@ -102,8 +103,8 @@ function ProofSliceCard({
 
   if (proofMd.isLoading) {
     return (
-      <section data-testid={`proof-slice-loading-${sliceId}`} className="border border-outline-variant bg-surface-lowest/25 p-4">
-        <div className="font-mono text-[11px] text-on-surface-variant">Loading proof…</div>
+      <section data-testid={`proof-slice-loading-${sliceId}`} className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
+        <div className="text-xs text-on-surface-variant">Loading proof…</div>
       </section>
     );
   }
@@ -140,12 +141,12 @@ function ProofSliceCard({
     return (
       <section
         data-testid={`proof-slice-empty-${sliceId}`}
-        className="border border-dashed border-outline-variant bg-surface-lowest/10 p-4"
+        className="rounded-lg border border-dashed bg-surface-lowest p-4 shadow-sm"
       >
-        <div className="flex items-baseline justify-between border-b border-outline-variant/60 pb-2">
-          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface-variant">{sliceId}</span>
+        <div className="flex items-baseline justify-between gap-2 border-b border-outline-variant/60 pb-2">
+          <span className="font-mono text-xs text-on-surface-variant">{sliceId}</span>
           {empty.micro ? (
-            <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant">{empty.micro}</span>
+            <span className="text-xs text-on-surface-variant">{empty.micro}</span>
           ) : null}
         </div>
         <div className="mt-3">
@@ -161,19 +162,18 @@ function ProofSliceCard({
   }
 
   return (
-    <section data-testid={`proof-slice-${sliceId}`} className="border border-outline-variant bg-surface-lowest/25 p-4">
+    <section data-testid={`proof-slice-${sliceId}`} className="rounded-lg border bg-surface-lowest p-4 shadow-sm">
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-outline-variant pb-2">
         <div className="flex items-baseline gap-2">
-          <span className="font-mono text-[12px] uppercase tracking-[0.12em] text-on-surface">{sliceId}</span>
-          <span className="font-mono text-[10px] text-on-surface-variant">{title}</span>
+          <span className="font-mono text-xs text-on-surface">{sliceId}</span>
+          <span className="text-xs text-on-surface-variant">{title}</span>
         </div>
         {verdict ? (
-          <span
-            data-testid={`proof-verdict-${sliceId}`}
-            className={`border px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-[0.14em] ${VERDICT_TONE[verdict]}`}
-          >
-            {verdict}
-          </span>
+          <StatusBadge
+            status={VERDICT_STATUS[verdict]}
+            label={verdict}
+            testId={`proof-verdict-${sliceId}`}
+          />
         ) : null}
       </div>
 
@@ -191,31 +191,31 @@ function ProofSliceCard({
 
       {/* Artifact gallery — the proof/ captures, browser-viewable via /api/files/asset. */}
       {images.length > 0 ? (
-        <div className="mt-3">
-          <div className="mb-1.5 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">
-            proof/ · {images.length} capture{images.length === 1 ? "" : "s"}
-          </div>
-          <div data-testid={`proof-gallery-${sliceId}`} className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {images.map((img) => {
-              const url = fileAssetUrl(resolved!.rootName, `${proofRel}/${img.name}`);
-              return (
-                <figure key={img.name} data-testid={`proof-thumb-${img.name}`} className="border border-outline-variant bg-surface-lowest/40">
-                  <button type="button" onClick={() => setPreview(url)} className="block w-full" aria-label={`Open ${img.name}`}>
-                    <img src={url} alt={img.name} loading="lazy" className="block h-[150px] w-full object-cover object-top" />
-                  </button>
-                  <figcaption className="truncate border-t border-outline-variant px-2 py-1 font-mono text-[8px] uppercase tracking-[0.08em] text-on-surface-variant">
-                    {img.name}
-                  </figcaption>
-                </figure>
-              );
-            })}
-          </div>
+      <div className="mt-3">
+        <div className="mb-1.5 text-xs font-medium text-on-surface-variant">
+          Proof · {images.length} capture{images.length === 1 ? "" : "s"}
         </div>
+        <div data-testid={`proof-gallery-${sliceId}`} className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {images.map((img) => {
+            const url = fileAssetUrl(resolved!.rootName, `${proofRel}/${img.name}`);
+            return (
+              <figure key={img.name} data-testid={`proof-thumb-${img.name}`} className="overflow-hidden rounded-lg border bg-surface-lowest">
+                <button type="button" onClick={() => setPreview(url)} className="block w-full" aria-label={`Open ${img.name}`}>
+                  <img src={url} alt={img.name} loading="lazy" className="block h-[150px] w-full object-cover object-top" />
+                </button>
+                <figcaption className="truncate border-t border-outline-variant px-2 py-1 text-xs text-on-surface-variant">
+                  {img.name}
+                </figcaption>
+              </figure>
+            );
+          })}
+        </div>
+      </div>
       ) : null}
 
       {/* Non-image proof artifacts (logs/videos/etc) — listed AS-IS as links, nothing hidden. */}
       {otherFiles.length > 0 ? (
-        <ul data-testid={`proof-files-${sliceId}`} className="mt-3 space-y-1 font-mono text-[10px]">
+        <ul data-testid={`proof-files-${sliceId}`} className="mt-3 space-y-1 font-mono text-xs">
           {otherFiles.map((f) => (
             <li key={f.name}>
               {MD_RE.test(f.name) ? (

@@ -88,7 +88,7 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
     <div className="flex-1 overflow-y-auto" data-testid="env-panel">
       {/* Overall env state */}
       <section className="px-4 py-3 border-b border-outline-variant">
-        <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-1">Environment</div>
+        <div className="text-[11px] text-on-surface-variant mb-1">Environment</div>
         <div data-testid="env-state" className={`font-mono text-[12px] font-bold ${
           envState === "Healthy" ? "text-green-700"
             : envState === "Degraded" ? "text-amber-600"
@@ -102,10 +102,10 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
       {/* Services */}
       {services.length > 0 && (
         <section className="px-4 py-3 border-b border-outline-variant">
-          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Services</div>
+          <div className="text-[11px] text-on-surface-variant mb-2">Services</div>
           <div className="space-y-1">
             {services.map((svc) => (
-              <div key={svc.name} className="flex items-center justify-between font-mono text-[10px]">
+              <div key={svc.name} className="flex items-center justify-between font-mono text-[11px]">
                 <span className="text-on-surface">{svc.name}</span>
                 <span className={svc.health === "healthy" ? "text-green-700" : "text-on-surface-variant"}>
                   {svc.health ?? svc.status}
@@ -119,10 +119,10 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
       {/* Health gates */}
       {waitFor.length > 0 && (
         <section className="px-4 py-3 border-b border-outline-variant">
-          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Health Gates</div>
+          <div className="text-[11px] text-on-surface-variant mb-2">Health Gates</div>
           <div className="space-y-2">
             {waitFor.map((gate, index) => (
-              <div key={`${formatWaitTarget(gate.target)}-${index}`} className="space-y-1 font-mono text-[10px]">
+              <div key={`${formatWaitTarget(gate.target)}-${index}`} className="space-y-1 font-mono text-[11px]">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-on-surface break-all">{formatWaitTarget(gate.target)}</span>
                   <span className={
@@ -145,10 +145,10 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
       {/* Surfaces */}
       {surfaces && (surfaces.urls?.length || surfaces.commands?.length) && (
         <section className="px-4 py-3 border-b border-outline-variant">
-          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Surfaces</div>
+          <div className="text-[11px] text-on-surface-variant mb-2">Surfaces</div>
           <div className="space-y-1">
             {surfaces.urls?.map((u) => (
-              <div key={u.name} className="flex items-center justify-between font-mono text-[10px]">
+              <div key={u.name} className="flex items-center justify-between font-mono text-[11px]">
                 <span className="text-on-surface">{u.name}</span>
                 <a href={u.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline truncate ml-2">
                   {u.url}
@@ -156,7 +156,7 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
               </div>
             ))}
             {surfaces.commands?.map((cmd) => (
-              <div key={cmd.name} className="flex items-center justify-between font-mono text-[10px]">
+              <div key={cmd.name} className="flex items-center justify-between font-mono text-[11px]">
                 <span className="text-on-surface">{cmd.name}</span>
                 <span className="text-on-surface-variant truncate ml-2">{cmd.command}</span>
               </div>
@@ -175,19 +175,19 @@ export function RigEnvPanel({ rigId, envData }: RigEnvPanelProps) {
             {downPending ? "Stopping..." : "Stop Env"}
           </Button>
         </div>
-        {downResult && <div className="mt-2 font-mono text-[9px] text-on-surface-variant">{downResult}</div>}
+        {downResult && <div className="mt-2 font-mono text-[11px] text-on-surface-variant">{downResult}</div>}
       </section>
 
       {/* Logs output */}
       {logsError && (
         <section className="px-4 py-3">
-          <div className="font-mono text-[9px] text-red-600">{logsError}</div>
+          <div className="font-mono text-[11px] text-red-600">{logsError}</div>
         </section>
       )}
       {logs !== null && !logsError && (
         <section className="px-4 py-3">
-          <div className="font-mono text-[8px] text-on-surface-variant uppercase tracking-wider mb-2">Logs</div>
-          <pre className="font-mono text-[9px] text-on-surface whitespace-pre-wrap break-all max-h-64 overflow-y-auto bg-background p-2 border border-outline-variant">
+          <div className="text-[11px] text-on-surface-variant mb-2">Logs</div>
+          <pre className="font-mono text-[11px] text-on-surface whitespace-pre-wrap break-all max-h-64 overflow-y-auto bg-background p-2 border border-outline-variant">
             {logs || "(empty)"}
           </pre>
         </section>

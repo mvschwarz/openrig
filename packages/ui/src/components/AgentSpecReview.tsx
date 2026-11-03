@@ -62,9 +62,9 @@ export function AgentSpecReview() {
         )}
 
         {/* Loading / Error */}
-        {isLoading && <div className="font-mono text-[10px] text-on-surface-variant">Loading review...</div>}
+        {isLoading && <div className="text-xs text-on-surface-variant">Loading review…</div>}
         {error && (
-          <div className="p-3 bg-red-50 border border-red-200 font-mono text-[10px] text-red-700">
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
             {(error as Error).message}
           </div>
         )}

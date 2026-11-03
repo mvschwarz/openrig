@@ -32,18 +32,18 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
   const hasAnything = affectedRigs.length > 0 || specGraph !== null;
   if (!hasAnything) {
     return (
-      <div className="p-4 font-mono text-[10px] text-on-surface-variant" data-testid="topology-empty">
-        No seats found for this slice's qitem chain.
+      <div className="p-4 text-xs text-on-surface-variant" data-testid="topology-empty">
+        No agents found for this slice's queue item chain.
       </div>
     );
   }
   return (
-    <div data-testid="topology-tab" className="p-4 space-y-4">
+    <div data-testid="topology-tab" className="p-4 space-y-4 text-sm">
       <header className="flex items-center justify-between border-b border-outline-variant pb-2">
-        <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
+        <div className="text-sm font-semibold text-on-surface">
           Workflow
         </div>
-        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="topology-aggregate">
+        <div className="font-mono text-xs tabular-nums text-on-surface-variant" data-testid="topology-aggregate">
           {totalSeats} seat{totalSeats === 1 ? "" : "s"}
           {" · "}{affectedRigs.length} rig{affectedRigs.length === 1 ? "" : "s"}
           {specGraph && (
@@ -61,23 +61,23 @@ export function TopologyTab({ topology }: { topology: SliceDetail["topology"] })
       {affectedRigs.length > 0 && (
         <div data-testid="topology-rig-listing" className="space-y-3">
           {runtimeGraph && (
-            <div className="font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
-              Active seats
+            <div className="text-xs font-medium text-on-surface-variant">
+              Active agents
             </div>
           )}
           {affectedRigs.map((rig) => (
             <section
               key={rig.rigName}
               data-testid={`topology-rig-${rig.rigName}`}
-              className="border border-outline-variant bg-surface-lowest"
+              className="overflow-hidden rounded-lg border bg-surface-lowest"
             >
               <header className="flex items-center justify-between border-b border-outline-variant bg-background px-3 py-2">
-                <div className="font-mono text-[10px] font-bold text-on-surface">{rig.rigName}</div>
+                <div className="text-xs font-semibold text-on-surface">{rig.rigName}</div>
                 <Link
                   to="/rigs/$rigId"
                   params={{ rigId: rig.rigId }}
                   data-testid={`topology-rig-${rig.rigName}-open`}
-                  className="font-mono text-[9px] uppercase tracking-[0.10em] text-blue-700 hover:underline"
+                  className="text-xs text-brand hover:underline"
                 >
                   Open topology →
                 </Link>
@@ -138,7 +138,7 @@ function SeatRow({ session }: { session: string }) {
         data-remote-readonly="true"
         className="px-3 py-1"
       >
-        <span className="flex w-full items-baseline gap-2 font-mono text-[10px] text-on-surface">
+        <span className="flex w-full items-baseline gap-2 font-mono text-xs text-on-surface">
           <span className="flex-1 truncate">{session}</span>
         </span>
       </li>
@@ -154,7 +154,7 @@ function SeatRow({ session }: { session: string }) {
         type="button"
         data-testid={`topology-seat-${session}-toggle`}
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-baseline gap-2 text-left font-mono text-[10px] text-on-surface hover:bg-background -mx-3 px-3 py-0.5"
+        className="-mx-3 flex w-full items-baseline gap-2 px-3 py-0.5 text-left font-mono text-xs text-on-surface hover:bg-background"
       >
         <span className="flex-1 truncate">{session}</span>
         <span className="text-on-surface-variant shrink-0">{open ? "▾" : "▸"}</span>

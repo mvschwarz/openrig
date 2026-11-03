@@ -62,10 +62,10 @@ export function FencedBlockRenderer({ language, text }: FencedBlockProps): React
 function FallbackCode({ language, text, reason }: { language: string; text: string; reason: string }) {
   return (
     <div data-testid={`fenced-block-${language}-fallback`} className="my-3 border border-amber-300 bg-amber-50/60 p-3">
-      <div className="mb-2 font-mono text-[8px] uppercase tracking-[0.18em] text-amber-700">
+      <div className="mb-2 text-[11px] text-amber-700">
         {language} block (fallback: {reason})
       </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[10px] text-on-surface">{text}</pre>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] text-on-surface">{text}</pre>
     </div>
   );
 }

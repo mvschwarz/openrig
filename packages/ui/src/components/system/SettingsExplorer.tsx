@@ -58,9 +58,9 @@ export function SettingsExplorer() {
       <div className="px-2 mb-2">
         <span
           data-testid="settings-explorer-heading"
-          className="block font-mono text-[11px] uppercase tracking-wide text-on-surface px-2 py-1"
+          className="block text-xs font-medium text-on-surface-variant px-2 py-1"
         >
-          {"> "}Settings
+          Settings
         </span>
       </div>
       <ul className="px-2 space-y-0.5">
@@ -73,7 +73,7 @@ export function SettingsExplorer() {
                 data-testid={`settings-explorer-item-${item.id}`}
                 data-active={active}
                 className={cn(
-                  "block font-mono text-[11px] uppercase tracking-wide px-2 py-1",
+                  "block text-sm px-2 py-1",
                   active
                     ? "bg-inverse-surface text-background"
                     : "text-on-surface hover:text-on-surface hover:bg-surface-low",

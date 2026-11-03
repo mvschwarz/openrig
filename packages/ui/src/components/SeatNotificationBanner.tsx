@@ -60,14 +60,14 @@ export function SeatNotificationBanner({ data }: SeatNotificationBannerProps) {
     >
       <AlertTitle
         data-testid="seat-notification-headline"
-        className="font-mono text-[11px] uppercase tracking-[0.08em]"
+        className="text-[11px] "
       >
         {headline}
       </AlertTitle>
       {hasError ? (
         <AlertDescription
           data-testid="seat-notification-error"
-          className="font-mono text-[10px]"
+          className="font-mono text-[11px]"
         >
           {data.latestError}
         </AlertDescription>
@@ -75,7 +75,7 @@ export function SeatNotificationBanner({ data }: SeatNotificationBannerProps) {
       {hasGuidance && data.recoveryGuidance ? (
         <AlertDescription
           data-testid="seat-notification-guidance"
-          className="mt-1 font-mono text-[10px] text-on-surface"
+          className="mt-1 font-mono text-[11px] text-on-surface"
         >
           {data.recoveryGuidance.summary}
         </AlertDescription>

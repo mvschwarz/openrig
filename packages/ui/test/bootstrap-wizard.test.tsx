@@ -109,8 +109,8 @@ describe("BootstrapWizard", () => {
     expect(screen.getByTestId("step-3").getAttribute("data-step-state")).toBe("active");
   });
 
-  // T3: requirements panel shows all 4 statuses with correct colors
-  it("requirements panel renders installed/missing/unsupported/unknown with correct dot colors", () => {
+  // T3: requirements panel shows all 4 statuses with sentence-case labels + StatusDot (C14e)
+  it("requirements panel renders installed/missing/unsupported/unknown with sentence-case labels", () => {
     const results: RequirementResult[] = [
       { name: "git", kind: "cli_tool", status: "installed", version: null, detectedPath: "/usr/bin/git" },
       { name: "rg", kind: "cli_tool", status: "missing", version: null, detectedPath: null },
@@ -119,18 +119,14 @@ describe("BootstrapWizard", () => {
     ];
     render(<RequirementsPanel results={results} />);
 
-    const dots = screen.getAllByTestId("requirement-dot");
-    expect(dots).toHaveLength(4);
-    expect(dots[0]!.className).toContain("bg-success");
-    expect(dots[1]!.className).toContain("bg-destructive");
-    expect(dots[2]!.className).toContain("bg-warning");
-    expect(dots[3]!.className).toContain("bg-warning");
+    const rows = screen.getAllByTestId("requirement-row");
+    expect(rows).toHaveLength(4);
 
     const statuses = screen.getAllByTestId("requirement-status");
-    expect(statuses[0]!.textContent).toContain("OK");
-    expect(statuses[1]!.textContent).toContain("MISSING");
-    expect(statuses[2]!.textContent).toContain("MANUAL");
-    expect(statuses[3]!.textContent).toContain("UNKNOWN");
+    expect(statuses[0]!.textContent).toContain("Ok");
+    expect(statuses[1]!.textContent).toContain("Missing");
+    expect(statuses[2]!.textContent).toContain("Manual");
+    expect(statuses[3]!.textContent).toContain("Unknown");
   });
 
   // T4: apply sends approvedActionKeys in POST body

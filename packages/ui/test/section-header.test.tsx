@@ -10,13 +10,14 @@ describe("SectionHeader (Phase 1 primitive)", () => {
     expect(screen.getByText("OVERVIEW")).toBeTruthy();
   });
 
-  it("applies canonical eyebrow classes", () => {
+  it("applies canonical header classes", () => {
     const { container } = render(<SectionHeader>X</SectionHeader>);
     const el = container.querySelector("header") as HTMLElement;
-    expect(el.className).toContain("font-mono");
-    expect(el.className).toContain("text-[10px]");
-    expect(el.className).toContain("uppercase");
-    expect(el.className).toContain("tracking-[0.18em]");
+    // Clean theme (ui-redesign C03): sentence-case header, no mono/uppercase/tracking.
+    expect(el.className).toContain("text-sm");
+    expect(el.className).toContain("font-semibold");
+    expect(el.className).not.toContain("uppercase");
+    expect(el.className).not.toContain("font-mono");
   });
 
   it("renders right slot when provided", () => {

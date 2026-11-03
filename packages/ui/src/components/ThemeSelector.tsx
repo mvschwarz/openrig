@@ -18,7 +18,7 @@ export function ThemeSelector() {
         aria-label="Theme"
         value={theme}
         onChange={(e) => setTheme(e.target.value as ThemeId)}
-        className="font-mono text-[10px] uppercase tracking-[0.14em] bg-transparent text-on-surface-variant border border-outline-variant px-2 py-1 hover:text-on-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-secondary cursor-pointer"
+        className="h-8 rounded-md border border-outline-variant bg-background px-2 text-xs text-on-surface-variant hover:text-on-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer"
       >
         {themes.map((t) => (
           <option key={t.id} value={t.id}>

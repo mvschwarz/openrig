@@ -17,45 +17,13 @@
 //   peer to Topology / Project / Library / For-You). Only Dashboard
 //   remains surface=none (no Explorer).
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, cleanup, waitFor } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { createMockEventSourceClass } from "./helpers/mock-event-source.js";
-import { createAppTestRouter } from "./helpers/test-router.js";
+import { setupAppShellTestEnv, renderAppShellAt } from "./helpers/app-shell-env.js";
 import { AppShell } from "../src/components/AppShell.js";
 
-const mockFetch = vi.fn();
-globalThis.fetch = mockFetch;
-
-let OriginalEventSource: typeof EventSource | undefined;
-
-beforeEach(async () => {
-  mockFetch.mockReset();
-  // Default rig/ps mocks return empty so chrome can render.
-  mockFetch.mockImplementation(async (url: string) => {
-    if (url.includes("/api/rigs/summary")) return new Response(JSON.stringify([]));
-    if (url.includes("/api/rigs/ps")) return new Response(JSON.stringify([]));
-    if (url.includes("/api/inventory")) return new Response(JSON.stringify([]));
-    return new Response("[]");
-  });
-  OriginalEventSource = globalThis.EventSource;
-  globalThis.EventSource = createMockEventSourceClass() as unknown as typeof EventSource;
-  const { queryClient } = await import("../src/lib/query-client.js");
-  queryClient.clear();
-});
-
-afterEach(() => {
-  if (OriginalEventSource) globalThis.EventSource = OriginalEventSource;
-  window.localStorage.clear();
-  cleanup();
-  Object.defineProperty(window, "innerWidth", {
-    configurable: true,
-    value: 1024,
-    writable: true,
-  });
-  window.dispatchEvent(new Event("resize"));
-});
+setupAppShellTestEnv();
 
 // Slice 52 (UI wall-clock hardening): the timed fixture no longer imports
 // ../src/routes.js. Mounting the whole route tree (all lazy page modules) was
@@ -65,22 +33,8 @@ afterEach(() => {
 // PATHNAME (surfaceForPath), not by the route tree — so a minimal router with
 // AppShell as the root and a catch-all stub renders IDENTICAL chrome with no
 // heavy import and no clock to race.
-async function renderAt(initialPath: string, opts: { innerWidth?: number } = {}) {
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: opts.innerWidth ?? 1440, writable: true });
-  window.dispatchEvent(new Event("resize"));
-  const result = render(
-    createAppTestRouter({
-      routes: [{ path: "$", component: () => null }],
-      rootComponent: ({ children }) => <AppShell>{children}</AppShell>,
-      initialPath,
-    }),
-  );
-  // TanStack Router resolves route component async; wait for chrome to land.
-  await waitFor(() => {
-    expect(result.container.querySelector("[data-testid='app-rail']")).toBeTruthy();
-  }, { timeout: 5000 });
-  return result;
-}
+const renderAt = (initialPath: string, opts: { innerWidth?: number } = {}) =>
+  renderAppShellAt(AppShell, initialPath, opts);
 
 describe("AppShell — Phase 2 chrome", () => {
   describe("SC-1: exactly 2 left chromes on desktop (rail + explore)", () => {
@@ -232,8 +186,9 @@ describe("AppShell — Phase 2 chrome", () => {
       const topbar = container.querySelector("[data-testid='app-topbar']") as HTMLElement;
       expect(topbar).toBeTruthy();
       // Single source of truth — top bar is universal, NOT lg:hidden.
+      // C07 redesign: height is h-12.
       expect(topbar.className).not.toContain("lg:hidden");
-      expect(topbar.className).toContain("h-14");
+      expect(topbar.className).toContain("h-12");
     });
 
     it("brand link visible at desktop and links to / (Dashboard)", async () => {
@@ -241,7 +196,8 @@ describe("AppShell — Phase 2 chrome", () => {
       const brand = container.querySelector("[data-testid='brand-home-link']") as HTMLAnchorElement;
       expect(brand).toBeTruthy();
       expect(brand.getAttribute("href")).toBe("/");
-      expect(brand.textContent).toContain("OPENRIG");
+      // C07 redesign: sentence-case "OpenRig" wordmark in the sidebar header.
+      expect(brand.textContent).toContain("OpenRig");
     });
 
     it("right-slot carries the MH-2 host indicator (quiet local register, defaults to 'localhost')", async () => {
@@ -299,24 +255,19 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(rail.className).not.toMatch(/\boverflow-x-auto\b/);
     });
 
-    // Slice 20 mobile: rail icon tap targets meet iOS HIG minimum
-    // (44px) on mobile, AND restore the prior 40px hitbox at lg: width
-    // so desktop hover precision is preserved. The className carries
-    // both shapes: `h-11 w-11` (mobile default) + `lg:h-10 lg:w-10`
-    // (desktop override). Tailwind's mobile-first cascade ensures the
-    // larger square only paints at < lg: viewports.
-    it("slice 20: rail icon tap targets are ≥44px on mobile + restored to 40px at lg:", async () => {
+    // C06 sidebar: nav items keep a >=44px tap target on mobile
+    // (`h-11`) and a compact 36px row at lg: (`lg:h-9`). The icon is
+    // centered when the sidebar is collapsed, so no width assertion.
+    it("nav items keep a ≥44px tap target on mobile", async () => {
       const { container } = await renderAt("/");
       const dashIcon = container.querySelector(
         "[data-testid='rail-dashboard']",
       ) as HTMLElement;
       expect(dashIcon, "rail dashboard icon link").toBeTruthy();
-      // Mobile default: 44px square.
+      // Mobile default: 44px tall row.
       expect(dashIcon.className).toMatch(/\bh-11\b/);
-      expect(dashIcon.className).toMatch(/\bw-11\b/);
-      // Desktop override: lg: prefix restores the 40px hitbox.
-      expect(dashIcon.className).toMatch(/\blg:h-10\b/);
-      expect(dashIcon.className).toMatch(/\blg:w-10\b/);
+      // Desktop override: lg: prefix restores the compact 36px row.
+      expect(dashIcon.className).toMatch(/\blg:h-9\b/);
     });
   });
 

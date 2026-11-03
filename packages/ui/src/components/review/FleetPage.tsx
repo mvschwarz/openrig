@@ -23,7 +23,9 @@
 import { Link } from "@tanstack/react-router";
 import { Globe } from "lucide-react";
 import { cn } from "../../lib/utils.js";
-import { VELLUM_CARD } from "./vellum.js";
+import { PageHeader } from "../ui/page-header.js";
+import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
 import { useFleet } from "../../hooks/useFleet.js";
 import type { FleetHostRollup, FleetNeedsYouItem } from "../../hooks/useFleet.js";
 import { useSelectHost } from "../../hooks/useHosts.js";
@@ -44,9 +46,10 @@ function HostChip({ hostId }: { hostId: string }) {
     <span
       data-testid={`fleet-item-host-${hostId}`}
       className={cn(
-        "shrink-0 border px-1 font-mono text-[9px] uppercase tracking-wide",
+        "shrink-0 rounded border px-1 font-mono text-xs",
         hostId === "local" ? "border-outline-variant text-on-surface-variant" : "border-on-surface text-on-surface",
       )}
+      title={`host ${hostId}`}
     >
       {hostId}
     </span>
@@ -88,50 +91,50 @@ function FleetNeedsYouRow({
   onOpenHost: (hostId: string) => void;
 }) {
   return (
-    <li data-testid={`fleet-needs-you-${item.fleetKey}`} data-source={item.source} className="px-2 py-1.5">
+    <li data-testid={`fleet-needs-you-${item.fleetKey}`} data-source={item.source} className="px-2 py-1.5 text-sm">
       <button type="button" onClick={onToggle} className="block w-full text-left">
         <span className="flex flex-wrap items-center gap-2">
           <span
-            className={cn("font-mono text-[11px]", item.source === "derived" ? "text-amber-700" : "text-emerald-700")}
+            className={cn("font-mono text-xs", item.source === "derived" ? "text-amber-700" : "text-emerald-700")}
             title={item.source === "derived" ? "machine-derived exception" : "agent-initiated"}
           >
             {item.source === "derived" ? "▲" : "●"}
           </span>
           <HostChip hostId={item.hostId} />
-          <span className="min-w-0 flex-1 truncate text-[12px] text-on-surface">{item.summary}</span>
+          <span className="min-w-0 flex-1 truncate text-sm text-on-surface">{item.summary}</span>
           {item.derived ? (
-            <span className="font-mono text-[9px] uppercase tracking-wide text-amber-700">{item.derived.kind}</span>
+            <span className="font-mono text-xs text-amber-700" title={`derived kind ${item.derived.kind}`}>{item.derived.kind}</span>
           ) : null}
-          <span className="font-mono text-[10px] text-on-surface-variant">{item.where}</span>
-          <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(item.ageIso)}</span>
+          <span className="font-mono text-xs text-on-surface-variant" title={`where ${item.where}`}>{item.where}</span>
+          <span className="font-mono text-xs text-on-surface-variant" title={`age ${item.ageIso ?? "unknown"}`}>{ageLabel(item.ageIso)}</span>
         </span>
       </button>
       {item.derived ? (
-        <p className="mt-0.5 pl-6 font-mono text-[10px] text-on-surface-variant">
+        <p className="mt-0.5 pl-6 font-mono text-xs text-on-surface-variant" title={`evidence ${item.derived.evidence}`}>
           ▲ {item.derived.evidence} · threshold: {item.derived.threshold}
         </p>
       ) : null}
       {/* FR-3: the one-count is INSPECTABLE — the altitudes this identity
           was visible from on its host, still ONE row here. */}
-      <p className="mt-0.5 pl-6 font-mono text-[9px] text-on-surface-variant/80">
+      <p className="mt-0.5 pl-6 text-xs text-on-surface-variant/80" title={`counted once on ${item.hostId}`}>
         counted once · seen from {item.seenFrom.join(" · ")} on {item.hostId}
       </p>
       {expanded ? (
         <div
           data-testid={`fleet-item-expanded-${item.fleetKey}`}
-          className="mt-1.5 ml-6 border border-outline-variant bg-surface-low/50 px-2 py-1.5"
+          className="mt-1.5 ml-6 rounded-lg border border-outline-variant bg-surface-lowest px-2 py-1.5"
         >
           {/* The Q4 one-count key, VERBATIM. */}
-          <p className="font-mono text-[10px] text-on-surface">
-            identity: <span className="text-on-surface-variant">{item.fleetKey}</span>
+          <p className="text-sm text-on-surface">
+            identity: <span className="font-mono text-xs text-on-surface-variant">{item.fleetKey}</span>
           </p>
           {item.derived ? (
-            <p className="mt-0.5 font-mono text-[10px] text-on-surface">
-              evidence: <span className="text-on-surface-variant">{item.derived.evidence}</span>
+            <p className="mt-0.5 text-sm text-on-surface">
+              evidence: <span className="font-mono text-xs text-on-surface-variant">{item.derived.evidence}</span>
             </p>
           ) : null}
           {/* FR-5: read + surface only — the boundary is ON the surface. */}
-          <p className="mt-1 font-mono text-[9px] uppercase tracking-wide text-on-surface-variant">
+          <p className="mt-1 text-xs text-on-surface-variant">
             read-only here — acting on a remote host&apos;s item rides cross-host routing (MH-3/MH-4) ·{" "}
             <button type="button" onClick={() => onOpenHost(item.hostId)} className="underline">
               open {item.hostId} →
@@ -153,11 +156,11 @@ export function FleetPage() {
   const openKey = readSearchParam("open");
 
   if (isLoading) {
-    return <p className="p-4 font-mono text-[11px] text-on-surface-variant">composing the fleet glance…</p>;
+    return <p className="p-4 text-xs text-on-surface-variant">composing the fleet glance…</p>;
   }
   if (error || !data) {
     return (
-      <p data-testid="fleet-error" className="p-4 font-mono text-[11px] text-error">
+      <p data-testid="fleet-error" className="p-4 text-sm text-error">
         fleet glance unavailable: {error instanceof Error ? error.message : "composer unreachable"}
       </p>
     );
@@ -166,44 +169,38 @@ export function FleetPage() {
   const okHosts = data.hosts.filter((h) => h.status.status === "ok").length;
 
   return (
-    <div data-testid="fleet-page" className="mx-auto max-w-4xl space-y-5 p-4">
-      {/* Breadcrumb — FLEET is the TOP of the spine; everything drills DOWN. */}
-      <nav className="flex items-center gap-2 font-mono text-[10px] uppercase text-on-surface-variant">
-        <span data-testid="fleet-crumb" className="text-on-surface">fleet</span>
-        <span>·</span>
-        <span>every factory, one glance</span>
-      </nav>
-
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-[14px] font-semibold uppercase">Fleet — needs me / stuck / failing</h2>
-        {/* FR-3: the DAEMON's rollup (computed from the deduped rows) —
-            checkable against the HOSTS band's per-host counts below. */}
-        <div data-testid="fleet-rollup" className="flex items-center gap-2 font-mono text-[10px] uppercase">
-          <span className="text-emerald-700">● {data.rollup.needsYouCount} need you</span>
-          <span className="text-amber-700">
-            ▲ {data.rollup.exceptionCount} exceptions
-            {data.rollup.exceptionsByKind.length > 0
-              ? ` (${data.rollup.exceptionsByKind.map((e) => `${e.count} ${e.kind}`).join(" · ")})`
-              : ""}
-          </span>
-          <span className="text-on-surface-variant">{data.rollup.hostCount} hosts</span>
-          {data.rollup.unreachableCount > 0 ? (
-            <span className="text-error">{data.rollup.unreachableCount} unreachable</span>
-          ) : null}
-        </div>
-      </header>
+    <div data-testid="fleet-page" className="mx-auto w-full max-w-4xl space-y-5 p-4 text-sm">
+      <PageHeader
+        title="Hosts"
+        description="Every factory in one glance — what needs you, per-host status, and settled work. Open a host to work there."
+        meta={
+          <div data-testid="fleet-rollup" className="flex flex-wrap items-center gap-2 text-xs">
+            <StatusBadge status="attention_required" label={`${data.rollup.needsYouCount} need you`} />
+            <span className="font-mono text-xs text-amber-700" title={`${data.rollup.exceptionCount} exceptions`}>
+              ▲ {data.rollup.exceptionCount} exceptions
+              {data.rollup.exceptionsByKind.length > 0
+                ? ` (${data.rollup.exceptionsByKind.map((e) => `${e.count} ${e.kind}`).join(" · ")})`
+                : ""}
+            </span>
+            <span className="font-mono text-xs text-on-surface-variant" title={`${data.rollup.hostCount} hosts`}>{data.rollup.hostCount} hosts</span>
+            {data.rollup.unreachableCount > 0 ? (
+              <StatusBadge status="unreachable" label={`${data.rollup.unreachableCount} unreachable`} />
+            ) : null}
+          </div>
+        }
+      />
 
       {/* An existing-but-unreadable registry is surfaced, never silent. */}
       {data.registryError ? (
-        <p data-testid="fleet-registry-error" className="font-mono text-[10px] text-error">
+        <p data-testid="fleet-registry-error" className="text-xs text-error">
           host registry unreadable — this glance is LOCAL-ONLY, not the fleet: {data.registryError}
         </p>
       ) : null}
 
       {/* Band 1: NEEDS YOU — the fleet union, host-attributed, ● and ▲ at
           equal rank (the shipped grammar, one altitude up). */}
-      <section data-testid="fleet-needs-you" className={cn("space-y-1 p-2", VELLUM_CARD)}>
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">NEEDS YOU</h3>
+      <section data-testid="fleet-needs-you" className="space-y-2 rounded-lg border bg-surface-lowest p-2 shadow-sm">
+        <h3 className="text-xs text-on-surface-variant">Needs you</h3>
         {data.needsYou.items.length > 0 ? (
           <ul className="divide-y divide-outline-variant/50">
             {data.needsYou.items.map((item) => (
@@ -216,45 +213,53 @@ export function FleetPage() {
               />
             ))}
           </ul>
-        ) : null}
-        <p className="font-mono text-[9px] text-on-surface-variant">{data.needsYou.provenance}</p>
+        ) : (
+          <EmptyState
+            title="Nothing needs you"
+            label="Nothing needs you"
+            description="Items from every composing host show up here when they need a human."
+            variant="minimal"
+            testId="fleet-needs-you-empty"
+          />
+        )}
+        <p className="text-xs text-on-surface-variant">{data.needsYou.provenance}</p>
       </section>
 
       {/* Band 2: HOSTS — the field band at fleet altitude (each factory,
           honest status; the MH-2 drill-in is the row's verb). */}
-      <section data-testid="fleet-hosts" className={cn("space-y-1 p-2", VELLUM_CARD)}>
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">HOSTS</h3>
+      <section data-testid="fleet-hosts" className="space-y-2 rounded-lg border bg-surface-lowest p-2 shadow-sm">
+        <h3 className="text-xs text-on-surface-variant">Hosts</h3>
         <ul className="divide-y divide-outline-variant/50">
           {data.hosts.map((h) => {
             const glyph = hostGlyph(h);
             const ok = h.status.status === "ok";
             return (
-              <li key={h.hostId} data-testid={`fleet-host-${h.hostId}`} className="flex flex-wrap items-center gap-2 px-2 py-1.5">
-                <span className={cn("font-mono text-[11px]", glyph.cls)}>{glyph.char}</span>
+              <li key={h.hostId} data-testid={`fleet-host-${h.hostId}`} className="flex flex-wrap items-center gap-2 px-2 py-1.5 text-sm">
+                <span className={cn("font-mono text-xs", glyph.cls)} title={ok ? "host ok" : `host ${h.status.status}`} aria-hidden>{glyph.char}</span>
                 <Globe className="h-3 w-3 text-on-surface-variant" />
-                <span className="font-mono text-[11px] uppercase text-on-surface">{h.hostId}</span>
+                <span className="font-mono text-xs text-on-surface" title={`host ${h.hostId}`}>{h.hostId}</span>
                 {h.kind === "local" ? (
-                  <span className="font-mono text-[8px] uppercase text-on-surface-variant">local</span>
+                  <span className="text-xs text-on-surface-variant">local</span>
                 ) : null}
                 {ok ? (
                   <>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-on-surface-variant">{h.topLine}</span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-on-surface-variant" title={h.topLine}>{h.topLine}</span>
                     {(h.needsYouCount ?? 0) > 0 ? (
-                      <span className="font-mono text-[10px] text-emerald-700">● {h.needsYouCount}</span>
+                      <span className="font-mono text-xs text-emerald-700" title={`${h.needsYouCount} need you`}>● {h.needsYouCount}</span>
                     ) : null}
                     {(h.exceptionsByKind ?? []).map((e) => (
-                      <span key={e.kind} className="font-mono text-[10px] text-amber-700">
+                      <span key={e.kind} className="font-mono text-xs text-amber-700" title={`${e.count} ${e.kind}`}>
                         ▲ {e.count} {e.kind}
                       </span>
                     ))}
-                    <span className="font-mono text-[9px] text-on-surface-variant">
-                      {h.rigCount} rigs · {h.seatCount} seats
+                    <span className="text-xs text-on-surface-variant" title={`${h.rigCount} rigs · ${h.seatCount} seats`}>
+                      {h.rigCount} rig{h.rigCount === 1 ? "" : "s"} · {h.seatCount} agents
                     </span>
                     <button
                       type="button"
                       data-testid={`fleet-host-${h.hostId}-open`}
                       onClick={() => openHost(h.hostId)}
-                      className="font-mono text-[10px] uppercase text-on-surface hover:underline"
+                      className="text-xs text-on-surface hover:underline"
                     >
                       open →
                     </button>
@@ -263,7 +268,7 @@ export function FleetPage() {
                   <>
                     {/* Honest per-host truth: items ABSENT from this glance,
                         not zero (the k9s stale-header anti-pattern). */}
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-error">
+                    <span className="min-w-0 flex-1 truncate text-xs text-error" title={`host ${h.hostId} ${h.status.status}`}>
                       {h.status.status}
                       {h.status.error ? ` — ${h.status.error}` : ""} · items absent from this glance, not zero
                     </span>
@@ -271,9 +276,9 @@ export function FleetPage() {
                       type="button"
                       data-testid={`fleet-host-${h.hostId}-retry`}
                       onClick={() => void refetch()}
-                      className="border border-error px-1.5 py-0.5 font-mono text-[9px] uppercase text-error hover:bg-surface-low"
+                      className="border border-error px-1.5 py-0.5 text-xs text-error hover:bg-surface-low"
                     >
-                      retry
+                      Retry
                     </button>
                   </>
                 )}
@@ -284,26 +289,34 @@ export function FleetPage() {
       </section>
 
       {/* Band 3: SETTLED — the record band, minimal (D-5), host-chipped. */}
-      <section data-testid="fleet-settled" className="space-y-1">
-        <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">SETTLED</h3>
+      <section data-testid="fleet-settled" className="space-y-2 rounded-lg border bg-surface-lowest p-2">
+        <h3 className="text-xs text-on-surface-variant">Settled</h3>
         {data.settled.length > 0 ? (
-          <ul className="divide-y divide-outline-variant/50 border border-outline-variant">
+          <ul className="divide-y divide-outline-variant/50">
             {data.settled.map((row) => (
-              <li key={`${row.hostId}|${row.qitemId}`} className="flex items-center gap-2 px-2 py-1.5">
+              <li key={`${row.hostId}|${row.qitemId}`} className="flex items-center gap-2 px-2 py-1.5 text-sm">
                 <HostChip hostId={row.hostId} />
-                <span className="font-mono text-[10px] text-on-surface-variant">{row.fromSession.split("@")[0]}</span>
+                <span className="font-mono text-xs text-on-surface-variant" title={`from ${row.fromSession}`}>{row.fromSession.split("@")[0]}</span>
                 <span className="text-on-surface-variant">→</span>
-                <span className="font-mono text-[10px] text-on-surface-variant">{row.toSession.split("@")[0]}</span>
-                <span className="min-w-0 flex-1 truncate text-[11px]">{row.summary ?? row.qitemId}</span>
-                <span className="font-mono text-[10px] text-on-surface-variant">{ageLabel(row.closedAtIso)}</span>
+                <span className="font-mono text-xs text-on-surface-variant" title={`to ${row.toSession}`}>{row.toSession.split("@")[0]}</span>
+                <span className="min-w-0 flex-1 truncate text-sm" title={row.summary ?? row.qitemId}>{row.summary ?? row.qitemId}</span>
+                <span className="font-mono text-xs text-on-surface-variant" title={`closed ${row.closedAtIso}`}>{ageLabel(row.closedAtIso)}</span>
               </li>
             ))}
           </ul>
-        ) : null}
-        <p className="font-mono text-[9px] text-on-surface-variant">{data.settledProvenance}</p>
+        ) : (
+          <EmptyState
+            title="No settled items"
+            label="No settled items"
+            description="Closed handoffs across composing hosts show up here."
+            variant="minimal"
+            testId="fleet-settled-empty"
+          />
+        )}
+        <p className="text-xs text-on-surface-variant">{data.settledProvenance}</p>
       </section>
 
-      <p data-testid="fleet-fanout-footer" className="font-mono text-[10px] text-on-surface-variant">
+      <p data-testid="fleet-fanout-footer" className="font-mono text-xs text-on-surface-variant" title={`composed ${data.composedAt} · fleet fan-out ${okHosts}/${data.hosts.length}`}>
         composed {data.composedAt} · fleet fan-out {okHosts}/{data.hosts.length} hosts ok ·{" "}
         <Link to="/agents" className="hover:underline">
           this host&apos;s agents →

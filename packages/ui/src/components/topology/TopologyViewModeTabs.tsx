@@ -63,9 +63,9 @@ export function TopologyViewModeTabs<T extends string>({
           data-active={active === t.id}
           onClick={() => onSelect(t.id)}
           className={cn(
-            "py-3 font-mono text-[10px] uppercase tracking-[0.18em] border-b-2",
+            "py-3 text-sm border-b-2",
             active === t.id
-              ? "border-on-surface text-on-surface"
+              ? "border-b-2 border-on-surface text-on-surface"
               : "border-transparent text-on-surface-variant hover:text-on-surface",
           )}
         >

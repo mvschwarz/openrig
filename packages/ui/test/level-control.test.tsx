@@ -53,14 +53,14 @@ function mockHighlights(posted: Record<string, string>) {
 }
 
 describe("LevelControl (OPR.0.4.1.27 Unit 3)", () => {
-  it("renders the 3 named levels + the action-items-always-on label", async () => {
+  it("renders the 3 named levels as sentence-case tabs (C11 Inbox v2)", async () => {
     mockHighlights({});
-    const { findByTestId, getByText } = withQC(<LevelControl />);
+    const { findByTestId } = withQC(<LevelControl />);
     expect(await findByTestId("level-control")).toBeTruthy();
-    expect(await findByTestId("level-control-option-all-activity")).toBeTruthy();
-    expect(await findByTestId("level-control-option-highlights")).toBeTruthy();
-    expect(await findByTestId("level-control-option-needs-you")).toBeTruthy();
-    expect(getByText(/action items always on/i)).toBeTruthy();
+    // Tab display labels are sentence case; "All activity" renders as "Everything" in the tab only.
+    expect((await findByTestId("level-control-option-all-activity")).textContent).toBe("Everything");
+    expect((await findByTestId("level-control-option-highlights")).textContent).toBe("Highlights");
+    expect((await findByTestId("level-control-option-needs-you")).textContent).toBe("Needs you");
   });
 
   it("marks the derived current level active (highlights default)", async () => {

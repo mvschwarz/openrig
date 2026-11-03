@@ -13,7 +13,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { cn } from "../../lib/utils.js";
-import { SectionHeader } from "../ui/section-header.js";
+import { PageHeader } from "../ui/page-header.js";
 import { EmptyState } from "../ui/empty-state.js";
 import { useActivityFeed } from "../../hooks/useActivityFeed.js";
 import { useAttentionItems } from "../../hooks/useAttentionItems.js";
@@ -59,7 +59,7 @@ import type { MissionControlVerb } from "../mission-control/hooks/useMissionCont
 
 const LENS_CHIPS: Array<{ id: FeedCardKind | "all"; label: string }> = [
   { id: "all", label: "All" },
-  { id: "action-required", label: "Action req" },
+  { id: "action-required", label: "Action required" },
   { id: "approval", label: "Approvals" },
   { id: "shipped", label: "Shipped" },
   { id: "progress", label: "Progress" },
@@ -380,29 +380,26 @@ export function Feed() {
   // still imports them) — only this band's wiring was dropped.
 
   return (
-    <div data-testid="for-you-feed" className="mx-auto w-full max-w-[720px] px-6 py-8">
-      <header className="border-b border-outline-variant pb-4 mb-4">
-        <SectionHeader tone="muted">Attention</SectionHeader>
-        <h1 className="font-headline text-headline-md font-bold tracking-tight uppercase text-on-surface mt-1">
-          For You
-        </h1>
-      </header>
+    <div data-testid="for-you-feed" className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
+      <PageHeader
+        title="Inbox"
+        description="Approvals, questions and updates from your agents."
+      />
 
-      {/* OPR.0.4.1.27 — the PRIMARY subscription control at the top of the
-          (phone) feed: a plain-language level (All activity / Highlights /
-          Needs you) over the same toggle model; action items always on. The 5
-          individual toggles remain the advanced view in the Explorer sidebar. */}
-      <div data-testid="feed-level-control" className="mb-4">
+      {/* Feed level tabs: Needs you / Highlights / Everything. Same toggle
+          model as the retired SHOW ME box (LevelControl presentation only). */}
+      <div className="mb-3">
         <LevelControl />
       </div>
 
-      {/* Lens chips — transient filter, doesn't persist (per L156+). Div not
-          nav so SC-1 left-chrome count stays at exactly 2. */}
+      {/* Kind filter — compact segmented control, sentence case. Transient
+          filter, doesn't persist. Div not nav so SC-1 left-chrome count
+          stays at exactly 2. */}
       <div
         data-testid="feed-lens-chips"
         role="toolbar"
         aria-label="Feed filters"
-        className="flex flex-wrap gap-1 mb-4"
+        className="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border bg-surface-lowest p-0.5"
       >
         {LENS_CHIPS.map((c) => (
           <button
@@ -410,13 +407,14 @@ export function Feed() {
             type="button"
             data-testid={`feed-lens-${c.id}`}
             data-active={lens === c.id}
+            aria-pressed={lens === c.id}
             onClick={() => setLens(c.id)}
-            className={cn(
-              "px-2 py-1 border font-mono text-[9px] uppercase tracking-wide",
-              lens === c.id
-                ? "border-on-surface bg-inverse-surface text-background"
-                : "border-outline-variant text-on-surface-variant hover:bg-surface-low",
-            )}
+            className={
+              "rounded-md px-2.5 py-1 text-sm whitespace-nowrap " +
+              (lens === c.id
+                ? "bg-surface-mid font-medium text-on-surface"
+                : "text-on-surface-variant hover:text-on-surface")
+            }
           >
             {c.label}
           </button>
@@ -425,29 +423,27 @@ export function Feed() {
 
       {/* OPR.0.4.4.15 — host chips + per-host status rows, rendered ONLY
           when aggregation is active (hostStatuses is empty on the legacy
-          path — zero-config DOM is byte-identical to today). Same
-          lens-chip visual pattern; failed hosts render muted + a status
-          row (never a silently thinner feed). */}
+          path — zero-config DOM is byte-identical to today). */}
       {hostStatuses.length > 0 && (
         <div
           data-testid="feed-host-chips"
           role="toolbar"
           aria-label="Host filter"
-          className="flex flex-wrap gap-1 mb-2"
+          className="mb-2 inline-flex max-w-full overflow-x-auto rounded-lg border bg-surface-lowest p-0.5"
         >
           <button
             type="button"
             data-testid="feed-host-all"
             data-active={hostFilter === null}
             onClick={() => setHostFilter(null)}
-            className={cn(
-              "px-2 py-1 border font-mono text-[9px] uppercase tracking-wide",
-              hostFilter === null
-                ? "border-on-surface bg-inverse-surface text-background"
-                : "border-outline-variant text-on-surface-variant hover:bg-surface-low",
-            )}
+            className={
+              "rounded-md px-2.5 py-1 text-sm whitespace-nowrap " +
+              (hostFilter === null
+                ? "bg-surface-mid font-medium text-on-surface"
+                : "text-on-surface-variant hover:text-on-surface")
+            }
           >
-            ALL HOSTS
+            All hosts
           </button>
           {hostStatuses.map((h) => (
             <button
@@ -457,13 +453,13 @@ export function Feed() {
               data-active={hostFilter === h.hostId}
               data-host-status={h.status}
               onClick={() => setHostFilter(hostFilter === h.hostId ? null : h.hostId)}
-              className={cn(
-                "px-2 py-1 border font-mono text-[9px] uppercase tracking-wide",
-                hostFilter === h.hostId
-                  ? "border-on-surface bg-inverse-surface text-background"
-                  : "border-outline-variant text-on-surface-variant hover:bg-surface-low",
-                h.status !== "ok" && "opacity-60",
-              )}
+              className={
+                "rounded-md px-2.5 py-1 text-sm whitespace-nowrap " +
+                (hostFilter === h.hostId
+                  ? "bg-surface-mid font-medium text-on-surface"
+                  : "text-on-surface-variant hover:text-on-surface") +
+                (h.status !== "ok" ? " opacity-60" : "")
+              }
             >
               {h.hostId}
               {h.status !== "ok" ? ` · ${h.status}` : ""}
@@ -477,7 +473,7 @@ export function Feed() {
           <div
             key={`status-${h.hostId}`}
             data-testid={`feed-host-status-${h.hostId}`}
-            className="mb-2 border border-outline-variant px-2 py-1 font-mono text-[9px] text-on-surface-variant"
+            className="mb-2 border border-outline-variant px-2 py-1 font-mono text-[11px] text-on-surface-variant"
           >
             {h.hostId}: {h.status}
             {h.error ? ` — ${h.error}` : ""} (other hosts&apos; items unaffected)
@@ -492,7 +488,7 @@ export function Feed() {
           testId="for-you-empty"
         />
       ) : (
-        <div data-testid="for-you-feed-cards">
+        <div data-testid="for-you-feed-cards" className="overflow-hidden rounded-lg border bg-surface-lowest divide-y divide-outline-variant">
           {cards.map((c) => {
             const qitemId = qitemIdForCard(c);
             const queueItem = qitemId ? queueItems.itemsById.get(qitemId) : undefined;

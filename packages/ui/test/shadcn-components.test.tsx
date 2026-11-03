@@ -48,29 +48,30 @@ describe("shadcn components", () => {
     expect(container.children.length).toBeGreaterThan(0);
   });
 
-  // Test 2: Button tactical variant has uppercase text + bracket decoration
-  it("Button tactical variant renders brackets and uppercase", async () => {
+  // Test 2: Button tactical variant is a small neutral outlined button (Clean theme, C03)
+  it("Button tactical variant renders a small neutral outlined button", async () => {
     const { Button } = await import("../src/components/ui/button.js");
 
-    render(<Button variant="tactical" data-testid="tac">SNAPSHOT</Button>);
+    render(<Button variant="tactical" data-testid="tac">Snapshot</Button>);
 
     const btn = screen.getByTestId("tac");
-    expect(btn.textContent).toContain("SNAPSHOT");
-    // Should have uppercase + tracking + border classes (tech button style)
-    expect(btn.className).toContain("uppercase");
-    expect(btn.className).toContain("text-[10px]");
+    expect(btn.textContent).toContain("Snapshot");
+    // Clean theme: sentence case, small text, neutral outline border.
+    expect(btn.className).toContain("text-xs");
+    expect(btn.className).toContain("text-on-surface-variant");
     expect(btn.className).toContain("border");
+    expect(btn.className).not.toContain("uppercase");
   });
 
-  // Test 3: Button default variant has correct classes (vellum theme)
-  it("Button default variant has bg-stone-900 text-white", async () => {
+  // Test 3: Button default variant uses primary (Clean theme, C03)
+  it("Button default variant has bg-primary text-primary-foreground", async () => {
     const { Button } = await import("../src/components/ui/button.js");
 
     render(<Button variant="default" data-testid="pri">Go</Button>);
 
     const btn = screen.getByTestId("pri");
-    expect(btn.className).toContain("bg-inverse-surface");
-    expect(btn.className).toContain("text-background");
+    expect(btn.className).toContain("bg-primary");
+    expect(btn.className).toContain("text-primary-foreground");
   });
 
   // Test 4: Input and textarea use framed field styling

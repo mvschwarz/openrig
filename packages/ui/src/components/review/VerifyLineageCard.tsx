@@ -21,7 +21,7 @@ const TONE_CLASS: Record<string, string> = {
 export function VerifyLineageCard({ lineage }: { lineage: VerifyLineage }) {
   return (
     <section data-testid="verify-lineage-card" className={cn(VELLUM_CARD, "p-3 space-y-2")}>
-      <h3 className="font-mono text-[10px] uppercase tracking-wide text-on-surface-variant">Verify lineage</h3>
+      <h3 className="text-[11px] text-on-surface-variant">Verify lineage</h3>
       <p className="font-mono text-[11px] break-all">
         proven-at <code>{lineage.candidateSha ?? "unknown"}</code>
         {" · "}merged-at <code>{lineage.mergeSha ?? "UNMERGED"}</code>
@@ -38,7 +38,7 @@ export function VerifyLineageCard({ lineage }: { lineage: VerifyLineage }) {
             key={cell.role}
             data-testid={`gate-cell-${cell.role}`}
             title={cell.source ?? "no artifact"}
-            className={`border px-1.5 py-0.5 font-mono text-[10px] ${TONE_CLASS[cell.tone]}`}
+            className={`border px-1.5 py-0.5 font-mono text-[11px] ${TONE_CLASS[cell.tone]}`}
           >
             {cell.role}: {cell.recordedToken ?? "missing"}
           </span>

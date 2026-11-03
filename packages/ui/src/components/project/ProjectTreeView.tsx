@@ -38,7 +38,7 @@ function ProjectTreeRefreshHeader({ remoteReadonly }: { remoteReadonly: boolean 
   const refresh = useRefreshSlices();
   return (
     <div className="flex items-center justify-between px-2 pb-2 border-b border-outline-variant">
-      <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">
+      <span className="text-xs font-medium text-on-surface-variant">
         Project
       </span>
       {/* OPR.0.4.6.MH2 rev1-r2 re-verdict B1 (same-class, enumerated): the
@@ -57,7 +57,7 @@ function ProjectTreeRefreshHeader({ remoteReadonly }: { remoteReadonly: boolean 
             className={`h-3 w-3 ${refresh.isPending ? "animate-spin" : ""}`}
             aria-hidden="true"
           />
-          <span className="font-mono text-[9px] uppercase tracking-wide">refresh</span>
+          <span className="text-xs">refresh</span>
         </button>
       )}
     </div>
@@ -218,18 +218,18 @@ export function ProjectTreeView() {
       >
         <div
           data-testid="project-no-workspace"
-          className="border border-outline-variant bg-surface-low px-3 py-3 font-mono text-[10px]"
+          className="rounded-lg border bg-surface-lowest px-3 py-3 shadow-sm"
         >
-          <div className="text-on-surface uppercase tracking-wide font-bold mb-1">
+          <div className="text-sm font-semibold text-on-surface mb-1">
             No workspace connected
           </div>
-          <p className="text-on-surface-variant mb-2">
+          <p className="text-xs text-on-surface-variant mb-2">
             Configure a workspace root to browse missions and slices.
           </p>
           <Link
             to="/settings"
             data-testid="project-no-workspace-cta"
-            className="inline-flex items-center text-on-surface hover:underline uppercase"
+            className="inline-flex items-center text-sm text-brand hover:underline"
           >
             Open settings →
           </Link>
@@ -277,7 +277,7 @@ export function ProjectTreeView() {
             to="/project/mission/$missionId"
             params={{ missionId: m.id }}
             data-testid={`project-mission-link-${m.id}`}
-            className="font-mono text-[11px] text-on-surface flex-1 truncate hover:underline"
+            className="flex-1 truncate text-sm text-on-surface hover:underline"
           >
             {m.label}
           </Link>
@@ -286,7 +286,7 @@ export function ProjectTreeView() {
         {missionExpanded ? (
           <ul className="ml-4 border-l border-outline-variant">
             {m.slices.length === 0 ? (
-              <li className="px-2 py-0.5 font-mono text-[10px] text-on-surface-variant italic">
+              <li className="px-2 py-0.5 text-xs italic text-on-surface-variant">
                 No slices.
               </li>
             ) : (
@@ -301,7 +301,7 @@ export function ProjectTreeView() {
                       data-testid={`project-slice-${s.name}`}
                       title={`${s.displayName} — ${meta}`}
                       aria-label={`${s.displayName} (${meta})`}
-                      className="flex items-start gap-2 px-2 py-1 font-mono text-xs text-on-surface hover:text-on-surface hover:bg-surface-low"
+                      className="flex items-start gap-2 px-2 py-1 text-xs text-on-surface hover:text-on-surface hover:bg-surface-low"
                     >
                       <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">{s.displayName}</span>
                       <span
@@ -341,7 +341,7 @@ export function ProjectTreeView() {
             )}
             <span
               data-testid="project-workspace-label"
-              className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1"
+              className="flex-1 text-sm text-on-surface"
             >
               {workspaceLabel}
             </span>
@@ -349,7 +349,7 @@ export function ProjectTreeView() {
               to="/project"
               data-testid="project-workspace-link"
               onClick={(e) => e.stopPropagation()}
-              className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant hover:text-on-surface"
+              className="text-xs text-on-surface-variant hover:text-on-surface"
             >
               open
             </Link>
@@ -359,37 +359,37 @@ export function ProjectTreeView() {
               {discovery.unavailable && discovery.hint ? (
                 <li
                   data-testid="project-discovery-degraded"
-                  className="px-2 py-1 font-mono text-[9px] text-on-surface-variant italic"
+                  className="px-2 py-1 text-xs italic text-on-surface-variant"
                   title={discovery.hint}
                 >
                   Workspace missions folder unavailable; showing indexed slice grouping. Expected workspace/missions/&lt;mission&gt;/slices/&lt;slice&gt;.
                 </li>
               ) : null}
               {missions.length === 0 ? (
-                <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+                <li className="px-2 py-1 text-xs italic text-on-surface-variant">
                   No missions yet.
                 </li>
               ) : (
                 <>
                   <li
                     data-testid="project-mission-section-current"
-                    className="px-2 pt-2 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant"
+                    className="px-2 pt-2 pb-1 text-xs font-medium text-on-surface-variant"
                   >
-                    Current Work · {missionSections.current.length}
+                    Current work · {missionSections.current.length}
                   </li>
                   {missionSections.current.length > 0 ? (
                     missionSections.current.map((m) => renderMission(m, "current"))
                   ) : (
                     <li
                       data-testid="project-mission-section-current-empty"
-                      className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic"
+                      className="px-2 py-1 text-xs italic text-on-surface-variant"
                     >
                       No current work.
                     </li>
                   )}
                   <li
                     data-testid="project-mission-section-archive"
-                    className="px-2 pt-3 pb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant"
+                    className="px-2 pt-3 pb-1 text-xs font-medium text-on-surface-variant"
                   >
                     Archive · {missionSections.archive.length}
                   </li>
@@ -398,7 +398,7 @@ export function ProjectTreeView() {
                   ) : (
                     <li
                       data-testid="project-mission-section-archive-empty"
-                      className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic"
+                      className="px-2 py-1 text-xs italic text-on-surface-variant"
                     >
                       No archived work.
                     </li>
@@ -435,12 +435,12 @@ export function ProjectTreeView() {
         >
           {isSelected ? <ChevronDown className="h-3 w-3 text-on-surface-variant" /> : <ChevronRight className="h-3 w-3 text-on-surface-variant" />}
           <Globe className="h-3 w-3 text-on-surface-variant" />
-          <span className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 truncate">{opts.label}</span>
+          <span className="flex-1 truncate text-sm text-on-surface">{opts.label}</span>
           {chip ? (
             <span
               className={cn(
-                "font-mono text-[9px] uppercase tracking-[0.12em]",
-                chip === "viewing" ? "bg-inverse-surface px-1 text-background" : "text-on-surface-variant",
+                "text-xs",
+                chip === "viewing" ? "rounded-full bg-inverse-surface px-1 text-background" : "text-on-surface-variant",
               )}
             >
               {chip}

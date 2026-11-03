@@ -9,14 +9,14 @@ const config: Config = {
   theme: {
     borderRadius: {
       none: "0px",
-      sm: "0px",
-      DEFAULT: "0px",
-      md: "0px",
-      lg: "0px",
-      xl: "0px",
-      "2xl": "0px",
-      "3xl": "0px",
-      full: "9999px", /* Exception: stamp circles only */
+      sm: "calc(var(--radius) - 4px)",
+      DEFAULT: "calc(var(--radius) - 2px)",
+      md: "calc(var(--radius) - 2px)",
+      lg: "var(--radius)",
+      xl: "calc(var(--radius) + 4px)",
+      "2xl": "calc(var(--radius) + 8px)",
+      "3xl": "calc(var(--radius) + 12px)",
+      full: "9999px",
     },
     extend: {
       colors: {
@@ -68,6 +68,8 @@ const config: Config = {
         success: "hsl(var(--success))",
         warning: "hsl(var(--warning))",
         accent: "hsl(var(--secondary))",
+        brand: { DEFAULT: "hsl(var(--brand))", foreground: "hsl(var(--brand-foreground))" },
+        ring: "hsl(var(--ring))",
 
         /* shadcn compat */
         card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },

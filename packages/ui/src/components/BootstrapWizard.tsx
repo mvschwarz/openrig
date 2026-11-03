@@ -6,11 +6,13 @@ import { RequirementsPanel, type RequirementResult } from "./RequirementsPanel.j
 import { WorkspacePage } from "./WorkspacePage.js";
 import { useBootstrapPlan, useBootstrapApply, type BootstrapPlanResult } from "../hooks/useBootstrap.js";
 import { useSpecsWorkspace } from "./SpecsWorkspace.js";
-import { WorkflowHeader, WorkflowSection, WorkflowStepIndicator } from "./WorkflowScaffold.js";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { StatusBadge } from "@/components/ui/status-badge.js";
+import { WorkflowSection, WorkflowStepIndicator } from "./WorkflowScaffold.js";
 
 type Step = "enter" | "planning" | "planned" | "applying" | "done" | "error";
 
-const STEP_LABELS = ["ENTER", "PLAN", "REVIEW", "APPLY"] as const;
+const STEP_LABELS = ["Enter", "Plan", "Review", "Apply"] as const;
 const STEPS = STEP_LABELS.map((label, index) => ({ num: index + 1, label }));
 
 function currentStepNumber(step: Step): number {
@@ -101,8 +103,7 @@ export function BootstrapWizard() {
   return (
     <WorkspacePage>
       <div data-testid="bootstrap-wizard" className="space-y-8">
-      <WorkflowHeader
-        eyebrow="Bootstrap"
+      <PageHeader
         title="Bootstrap"
         description="Plan environment requirements, approve install actions, then import the rig into a running topology."
       />
@@ -115,21 +116,21 @@ export function BootstrapWizard() {
           description="Provide a rig spec or bundle path. Bootstrap will inspect requirements before it imports anything."
         >
         <div data-testid="step-enter">
-          <label className="text-label-md uppercase block mb-spacing-2">SPEC OR BUNDLE PATH</label>
+          <label className="text-xs text-on-surface-variant block mb-spacing-2">Spec or bundle path</label>
           <Input
             data-testid="spec-input"
             type="text"
             value={sourceRef}
             onChange={(e) => setSourceRef(e.target.value)}
             placeholder="/path/to/rig.yaml or /path/to/bundle.rigbundle"
-            className="font-mono text-body-md"
+            className="font-mono text-sm"
           />
-          <p className="text-label-sm text-foreground-muted mt-spacing-1">
+          <p className="text-xs text-on-surface-variant mt-spacing-1">
             Accepts .yaml rig specs or .rigbundle archives.{" "}
             <span
               role="link"
               tabIndex={0}
-              className="text-primary cursor-pointer"
+              className="text-brand cursor-pointer"
               data-testid="inspect-link"
               onClick={() => navigate({ to: "/bundles/inspect" })}
               onKeyDown={(e) => { if (e.key === "Enter") navigate({ to: "/bundles/inspect" }); }}
@@ -137,9 +138,10 @@ export function BootstrapWizard() {
               Inspect a bundle first →
             </span>
           </p>
-          <div className="mt-spacing-4">
-            <Button variant="tactical" onClick={handlePlan} disabled={!sourceRef.trim()} data-testid="plan-btn">
-              PLAN
+          <div className="mt-spacing-4 flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" onClick={handlePlan} disabled={!sourceRef.trim()} data-testid="plan-btn">
+              Preview plan
             </Button>
           </div>
         </div>
@@ -148,7 +150,7 @@ export function BootstrapWizard() {
 
       {/* Step 2: Planning */}
       {step === "planning" && (
-        <div data-testid="step-planning" className="text-body-md text-foreground-muted">
+        <div data-testid="step-planning" className="text-sm text-on-surface-variant">
           Planning...
         </div>
       )}
@@ -156,19 +158,17 @@ export function BootstrapWizard() {
       {/* Step 3: Planned / Review */}
       {step === "planned" && planResult && (
         <WorkflowSection
-          title="Plan Review"
+          title="Plan review"
           description="Review requirement probe results and approve the install actions that bootstrap should execute."
         >
         <div data-testid="step-planned">
           {/* Stages */}
-          <h3 className="text-headline-md uppercase mb-spacing-3">STAGES</h3>
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Stages</h3>
           <div className="space-y-spacing-1 mb-spacing-6" data-testid="stage-list">
             {planResult.stages.map((s) => (
-              <div key={s.stage} className="flex items-center gap-spacing-3 text-label-sm font-mono" data-testid="stage-row">
-                <span className={s.status === "ok" ? "text-success" : s.status === "blocked" ? "text-warning" : "text-foreground-muted"}>
-                  {s.status.toUpperCase()}
-                </span>
-                <span>{s.stage}</span>
+              <div key={s.stage} className="flex items-center gap-spacing-3 text-xs" data-testid="stage-row">
+                <StatusBadge status={s.status === "ok" ? "done" : s.status === "blocked" ? "attention_required" : s.status} label={s.status === "ok" ? "Ok" : s.status === "blocked" ? "Blocked" : undefined} />
+                <span className="font-mono">{s.stage}</span>
               </div>
             ))}
           </div>
@@ -176,7 +176,7 @@ export function BootstrapWizard() {
           {/* Requirements */}
           {requirements.length > 0 && (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">REQUIREMENTS</h3>
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Requirements</h3>
               <div className="mb-spacing-6">
                 <RequirementsPanel results={requirements} />
               </div>
@@ -186,10 +186,10 @@ export function BootstrapWizard() {
           {/* Actions */}
           {actions.length > 0 && (
             <>
-              <h3 className="text-headline-md uppercase mb-spacing-3">ACTIONS</h3>
+              <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Actions</h3>
               <div className="space-y-spacing-1 mb-spacing-4">
                 {actions.map((a) => (
-                  <label key={a.key} className="flex items-center gap-spacing-3 text-label-sm font-mono cursor-pointer">
+                  <label key={a.key} className="flex items-center gap-spacing-3 text-xs cursor-pointer">
                     <input
                       type="checkbox"
                       checked={autoApprove || selectedKeys.has(a.key)}
@@ -202,11 +202,11 @@ export function BootstrapWizard() {
                       }}
                     />
                     <span className={a.classification === "manual_only" ? "text-warning" : ""}>{a.requirementName}</span>
-                    {a.commandPreview && <span className="text-foreground-muted">{a.commandPreview}</span>}
+                    {a.commandPreview && <span className="font-mono text-on-surface-variant">{a.commandPreview}</span>}
                   </label>
                 ))}
               </div>
-              <label className="flex items-center gap-spacing-2 text-label-sm mb-spacing-4">
+              <label className="flex items-center gap-spacing-2 text-xs text-on-surface-variant mb-spacing-4">
                 <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
                 Auto-approve all trusted actions
               </label>
@@ -215,7 +215,7 @@ export function BootstrapWizard() {
 
           {/* Blocked warning */}
           {isPlanBlocked && (
-            <div className="text-warning text-label-sm mb-spacing-4" data-testid="blocked-warning">
+            <div className="text-warning text-xs mb-spacing-4" data-testid="blocked-warning">
               Manual requirements must be resolved before bootstrap can proceed.
             </div>
           )}
@@ -224,20 +224,29 @@ export function BootstrapWizard() {
           {planResult.warnings.length > 0 && (
             <div className="mb-spacing-4">
               {planResult.warnings.map((w, i) => (
-                <div key={i} className="text-warning text-label-sm">{w}</div>
+                <div key={i} className="text-warning text-xs">{w}</div>
               ))}
             </div>
           )}
 
-          <Button
-            variant="tactical"
-            onClick={handleApply}
-            disabled={isPlanBlocked || noneSelected}
-            title={isPlanBlocked ? "Manual requirements must be resolved" : noneSelected ? "Select actions to approve" : undefined}
-            data-testid="apply-btn"
-          >
-            APPLY
-          </Button>
+          <div className="flex items-center justify-between gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => setStep("enter")}
+              data-testid="plan-back-btn"
+            >
+              Back
+            </Button>
+            <Button
+              variant="default"
+              onClick={handleApply}
+              disabled={isPlanBlocked || noneSelected}
+              title={isPlanBlocked ? "Manual requirements must be resolved" : noneSelected ? "Select actions to approve" : undefined}
+              data-testid="apply-btn"
+            >
+              Bootstrap rig
+            </Button>
+          </div>
         </div>
         </WorkflowSection>
       )}
@@ -249,28 +258,28 @@ export function BootstrapWizard() {
           description="Bootstrap is executing the approved actions and importing the rig."
         >
         <div data-testid="step-applying">
-          <h3 className="text-headline-md uppercase mb-spacing-3">APPLYING</h3>
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Applying</h3>
           <div className="space-y-spacing-1 mb-spacing-4" data-testid="applying-checklist">
             {planResult.stages.map((s) => (
-              <div key={s.stage} className="flex items-center gap-spacing-3 text-label-sm font-mono">
-                <span className="text-foreground-muted">○</span>
-                <span>{s.stage}</span>
+              <div key={s.stage} className="flex items-center gap-spacing-3 text-xs">
+                <span className="text-on-surface-variant">○</span>
+                <span className="font-mono">{s.stage}</span>
               </div>
             ))}
-            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
-              <span className="text-foreground-muted">○</span>
-              <span>execute_external_installs</span>
+            <div className="flex items-center gap-spacing-3 text-xs">
+              <span className="text-on-surface-variant">○</span>
+              <span className="font-mono">execute_external_installs</span>
             </div>
-            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
-              <span className="text-foreground-muted">○</span>
-              <span>install_packages</span>
+            <div className="flex items-center gap-spacing-3 text-xs">
+              <span className="text-on-surface-variant">○</span>
+              <span className="font-mono">install_packages</span>
             </div>
-            <div className="flex items-center gap-spacing-3 text-label-sm font-mono">
-              <span className="text-foreground-muted">○</span>
-              <span>import_rig</span>
+            <div className="flex items-center gap-spacing-3 text-xs">
+              <span className="text-on-surface-variant">○</span>
+              <span className="font-mono">import_rig</span>
             </div>
           </div>
-          <p className="text-body-sm text-foreground-muted">Bootstrapping...</p>
+          <p className="text-sm text-on-surface-variant">Bootstrapping...</p>
         </div>
         </WorkflowSection>
       )}
@@ -282,23 +291,26 @@ export function BootstrapWizard() {
           description="Bootstrap finished and returned the managed rig identity."
         >
         <div data-testid="step-done">
-          <h3 className="text-headline-md uppercase mb-spacing-3">
-            {planResult.status === "completed" ? "BOOTSTRAP COMPLETE" : "BOOTSTRAP PARTIAL"}
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">
+            {planResult.status === "completed" ? "Bootstrap complete" : "Bootstrap partial"}
           </h3>
-          <div className="text-label-sm font-mono space-y-spacing-1 mb-spacing-4">
-            <div>Status: <span className={planResult.status === "completed" ? "text-success" : "text-warning"}>{planResult.status.toUpperCase()}</span></div>
+          <div className="text-xs space-y-spacing-1 mb-spacing-4">
+            <div>Status: <StatusBadge status={planResult.status === "completed" ? "done" : "attention_required"} label={planResult.status === "completed" ? "Completed" : "Partial"} /></div>
             {(planResult as { rigId?: string }).rigId && (
-              <div data-testid="result-rig-id">Rig: {(planResult as { rigId?: string }).rigId}</div>
+              <div data-testid="result-rig-id">Rig: <span className="font-mono">{(planResult as { rigId?: string }).rigId}</span></div>
             )}
           </div>
           {(planResult as { rigId?: string }).rigId && (
-            <Button
-              variant="tactical"
-              data-testid="view-rig-btn"
-              onClick={() => navigate({ to: "/rigs/$rigId", params: { rigId: (planResult as unknown as { rigId: string }).rigId } })}
-            >
-              VIEW RIG
-            </Button>
+            <div className="flex items-center justify-between gap-2">
+              <span />
+              <Button
+                variant="default"
+                data-testid="view-rig-btn"
+                onClick={() => navigate({ to: "/rigs/$rigId", params: { rigId: (planResult as unknown as { rigId: string }).rigId } })}
+              >
+                View rig
+              </Button>
+            </div>
           )}
         </div>
         </WorkflowSection>
@@ -307,14 +319,17 @@ export function BootstrapWizard() {
       {/* Error */}
       {step === "error" && (
         <WorkflowSection
-          title="Bootstrap Error"
+          title="Bootstrap error"
           description="Bootstrap could not complete. Fix the issue and retry the plan."
         >
         <div data-testid="step-error">
-          <p className="text-destructive text-body-md mb-spacing-4">{errorMessage}</p>
-          <Button variant="tactical" onClick={handleReset} data-testid="try-again-btn">
-            TRY AGAIN
-          </Button>
+          <p className="text-destructive text-sm mb-spacing-4">{errorMessage}</p>
+          <div className="flex items-center justify-between gap-2">
+            <span />
+            <Button variant="default" onClick={handleReset} data-testid="try-again-btn">
+              Try again
+            </Button>
+          </div>
         </div>
         </WorkflowSection>
       )}

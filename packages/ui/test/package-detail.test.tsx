@@ -130,7 +130,7 @@ describe("PackageDetail", () => {
       expect(screen.getByTestId("package-header")).toBeTruthy();
     });
 
-    expect(screen.getByText("acme-standards (Legacy)")).toBeTruthy();
+    expect(screen.getByText("acme-standards (legacy)")).toBeTruthy();
     expect(screen.getByText("v2.0.0")).toBeTruthy();
     expect(screen.getByTestId("package-source").textContent).toBe("/packages/acme");
   });
@@ -167,9 +167,12 @@ describe("PackageDetail", () => {
     });
 
     const badges = screen.getAllByTestId("install-status-badge");
-    expect(badges[0]!.className).toContain("bg-success");
-    expect(badges[1]!.className).toContain("bg-warning");
-    expect(badges[2]!.className).toContain("bg-destructive");
+    expect(badges[0]!.textContent).toBe("Applied");
+    expect(badges[0]!.getAttribute("data-tone")).toBe("success");
+    expect(badges[1]!.textContent).toBe("Rolled back");
+    expect(badges[1]!.getAttribute("data-tone")).toBe("warning");
+    expect(badges[2]!.textContent).toBe("Failed");
+    expect(badges[2]!.getAttribute("data-tone")).toBe("danger");
   });
 
   // Test 4: Expand install shows journal entries
@@ -400,7 +403,7 @@ describe("PackageDetail", () => {
     await waitFor(() => {
       const btn = screen.getByTestId("rollback-confirm");
       expect(btn.hasAttribute("disabled")).toBe(true);
-      expect(btn.textContent).toContain("ROLLING BACK");
+      expect(btn.textContent).toContain("Rolling back");
     });
   });
 

@@ -110,7 +110,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
               colored pill; the only color is the dot. */}
           <div
             data-testid={`${testId}-pill`}
-            className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-on-surface"
+            className="flex items-center gap-2 text-[11px] text-on-surface"
           >
             <span aria-hidden="true" className={`inline-block w-1.5 h-1.5 rounded-full ${KIND_DOT[kind]}`} />
             <span>{KIND_LABEL[kind]}</span>
@@ -156,7 +156,7 @@ export function CardShell({ testId, kind, title, oneLiner, expanded, drillInHref
               <a
                 data-testid={`${testId}-drill-in`}
                 href={drillInHref}
-                className="inline-flex items-center gap-1 min-h-[44px] border border-on-surface px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
+                className="inline-flex items-center gap-1 min-h-[44px] border border-on-surface px-3 py-2 text-[11px] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
                 onClick={(e) => e.stopPropagation()}
               >
                 {drillInLabel ?? "Open"} →
@@ -195,7 +195,7 @@ export function ShippedCard({ source }: { source: ShippedCardSource }) {
           <ol className="space-y-2 text-[11px]">
             {source.sections.slice(0, 3).map((s) => (
               <li key={s.number} data-testid={`feed-card-shipped-${source.sliceId}-section-${s.number}`} className="flex gap-2">
-                <span className="font-mono text-[10px] font-bold text-on-surface-variant">{s.number}.</span>
+                <span className="font-mono text-[11px] font-bold text-on-surface-variant">{s.number}.</span>
                 <div>
                   <div className="font-semibold text-on-surface">{s.heading}</div>
                   <div className="text-on-surface">{s.summary}</div>
@@ -255,7 +255,7 @@ export function IncidentCard({ source }: { source: IncidentCardSource }) {
             {source.recentEntries.slice(0, 3).map((e, i) => (
               <li key={i} data-testid={`feed-card-incident-${source.sliceId}-entry-${i}`} className="flex items-baseline gap-2">
                 <span className={`inline-block h-2 w-2 rounded-full ${STATUS_DOT[e.status]} shrink-0`} aria-hidden="true" />
-                <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant shrink-0">{e.time}</span>
+                <span className="text-[11px] text-on-surface-variant shrink-0">{e.time}</span>
                 <span className="text-on-surface">{e.title}</span>
               </li>
             ))}
@@ -307,7 +307,7 @@ export function ProgressCard({
         event.stopPropagation();
         onMarkComplete(source.missionId);
       }}
-      className="min-h-[36px] border border-on-surface px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors focus:outline-none focus:ring-1 focus:ring-on-surface"
+      className="min-h-[36px] border border-on-surface px-3 py-1.5 text-[11px] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors focus:outline-none focus:ring-1 focus:ring-on-surface"
     >
       Mark complete
     </button>
@@ -339,9 +339,9 @@ export function ProgressCard({
       expanded={
         source.activeSlice ? (
           <div data-testid={`feed-card-progress-${source.missionId}-active-slice`} className="border border-outline-variant bg-background px-2 py-2">
-            <div className="font-mono text-[8px] uppercase tracking-[0.18em] text-on-surface-variant">Active slice</div>
+            <div className="text-[11px] text-on-surface-variant">Active slice</div>
             <div className="mt-1 text-[12px] font-semibold text-on-surface">{source.activeSlice.label}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-on-surface-variant">status: {source.activeSlice.status}</div>
+            <div className="mt-0.5 font-mono text-[11px] text-on-surface-variant">status: {source.activeSlice.status}</div>
           </div>
         ) : (
           <div className="text-[11px] text-on-surface-variant">No active slice.</div>
@@ -384,7 +384,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
               type="button"
               data-testid={`feed-card-approval-${source.qitemId}-approve`}
               onClick={source.onApprove}
-              className="min-h-[44px] border border-success px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-success hover:bg-success hover:text-white transition-colors"
+              className="min-h-[44px] border border-success px-3 py-1.5 text-[11px] text-success hover:bg-success hover:text-white transition-colors"
             >
               Approve
             </button>
@@ -394,7 +394,7 @@ export function ApprovalCard({ source }: { source: ApprovalCardSource }) {
               type="button"
               data-testid={`feed-card-approval-${source.qitemId}-deny`}
               onClick={source.onDeny}
-              className="min-h-[44px] border border-on-surface px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
+              className="min-h-[44px] border border-on-surface px-3 py-1.5 text-[11px] text-on-surface hover:bg-inverse-surface hover:text-background transition-colors"
             >
               Deny
             </button>
@@ -443,15 +443,15 @@ export function ConceptCard({ source }: { source: ConceptCardSource }) {
           <table className="w-full border-collapse text-[11px]">
             <thead>
               <tr className="bg-background">
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant"></th>
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">Old</th>
-                <th className="border border-outline-variant px-2 py-1 text-left font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">New</th>
+                <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant"></th>
+                <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">Old</th>
+                <th className="border border-outline-variant px-2 py-1 text-left text-[11px] text-on-surface-variant">New</th>
               </tr>
             </thead>
             <tbody>
               {source.comparePreview.slice(0, 3).map((row, i) => (
                 <tr key={i}>
-                  <td className="border border-outline-variant px-2 py-1 font-mono text-[10px] font-semibold text-on-surface">{row.label}</td>
+                  <td className="border border-outline-variant px-2 py-1 font-mono text-[11px] font-semibold text-on-surface">{row.label}</td>
                   <td className="border border-outline-variant px-2 py-1 text-on-surface">{row.valueOld}</td>
                   <td className="border border-outline-variant px-2 py-1 text-on-surface">{row.valueNew}</td>
                 </tr>

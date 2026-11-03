@@ -11,25 +11,30 @@ import { formatEventPayload } from "../../lib/format-event-payload.js";
 export function LogPage() {
   const { events } = useActivityFeed();
   return (
-    <SettingsPageShell testId="settings-page-log" title="Log">
+    <SettingsPageShell
+      testId="settings-page-log"
+      title="Log"
+      description="A live stream of daemon activity events. Newest events appear first."
+    >
       {events.length === 0 ? (
         <EmptyState
-          label="LOG IS QUIET"
-          description="Activity events from rigs will stream here."
+          label="Log is quiet"
+          title="Log is quiet"
+          description="Activity events from your rigs will stream here once agents start working."
           variant="card"
           testId="settings-log-empty"
         />
       ) : (
         <ul
           data-testid="settings-log-stream"
-          className="divide-y divide-outline-variant border border-outline-variant max-h-[60vh] overflow-y-auto"
+          className="divide-y divide-outline-variant rounded-lg border bg-surface-lowest max-h-[60vh] overflow-y-auto"
         >
           {events.slice(0, 100).map((evt) => (
             <li
               key={evt.seq}
-              className="px-3 py-2 flex items-baseline gap-3 font-mono text-xs"
+              className="px-3 py-2 flex items-baseline gap-3 text-sm"
             >
-              <span className="text-on-surface-variant text-[10px] uppercase tracking-wide w-32 shrink-0 truncate">
+              <span className="text-xs text-on-surface-variant w-32 shrink-0 truncate font-mono">
                 {evt.type}
               </span>
               <span className="text-on-surface truncate" title={formatEventPayload(evt.payload)}>

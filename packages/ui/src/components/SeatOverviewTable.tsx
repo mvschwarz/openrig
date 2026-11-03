@@ -124,7 +124,7 @@ export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOv
   const columnFields: ColumnField[] = [
     {
       key: "runtime",
-      label: "runtime",
+      label: "Runtime",
       value: data.runtime ? (
         <RuntimeBadge
           runtime={data.runtime}
@@ -136,12 +136,12 @@ export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOv
         />
       ) : null,
     },
-    { key: "model", label: "model", value: data.model, mono: true },
-    { key: "profile", label: "profile", value: data.profile, mono: true },
-    { key: "spec", label: "spec", value: specCell, mono: true },
-    { key: "activity", label: "activity", value: activityValue },
-    { key: "context-percent", label: "context %", value: contextPercentage, mono: true },
-    { key: "total-tokens", label: "tokens", value: tokenLabel, mono: true },
+    { key: "model", label: "Model", value: data.model, mono: true },
+    { key: "profile", label: "Profile", value: data.profile, mono: true },
+    { key: "spec", label: "Spec", value: specCell, mono: true },
+    { key: "activity", label: "Activity", value: activityValue },
+    { key: "context-percent", label: "Context %", value: contextPercentage, mono: true },
+    { key: "total-tokens", label: "Tokens", value: tokenLabel, mono: true },
   ];
 
   const lastIdx = columnFields.length - 1;
@@ -163,7 +163,7 @@ export function SeatOverviewTable({ data, activityVisual: recentVisual }: SeatOv
                   key={field.key}
                   scope="col"
                   data-testid={`seat-overview-header-${field.key}`}
-                  className={`px-3 py-1.5 text-left font-mono text-[10px] font-normal lowercase tracking-[0.04em] text-on-surface-variant ${
+                  className={`px-3 py-1.5 text-left font-mono text-[11px] font-normal text-on-surface-variant ${
                     idx < lastIdx ? "border-r border-outline-variant/55" : ""
                   }`}
                 >

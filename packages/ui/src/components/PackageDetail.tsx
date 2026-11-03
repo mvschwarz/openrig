@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useParams } from "@tanstack/react-router";
-import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -17,31 +16,28 @@ import {
   useRollbackInstall,
   type InstallSummary,
 } from "../hooks/usePackageDetail.js";
+import { PageHeader } from "@/components/ui/page-header.js";
+import { EmptyState } from "@/components/ui/empty-state.js";
+import { StatusBadge } from "@/components/ui/status-badge.js";
 import { WorkspacePage } from "./WorkspacePage.js";
 
-function statusBadgeColor(status: string): string {
+/** C14e: map legacy install status to the shared status vocabulary. */
+function installStatusKey(status: string): string {
   switch (status) {
-    case "applied":
-      return "bg-success";
-    case "rolled_back":
-      return "bg-warning";
-    case "failed":
-      return "bg-destructive";
-    default:
-      return "bg-foreground-muted";
+    case "applied": return "done";
+    case "rolled_back": return "recoverable";
+    case "failed": return "failed";
+    default: return status;
   }
 }
 
-function statusLabel(status: string): string {
+/** C14e: map legacy install status to a sentence-case label. */
+function installStatusLabel(status: string): string {
   switch (status) {
-    case "applied":
-      return "APPLIED";
-    case "rolled_back":
-      return "ROLLED BACK";
-    case "failed":
-      return "FAILED";
-    default:
-      return status.toUpperCase();
+    case "applied": return "Applied";
+    case "rolled_back": return "Rolled back";
+    case "failed": return "Failed";
+    default: return status.replace(/[_-]+/g, " ").replace(/^\w/, (c) => c.toUpperCase());
   }
 }
 
@@ -78,13 +74,13 @@ function JournalSubList({ installId }: { installId: string }) {
         <div
           key={entry.id}
           data-testid="journal-entry"
-          className="flex items-center gap-spacing-3 text-label-sm font-mono py-spacing-1 border-b border-foreground/6 last:border-0"
+          className="flex items-center gap-spacing-3 text-xs py-spacing-1 border-b border-foreground/6 last:border-0"
         >
-          <span className="text-foreground-muted w-6 text-right">{entry.seq}</span>
-          <span className="uppercase">{entry.action}</span>
-          <span className="text-foreground-muted">{entry.exportType}</span>
-          <span className="text-foreground-muted truncate max-w-[200px]">{entry.targetPath}</span>
-          <span className="text-foreground-muted ml-auto">{entry.status}</span>
+          <span className="text-on-surface-variant w-6 text-right font-mono">{entry.seq}</span>
+          <span>{entry.action}</span>
+          <span className="text-on-surface-variant font-mono">{entry.exportType}</span>
+          <span className="text-on-surface-variant truncate max-w-[200px] font-mono">{entry.targetPath}</span>
+          <span className="text-on-surface-variant ml-auto">{entry.status}</span>
         </div>
       ))}
     </div>
@@ -101,31 +97,23 @@ function InstallRow({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div data-testid="install-row" className="card-dark p-spacing-4 mb-spacing-2">
+    <div data-testid="install-row" className="rounded-lg border bg-surface-lowest p-spacing-4 mb-spacing-2 shadow-sm">
       <div className="flex items-center gap-spacing-4">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-spacing-3 mb-spacing-1">
-            <span className="font-mono text-label-sm text-foreground-muted">
+            <span className="font-mono text-xs text-on-surface-variant">
               {install.createdAt}
             </span>
-            <span
-              data-testid="install-status-badge"
-              className={cn(
-                "inline-block px-spacing-2 py-px text-label-sm uppercase",
-                statusBadgeColor(install.status)
-              )}
-            >
-              {statusLabel(install.status)}
-            </span>
+            <StatusBadge status={installStatusKey(install.status)} label={installStatusLabel(install.status)} testId="install-status-badge" />
           </div>
-          <div className="text-label-sm font-mono text-foreground-muted-on-dark">
+          <div className="text-xs font-mono text-on-surface-variant">
             {install.targetRoot}
           </div>
-          <div className="flex items-center gap-spacing-3 mt-spacing-1 text-label-sm">
+          <div className="flex items-center gap-spacing-3 mt-spacing-1 text-xs text-on-surface-variant">
             <span data-testid="applied-count">
-              <span className="font-mono">{install.appliedCount}</span> applied
+              <span className="font-mono text-on-surface">{install.appliedCount}</span> applied
             </span>
-            <span data-testid="deferred-placeholder" className="text-foreground-muted">
+            <span data-testid="deferred-placeholder">
               &mdash; deferred
             </span>
           </div>
@@ -133,21 +121,21 @@ function InstallRow({
 
         <div className="flex items-center gap-spacing-2 shrink-0">
           <Button
-            variant="tactical"
+            variant="ghost"
             size="sm"
             data-testid="expand-btn"
             onClick={() => setExpanded(!expanded)}
           >
-            {expanded ? "COLLAPSE" : "EXPAND"}
+            {expanded ? "Collapse" : "Expand"}
           </Button>
           {install.status === "applied" && (
             <Button
-              variant="tactical"
+              variant="ghost"
               size="sm"
               data-testid="rollback-btn"
               onClick={() => onRollback(install.id)}
             >
-              ROLLBACK
+              Rollback
             </Button>
           )}
         </div>
@@ -189,7 +177,7 @@ export function PackageDetail() {
       <WorkspacePage>
       <div data-testid="detail-loading">
         <div className="h-8 w-48 shimmer mb-spacing-4" />
-        <div className="card-dark p-spacing-6 mb-spacing-4">
+        <div className="rounded-lg border bg-surface-lowest p-spacing-6 mb-spacing-4">
           <div className="h-6 w-64 shimmer-dark mb-spacing-3" />
           <div className="h-4 w-full shimmer-dark" />
         </div>
@@ -227,32 +215,37 @@ export function PackageDetail() {
     <div>
       {/* Package header */}
       {pkg && (
-        <div className="card-dark p-spacing-6 mb-spacing-6" data-testid="package-header">
-          <div className="flex items-baseline justify-between mb-spacing-2">
-            <h2 className="text-headline-lg uppercase">{pkg.name} (Legacy)</h2>
-            <span className="text-label-md font-mono text-foreground-muted-on-dark">
-              v{pkg.version}
-            </span>
-          </div>
-          <div className="text-label-sm text-foreground-muted-on-dark mb-spacing-2">
-            SOURCE{" "}
-            <span className="font-mono text-foreground-on-dark" data-testid="package-source">
-              {pkg.sourceRef}
-            </span>
-          </div>
-          {pkg.summary && (
-            <p className="text-body-sm text-foreground-muted-on-dark">{pkg.summary}</p>
-          )}
+        <div data-testid="package-header">
+          <PageHeader
+            title={`${pkg.name} (legacy)`}
+            description={pkg.summary ?? "Legacy package details and install history."}
+            meta={
+              <>
+                <span className="font-mono text-xs text-on-surface-variant">
+                  v{pkg.version}
+                </span>
+                <span className="text-xs text-on-surface-variant">
+                  Source{" "}
+                  <span className="font-mono text-on-surface" data-testid="package-source">
+                    {pkg.sourceRef}
+                  </span>
+                </span>
+              </>
+            }
+          />
         </div>
       )}
 
       {/* Install history */}
-      <h3 className="text-headline-md uppercase mb-spacing-4">INSTALL HISTORY</h3>
+      <h3 className="text-sm font-semibold text-on-surface mb-spacing-4">Install history</h3>
 
       {sortedInstalls.length === 0 ? (
-        <div data-testid="empty-installs" className="text-body-md text-foreground-muted">
-          No installs yet
-        </div>
+        <EmptyState
+          label="No installs yet"
+          title="No installs yet"
+          description="No installs recorded for this package yet. Install it from the packages page to see history here."
+          testId="empty-installs"
+        />
       ) : (
         <div data-testid="install-list">
           {sortedInstalls.map((install) => (
@@ -269,14 +262,14 @@ export function PackageDetail() {
       <Dialog open={dialogOpen} onOpenChange={(open) => { if (!rollbackMutation.isPending) { setDialogOpen(open); if (!open) rollbackMutation.reset(); } }}>
         <DialogContent data-testid="rollback-dialog" onPointerDownOutside={(e) => { if (rollbackMutation.isPending) e.preventDefault(); }} onEscapeKeyDown={(e) => { if (rollbackMutation.isPending) e.preventDefault(); }} hideCloseButton={rollbackMutation.isPending}>
           <DialogHeader>
-            <DialogTitle className="text-headline-md uppercase">CONFIRM ROLLBACK</DialogTitle>
+            <DialogTitle>Confirm rollback</DialogTitle>
             <DialogDescription>
               This will roll back the install and restore previous file states. This action cannot
               be undone.
             </DialogDescription>
           </DialogHeader>
           {rollbackMutation.isError && (
-            <p className="text-destructive text-label-sm" data-testid="rollback-error">
+            <p className="text-destructive text-xs" data-testid="rollback-error">
               Rollback failed: {rollbackMutation.error?.message ?? "Unknown error"}
             </p>
           )}
@@ -287,7 +280,7 @@ export function PackageDetail() {
               data-testid="rollback-cancel"
               disabled={rollbackMutation.isPending}
             >
-              CANCEL
+              Cancel
             </Button>
             <Button
               variant="destructive"
@@ -295,7 +288,7 @@ export function PackageDetail() {
               data-testid="rollback-confirm"
               disabled={rollbackMutation.isPending}
             >
-              {rollbackMutation.isPending ? "ROLLING BACK..." : "ROLLBACK"}
+              {rollbackMutation.isPending ? "Rolling back..." : "Rollback"}
             </Button>
           </DialogFooter>
         </DialogContent>

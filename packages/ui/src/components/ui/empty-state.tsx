@@ -1,6 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { VellumCard } from "./vellum-card";
+import { Button } from "./button";
 
 export type EmptyStateVariant = "minimal" | "card";
 
@@ -13,6 +13,8 @@ export interface EmptyStateAction {
 export interface EmptyStateProps {
   icon?: React.ReactNode;
   label: string;
+  /** Optional new-design title; falls back to `label` when omitted. */
+  title?: string;
   description?: React.ReactNode;
   action?: EmptyStateAction;
   variant?: EmptyStateVariant;
@@ -21,30 +23,27 @@ export interface EmptyStateProps {
 }
 
 function ActionButton({ action, testId }: { action: EmptyStateAction; testId?: string }) {
-  const cls =
-    "inline-flex items-center px-3 py-1 border border-on-surface bg-surface-lowest font-mono text-[10px] uppercase hover:bg-surface-low";
+  const actionTestId = testId ? `${testId}-action` : undefined;
   if (action.href) {
     return (
-      <a href={action.href} className={cls} data-testid={testId ? `${testId}-action` : undefined}>
-        {action.label}
-      </a>
+      <Button asChild size="sm">
+        <a href={action.href} data-testid={actionTestId}>
+          {action.label}
+        </a>
+      </Button>
     );
   }
   return (
-    <button
-      type="button"
-      onClick={action.onClick}
-      className={cls}
-      data-testid={testId ? `${testId}-action` : undefined}
-    >
+    <Button size="sm" onClick={action.onClick} data-testid={actionTestId}>
       {action.label}
-    </button>
+    </Button>
   );
 }
 
 export function EmptyState({
   icon,
   label,
+  title,
   description,
   action,
   variant = "minimal",
@@ -54,21 +53,24 @@ export function EmptyState({
   const body = (
     <div
       className={cn(
-        "flex flex-col items-center justify-center text-center p-6 gap-2",
+        "flex flex-col items-center justify-center text-center py-12 gap-2",
         className,
       )}
       data-testid={testId}
     >
       {icon ? (
-        <div className="text-on-surface-variant" aria-hidden="true">
+        <div
+          className="rounded-lg bg-surface-low p-3 text-on-surface-variant"
+          aria-hidden="true"
+        >
           {typeof icon === "string" ? <span className="text-2xl">{icon}</span> : icon}
         </div>
       ) : null}
-      <div className="font-headline font-bold uppercase text-on-surface text-sm tracking-tight">
-        {label}
+      <div className="text-sm font-semibold text-on-surface">
+        {title ?? label}
       </div>
       {description ? (
-        <div className="text-xs text-on-surface-variant max-w-prose">{description}</div>
+        <div className="text-sm text-on-surface-variant max-w-md">{description}</div>
       ) : null}
       {action ? (
         <div className="pt-2">
@@ -80,9 +82,9 @@ export function EmptyState({
 
   if (variant === "card") {
     return (
-      <VellumCard variant="ghost" elevation="flat" registrationMarks={false}>
+      <div className="rounded-lg border bg-surface-lowest shadow-sm">
         {body}
-      </VellumCard>
+      </div>
     );
   }
   return body;

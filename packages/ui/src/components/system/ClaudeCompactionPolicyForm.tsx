@@ -1,6 +1,6 @@
 // Slice 27 — Claude Auto-Compaction Policy form.
 //
-// Operator-configurable pre-compaction trigger: when a Claude seat's
+// Operator-configurable pre-compaction trigger: when a Claude agent's
 // context usage crosses `threshold_percent`, the daemon's ContextMonitor
 // first sends a fixed-wrapper preparation prompt plus operator-editable
 // `pre_compact_instruction`, then dispatches `/compact` via
@@ -66,11 +66,11 @@ export function ClaudeCompactionPolicyForm() {
     return (
       <section
         data-testid="claude-compaction-policy-form"
-        className="border border-outline-variant p-5 bg-surface-lowest/50"
+        className="rounded-lg border bg-surface-lowest p-5 shadow-sm"
       >
         <SectionHeader tone="muted">Policy</SectionHeader>
-        <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-on-surface mt-1">
-          Claude Auto-Compaction
+        <h2 className="text-sm font-semibold text-on-surface mt-1">
+          Claude auto-compaction
         </h2>
         {isLoading && (
           <p className="mt-4 text-sm text-on-surface-variant" data-testid="claude-compaction-policy-loading">
@@ -142,18 +142,18 @@ function PolicyFormBody({ data, setSetting }: PolicyFormBodyProps) {
   return (
     <section
       data-testid="claude-compaction-policy-form"
-      className="border border-outline-variant p-5 bg-surface-lowest/50"
+      className="rounded-lg border bg-surface-lowest p-5 shadow-sm"
     >
       <SectionHeader tone="muted">Policy</SectionHeader>
-      <h2 className="font-headline text-headline-sm font-bold tracking-tight uppercase text-on-surface mt-1">
-        Claude Auto-Compaction
+      <h2 className="text-sm font-semibold text-on-surface mt-1">
+        Claude auto-compaction
       </h2>
       <p className="mt-2 text-sm text-on-surface-variant max-w-prose">
-        When a Claude seat's context usage crosses the configured threshold,
+        When a Claude agent&apos;s context usage crosses the configured threshold,
         OpenRig first sends a preparation message, then sends
-        <code className="font-mono text-[12px]"> /compact</code> on the next
+        <code className="font-mono text-xs"> /compact</code> on the next
         eligible observation. After compaction, OpenRig sends one restore prompt
-        that points the seat at its restore packet, followed by a read-depth
+        that points the agent at its restore packet, followed by a read-depth
         audit prompt.
       </p>
 

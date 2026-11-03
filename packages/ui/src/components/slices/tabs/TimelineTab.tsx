@@ -110,12 +110,12 @@ export function TimelineTab({
     return (
       <div
         data-testid="story-empty"
-        className="border border-dashed border-outline-variant bg-surface-lowest/35 p-4 font-body text-[11px] leading-relaxed text-on-surface-variant"
+        className="rounded-lg border border-dashed bg-surface-lowest p-4 text-sm leading-relaxed text-on-surface-variant"
       >
         {/* Slice 16: empty-state copy is prose; the file-path / frontmatter /
             fence-block markers stay font-mono as code identifiers per
             DESIGN §Typography. */}
-        <div className="mb-1 font-mono uppercase tracking-[0.12em] text-on-surface-variant">No timeline yet</div>
+        <div className="mb-1 text-sm font-medium text-on-surface">No timeline yet</div>
         <div className="text-on-surface">
           Author one at <span className="font-mono text-on-surface">&lt;slice-dir&gt;/timeline.md</span> with frontmatter
           <span className="font-mono text-on-surface"> kind: incident-timeline</span> and a <span className="font-mono text-on-surface">```timeline```</span> fenced block.
@@ -129,48 +129,48 @@ export function TimelineTab({
       {hasMarkdown && (
         <div
           data-testid="story-timeline-markdown"
-          className="border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm"
+          className="rounded-lg border bg-surface-lowest p-3 shadow-sm"
         >
           <MarkdownViewer content={timelineMarkdown!} hideFrontmatter hideRawToggle />
         </div>
-      )}
-      {hasEvents && (
-      <div data-testid="story-step-tree" data-order="newest-first" className="relative border border-outline-variant bg-surface-lowest/35 p-3 backdrop-blur-sm">
-        {pagedEvents.map((event, idx) => (
-          <StoryStepCard
-            key={`${event.ts}-${event.kind}-${idx}`}
-            event={event}
-            phaseMeta={phaseMeta}
-            isLast={idx === pagedEvents.length - 1}
-            queueItem={event.qitemId ? queueItemsById?.get(event.qitemId) : undefined}
-          />
-        ))}
-      </div>
-      )}
-      {totalPages > 1 ? (
-        <div className="mt-3 flex items-center justify-between border border-outline-variant bg-surface-lowest/35 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
-          <button
-            type="button"
-            data-testid="story-page-prev"
-            disabled={safePage === 0}
-            onClick={() => setPage((current) => Math.max(0, current - 1))}
-            className="border border-outline-variant px-2 py-1 disabled:opacity-40"
-          >
-            Newer
-          </button>
-          <span data-testid="story-page-status">
-            Page {safePage + 1} / {totalPages}
-          </span>
-          <button
-            type="button"
-            data-testid="story-page-next"
-            disabled={safePage >= totalPages - 1}
-            onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}
-            className="border border-outline-variant px-2 py-1 disabled:opacity-40"
-          >
-            Older
-          </button>
+        )}
+        {hasEvents && (
+        <div data-testid="story-step-tree" data-order="newest-first" className="relative rounded-lg border bg-surface-lowest p-3 shadow-sm">
+          {pagedEvents.map((event, idx) => (
+            <StoryStepCard
+              key={`${event.ts}-${event.kind}-${idx}`}
+              event={event}
+              phaseMeta={phaseMeta}
+              isLast={idx === pagedEvents.length - 1}
+              queueItem={event.qitemId ? queueItemsById?.get(event.qitemId) : undefined}
+            />
+          ))}
         </div>
+        )}
+        {totalPages > 1 ? (
+          <div className="mt-3 flex items-center justify-between rounded-lg border bg-surface-lowest px-3 py-2 text-xs text-on-surface-variant">
+            <button
+              type="button"
+              data-testid="story-page-prev"
+              disabled={safePage === 0}
+              onClick={() => setPage((current) => Math.max(0, current - 1))}
+              className="rounded-md border border-outline-variant px-2 py-1 disabled:opacity-40"
+            >
+              Newer
+            </button>
+            <span data-testid="story-page-status">
+              Page {safePage + 1} / {totalPages}
+            </span>
+            <button
+              type="button"
+              data-testid="story-page-next"
+              disabled={safePage >= totalPages - 1}
+              onClick={() => setPage((current) => Math.min(totalPages - 1, current + 1))}
+              className="rounded-md border border-outline-variant px-2 py-1 disabled:opacity-40"
+            >
+              Older
+            </button>
+          </div>
       ) : null}
     </div>
   );
@@ -275,7 +275,7 @@ function StoryStepCard({
         {queueItem?.tags?.slice(0, 4).map((tag) => <TagPill key={tag} tag={tag} />)}
       </div>
       {bodyIsQitem && event.summary !== primaryBody ? (
-        <div data-testid={`story-row-summary-${event.kind}`} className="mt-2 truncate font-mono text-[9px] text-on-surface-variant">
+        <div data-testid={`story-row-summary-${event.kind}`} className="mt-2 truncate text-xs text-on-surface-variant">
           {event.summary}
         </div>
       ) : null}
@@ -306,24 +306,24 @@ function StoryStepCard({
         <QueueItemTrigger
           data={qitemViewerData(event, queueItem)}
           testId={`story-row-${event.kind}`}
-          className="block w-full border border-outline-variant bg-surface-lowest/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm hover:bg-surface-lowest/60"
+          className="block w-full rounded-lg border bg-surface-lowest px-3 py-2 text-left shadow-sm hover:bg-surface-low"
         >
           {rowBody}
         </QueueItemTrigger>
       ) : (
         <div
           data-testid={`story-row-${event.kind}`}
-          className="w-full border border-outline-variant bg-surface-lowest/45 px-3 py-2 text-left hard-shadow backdrop-blur-sm"
+          className="w-full rounded-lg border bg-surface-lowest px-3 py-2 text-left shadow-sm"
         >
           {rowBody}
         </div>
       )}
       {event.detail && (
         <details className="mt-1">
-          <summary className="cursor-pointer font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
+          <summary className="cursor-pointer text-xs text-on-surface-variant">
             Event detail
           </summary>
-          <pre data-testid={`story-row-detail-${event.kind}`} className="mt-1 overflow-x-auto bg-background p-2 font-mono text-[9px] text-on-surface">
+          <pre data-testid={`story-row-detail-${event.kind}`} className="mt-1 overflow-x-auto rounded-lg bg-background p-2 font-mono text-xs text-on-surface">
             {JSON.stringify(event.detail, null, 2)}
           </pre>
         </details>

@@ -83,16 +83,16 @@ function PolicyOption({
         warn && !selected && "border-tertiary/50",
       )}
     >
-      <div className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wide">
+      <div className="flex items-center gap-1.5 text-[11px] ">
         {selected ? <Check className="h-3 w-3" /> : null}
         {label}
         {policy === "restore-original" ? (
-          <span className={cn("ml-auto text-[8px]", selected ? "text-white/70" : "text-secondary")}>default</span>
+          <span className={cn("ml-auto text-[11px]", selected ? "text-white/70" : "text-secondary")}>Default</span>
         ) : null}
       </div>
       <div
         className={cn(
-          "mt-1 font-mono text-[8px] leading-snug",
+          "mt-1 font-mono text-[11px] leading-snug",
           selected ? "text-white/75" : warn ? "text-tertiary" : "text-secondary",
         )}
       >
@@ -145,11 +145,11 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent hideCloseButton className="max-w-3xl border-stone-900" data-testid="launch-recovery-modal">
         <DialogHeader>
-          <DialogTitle className="font-headline uppercase tracking-tight flex items-center gap-2">
+          <DialogTitle className="font-headline tracking-tight flex items-center gap-2">
             <RotateCcw className="h-4 w-4" />
             Restore {rigName}
           </DialogTitle>
-          <DialogDescription className="font-mono text-[10px] text-secondary">
+          <DialogDescription className="font-mono text-[11px] text-secondary">
             Plan before action — this is a READ-ONLY preview. No changes made yet.
           </DialogDescription>
         </DialogHeader>
@@ -180,20 +180,20 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
             className="border border-tertiary bg-tertiary/10 px-3 py-2 flex items-start gap-2"
           >
             <Ban className="h-3.5 w-3.5 text-tertiary shrink-0" />
-            <div className="font-mono text-[9px] leading-relaxed text-tertiary">
-              <span className="font-bold uppercase">restore-original blocked</span> — {blockedSeats.length} seat(s)
+            <div className="font-mono text-[11px] leading-relaxed text-tertiary">
+              <span className="font-bold">Restore-original blocked</span> — {blockedSeats.length} seat(s)
               need a decision. restore-original will NOT silently fresh-prime. Resolve each seat below, or switch to{" "}
-              <span className="underline">fresh</span> (identity-changing) for the whole rig.
+              <span className="underline">Fresh</span> (identity-changing) for the whole rig.
             </div>
           </div>
         ) : null}
 
         {planMut.isPending ? (
-          <p data-testid="launch-plan-loading" className="font-mono text-[10px] text-secondary py-4">
+          <p data-testid="launch-plan-loading" className="font-mono text-[11px] text-secondary py-4">
             Fetching read-only plan…
           </p>
         ) : planMut.isError ? (
-          <p data-testid="launch-plan-error" className="font-mono text-[10px] text-tertiary py-4">
+          <p data-testid="launch-plan-error" className="font-mono text-[11px] text-tertiary py-4">
             Could not fetch plan: {(planMut.error as Error).message}
           </p>
         ) : (
@@ -202,23 +202,23 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
             <Table data-testid="launch-plan-table">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="font-mono text-[9px]">Seat</TableHead>
-                  <TableHead className="font-mono text-[9px]">Token</TableHead>
-                  <TableHead className="font-mono text-[9px]">Plan</TableHead>
-                  <TableHead className="font-mono text-[9px]">Prompt / note</TableHead>
+                  <TableHead className="font-mono text-[11px]">Seat</TableHead>
+                  <TableHead className="font-mono text-[11px]">Token</TableHead>
+                  <TableHead className="font-mono text-[11px]">Plan</TableHead>
+                  <TableHead className="font-mono text-[11px]">Prompt / note</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {planNodes.map((s) => (
                   <TableRow key={s.logicalId} data-testid={`plan-row-${s.logicalId}`}>
-                    <TableCell className="py-2 font-mono text-[10px] font-medium">{s.logicalId}</TableCell>
-                    <TableCell className="py-2 font-mono text-[9px]" data-testid={`plan-token-${s.logicalId}`}>
+                    <TableCell className="py-2 font-mono text-[11px] font-medium">{s.logicalId}</TableCell>
+                    <TableCell className="py-2 font-mono text-[11px]" data-testid={`plan-token-${s.logicalId}`}>
                       <span className={cn(tokenTone[s.tokenState])}>{s.tokenState}</span>
                     </TableCell>
                     <TableCell className="py-2" data-testid={`plan-verdict-${s.logicalId}`}>
                       <StatusPip status={verdictPip[s.intendedAction]} variant="pill" label={s.intendedAction} />
                     </TableCell>
-                    <TableCell className="py-2 font-mono text-[9px] text-secondary">
+                    <TableCell className="py-2 font-mono text-[11px] text-secondary">
                       {s.runtimePrompt ?? s.reason ?? "—"}
                     </TableCell>
                   </TableRow>
@@ -227,7 +227,7 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
             </Table>
 
             {launchMut.isError ? (
-              <p data-testid="launch-execute-error" className="font-mono text-[9px] text-tertiary">
+              <p data-testid="launch-execute-error" className="font-mono text-[11px] text-tertiary">
                 {(launchMut.error as Error).message}
               </p>
             ) : null}
@@ -235,13 +235,13 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
         )}
 
         <DialogFooter className="items-center gap-2">
-          <p className="mr-auto font-mono text-[8px] text-stone-400 leading-snug">
+          <p className="mr-auto font-mono text-[11px] text-stone-400 leading-snug">
             src: composed from /api/rigs/:id/launch-plan (read-only forecast · mutated:false)
           </p>
           <Button
             variant="secondary"
             size="sm"
-            className="font-mono text-[10px]"
+            className="font-mono text-[11px]"
             onClick={() => onOpenChange(false)}
             data-testid="launch-cancel"
           >
@@ -253,7 +253,7 @@ export function LaunchRecoveryModal({ rigId, rigName, open, onOpenChange }: Laun
             disabled={!canExecute}
             onClick={execute}
             data-testid="launch-execute"
-            className="font-mono text-[10px] tracking-widest"
+            className="font-mono text-[11px]"
           >
             {isBlocked
               ? "Resolve blockers to restore"

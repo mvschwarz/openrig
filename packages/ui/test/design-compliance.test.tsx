@@ -19,20 +19,19 @@ function readAllTsx(dir: string): string[] {
 }
 
 describe("Design System Compliance", () => {
-  // Test 1: No rounded corners — no rounded-* classes except rounded-md (which is 0px)
-  it("no non-zero border-radius in any component", () => {
+  // Test 1: border radius comes only from the --radius token scale — no non-zero
+  // hardcoded radius in config, no inline borderRadius in source files
+  it("border radius comes only from the --radius token scale", () => {
     const config = readFileSync(resolve(__dirname, "../tailwind.config.ts"), "utf-8");
     const radiusMatch = config.match(/borderRadius:\s*\{([^}]+)\}/);
     expect(radiusMatch).not.toBeNull();
 
-    // All radius values are 0px (except `full: "9999px"` for stamp circles)
-    const pairs = [...radiusMatch![1]!.matchAll(/(\w+):\s*"([^"]+)"/g)];
+    // All radius values derive from --radius (except `none: "0px"` and `full: "9999px"`)
+    const pairs = [...radiusMatch![1]!.matchAll(/"?(\w+)"?:\s*"([^"]+)"/g)];
     for (const [, key, value] of pairs) {
-      if (key === "full") {
-        expect(value).toBe("9999px");
-      } else {
-        expect(value).toBe("0px");
-      }
+      if (key === "full") expect(value).toBe("9999px");
+      else if (key === "none") expect(value).toBe("0px");
+      else expect(value).toContain("var(--radius)");
     }
 
     // No inline borderRadius in source files

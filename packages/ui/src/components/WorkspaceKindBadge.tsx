@@ -28,7 +28,7 @@ interface Props {
 export function WorkspaceKindBadge({ kind, compact, className }: Props) {
   const meta = KIND_META[kind];
   if (!meta) return null;
-  const base = `inline-block border ${meta.border} ${meta.bg} ${meta.fg} font-mono text-[8px] uppercase tracking-[0.14em] leading-none rounded-sm`;
+  const base = `inline-block border ${meta.border} ${meta.bg} ${meta.fg} text-[11px] leading-none rounded-sm`;
   const sized = compact ? "px-1 py-[2px]" : "px-1.5 py-0.5";
   return (
     <span

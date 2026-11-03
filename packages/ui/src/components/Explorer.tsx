@@ -167,7 +167,7 @@ function NodeActivityIndicator({ node }: { node: NodeInventoryEntry }) {
       <Activity className={cn("h-2.5 w-2.5 shrink-0", textClass, animClass)} strokeWidth={2.4} aria-label={title} />
       {qitems.length > 0 && (
         <span
-          className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant"
+          className="text-[11px] text-on-surface-variant"
           data-testid={`node-active-work-${node.logicalId}`}
           aria-label="owns active work"
         >
@@ -255,7 +255,7 @@ function SurfaceBody({
     // unreachable → canonical defaults + CLI hint.
     return (
       <div data-testid="explorer-for-you-subscriptions" className="flex-1 overflow-y-auto py-3 px-3">
-        <div className="font-mono text-[9px] uppercase tracking-[0.14em] text-on-surface-variant mb-2">
+        <div className="text-[11px] text-on-surface-variant mb-2">
           Advanced · individual toggles
         </div>
         <SubscriptionToggleList />
@@ -365,9 +365,10 @@ export function Explorer({
         "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
         // Desktop (>=lg): persistent column at 280px (lg:w-72) per
-        // universal-shell.md L34. Positioned absolutely after the 48px
-        // rail.
-        "lg:absolute lg:top-0 lg:bottom-0 lg:left-12 lg:w-72 lg:max-w-none lg:translate-x-0",
+        // universal-shell.md L34. Positioned absolutely after the sidebar
+        // (left edge = --sidebar-current-width, set on the flex wrapper
+        // in AppShell).
+        "lg:absolute lg:top-0 lg:bottom-0 lg:left-[var(--sidebar-current-width)] lg:w-72 lg:max-w-none lg:translate-x-0",
       )}
     >
       <div className="relative flex h-full w-full flex-col">

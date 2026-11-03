@@ -43,16 +43,15 @@ export function TestsVerificationTab({
 }) {
   if (tests.proofPackets.length === 0) {
     return (
-      <div
-        className="border border-outline-variant bg-surface-lowest/20 p-4 font-mono"
+      <div className="rounded-lg border bg-surface-lowest p-4 font-mono text-sm"
         data-testid="tests-empty"
       >
-        <div className="text-[10px] uppercase tracking-[0.14em] text-on-surface-variant">
+        <div className="text-sm font-medium text-on-surface-variant" style={{ fontFamily: "inherit" }}>
           No proof packet matched
         </div>
         <p
           data-testid="tests-empty-reason"
-          className="mt-2 max-w-2xl text-[11px] leading-relaxed text-on-surface"
+          className="mt-2 max-w-2xl text-sm leading-relaxed text-on-surface"
         >
           The proof matcher did not find a dogfood-evidence directory whose
           name contains this slice id. Evidence may still exist under the
@@ -60,7 +59,7 @@ export function TestsVerificationTab({
         </p>
         <div
           data-testid="tests-empty-diagnostics"
-          className="mt-3 grid gap-2 text-[10px] text-on-surface-variant sm:grid-cols-3"
+          className="mt-3 grid gap-2 text-xs text-on-surface-variant sm:grid-cols-3"
         >
           <Metric label="Qitems" value={qitemCount ?? 0} />
           <Metric label="Indexed files" value={docsCount ?? 0} />
@@ -68,7 +67,7 @@ export function TestsVerificationTab({
         </div>
         <ul
           data-testid="tests-empty-next-steps"
-          className="mt-3 list-disc space-y-1 pl-4 text-[10px] leading-relaxed text-on-surface-variant"
+          className="mt-3 list-disc space-y-1 pl-4 text-xs leading-relaxed text-on-surface-variant"
         >
           <li>Check Artifacts for slice-local files and commit refs.</li>
           <li>Check the evidence root for dogfood screenshots or proof notes with related names.</li>
@@ -78,13 +77,13 @@ export function TestsVerificationTab({
     );
   }
   return (
-    <div data-testid="tests-tab" className="p-4 space-y-4">
+    <div data-testid="tests-tab" className="p-4 space-y-4 text-sm">
       <header className="flex items-center justify-between border-b border-outline-variant pb-2">
-        <div className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
+        <div className="inline-flex items-center gap-1.5 text-sm font-semibold text-on-surface">
           <ToolMark tool="proof" size="xs" />
           Tests / Verification
         </div>
-        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="tests-aggregate">
+        <div className="font-mono text-xs tabular-nums text-on-surface-variant" data-testid="tests-aggregate">
           {tests.aggregate.passCount} pass, {tests.aggregate.failCount} fail
           {" · "}{tests.proofPackets.length} packet{tests.proofPackets.length === 1 ? "" : "s"}
         </div>
@@ -98,9 +97,9 @@ export function TestsVerificationTab({
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="border border-outline-variant bg-surface-lowest/30 px-2 py-1">
-      <div className="text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">{label}</div>
-      <div className="mt-0.5 truncate text-on-surface">{value}</div>
+    <div className="rounded-lg border bg-surface-lowest px-2 py-1">
+      <div className="text-xs text-on-surface-variant">{label}</div>
+      <div className="mt-0.5 truncate font-mono text-xs tabular-nums text-on-surface">{value}</div>
     </div>
   );
 }
@@ -116,7 +115,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
   const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
   return (
     <article
-      className="border border-outline-variant bg-surface-lowest"
+      className="overflow-hidden rounded-lg border bg-surface-lowest shadow-sm"
       data-testid={`tests-packet-${packet.dirName}`}
     >
       <header className="flex items-center justify-between border-b border-outline-variant bg-background px-3 py-2">
@@ -130,11 +129,11 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
       <div className="p-3 space-y-3">
         {packet.primaryMarkdown && (
           <div data-testid={`tests-packet-primary-md-${packet.dirName}`}>
-            <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <div className="mb-1 font-mono text-xs text-on-surface-variant">
               <ToolMark tool={packet.primaryMarkdown.relPath} size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               {packet.primaryMarkdown.relPath}
             </div>
-            <pre className="whitespace-pre-wrap break-words bg-background p-3 font-mono text-[10px] text-on-surface">
+            <pre className="whitespace-pre-wrap break-words rounded-lg bg-background p-3 font-mono text-xs text-on-surface">
               {packet.primaryMarkdown.content}
             </pre>
           </div>
@@ -142,13 +141,13 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
 
         {packet.screenshots.length > 0 && (
           <section data-testid={`tests-packet-screenshots-${packet.dirName}`}>
-            <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <div className="mb-1 text-xs font-medium text-on-surface-variant">
               <ToolMark tool="screenshot" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Screenshots ({packet.screenshots.length})
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {packet.screenshots.map((rel) => (
-                <figure key={rel} className="border border-outline-variant">
+                <figure key={rel} className="overflow-hidden rounded-lg border">
                   <button
                     type="button"
                     data-testid={`tests-packet-screenshot-open-${rel}`}
@@ -163,7 +162,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
                       className="block w-full bg-surface-low"
                     />
                   </button>
-                  <figcaption className="bg-background px-2 py-1 font-mono text-[9px] text-on-surface-variant truncate">
+                  <figcaption className="truncate bg-background px-2 py-1 font-mono text-xs text-on-surface-variant">
                     <ToolMark tool={rel} size="xs" className="mr-1 inline-block align-[-2px]" decorative />
                     {rel}
                   </figcaption>
@@ -183,13 +182,13 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
 
         {packet.videos.length > 0 && (
           <section data-testid={`tests-packet-videos-${packet.dirName}`}>
-            <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <div className="mb-1 text-xs font-medium text-on-surface-variant">
               <ToolMark tool="video" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Videos ({packet.videos.length})
             </div>
             <div className="space-y-3">
               {packet.videos.map((rel) => (
-                <figure key={rel} className="border border-outline-variant">
+                <figure key={rel} className="overflow-hidden rounded-lg border">
                   <video
                     data-testid={`tests-packet-video-${rel}`}
                     src={proofAssetUrl(sliceName, rel)}
@@ -197,7 +196,7 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
                     preload="metadata"
                     className="block w-full bg-black"
                   />
-                  <figcaption className="bg-background px-2 py-1 font-mono text-[9px] text-on-surface-variant truncate">
+                  <figcaption className="truncate bg-background px-2 py-1 font-mono text-xs text-on-surface-variant">
                     {rel}
                   </figcaption>
                 </figure>
@@ -208,17 +207,17 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
 
         {packet.traces.length > 0 && (
           <section data-testid={`tests-packet-traces-${packet.dirName}`}>
-            <div className="mb-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+            <div className="mb-1 text-xs font-medium text-on-surface-variant">
               <ToolMark tool="trace" size="xs" className="mr-1 inline-block align-[-2px]" decorative />
               Traces (download)
             </div>
-            <ul className="font-mono text-[10px]">
+            <ul className="font-mono text-xs">
               {packet.traces.map((rel) => (
                 <li key={rel}>
                   <a
                     href={proofAssetUrl(sliceName, rel)}
                     download
-                    className="inline-flex items-center gap-1 text-blue-700 hover:underline"
+                    className="inline-flex items-center gap-1 text-brand hover:underline"
                   >
                     <ToolMark tool={rel} size="xs" decorative />
                     {rel}
@@ -231,17 +230,17 @@ function ProofPacketSection({ sliceName, packet }: { sliceName: string; packet: 
 
         {packet.additionalMarkdown.length > 0 && (
           <details>
-            <summary className="cursor-pointer font-mono text-[10px] text-on-surface" data-testid={`tests-packet-additional-md-toggle-${packet.dirName}`}>
+            <summary className="cursor-pointer text-xs text-on-surface" data-testid={`tests-packet-additional-md-toggle-${packet.dirName}`}>
               Additional markdown ({packet.additionalMarkdown.length})
             </summary>
             <div className="mt-2 space-y-2">
               {packet.additionalMarkdown.map((md) => (
                 <div key={md.relPath}>
-                  <div className="inline-flex items-center gap-1 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant">
+                  <div className="inline-flex items-center gap-1 font-mono text-xs text-on-surface-variant">
                     <ToolMark tool={md.relPath} size="xs" decorative />
                     {md.relPath}
                   </div>
-                  <pre className="whitespace-pre-wrap break-words bg-background p-2 font-mono text-[9px] text-on-surface">{md.content}</pre>
+                  <pre className="whitespace-pre-wrap break-words rounded-lg bg-background p-2 font-mono text-xs text-on-surface">{md.content}</pre>
                 </div>
               ))}
             </div>

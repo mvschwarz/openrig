@@ -34,14 +34,14 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
 
 
   return (
-    <div data-testid="acceptance-tab" className="p-4">
+    <div data-testid="acceptance-tab" className="p-4 text-sm">
       {currentStep && <CurrentStepPanel currentStep={currentStep} />}
       <header className="mb-4">
         <div className="flex items-baseline justify-between">
-          <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
+          <div className="text-sm font-semibold text-on-surface">
             Acceptance
           </div>
-          <div className="font-mono text-[10px] text-on-surface-variant">
+          <div className="font-mono text-xs tabular-nums text-on-surface-variant">
             {doneItems} / {totalItems} ({percentage}%)
           </div>
         </div>
@@ -56,7 +56,7 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
         {closureCallout && (
           <div
             data-testid="acceptance-closure-callout"
-            className="mt-3 border border-outline-variant bg-surface-low px-3 py-2 font-mono text-[10px] text-on-surface"
+            className="mt-3 rounded-lg border bg-surface-lowest px-3 py-2 text-xs text-on-surface"
           >
             {closureCallout}
           </div>
@@ -70,7 +70,7 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
                 data-testid={`acceptance-filter-${f}`}
                 data-active={filter === f}
                 onClick={() => setFilter(f)}
-                className={`border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.10em] ${
+                className={`rounded-full border px-2 py-1 text-xs ${
                   filter === f
                     ? "border-on-surface bg-inverse-surface text-background"
                     : "border-outline-variant text-on-surface hover:bg-surface-low"
@@ -83,11 +83,11 @@ export function AcceptanceTab({ acceptance }: { acceptance: SliceDetail["accepta
         )}
       </header>
       {items.length === 0 ? (
-        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="acceptance-empty">
+        <div className="text-xs text-on-surface-variant" data-testid="acceptance-empty">
           No acceptance items found in slice docs (looks for `[ ]` / `[x]` checkbox lines in README / IMPLEMENTATION-PRD / PROGRESS / IMPLEMENTATION).
         </div>
       ) : filtered.length === 0 ? (
-        <div className="font-mono text-[10px] text-on-surface-variant" data-testid="acceptance-filter-empty">
+        <div className="text-xs text-on-surface-variant" data-testid="acceptance-filter-empty">
           No items match filter '{filter}'.
         </div>
       ) : (
@@ -107,48 +107,48 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
     <section
       data-testid="acceptance-current-step"
       data-step-id={currentStep.stepId}
-      className="mb-6 border border-outline-variant bg-background p-3"
+      className="mb-6 rounded-lg border bg-surface-lowest p-3 shadow-sm"
     >
       <div className="flex items-baseline justify-between">
-        <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-on-surface">
+        <div className="text-sm font-semibold text-on-surface">
           Current step
         </div>
-        <div className="font-mono text-[9px] text-on-surface-variant">
+        <div className="font-mono text-xs text-on-surface-variant">
           hop {currentStep.hopCount} · {currentStep.instanceStatus}
         </div>
       </div>
       <div className="mt-2 flex items-baseline gap-2">
         <span
           data-testid="acceptance-current-step-id"
-          className="font-mono text-[12px] font-bold text-on-surface"
+          className="font-mono text-xs font-semibold text-on-surface"
         >
           {currentStep.stepId}
         </span>
-        <span className="font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
+        <span className="text-xs text-on-surface-variant">
           role: {currentStep.role}
         </span>
       </div>
       {currentStep.objective && (
         <div
           data-testid="acceptance-current-step-objective"
-          className="mt-2 whitespace-pre-line font-mono text-[10px] text-on-surface"
+          className="mt-2 whitespace-pre-line text-xs text-on-surface"
         >
           {currentStep.objective}
         </div>
       )}
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div data-testid="acceptance-current-step-allowed-exits">
-          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <div className="text-xs text-on-surface-variant">
             Allowed exits
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             {currentStep.allowedExits.length === 0 ? (
-              <span className="font-mono text-[9px] text-on-surface-variant">(none)</span>
+              <span className="text-xs text-on-surface-variant">(none)</span>
             ) : (
               currentStep.allowedExits.map((exit) => (
                 <span
                   key={exit}
-                  className="border border-outline-variant bg-surface-lowest px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface"
+                  className="rounded-full border border-outline-variant bg-surface-lowest px-1.5 py-0.5 font-mono text-xs text-on-surface"
                 >
                   {exit}
                 </span>
@@ -157,12 +157,12 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
           </div>
         </div>
         <div data-testid="acceptance-current-step-allowed-next-steps">
-          <div className="font-mono text-[8px] uppercase tracking-[0.10em] text-on-surface-variant">
+          <div className="text-xs text-on-surface-variant">
             Allowed next steps
           </div>
           <div className="mt-1 flex flex-wrap gap-1">
             {currentStep.allowedNextSteps.length === 0 ? (
-              <span className="inline-flex items-center gap-1 font-mono text-[9px] uppercase tracking-[0.10em] text-on-surface-variant">
+              <span className="inline-flex items-center gap-1 text-xs text-on-surface-variant">
                 <ToolMark tool="terminal" size="xs" />
                 terminal
               </span>
@@ -171,7 +171,7 @@ function CurrentStepPanel({ currentStep }: { currentStep: CurrentStepPayload }) 
                 <span
                   key={next.stepId}
                   data-testid={`acceptance-next-step-${next.stepId}`}
-                  className="border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-mono text-[9px] text-emerald-900"
+                  className="rounded-full border border-emerald-300 bg-emerald-50 px-1.5 py-0.5 font-mono text-xs text-emerald-900"
                   title={`role: ${next.role}`}
                 >
                   {next.stepId}
@@ -203,21 +203,21 @@ function AcceptanceRow({ item, idx }: { item: AcceptanceItem; idx: number }) {
       >
         <span
           data-testid={`acceptance-pill-${idx}`}
-          className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.10em] ${pillClass}`}
+          className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${pillClass}`}
           aria-label={pillLabel}
         >
           <span aria-hidden="true">{pillIcon}</span>
           <span>{pillLabel}</span>
         </span>
-        <span className="flex-1 font-mono text-[10px] text-on-surface">{item.text}</span>
-        <span className="font-mono text-[8px] text-on-surface-variant" title={`${item.source.file}:${item.source.line}`}>
+        <span className="flex-1 text-xs text-on-surface">{item.text}</span>
+        <span className="font-mono text-xs text-on-surface-variant" title={`${item.source.file}:${item.source.line}`}>
           {item.source.file}:{item.source.line}
         </span>
       </button>
       {expanded && (
         <div
           data-testid={`acceptance-item-${idx}-detail`}
-          className="ml-2 mt-1 border-l-2 border-outline-variant bg-background px-3 py-2 font-mono text-[9px] text-on-surface"
+          className="ml-2 mt-1 rounded-lg border-l-2 border-outline-variant bg-background px-3 py-2 font-mono text-xs text-on-surface"
         >
           <div>
             <span className="font-bold">Source:</span>{" "}

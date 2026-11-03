@@ -185,7 +185,7 @@ export function QueueItemViewer({
             type="button"
             onClick={() => setShowFull((s) => !s)}
             data-testid="qitem-body-toggle"
-            className="mt-2 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:text-on-surface underline"
+            className="mt-2 text-[11px] text-on-surface hover:text-on-surface underline"
           >
             {showFull ? "Show less" : `Show full body (${bodyLines.length} lines)`}
           </button>
@@ -197,7 +197,7 @@ export function QueueItemViewer({
           <ul className="mt-2 space-y-1 font-mono text-xs">
             {related.map((r, i) => (
               <li key={`${r.kind}-${i}`} className="flex items-baseline gap-2">
-                <span className="inline-flex w-12 shrink-0 items-center gap-1 text-on-surface-variant text-[10px] uppercase tracking-wide">
+                <span className="inline-flex w-12 shrink-0 items-center gap-1 text-on-surface-variant text-[11px] ">
                   <RelatedKindIcon kind={r.kind} label={r.label} />
                   {r.kind}
                 </span>

@@ -44,8 +44,39 @@ const buildNodes: NodeInventoryEntry[] = [
 
 export const nodeInventoryByRig: Record<string, NodeInventoryEntry[]> = {
   rig_alpha: buildNodes,
-  rig_bravo: [],
-  rig_gamma: [],
+  // C10 acceptance: Active agents tile = 6+2+1 = 9 across the three demo rigs.
+  rig_bravo: [
+    { rigId: "rig_bravo", rigName: "acme-comms", logicalId: "comms.writer", podId: "pod_comms", podNamespace: "comms", canonicalSessionName: "writer@acme-comms", nodeKind: "agent", runtime: "codex", sessionStatus: "running", startupStatus: "ready", restoreOutcome: "clean", tmuxAttachCommand: "tmux attach -t writer", resumeCommand: null, latestError: null },
+    { rigId: "rig_bravo", rigName: "acme-comms", logicalId: "comms.listener", podId: "pod_comms", podNamespace: "comms", canonicalSessionName: "listener@acme-comms", nodeKind: "agent", runtime: "codex", sessionStatus: "running", startupStatus: "ready", restoreOutcome: "clean", tmuxAttachCommand: "tmux attach -t listener", resumeCommand: null, latestError: null },
+  ],
+  rig_gamma: [
+    { rigId: "rig_gamma", rigName: "acme-core", logicalId: "core.guardian", podId: "pod_core", podNamespace: "core", canonicalSessionName: "guardian@acme-core", nodeKind: "agent", runtime: "claude-code", sessionStatus: "running", startupStatus: "ready", restoreOutcome: "clean", tmuxAttachCommand: "tmux attach -t guardian", resumeCommand: null, latestError: null },
+  ],
+};
+
+// C10 Dashboard v2 — demo attention items for the "Needs you" section
+// (typed against useAttentionItems' AttentionData; fictional demo data).
+export const attentionItems = {
+  items: [
+    {
+      qitemId: "q-demo-001",
+      tsCreated: "2025-09-01T01:20:00.000Z",
+      tsUpdated: "2025-09-01T01:35:00.000Z",
+      sourceSession: "builder2@acme-build",
+      destinationSession: "human@host",
+      state: "pending",
+      priority: "high",
+      tier: "human-gate",
+      tags: null,
+      blockedOn: null,
+      handedOffTo: null,
+      handedOffFrom: null,
+      body: "Approve deploy plan\nsecond line",
+      summary: "Approve deploy plan",
+      evidenceRef: null,
+    },
+  ],
+  hosts: [],
 };
 
 // --- Hard surface 1: TOPOLOGY GRAPH (xyflow) ------------------------------------------

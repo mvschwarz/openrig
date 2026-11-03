@@ -75,7 +75,7 @@ export function EvidenceOpener({ evidenceRef, ctx, testId }: { evidenceRef: stri
     return (
       <span className="font-mono text-[11px] text-on-surface-variant">
         <span data-testid={`${tid}-pointer`}>{evidenceRef}</span>
-        <span className="ml-1 text-[10px]">(not openable from this view — no slice context)</span>
+        <span className="ml-1 text-[11px]">(not openable from this view — no slice context)</span>
       </span>
     );
   }

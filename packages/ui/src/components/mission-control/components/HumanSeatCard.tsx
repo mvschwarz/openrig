@@ -66,8 +66,8 @@ export function HumanSeatCard({
             >
               {pendingCount}
             </div>
-            <div className="font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant mt-1">
-              pending
+            <div className="text-[11px] text-on-surface-variant mt-1">
+              Pending
             </div>
           </div>
         </div>
@@ -93,7 +93,7 @@ export function HumanSeatCard({
           {capabilities.map((cap) => (
             <span
               key={cap}
-              className="border border-outline-variant px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-on-surface-variant bg-surface-lowest/30"
+              className="border border-outline-variant px-1.5 py-0.5 text-[11px] text-on-surface-variant bg-surface-lowest/30"
             >
               {cap}
             </span>

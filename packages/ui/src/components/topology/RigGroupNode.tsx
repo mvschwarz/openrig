@@ -72,7 +72,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
       )}
     >
       <RegistrationMarks testIdPrefix={`rig-group-${rigId}`} />
-      <header className="absolute -top-8 left-4 z-10 flex items-center gap-2 border border-outline-variant/70 bg-background px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface shadow-[2px_2px_0_rgba(46,52,46,0.10)]">
+      <header className="absolute -top-8 left-4 z-10 flex items-center gap-2 border border-outline-variant/70 bg-background px-3 py-1.5 text-[11px] text-on-surface shadow-[2px_2px_0_rgba(46,52,46,0.10)]">
         <div className="flex items-center gap-2 min-w-0">
           <ChevronRight
             className={cn(
@@ -83,7 +83,7 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
           />
           <span
             data-testid={`rig-group-name-${rigId}`}
-            className="font-mono text-[11px] font-bold uppercase tracking-[0.10em] text-on-surface truncate"
+            className="text-[11px] font-bold text-on-surface truncate"
           >
             {rigName}
           </span>
@@ -108,18 +108,18 @@ function RigGroupNodeInner({ data }: { data: RigGroupNodeData }) {
       {collapsed ? (
         <div className="px-3 pt-8 pb-3 flex items-center justify-between gap-2 flex-1">
           <div className="flex flex-col gap-0.5 min-w-0">
-            <div className="font-mono text-[9px] uppercase tracking-wider text-on-surface-variant">
+            <div className="text-[11px] text-on-surface-variant">
               {podCount !== undefined ? `${podCount} pods / ` : ""}
               {nodeCount} agent{nodeCount === 1 ? "" : "s"}
             </div>
-            <div className="font-mono text-[9px] text-on-surface-variant">
+            <div className="font-mono text-[11px] text-on-surface-variant">
               {displayedActiveCount} active
             </div>
           </div>
         </div>
       ) : (
         <div
-          className="absolute right-3 top-3 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.12em] text-on-surface-variant"
+          className="absolute right-3 top-3 flex items-center gap-2 text-[11px] text-on-surface-variant"
           data-testid={`rig-group-expanded-counts-${rigId}`}
         >
           <span>{podCount !== undefined ? `${podCount} pods` : ""}</span>

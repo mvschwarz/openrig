@@ -19,7 +19,7 @@ export interface RigStampProps {
 }
 
 const sizeClass: Record<RigStampSize, string> = {
-  sm: "text-[10px]",
+  sm: "text-[11px]",
   md: "text-sm",
   lg: "text-2xl",
   xl: "text-4xl",

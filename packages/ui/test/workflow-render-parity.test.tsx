@@ -201,7 +201,9 @@ describe("WF-4 render-parity — the ExceptionBanner (overdue disclosed vs faile
       <ExceptionBanner instance={overdue} onResume={() => {}} resuming={false} resumeError={null} />,
     );
     const banner = getByTestId("workflow-exception-banner");
-    expect(banner.textContent).toContain("OVERDUE-UNCLAIMED");
+    // C14c: StatusBadge renders the tone + sentence-case label; the
+    // machine evidence (kind key, session) stays verbatim.
+    expect(banner.textContent).toContain("Overdue unclaimed");
     expect(banner.textContent).toContain("inspector@acme-factory");
   });
 
@@ -210,7 +212,8 @@ describe("WF-4 render-parity — the ExceptionBanner (overdue disclosed vs faile
     const { getByTestId, queryByTestId } = render(
       <ExceptionBanner instance={failed} onResume={() => {}} resuming={false} resumeError={null} />,
     );
-    expect(getByTestId("workflow-exception-banner").textContent).toContain("FAILED");
+    // C14c: sentence-case label; StatusBadge carries the tone.
+    expect(getByTestId("workflow-exception-banner").textContent).toContain("Failed");
     expect(getByTestId("workflow-resume")).toBeTruthy();
     // route-from-web is deferred — no re-route affordance renders.
     expect(queryByTestId("workflow-route")).toBeNull();

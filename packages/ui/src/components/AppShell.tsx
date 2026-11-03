@@ -28,19 +28,11 @@ import {
   useState,
   createContext,
   useContext,
-  type ComponentType,
 } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-  Brain,
-  Cog,
-  FileText,
-  Folder,
-  LayoutDashboard,
-  Network,
-  Sparkles,
-  Wrench,
-} from "lucide-react";
+import { MobileBottomNav } from "./shell/MobileBottomNav.js";
+import { Folder, Network, Sparkles } from "lucide-react";
+import { TopBar } from "./shell/TopBar.js";
 import { Explorer, shouldSuppressExplorerMount, type ExplorerSurface } from "./Explorer.js";
 import { SharedDetailDrawer, type DrawerSelection } from "./SharedDetailDrawer.js";
 import { PreviewStack } from "./preview/PreviewStack.js";
@@ -51,13 +43,15 @@ import {
   useTopologyOverlay,
 } from "./topology/topology-overlay-context.js";
 import { ThemeSelector } from "./ThemeSelector.js";
-import { useSettings } from "../hooks/useSettings.js";
 import { useActivityFeed } from "../hooks/useActivityFeed.js";
 import { useClearPlacementOnHostSwitch } from "../hooks/useHosts.js";
 import { useGlobalEvents } from "../hooks/useGlobalEvents.js";
 import { cn } from "../lib/utils.js";
-import { parseSessionName } from "../lib/session-name.js";
-import { HostIndicator } from "./HostIndicator.js";
+import { useTheme } from "./ThemeProvider.js";
+import { Toaster } from "sonner";
+import { Sidebar } from "./shell/Sidebar.js";
+import { CommandPalette, PaletteShortcuts } from "./shell/CommandPalette.js";
+import { isSidebarCollapsed, readSidebarMode, writeSidebarMode } from "../lib/sidebar-mode.js";
 
 // =====================================================================
 // Contexts (preserved per DRIFT P2-B + active consumers in Dashboard, RigGraph)
@@ -110,125 +104,6 @@ export function useDiscoveryPlacement() {
 export const NodeSelectionContext = DrawerSelectionContext;
 
 // =====================================================================
-// Rail icon roster — universal-shell.md L37–L58 + agent-chat-surface.md V1 placeholder
-// =====================================================================
-
-interface RailIconSpec {
-  id: string;
-  label: string;
-  to: string;
-  // lucide-react icons accept SVG props (strokeWidth, color, size, etc).
-  icon: ComponentType<{ className?: string; strokeWidth?: number | string }>;
-  /** Path prefix used for active-state matching. */
-  activeWhen: (pathname: string) => boolean;
-  testId: string;
-  group: "destination" | "chat";
-}
-
-// V1 default seats per agent-chat-surface.md L51–L52. Phase 4 swaps in
-// ConfigStore-driven resolution (`agents.advisor_session` /
-// `agents.operator_session`); Phase 2 mounts the icons with /settings
-// links as functional placeholders.
-const RAIL_ICONS: RailIconSpec[] = [
-  {
-    id: "dashboard",
-    label: "Dashboard",
-    to: "/",
-    icon: LayoutDashboard,
-    activeWhen: (p) => p === "/",
-    testId: "rail-dashboard",
-    group: "destination",
-  },
-  {
-    id: "topology",
-    label: "Topology",
-    to: "/topology",
-    icon: Network,
-    activeWhen: (p) => p.startsWith("/topology") || p.startsWith("/rigs/"),
-    testId: "rail-topology",
-    group: "destination",
-  },
-  {
-    id: "for-you",
-    label: "For You",
-    to: "/for-you",
-    icon: Sparkles,
-    activeWhen: (p) => p.startsWith("/for-you"),
-    testId: "rail-for-you",
-    group: "destination",
-  },
-  {
-    id: "project",
-    label: "Project",
-    to: "/project",
-    icon: Folder,
-    activeWhen: (p) => p.startsWith("/project"),
-    testId: "rail-project",
-    group: "destination",
-  },
-  {
-    id: "specs",
-    label: "Library",
-    to: "/specs",
-    icon: FileText,
-    activeWhen: (p) => p.startsWith("/specs") || p.startsWith("/plugins"),
-    testId: "rail-specs",
-    group: "destination",
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    to: "/settings",
-    icon: Cog,
-    activeWhen: (p) => p.startsWith("/settings"),
-    testId: "rail-settings",
-    group: "destination",
-  },
-  {
-    id: "advisor",
-    label: "Advisor",
-    to: "/settings#agents-advisor-session",
-    icon: Brain,
-    activeWhen: () => false,
-    testId: "rail-advisor",
-    group: "chat",
-  },
-  {
-    id: "operator",
-    label: "Operator",
-    to: "/settings#agents-operator-session",
-    icon: Wrench,
-    activeWhen: () => false,
-    testId: "rail-operator",
-    group: "chat",
-  },
-];
-
-// V1 Phase 4 P4-4 helpers — config-driven Advisor / Operator click resolution.
-
-function readSettingString(
-  data: { settings?: Record<string, { value?: unknown }> } | undefined,
-  key: string,
-): string {
-  if (!data || !data.settings) return "";
-  const v = data.settings[key]?.value;
-  return typeof v === "string" ? v : "";
-}
-
-/** Map a ConfigStore session-string ("logicalId@rigId") to a navigation
- *  target. When configured: `/topology/seat/$rigId/$logicalId`. When
- *  unset: `/settings#agents-{role}-session`. Per universal-shell.md L80
- *  (one-click navigation; not popup-then-CTA two-click). */
-function resolveChatTo(session: string, role: "advisor" | "operator"): string {
-  if (!session) return `/settings#agents-${role}-session`;
-  // OPR.0.4.6.MH1 FR-8: the shared parse contract; non-canonical
-  // (malformed/legacy) falls back to /settings.
-  const parsed = parseSessionName(session);
-  if (parsed.kind !== "canonical") return `/settings#agents-${role}-session`;
-  return `/topology/seat/${encodeURIComponent(parsed.rig)}/${encodeURIComponent(parsed.member)}`;
-}
-
-// =====================================================================
 // Path → Explorer surface mapping
 // =====================================================================
 
@@ -242,112 +117,8 @@ function surfaceForPath(pathname: string): ExplorerSurface {
 }
 
 // =====================================================================
-// Rail component
+// Sidebar component (ui-redesign C06) lives in shell/Sidebar.tsx.
 // =====================================================================
-
-function Rail({
-  pathname,
-  onMobileClose,
-  vertical,
-}: {
-  pathname: string;
-  onMobileClose?: () => void;
-  vertical: boolean;
-}) {
-  const destinationIcons = RAIL_ICONS.filter((i) => i.group === "destination");
-  // V1 attempt-3 Phase 4 P4-4 — Advisor / Operator click handlers
-  // resolve `agents.advisor_session` / `agents.operator_session` from
-  // ConfigStore (via useSettings). When configured: navigate to seat
-  // detail. When unset: navigate to /settings#agents-{role}-session
-  // CTA. Defaults come from the daemon settings store (advisor =
-  // advisor-lead@kernel; operator = empty/not configured).
-  const { data: settingsData } = useSettings();
-  const advisorSession = readSettingString(settingsData, "agents.advisor_session");
-  const operatorSession = readSettingString(settingsData, "agents.operator_session");
-  const chatIcons: RailIconSpec[] = RAIL_ICONS.filter((i) => i.group === "chat").map((spec) => {
-    if (spec.id === "advisor") {
-      return { ...spec, to: resolveChatTo(advisorSession, "advisor") };
-    }
-    if (spec.id === "operator") {
-      return { ...spec, to: resolveChatTo(operatorSession, "operator") };
-    }
-    return spec;
-  });
-
-  const renderIcon = (spec: RailIconSpec) => {
-    const Icon = spec.icon;
-    const active = spec.activeWhen(pathname);
-    return (
-      <Link
-        key={spec.id}
-        to={spec.to}
-        data-testid={spec.testId}
-        data-active={active}
-        aria-label={spec.label}
-        title={spec.label}
-        onClick={onMobileClose}
-        className={cn(
-          // Slice 20 mobile: tap-target meets iOS HIG minimum (44px)
-          // on mobile (default `h-11 w-11`) and restores the original
-          // 40px hitbox at `lg:` (desktop) where mouse precision is
-          // the input model, not thumbs.
-          "relative flex h-11 w-11 items-center justify-center transition-colors lg:h-10 lg:w-10",
-          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-on-surface focus-visible:outline-offset-2",
-          active
-            ? "bg-inverse-surface text-background"
-            : "text-on-surface hover:bg-surface-high/60 hover:text-on-surface",
-        )}
-      >
-        {/* Lighter icon line weight: stroke-width 1.25 (default lucide is 2)
-            for an architectural drafting feel that matches the 1px ghost
-            border doctrine. */}
-        <Icon className="h-5 w-5" strokeWidth={1.25} />
-        {active && (
-          <span
-            aria-hidden="true"
-            className="absolute left-0 top-1 bottom-1 w-[2px] bg-tertiary"
-          />
-        )}
-      </Link>
-    );
-  };
-
-  return (
-    <nav
-      data-testid="app-rail"
-      aria-label="Primary navigation"
-      className={cn(
-        // V1 border weight doctrine (universal-shell.md L39–L48):
-        // 1px outline-variant ghost line for inter-region edges.
-        // Vellum surface: same translucent treatment as the topology-graph
-        // Explorer overlay, so the rail reads as a paper sheet layered over
-        // the canvas (sheets-of-vellum aesthetic per universal-shell.md L48).
-        "vellum border-outline-variant flex shrink-0",
-        vertical
-          ? "w-12 flex-col items-center border-r py-2 gap-1"
-          : "w-full flex-row items-center border-b px-2 gap-1 overflow-x-auto",
-      )}
-    >
-      <div
-        className={cn(
-          "flex",
-          vertical ? "flex-col gap-1 items-center" : "flex-row gap-1 items-center",
-        )}
-      >
-        {destinationIcons.map(renderIcon)}
-      </div>
-      <div className={cn(vertical ? "flex-1" : "flex-1 hidden lg:block")} />
-      <div
-        className={cn(
-          "flex",
-          vertical ? "flex-col gap-1 items-center pb-1" : "flex-row gap-1 items-center",
-        )}
-      >
-        {chatIcons.map(renderIcon)}
-      </div>
-    </nav>
-  );
-}
 
 // =====================================================================
 // AppShell
@@ -381,11 +152,13 @@ function AppShellInner({ children }: AppShellProps) {
     if (typeof window === "undefined") return true;
     return window.innerWidth >= WIDE_LAYOUT_BREAKPOINT;
   });
+  const [sidebarMode, setSidebarMode] = useState(readSidebarMode);
   const [selectionState, setSelectionState] = useState<DrawerSelection>(null);
   const [selectedDiscoveredId, setSelectedDiscoveredIdState] = useState<string | null>(null);
   const [placementTarget, setPlacementTargetState] = useState<DiscoveryPlacementTarget>(null);
 
   const { events } = useActivityFeed();
+  const { resolved } = useTheme();
 
   const setSelection = useCallback(
     (next: DrawerSelection) => {
@@ -451,6 +224,18 @@ function AppShellInner({ children }: AppShellProps) {
   // suppression reverts at that time.
   const explorerMounted = explorerVisible && !shouldSuppressExplorerMount(surface, isWideLayout);
   const drawerOpen = Boolean(selectionState);
+  // C06: auto mode collapses the sidebar when an Explorer column is
+  // visible on desktop (and the explorer itself is open).
+  const sidebarCollapsed =
+    isWideLayout && isSidebarCollapsed(sidebarMode, explorerVisible && desktopExplorerOpen);
+  const toggleSidebarCollapsed = () => {
+    const next = sidebarCollapsed ? "expanded" : "collapsed";
+    setSidebarMode(next);
+    writeSidebarMode(next);
+  };
+  const sidebarWidth = sidebarCollapsed
+    ? "var(--sidebar-width-collapsed)"
+    : "var(--sidebar-width)";
 
   // V1 attempt-3 Phase 3 bounce-fix — Class B fixed-anchor + selective overlay.
   // Topology graph mode signals overlay; only meaningful while on /topology
@@ -462,24 +247,27 @@ function AppShellInner({ children }: AppShellProps) {
   //   - opaque: padding = anchor (content starts AFTER explorer)
   //   - overlay: padding = 0 (content extends behind translucent explorer);
   //              tab bar is sticky/positioned at left=anchor independently.
-  // 21rem = rail (3rem) + explorer (18rem).
-  // 21rem (rail 3 + explorer 18) when explorer fully open. When
-  // collapsed: 3rem (rail only) — the floating chevron toggle floats
-  // over the canvas and doesn't claim layout space. When no explorer
-  // for the destination: 3rem (rail only).
-  const explorerAnchorLeft = isWideLayout && explorerVisible && desktopExplorerOpen
-    ? "21rem"
-    : "3rem";
-  const workspaceLeftOffset = isWideLayout
-    ? isTopologyOverlay
-      ? "0rem"
-      : explorerAnchorLeft
-    : "0rem";
+  // C06: the anchor is the sidebar width var + the 18rem explorer column.
+  // --sidebar-current-width is set on the flex wrapper below (NOT on
+  // workspaceStyle: that object is spread onto <main>, a sibling of the
+  // Explorer, so a variable set there would never reach the Explorer).
+  // main is a flex sibling AFTER the sidebar, so it already starts at the
+  // sidebar's right edge — the rail double-count is gone here: opaque +
+  // explorer open keeps only the 18rem explorer column, anything else is 0.
+  const explorerAnchorLeft =
+    isWideLayout && explorerVisible && desktopExplorerOpen
+      ? "calc(var(--sidebar-current-width) + 18rem)"
+      : "var(--sidebar-current-width)";
+  const workspaceLeftOffset =
+    isWideLayout && !isTopologyOverlay && explorerVisible && desktopExplorerOpen ? "18rem" : "0rem";
   // Class B fixed-anchor: header (eyebrow + title + view-mode tabs) ALWAYS
   // sits at the explorer-anchor offset, even in overlay mode where the
   // canvas extends behind the Explorer. This keeps the tab bar at a
   // stable left position across view-mode switches.
-  const headerAnchorOffset = isWideLayout && isTopologyOverlay ? explorerAnchorLeft : "0rem";
+  // C06: measured from <main>'s left edge (already past the sidebar), so
+  // it carries only the explorer column, not the sidebar width.
+  const headerAnchorOffset =
+    isWideLayout && isTopologyOverlay && explorerVisible && desktopExplorerOpen ? "18rem" : "0rem";
   // Coupled to VellumSheet wide preset (lg:w-[38rem]) — bounce-fix #3
   // caught the gap that emerged when bounce-fix #2 calibrated the drawer
   // 45rem → 38rem without updating this offset. Keep these two literals
@@ -511,9 +299,9 @@ function AppShellInner({ children }: AppShellProps) {
                 stay visible everywhere. */}
             <header
               data-testid="app-topbar"
-              className="h-14 flex items-center justify-between px-4 bg-background border-b border-outline-variant shrink-0 relative z-30"
+              className="h-12 flex items-center justify-between gap-3 px-4 bg-background border-b shrink-0 relative z-30"
             >
-              <div className="flex items-center gap-3">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
                 {/* Slice 26.E OPT-E Topology mobile toggle carve-out: at
                     narrow viewports on /topology the menu toggle does
                     not render. Clicking it flips explorerOpen state
@@ -536,40 +324,30 @@ function AppShellInner({ children }: AppShellProps) {
                     data-testid="mobile-menu-toggle"
                     onClick={() => setExplorerOpen((open) => !open)}
                     aria-label="Toggle navigation"
-                    className="flex flex-col gap-[3px] p-2 lg:hidden"
+                    className="flex flex-col gap-[3px] p-2 lg:hidden shrink-0"
                   >
                     <span className="block w-4 h-[1.5px] bg-inverse-surface" />
                     <span className="block w-4 h-[1.5px] bg-inverse-surface" />
                     <span className="block w-3 h-[1.5px] bg-inverse-surface" />
                   </button>
                 )}
-                <Link
-                  to="/"
-                  data-testid="brand-home-link"
-                  className="inline-flex items-center bg-inverse-surface px-3 py-1 font-mono text-sm font-bold uppercase tracking-[0.08em] text-background hover:bg-inverse-surface"
-                >
-                  OPENRIG
-                </Link>
-              </div>
-              {/* Right-slot — the V2 global affordance this slot was
-                  reserved for: the MH-2 which-host indicator (FR-3),
-                  truthful to the selected data source. Hidden on narrow
-                  viewports to preserve mobile space. */}
-              <div
-                data-testid="topbar-right-slot"
-                className="hidden sm:flex items-center gap-3"
-              >
-                <HostIndicator />
-                {/* OPR.0.4.3.29 — theme selector (placement founder-taste-gated). */}
-                <ThemeSelector />
+                <TopBar />
               </div>
             </header>
 
             {/* Main: rail + explore + center + drawer */}
-            <div className="flex flex-1 min-h-0 relative">
-              {/* Rail — desktop only (lg:flex). Mobile rail surfaces inside the slide-over. */}
+            <div
+              className="flex flex-1 min-h-0 relative"
+              style={{ "--sidebar-current-width": isWideLayout ? sidebarWidth : "0rem" } as CSSProperties}
+            >
+              {/* Sidebar — desktop only (lg:flex). Mobile sidebar surfaces inside the slide-over. */}
               <div className="hidden lg:flex">
-                <Rail pathname={pathname} vertical />
+                <Sidebar
+                  pathname={pathname}
+                  vertical
+                  collapsed={sidebarCollapsed}
+                  onToggleCollapsed={toggleSidebarCollapsed}
+                />
               </div>
 
               {/* Mobile slide-over: rail (horizontal) + explore.
@@ -592,10 +370,16 @@ function AppShellInner({ children }: AppShellProps) {
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
                   >
-                    {/* Slice 20 mobile: mobile slide-over rail is
+                    {/* Slice 20 mobile: mobile slide-over sidebar is
                         vertical (one item per row) — thumb-friendly stack
                         instead of the prior horizontal scroll. */}
-                    <Rail pathname={pathname} vertical onMobileClose={() => setExplorerOpen(false)} />
+                    <Sidebar
+                      pathname={pathname}
+                      vertical
+                      collapsed={false}
+                      isMobileTray
+                      onMobileClose={() => setExplorerOpen(false)}
+                    />
                   </div>
                 </>
               )}
@@ -663,11 +447,17 @@ function AppShellInner({ children }: AppShellProps) {
                   drawer when drawer mounted. */}
               <PreviewStack />
 
-              {/* V1 attempt-3 Phase 5 P5-9 — Mobile bottom nav per
-                  universal-shell.md L135 + L144: For You / Project /
-                  Topology only (NOT Talk; Talk slots are V2 when web
-                  terminal ships). lg:hidden so desktop never sees it. */}
-              <MobileBottomNav pathname={pathname} />
+              {/* C09: toasts for rig actions (sonner). Mounted once here. */}
+              <Toaster position="bottom-right" richColors={false} closeButton theme={resolved} />
+
+              {/* C08: command palette + g-then-key shortcuts, mounted once here. */}
+              <CommandPalette />
+              <PaletteShortcuts />
+
+              {/* ui-redesign C16 — mobile bottom nav lives in
+                  components/shell/MobileBottomNav.tsx. "More" opens the
+                  same mobile tray as the hamburger. */}
+              <MobileBottomNav pathname={pathname} onMore={() => setExplorerOpen(true)} />
             </div>
           </div>
       </DiscoveryPlacementContext.Provider>
@@ -675,47 +465,4 @@ function AppShellInner({ children }: AppShellProps) {
   );
 }
 
-/** V1 mobile bottom nav per universal-shell.md L135 + L144 — 3 slots
- *  (For You / Project / Topology). Talk slots are V2 deferred (when web
- *  terminal ships). Rendered at lg:hidden so desktop never shows it. */
-function MobileBottomNav({ pathname }: { pathname: string }) {
-  const slots: Array<{
-    id: "for-you" | "project" | "topology";
-    label: string;
-    to: string;
-    activeWhen: (p: string) => boolean;
-    icon: ComponentType<{ className?: string; strokeWidth?: number | string }>;
-  }> = [
-    { id: "for-you", label: "For You", to: "/for-you", activeWhen: (p) => p.startsWith("/for-you"), icon: Sparkles },
-    { id: "project", label: "Project", to: "/project", activeWhen: (p) => p.startsWith("/project"), icon: Folder },
-    { id: "topology", label: "Topology", to: "/topology", activeWhen: (p) => p.startsWith("/topology") || p.startsWith("/rigs/"), icon: Network },
-  ];
-  return (
-    <nav
-      data-testid="mobile-bottom-nav"
-      aria-label="Mobile bottom navigation"
-      className="fixed bottom-0 left-0 right-0 z-40 lg:hidden vellum border-t border-outline-variant flex"
-    >
-      {slots.map((slot) => {
-        const active = slot.activeWhen(pathname);
-        return (
-          <Link
-            key={slot.id}
-            to={slot.to}
-            data-testid={`mobile-nav-${slot.id}`}
-            data-active={active}
-            className={cn(
-              "flex-1 flex flex-col items-center justify-center gap-0.5 py-2 font-mono text-[9px] uppercase tracking-wide",
-              active
-                ? "text-on-surface"
-                : "text-on-surface-variant hover:text-on-surface",
-            )}
-          >
-            <slot.icon className="h-5 w-5" strokeWidth={1.25} aria-hidden="true" />
-            <span>{slot.label}</span>
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
+/** C16 removed the inline MobileBottomNav (now components/shell/MobileBottomNav.tsx). */

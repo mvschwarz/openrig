@@ -76,7 +76,7 @@ export function CompactStatusRow({
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <span
             data-testid="mc-state-badge"
-            className={`inline-flex items-center px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] ${badge.cls}`}
+            className={`inline-flex items-center px-2 py-0.5 text-[11px] ${badge.cls}`}
           >
             {badge.label}
           </span>
@@ -90,7 +90,7 @@ export function CompactStatusRow({
           {row.currentPhase ? (
             <span
               data-testid="mc-current-phase"
-              className="font-mono text-[10px] text-on-surface-variant"
+              className="font-mono text-[11px] text-on-surface-variant"
             >
               · {row.currentPhase}
             </span>
@@ -101,7 +101,7 @@ export function CompactStatusRow({
             type="button"
             onClick={() => toggleDetails()}
             data-testid="mc-row-details-toggle"
-            className="border border-outline-variant px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface hover:bg-surface-low"
+            className="border border-outline-variant px-2 py-0.5 text-[11px] text-on-surface hover:bg-surface-low"
             aria-expanded={isExpanded}
           >
             {isExpanded ? "Hide" : "Details"}
@@ -112,7 +112,7 @@ export function CompactStatusRow({
             type="button"
             onClick={onAction}
             data-testid="mc-row-action"
-            className="border border-outline-variant px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface hover:bg-surface-low"
+            className="border border-outline-variant px-2 py-0.5 text-[11px] text-on-surface hover:bg-surface-low"
           >
             ACT
           </button>
@@ -130,29 +130,29 @@ export function CompactStatusRow({
         <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] text-on-surface sm:grid-cols-2">
           {row.nextAction ? (
             <div data-testid="mc-next-action">
-              <span className="font-mono uppercase text-[9px] tracking-[0.1em] text-on-surface-variant">next</span>{" "}
+              <span className="text-[11px] text-on-surface-variant">Next</span>{" "}
               {row.nextAction}
             </div>
           ) : null}
           {row.pendingHumanDecision ? (
             <div data-testid="mc-pending-human-decision" className="text-amber-800">
-              <span className="font-mono uppercase text-[9px] tracking-[0.1em] text-amber-700">human</span>{" "}
+              <span className="text-[11px] text-amber-700">Human</span>{" "}
               {row.pendingHumanDecision}
             </div>
           ) : null}
           {row.readCost ? (
             <div data-testid="mc-read-cost">
-              <span className="font-mono uppercase text-[9px] tracking-[0.1em] text-on-surface-variant">read</span>{" "}
+              <span className="text-[11px] text-on-surface-variant">Read</span>{" "}
               {row.readCost}
             </div>
           ) : null}
           {row.confidenceFreshness ? (
             <div data-testid="mc-confidence-freshness">
-              <span className="font-mono uppercase text-[9px] tracking-[0.1em] text-on-surface-variant">conf</span>{" "}
+              <span className="text-[11px] text-on-surface-variant">Conf</span>{" "}
               {row.confidenceFreshness}
             </div>
           ) : null}
-          <div data-testid="mc-last-update" className="text-on-surface-variant font-mono text-[10px]">
+          <div data-testid="mc-last-update" className="text-on-surface-variant font-mono text-[11px]">
             {row.lastUpdate}
           </div>
           {row.evidenceLink ? (
@@ -178,7 +178,7 @@ export function CompactStatusRow({
               {fullBody}
             </div>
           ) : null}
-          <div className="grid grid-cols-1 gap-1 font-mono text-[10px] text-on-surface-variant sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-1 font-mono text-[11px] text-on-surface-variant sm:grid-cols-2">
             {row.qitemId ? (
               <div>
                 qitem <span data-testid="mc-qitem-id">{row.qitemId}</span>
@@ -194,7 +194,7 @@ export function CompactStatusRow({
             <a
               data-testid="mc-qitem-audit-link"
               href={`/mission-control?view=audit-history&qitem_id=${encodeURIComponent(row.qitemId)}`}
-              className="inline-flex border border-outline-variant px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hover:bg-surface-low"
+              className="inline-flex border border-outline-variant px-2 py-1 text-[11px] text-on-surface hover:bg-surface-low"
             >
               Audit
             </a>

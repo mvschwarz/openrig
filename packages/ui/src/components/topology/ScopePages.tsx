@@ -6,7 +6,26 @@
 // (Attempt-2 violated this by using separate routes per view-mode.)
 
 import { useState, useEffect } from "react";
-import { useParams } from "@tanstack/react-router";
+import { useParams, Link } from "@tanstack/react-router";
+import { PageHeader } from "../ui/page-header.js";
+import { StatusBadge } from "../ui/status-badge.js";
+import { Button } from "../ui/button.js";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "../ui/dropdown-menu.js";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog.js";
+import { useStartRig, useLaunchRig, useTeardownRig, useCreateSnapshot } from "../../hooks/mutations.js";
 import {
   TopologyViewModeTabs,
   HOST_SCOPE_TABS,
@@ -54,7 +73,7 @@ function ActivityRollupBar({ rigId }: { rigId: string }) {
   return (
     <div
       data-testid="activity-rollup-bar"
-      className="px-6 py-2 font-mono text-[10px] text-on-surface-variant border-b border-outline-variant bg-surface-lowest/30"
+      className="px-6 py-2 font-mono text-[11px] text-on-surface-variant border-b border-outline-variant bg-surface-lowest/30"
     >
       {formatRollupLabel(rollup)}
     </div>
@@ -64,6 +83,7 @@ function ActivityRollupBar({ rigId }: { rigId: string }) {
 // the prior placeholder with the multi-rig single-canvas component
 // (rig-collapse affordance; default-all-collapsed; auto-expand on URL).
 import { HostMultiRigGraph } from "./HostMultiRigGraph.js";
+import { useRigStatusResolver } from "../../hooks/useRigStatusResolver.js";
 // OPR.0.4.0.1: one global LiveTerminalProvider per scope page bounds the total
 // live terminals across the page's graph + table + terminal tab-surfaces.
 import { LiveTerminalProvider, useTerminalCap } from "../terminal/LiveTerminalProvider.js";
@@ -83,10 +103,39 @@ function useOverlayForActiveTab(active: string) {
   }, [active, setMode]);
 }
 
+/** Anchored bar: sits at left = var(--explorer-anchor-left)
+ *  (set on <main> in AppShell) so position is identical across graph /
+ *  table / terminal switches. Transparent over the canvas — paper-grid
+ *  shows through. z-30 keeps content above the Explorer overlay in graph
+ *  mode (anchored past the Explorer's right edge so overlap shouldn't
+ *  happen, but z-order is the safety net). C12 renders the PageHeader in
+ *  one and the tab nav in another so they share the same left edge. */
+function ScopeAnchoredBar({
+  children,
+  testId,
+}: {
+  children: React.ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div
+      className="relative z-30 px-6 pt-4"
+      style={{ marginLeft: "var(--header-anchor-offset, 0px)" }}
+      {...(testId ? { "data-testid": testId } : {})}
+    >
+      {children}
+    </div>
+  );
+}
+
 function ScopeShell({
+  header,
   tabsNav,
   children,
 }: {
+  /** Optional C12 PageHeader rendered above the tab nav at the same
+   *  anchored left offset (graph-overlay alignment). */
+  header?: React.ReactNode;
   /** Eyebrow + title are no longer rendered: tabs only, anchored to
    *  the right of Explorer. The scope
    *  identity reads from the URL + Explorer tree active state, so the
@@ -98,20 +147,19 @@ function ScopeShell({
   tabsNav: React.ReactNode;
   children: React.ReactNode;
 }) {
-  // Class B fixed-anchor: tabsNav sits at left = var(--explorer-anchor-left)
-  // (set on <main> in AppShell) so position is identical across graph /
-  // table / terminal switches. Transparent over the canvas — paper-grid
-  // shows through. z-30 keeps tabs above the Explorer overlay in graph
-  // mode (the tabs are anchored past the Explorer's right edge so they
-  // shouldn't actually overlap, but z-order is the safety net).
+  // Class B fixed-anchor: header and tabsNav each sit in a ScopeAnchoredBar
+  // at left = var(--explorer-anchor-left) (set on <main> in AppShell) so
+  // position is identical across graph / table / terminal switches.
   return (
     <div className="flex flex-col h-full">
-      <div
-        className="relative z-30 px-6 pt-4"
-        style={{ marginLeft: "var(--header-anchor-offset, 0px)" }}
-      >
+      {header ? (
+        <ScopeAnchoredBar testId="scope-page-header-anchor">
+          {header}
+        </ScopeAnchoredBar>
+      ) : null}
+      <ScopeAnchoredBar>
         {tabsNav}
-      </div>
+      </ScopeAnchoredBar>
       {/* flex column so the active view-mode panel can fill remaining
           height. min-h-0 lets the flex child shrink correctly inside
           the AppShell main scroll container. */}
@@ -159,6 +207,17 @@ export function HostScopePage() {
     <ScopeShell
       eyebrow="Topology · Host"
       title={isRemote ? selectedHost : ownName}
+      header={
+        <PageHeader
+          title="Rigs"
+          description="Every rig on this host. Open one to see its agents."
+          actions={
+            <Button asChild data-testid="new-rig-button">
+              <Link to="/specs/rig">New rig</Link>
+            </Button>
+          }
+        />
+      }
       tabsNav={<TopologyViewModeTabs tabs={HOST_SCOPE_TABS} active={active} onSelect={setActive} testIdPrefix="topology-host" />}
     >
       {remoteUnreachable ? (
@@ -170,13 +229,13 @@ export function HostScopePage() {
             data-testid="topology-remote-unreachable"
             className="max-w-2xl border-l-2 border-error bg-surface-low px-4 py-4 font-mono text-xs"
           >
-            <div className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-error">
+            <div className="mb-2 text-[11px] font-bold text-error">
               {selectedHost} is unreachable
             </div>
             <p className="mb-1 text-on-surface">
               The local daemon could not reach {selectedHost}&apos;s daemon. Its workspace can&apos;t be shown.
             </p>
-            <p className="mb-3 text-[10px] text-on-surface-variant">
+            <p className="mb-3 text-[11px] text-on-surface-variant">
               Check the host is up and paired (rig host ls), then retry. Other hosts are unaffected.
             </p>
             <div className="flex items-center gap-2">
@@ -184,7 +243,7 @@ export function HostScopePage() {
                 type="button"
                 data-testid="topology-remote-retry"
                 onClick={() => void refetch()}
-                className="border border-outline px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-on-surface hover:bg-surface-low/60"
+                className="border border-outline px-3 py-1 text-[11px] text-on-surface hover:bg-surface-low/60"
               >
                 Retry
               </button>
@@ -192,7 +251,7 @@ export function HostScopePage() {
                 type="button"
                 data-testid="topology-remote-back-local"
                 onClick={() => selectHost.mutate({ hostId: LOCAL_HOST_ID })}
-                className="border border-outline-variant px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-on-surface-variant hover:text-on-surface"
+                className="border border-outline-variant px-3 py-1 text-[11px] text-on-surface-variant hover:text-on-surface"
               >
                 Back to {ownName} (local)
               </button>
@@ -203,7 +262,7 @@ export function HostScopePage() {
       {remoteLoading ? (
         <div
           data-testid="topology-remote-loading"
-          className="mr-6 mt-3 border border-outline-variant bg-surface-low px-3 py-2 font-mono text-[10px] text-on-surface-variant"
+          className="mr-6 mt-3 border border-outline-variant bg-surface-low px-3 py-2 font-mono text-[11px] text-on-surface-variant"
           style={{ marginLeft: "calc(var(--header-anchor-offset, 0px) + 1.5rem)" }}
         >
           Pulling {selectedHost}&apos;s workspace over the network… showing the previous view until it arrives.
@@ -219,7 +278,7 @@ export function HostScopePage() {
           {!isWideLayout && active === "graph" ? (
             <p
               data-testid="topology-mobile-graph-degraded"
-              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+              className="font-mono text-[11px] text-on-surface-variant italic mb-2"
             >
               Graph view degrades to table on narrow viewports.
             </p>
@@ -236,6 +295,74 @@ export function HostScopePage() {
   );
 }
 
+/**
+ * C12 rig actions menu: Start (`useStartRig`, mutate() — bodyless
+ * POST /api/rigs/:id/up), Launch (`useLaunchRig`, mutate() — POST with
+ * `{}` body when no fresh seat list), Save snapshot (`useCreateSnapshot`,
+ * mutate() — bodyless POST /api/rigs/:id/snapshots), separator, Stop rig
+ * (`useTeardownRig`, mutate() — POST /api/down with
+ * `{ rigId }` JSON body, `destructive`). Rendered only for a known-local
+ * host selection (OPR.0.4.6.MH2 B1: remote gets no local mutation affordance).
+ * "Stop rig" opens a confirm Dialog; dialog "Stop rig" calls teardown.mutate().
+ */
+export function RigActionsMenu({ rigId, rigName }: { rigId: string; rigName: string }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const startMut = useStartRig(rigId);
+  const launchMut = useLaunchRig(rigId);
+  const snapshotMut = useCreateSnapshot(rigId);
+  const teardownMut = useTeardownRig(rigId);
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button data-testid="rig-actions" variant="outline">
+            Actions
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={() => startMut.mutate(undefined)}>Start</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => launchMut.mutate(undefined)}>Launch</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => snapshotMut.mutate(undefined)}>Save snapshot</DropdownMenuItem>
+          <DropdownMenuSeparator />
+          {/* Defer the dialog open one task: mounting a Radix Dialog
+              synchronously inside the menu's select dispatch fights the
+              menu-close focus handoff (infinite focus loop in jsdom; flaky
+              focus steal in real browsers). The menu finishes closing, then
+              the confirm dialog opens. */}
+          <DropdownMenuItem destructive onSelect={() => window.setTimeout(() => setConfirmOpen(true), 0)}>
+            Stop rig
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent data-testid="rig-stop-confirm">
+          <DialogHeader>
+            <DialogTitle>Stop {rigName}?</DialogTitle>
+            <DialogDescription>
+              All agents in this rig will be stopped. You can start it again later.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="rig-stop-confirm-button"
+              onClick={() => {
+                teardownMut.mutate();
+                setConfirmOpen(false);
+              }}
+            >
+              Stop rig
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 export function RigScopePage() {
   // OPR.0.4.6.MH2 guard delta-confirm blocker: lifecycle/action surfaces are
   // TRI-STATE — unknown selection mounts NO local controls and fires NO bare
@@ -247,6 +374,7 @@ export function RigScopePage() {
   const rigScopeActionsAllowed = hostSelectionKnown && hostSelectionLocal;
   const { rigId } = useParams({ from: "/topology/rig/$rigId" });
   const { data: rigs } = useRigSummary();
+  const rigStatus = useRigStatusResolver();
   const rig = rigs?.find((r) => r.id === rigId);
   const [active, setActive] = useState<TopologyRigPodScopeTab>("graph");
   const { isWideLayout } = useShellViewport();
@@ -260,6 +388,20 @@ export function RigScopePage() {
     <ScopeShell
       eyebrow="Topology · Rig"
       title={rig?.name ?? rigId}
+      header={
+        <PageHeader
+          title={rig?.name ?? rigId}
+          meta={
+            <>
+              <StatusBadge status={rigStatus(rigId, rig?.lifecycleState)} testId="rig-lifecycle-badge" />
+              <span className="font-mono text-xs text-on-surface-variant" data-testid="rig-id-mono">
+                {rigId}
+              </span>
+            </>
+          }
+          actions={rigScopeActionsAllowed ? <RigActionsMenu rigId={rigId} rigName={rig?.name ?? rigId} /> : null}
+        />
+      }
       tabsNav={
         <TopologyViewModeTabs
           tabs={RIG_POD_SCOPE_TABS}
@@ -287,9 +429,9 @@ export function RigScopePage() {
         >
           <div
             data-testid="rig-status-selection-pending"
-            className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant italic"
+            className="text-[11px] text-on-surface-variant italic"
           >
-            resolving selected host…
+            Resolving selected host…
           </div>
         </div>
       ) : rigScopeIsRemote ? (
@@ -303,7 +445,7 @@ export function RigScopePage() {
           <div
             data-testid="rig-status-remote-readonly"
             data-remote-readonly="true"
-            className="font-mono text-[9px] uppercase tracking-wide text-on-surface-variant"
+            className="text-[11px] text-on-surface-variant"
           >
             read-only — remote host (launch/recovery is a local action)
           </div>
@@ -329,7 +471,7 @@ export function RigScopePage() {
           {!isWideLayout && active === "graph" ? (
             <p
               data-testid="topology-mobile-graph-degraded"
-              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+              className="font-mono text-[11px] text-on-surface-variant italic mb-2"
             >
               Graph view degrades to table on narrow viewports.
             </p>
@@ -353,7 +495,7 @@ export function RigOverviewTab({ rigId }: { rigId: string; rigName: string | nul
   const preview = useRigSpecReview(exported.hostSelection === "local" ? exported.data ?? null : null);
 
   if (exported.hostSelection === "loading" || (exported.hostSelection === "local" && exported.isLoading)) {
-    return <div className="p-6 font-mono text-[10px] text-on-surface-variant">Loading current rig spec…</div>;
+    return <div className="p-6 font-mono text-[11px] text-on-surface-variant">Loading current rig spec…</div>;
   }
   if (exported.hostSelection !== "local" || exported.isError || exported.data === undefined) {
     return (
@@ -373,14 +515,14 @@ export function RigOverviewTab({ rigId }: { rigId: string; rigName: string | nul
   }
   return (
     <div className="px-6 pb-6" data-testid="topology-rig-overview">
-      <p className="mb-3 font-mono text-[10px] text-on-surface-variant">
+      <p className="mb-3 font-mono text-[11px] text-on-surface-variant">
         Current rig configuration — exported from this instance, not the Specs library template.
       </p>
       {preview.data ? (
         <RigSpecDisplay review={preview.data} yaml={exported.data} testIdPrefix="topology-rig-overview-" />
       ) : (
         <>
-          <p className="mb-3 font-mono text-[10px] text-on-surface-variant">
+          <p className="mb-3 font-mono text-[11px] text-on-surface-variant">
             {preview.isError ? "Topology preview unavailable. The current export is shown below." : "Preparing topology preview…"}
           </p>
           <WorkflowCodePreview title="Current configuration" testId="topology-rig-overview-yaml">
@@ -421,7 +563,7 @@ export function PodScopePage() {
           {!isWideLayout && active === "graph" ? (
             <p
               data-testid="topology-mobile-graph-degraded"
-              className="font-mono text-[9px] text-on-surface-variant italic mb-2"
+              className="font-mono text-[11px] text-on-surface-variant italic mb-2"
             >
               Graph view degrades to table on narrow viewports.
             </p>

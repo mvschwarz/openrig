@@ -31,7 +31,7 @@ describe("RigStamp (Phase 1 primitive)", () => {
   it("size=sm applies the small class", () => {
     const { container } = render(<RigStamp text="X" size="sm" testId="rs-sm" />);
     const el = container.querySelector("[data-testid='rs-sm']") as HTMLElement;
-    expect(el.className).toContain("text-[10px]");
+    expect(el.className).toContain("text-[11px]");
   });
 
   it("position numeric values become px", () => {

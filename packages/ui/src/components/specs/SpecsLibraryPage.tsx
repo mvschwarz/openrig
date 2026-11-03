@@ -1,7 +1,15 @@
 import { useMemo } from "react";
-import { Link } from "@tanstack/react-router";
-import { SectionHeader } from "../ui/section-header.js";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { Button } from "../ui/button.js";
+import { PageHeader } from "../ui/page-header.js";
 import { EmptyState } from "../ui/empty-state.js";
+import { StatusBadge } from "../ui/status-badge.js";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "../ui/dropdown-menu.js";
 import { useSpecLibrary, type SpecLibraryEntry } from "../../hooks/useSpecLibrary.js";
 import { useContextPackLibrary, type ContextPackEntry } from "../../hooks/useContextPackLibrary.js";
 import { useAgentImageLibrary, type AgentImageEntry } from "../../hooks/useAgentImageLibrary.js";
@@ -11,11 +19,12 @@ import { ToolMark } from "../graphics/RuntimeMark.js";
 // Phase 3a slice 3.3 — plugins library category.
 import { usePlugins, type PluginEntry } from "../../hooks/usePlugins.js";
 
-const TOOLBAR_ACTIONS = [
-  { label: "+ Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
+/** C14b: the 5 toolbar buttons collapse to one primary "New rig" + a
+ *  "More" dropdown. Destinations are unchanged from TOOLBAR_ACTIONS. */
+const MORE_ACTIONS = [
+  { label: "Add spec", to: "/specs/rig", testId: "specs-toolbar-add" },
   { label: "Import", to: "/import", testId: "specs-toolbar-import" },
   { label: "Discover", to: "/search", testId: "specs-toolbar-discover" },
-  { label: "Create rig", to: "/specs/rig", testId: "specs-toolbar-create-rig" },
   { label: "Generate workflow", to: "/specs/agent", testId: "specs-toolbar-gen-workflow" },
 ] as const;
 
@@ -98,14 +107,14 @@ function LibrarySection({
   badge?: string;
 }) {
   return (
-    <section data-testid={`library-section-${id}`} className="border border-outline-variant bg-surface-lowest/25 hard-shadow">
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
-        <SectionHeader tone="default">{title}</SectionHeader>
+    <section data-testid={`library-section-${id}`} className="rounded-lg border bg-surface-lowest shadow-sm">
+      <header className="flex items-baseline justify-between border-b border-outline-variant px-3 py-2">
+        <h2 className="text-sm font-semibold text-on-surface">{title}</h2>
         <span
           data-testid={`library-section-${id}-badge`}
-          className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant"
+          className="shrink-0 text-xs text-on-surface-variant"
         >
-          {isLoading ? "loading" : badge ?? `${rows.length} items`}
+          {isLoading ? "Loading" : badge ?? `${rows.length} items`}
         </span>
       </header>
       {rows.length > 0 ? (
@@ -117,7 +126,7 @@ function LibrarySection({
                   to="/specs/library/$entryId"
                   params={{ entryId: row.entryId }}
                   data-testid={`library-row-${id}-${row.id}`}
-                  className="block px-3 py-2 hover:bg-surface-low/50"
+                  className="block px-3 py-2 text-sm hover:bg-surface-low/50"
                 >
                   <LibraryRowContent row={row} />
                 </Link>
@@ -125,17 +134,18 @@ function LibrarySection({
                 <div
                   data-testid={`library-row-${id}-${row.id}`}
                   data-status={row.status}
-                  className={`px-3 py-2 ${row.status === "error" ? "bg-red-50/40 text-red-900" : ""}`}
+                  className="flex items-center gap-2 px-3 py-2 text-sm"
                 >
-                  <LibraryRowContent row={row} />
+                  <StatusBadge status={row.status} />
+                  <span className="min-w-0 flex-1"><LibraryRowContent row={row} /></span>
                 </div>
               )}
             </li>
           ))}
         </ul>
       ) : (
-        <div className="px-3 py-4 font-mono text-[10px] text-on-surface-variant">
-          {isLoading ? "Loading..." : emptyLabel ?? "No entries."}
+        <div className="px-3 py-4 text-sm text-on-surface-variant">
+          {isLoading ? "Loading…" : emptyLabel ?? "No entries."}
         </div>
       )}
     </section>
@@ -153,10 +163,10 @@ function formatBytes(bytes: number): string {
 
 function LibraryRowContent({ row }: { row: LibraryRow }) {
   return (
-    <div className="flex min-w-0 items-baseline justify-between gap-3 font-mono">
-      <span className="truncate text-xs font-bold text-on-surface">{row.label}</span>
+    <div className="flex min-w-0 items-baseline justify-between gap-3 text-sm">
+      <span className="truncate font-medium text-on-surface">{row.label}</span>
       {row.meta ? (
-        <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
+        <span className="shrink-0 font-mono text-xs text-on-surface-variant">
           {row.meta}
         </span>
       ) : null}
@@ -166,10 +176,9 @@ function LibraryRowContent({ row }: { row: LibraryRow }) {
 
 // Phase 3a slice 3.3 — Plugins library section.
 //
-// Mirrors SkillsSection's chrome (border + hard-shadow + header with count),
-// renders one row per discovered plugin with name, version, runtime support
-// badges (claude/codex), source label provenance. Each row links to the
-// plugin detail viewer at /plugins/:id.
+// Mirrors SkillsSection's chrome, renders one row per discovered plugin
+// with name, version, runtime support badges (claude/codex), source label
+// provenance. Each row links to the plugin detail viewer at /plugins/:id.
 function PluginsSection({
   plugins,
   isLoading,
@@ -181,22 +190,23 @@ function PluginsSection({
     <section
       id="library-plugins"
       data-testid="library-section-plugins"
-      className="border border-outline-variant bg-surface-lowest/25 hard-shadow"
+      className="rounded-lg border bg-surface-lowest shadow-sm"
     >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
-        <SectionHeader tone="default">Plugins</SectionHeader>
-        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
-          {isLoading ? "loading" : `${plugins.length} plugins`}
+      <header className="flex items-baseline justify-between border-b border-outline-variant px-3 py-2">
+        <h2 className="text-sm font-semibold text-on-surface">Plugins</h2>
+        <span className="shrink-0 text-xs text-on-surface-variant">
+          {isLoading ? "Loading" : `${plugins.length} plugins`}
         </span>
       </header>
       {plugins.length === 0 ? (
         <div className="px-3 py-4">
           <EmptyState
-            label={isLoading ? "LOADING" : "NO PLUGINS DISCOVERED"}
+            label={isLoading ? "Loading" : "No plugins discovered"}
+            title={isLoading ? "Loading" : "No plugins discovered"}
             description={isLoading
-              ? "Loading plugins..."
+              ? "Loading plugins…"
               : "Install a Claude Code or Codex plugin (or wait for openrig-core to vendor) to see it appear here."}
-            variant="card"
+            variant="minimal"
             testId="library-plugins-empty"
           />
         </div>
@@ -208,11 +218,11 @@ function PluginsSection({
                 to="/plugins/$pluginId"
                 params={{ pluginId: plugin.id }}
                 data-testid={`library-plugin-${plugin.id}`}
-                className="flex items-center gap-3 px-3 py-2 font-mono hover:bg-surface-low/50"
+                className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-surface-low/50"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <ToolMark tool="skill" title={`${plugin.name} plugin`} size="xs" decorative />
-                  <span className="truncate text-xs font-bold text-on-surface">{plugin.name}</span>
+                  <span className="truncate font-medium text-on-surface">{plugin.name}</span>
                 </span>
               </Link>
             </li>
@@ -234,22 +244,23 @@ function SkillsSection({
     <section
       id="library-skills"
       data-testid="library-section-skills"
-      className="border border-outline-variant bg-surface-lowest/25 hard-shadow"
+      className="rounded-lg border bg-surface-lowest shadow-sm"
     >
-      <header className="flex items-baseline justify-between border-b border-outline-variant bg-surface-lowest/30 px-3 py-2">
-        <SectionHeader tone="default">Skills</SectionHeader>
-        <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-on-surface-variant">
-          {isLoading ? "loading" : `${skills.length} folders`}
+      <header className="flex items-baseline justify-between border-b border-outline-variant px-3 py-2">
+        <h2 className="text-sm font-semibold text-on-surface">Skills</h2>
+        <span className="shrink-0 text-xs text-on-surface-variant">
+          {isLoading ? "Loading" : `${skills.length} folders`}
         </span>
       </header>
       {skills.length === 0 ? (
         <div className="px-3 py-4">
           <EmptyState
-            label={isLoading ? "LOADING" : "NO SKILLS FOUND"}
+            label={isLoading ? "Loading" : "No skills found"}
+            title={isLoading ? "Loading" : "No skills found"}
             description={isLoading
-              ? "Loading skill folders..."
+              ? "Loading skill folders…"
               : "No .openrig/skills or packaged OpenRig skill folders are visible through configured file roots."}
-            variant="card"
+            variant="minimal"
             testId="library-skills-empty"
           />
         </div>
@@ -260,13 +271,13 @@ function SkillsSection({
               <a
                 href={librarySkillHref(skill.id)}
                 data-testid={`library-skill-${skill.name}`}
-                className="flex items-center justify-between gap-3 px-3 py-2 font-mono hover:bg-surface-low/50"
+                className="flex items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-surface-low/60 focus:outline-none focus:bg-surface-low/80"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <ToolMark tool="skill" title={`${skill.name} skill`} size="xs" decorative />
-                  <span className="truncate text-xs font-bold text-on-surface">{skill.name}</span>
+                  <span className="truncate font-medium text-on-surface">{skill.name}</span>
                 </span>
-                <span className="shrink-0 text-[9px] uppercase tracking-[0.08em] text-on-surface-variant">
+                <span className="shrink-0 text-xs text-on-surface-variant">
                   {skill.files.length} files
                 </span>
               </a>
@@ -275,6 +286,35 @@ function SkillsSection({
         </ul>
       )}
     </section>
+  );
+}
+
+function LibraryToolbarActions() {
+  const navigate = useNavigate();
+  return (
+    <div className="flex items-center gap-2">
+      <Button asChild size="sm" data-testid="specs-toolbar-create-rig">
+        <Link to="/specs/rig">New rig</Link>
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" data-testid="specs-toolbar-more">
+            More
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {MORE_ACTIONS.map((a) => (
+            <DropdownMenuItem
+              key={a.testId}
+              data-testid={a.testId}
+              onSelect={() => void navigate({ to: a.to })}
+            >
+              {a.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   );
 }
 
@@ -310,104 +350,99 @@ export function SpecsLibraryPage() {
     + sections.applications.length
     + contextPacks.length
     + agentImages.length
-    + skills.length;
+    + skills.length
+    + plugins.length;
+
+  const anyLoading = specsLoading || contextPacksLoading || agentImagesLoading || skillsLoading || pluginsLoading;
 
   return (
     <div
       data-testid="specs-library-page"
-      className="h-full overflow-y-auto bg-paper-grid px-6 py-5 lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
+      className="h-full overflow-y-auto px-6 py-5 text-sm lg:pl-[var(--workspace-left-offset,0px)] lg:pr-[var(--workspace-right-offset,0px)]"
     >
-      <header className="mb-5 flex items-start justify-between gap-4">
-        <div>
-          <SectionHeader tone="muted">Library</SectionHeader>
-          <h1 className="mt-1 font-headline text-2xl font-bold tracking-tight text-on-surface">
-            Library
-          </h1>
-          <p className="mt-1 max-w-3xl text-sm text-on-surface-variant">
-            Specs, context packs, agent images, applications, and skill folders.
-          </p>
-        </div>
-        <nav
-          aria-label="Library actions"
-          className="flex flex-wrap justify-end gap-2"
-        >
-          {TOOLBAR_ACTIONS.map((a) => (
-            <Link
-              key={a.testId}
-              to={a.to}
-              data-testid={a.testId}
-              className="border border-outline-variant bg-surface-lowest/25 px-3 py-1.5 font-mono text-[10px] uppercase tracking-[0.12em] text-on-surface hard-shadow hover:bg-surface-lowest/40"
-            >
-              {a.label}
-            </Link>
-          ))}
-        </nav>
-      </header>
+      <PageHeader
+        title="Library"
+        description="Browse rig and agent specs, skills and plugins. Start a new rig or open anything to review it."
+        actions={<LibraryToolbarActions />}
+      />
 
-      <div className="mb-4 font-mono text-[10px] uppercase tracking-[0.14em] text-on-surface-variant">
+      <div className="mb-4 text-xs text-on-surface-variant">
         {total} library entries visible through current sources
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <LibrarySection
-          id="rig-specs"
-          title="Rig Specs"
-          rows={sections.rigSpecs}
-          isLoading={specsLoading}
-          emptyLabel="No rig specs found."
+      {!anyLoading && total === 0 ? (
+        <EmptyState
+          title="Your library is empty"
+          label="Your library is empty"
+          description="Specs, skills and plugins you add or discover show up here."
+          action={{ label: "Discover", href: "/search" }}
+          variant="card"
+          testId="library-empty"
         />
-        <LibrarySection
-          id="workspace-specs"
-          title="Workspace Specs"
-          rows={[]}
-          emptyLabel="No workspace specs source is wired yet."
-        />
-        <LibrarySection
-          id="workflow-specs"
-          title="Workflow Specs"
-          rows={sections.workflowSpecs}
-          isLoading={specsLoading}
-          emptyLabel="No workflow specs found."
-        />
-        <LibrarySection
-          id="context-packs"
-          title="Context Packs"
-          rows={contextPacks.map(contextPackRow)}
-          isLoading={contextPacksLoading}
-          emptyLabel="No context packs found."
-        />
-        <LibrarySection
-          id="agent-specs"
-          title="Agent Specs"
-          rows={sections.agentSpecs}
-          isLoading={specsLoading}
-          emptyLabel="No agent specs found."
-        />
-        <LibrarySection
-          id="agent-images"
-          title="Agent Images"
-          rows={agentImages.map(agentImageRow)}
-          isLoading={agentImagesLoading}
-          emptyLabel="No agent images found."
-          badge={agentImageBadge}
-        />
-        <LibrarySection
-          id="applications"
-          title="Applications"
-          rows={sections.applications}
-          isLoading={specsLoading}
-          emptyLabel="No application specs found."
-        />
-      </div>
+      ) : (
+        <>
+          <div className="grid gap-4 xl:grid-cols-2">
+            <LibrarySection
+              id="rig-specs"
+              title="Rig specs"
+              rows={sections.rigSpecs}
+              isLoading={specsLoading}
+              emptyLabel="No rig specs found."
+            />
+            <LibrarySection
+              id="workspace-specs"
+              title="Workspace specs"
+              rows={[]}
+              emptyLabel="No workspace specs source is wired yet."
+            />
+            <LibrarySection
+              id="workflow-specs"
+              title="Workflow specs"
+              rows={sections.workflowSpecs}
+              isLoading={specsLoading}
+              emptyLabel="No workflow specs found."
+            />
+            <LibrarySection
+              id="context-packs"
+              title="Context packs"
+              rows={contextPacks.map(contextPackRow)}
+              isLoading={contextPacksLoading}
+              emptyLabel="No context packs found."
+            />
+            <LibrarySection
+              id="agent-specs"
+              title="Agent specs"
+              rows={sections.agentSpecs}
+              isLoading={specsLoading}
+              emptyLabel="No agent specs found."
+            />
+            <LibrarySection
+              id="agent-images"
+              title="Agent images"
+              rows={agentImages.map(agentImageRow)}
+              isLoading={agentImagesLoading}
+              emptyLabel="No agent images found."
+              badge={agentImageBadge}
+            />
+            <LibrarySection
+              id="applications"
+              title="Applications"
+              rows={sections.applications}
+              isLoading={specsLoading}
+              emptyLabel="No application specs found."
+            />
+          </div>
 
-      <div className="mt-4 space-y-4">
-        {/* Phase 3a slice 3.3 — Plugins category sits between the spec
-            grid and the Skills folder roundup; both are wide single-
-            column sections rather than grid columns because their row
-            count varies more dramatically than the spec categories. */}
-        <PluginsSection plugins={plugins} isLoading={pluginsLoading} />
-        <SkillsSection skills={skills} isLoading={skillsLoading} />
-      </div>
+          <div className="mt-4 space-y-4">
+            {/* Phase 3a slice 3.3 — Plugins category sits between the spec
+                grid and the Skills folder roundup; both are wide single-
+                column sections rather than grid columns because their row
+                count varies more dramatically than the spec categories. */}
+            <PluginsSection plugins={plugins} isLoading={pluginsLoading} />
+            <SkillsSection skills={skills} isLoading={skillsLoading} />
+          </div>
+        </>
+      )}
     </div>
   );
 }

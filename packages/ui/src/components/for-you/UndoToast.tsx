@@ -37,14 +37,14 @@ export function UndoToast({ label, onUndo, onExpire, durationMs }: UndoToastProp
       data-testid="undo-toast"
       role="status"
       aria-live="polite"
-      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 border border-stone-700 bg-stone-900/95 px-4 py-2 font-mono text-[11px] uppercase tracking-wide text-stone-50 backdrop-blur-sm shadow-lg"
+      className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 border border-stone-700 bg-stone-900/95 px-4 py-2 text-[11px] text-stone-50 backdrop-blur-sm shadow-lg"
     >
       <span>{label}</span>
       <button
         type="button"
         data-testid="undo-toast-button"
         onClick={handleUndo}
-        className="border border-stone-500 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-stone-50 hover:bg-stone-800 focus:outline-none focus:ring-1 focus:ring-stone-300"
+        className="border border-stone-500 px-2 py-0.5 text-[11px] text-stone-50 hover:bg-stone-800 focus:outline-none focus:ring-1 focus:ring-stone-300"
       >
         Undo
       </button>

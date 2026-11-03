@@ -27,9 +27,9 @@ export function FeedCardTerminalDrill({ cardId, sessionName }: FeedCardTerminalD
         disabled
         data-testid={`feed-card-drill-${cardId}`}
         title="No session resolved for this card — live terminal unavailable"
-        className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-on-surface-variant cursor-not-allowed"
+        className="inline-flex cursor-not-allowed items-center gap-1 font-mono text-[11px] text-on-surface-variant"
       >
-        live terminal
+        Live terminal
       </button>
     );
   }
@@ -48,9 +48,9 @@ export function FeedCardTerminalDrill({ cardId, sessionName }: FeedCardTerminalD
         data-testid={`feed-card-drill-${cardId}`}
         onClick={openPreview}
         title={`Open live terminal for ${sessionName}`}
-        className="font-mono text-[10px] uppercase tracking-wide text-on-surface hover:text-on-surface underline"
+        className="text-xs text-on-surface underline hover:text-on-surface-variant"
       >
-        live terminal
+        Live terminal
       </button>
       <TerminalPreviewPopover
         rigId={cardId}

@@ -71,7 +71,7 @@ export function HostConfigCard() {
 
   return (
     <section data-testid="dashboard-host-config" className="df-hosts">
-      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-secondary mb-2">
+      <div className="text-[11px] text-secondary mb-2">
         Hosts
       </div>
 

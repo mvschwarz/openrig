@@ -79,11 +79,11 @@ function Section({
             to={navigateTo}
             data-testid={`specs-section-link-${def.id}`}
             onClick={onNavigate}
-            className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 hover:underline"
+            className="text-[11px] text-on-surface flex-1 hover:underline"
           >
             {def.label}
           </Link>
-          <span className="font-mono text-[10px] text-on-surface-variant">
+          <span className="font-mono text-[11px] text-on-surface-variant">
             {def.loading ? "..." : def.entries.length}
           </span>
         </div>
@@ -95,10 +95,10 @@ function Section({
           className="w-full flex items-center gap-1 px-2 py-1 hover:bg-surface-low text-left"
         >
           <Chevron className="h-3 w-3 text-on-surface-variant" />
-          <span className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1">
+          <span className="text-[11px] text-on-surface flex-1">
             {def.label}
           </span>
-          <span className="font-mono text-[10px] text-on-surface-variant">
+          <span className="font-mono text-[11px] text-on-surface-variant">
             {def.loading ? "..." : def.entries.length}
           </span>
         </button>
@@ -154,7 +154,7 @@ function Section({
               </li>
             ))
           ) : (
-            <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">
+            <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">
               {def.loading ? "Loading..." : `No ${def.label.toLowerCase()} yet.`}
             </li>
           )}
@@ -266,7 +266,7 @@ export function SpecsTreeView() {
         <Link
           to="/specs"
           data-testid="specs-tree-overview-link"
-          className="block font-mono text-[11px] uppercase tracking-wide text-on-surface px-2 py-1 hover:bg-surface-low"
+          className="block text-[11px] text-on-surface px-2 py-1 hover:bg-surface-low"
         >
           {"> "}Library
         </Link>
@@ -314,11 +314,11 @@ export function SpecsTreeView() {
                   to="/specs/skills"
                   data-testid="specs-section-link-skills"
                   onClick={() => setExpanded((prev) => ({ ...prev, skills: true }))}
-                  className="font-mono text-[11px] uppercase tracking-wide text-on-surface flex-1 hover:underline"
+                  className="text-[11px] text-on-surface flex-1 hover:underline"
                 >
                   Skills
                 </Link>
-                <span className="font-mono text-[10px] text-on-surface-variant">
+                <span className="font-mono text-[11px] text-on-surface-variant">
                   {skillsLoading ? "..." : skills.length}
                 </span>
               </div>
@@ -380,14 +380,14 @@ function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onTogg
   if (loading && skills.length === 0) {
     return (
       <ul className="ml-5 border-l border-outline-variant">
-        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">Loading...</li>
+        <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">Loading...</li>
       </ul>
     );
   }
   if (skills.length === 0) {
     return (
       <ul className="ml-5 border-l border-outline-variant">
-        <li className="px-2 py-1 font-mono text-[10px] text-on-surface-variant italic">No skills yet.</li>
+        <li className="px-2 py-1 font-mono text-[11px] text-on-surface-variant italic">No skills yet.</li>
       </ul>
     );
   }
@@ -414,8 +414,8 @@ function SkillsTree({ skills, loading, activeSkillId, expandedCategories, onTogg
               className="w-full flex items-center gap-1 px-2 py-0.5 hover:bg-surface-low text-left"
             >
               <CategoryChevron className="h-3 w-3 text-on-surface-variant" />
-              <span className="font-mono text-[10px] uppercase tracking-wide text-on-surface flex-1">{category}</span>
-              <span className="font-mono text-[9px] text-on-surface-variant">{items.length}</span>
+              <span className="text-[11px] text-on-surface flex-1">{category}</span>
+              <span className="font-mono text-[11px] text-on-surface-variant">{items.length}</span>
             </button>
             {isOpen && (
               <ul className="ml-4 border-l border-outline-variant">

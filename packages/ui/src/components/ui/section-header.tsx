@@ -28,7 +28,7 @@ export function SectionHeader({
   ...rest
 }: SectionHeaderProps) {
   const cls = cn(
-    "font-mono text-[10px] uppercase tracking-[0.18em] flex items-baseline justify-between gap-2",
+    "text-sm font-semibold flex items-baseline justify-between gap-2",
     toneClass[tone],
     className,
   );

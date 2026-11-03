@@ -271,7 +271,7 @@ describe("flagship attempt-0003 Review polish", () => {
     expect(ledger.className).toContain("backdrop-blur");
     const header = within(ledger).getByTestId("ledger-header");
     expect(header.textContent).toContain("SETTLED");
-    expect(header.textContent).toContain("completion ledger");
+    expect(header.textContent).toContain("Completion ledger");
     expect(within(header).getByTestId("cut-complete").textContent).toContain("cut-gating COMPLETE");
   });
 

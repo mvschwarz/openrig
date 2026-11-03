@@ -91,7 +91,7 @@ export function RigStatusCard({
       className="bg-white border border-stone-900 hard-shadow relative"
     >
       {/* Dark header stripe — vellum grammar (matches RigCard). */}
-      <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
+      <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[11px] flex justify-between items-center">
         <span>{isKernel ? "KERNEL RIG" : `RIG: ${rigName.toUpperCase()}`}</span>
         {isKernel ? <Hexagon className="h-3 w-3" /> : <Server className="h-3 w-3" />}
       </div>
@@ -99,11 +99,11 @@ export function RigStatusCard({
       <div className="p-4 space-y-3">
         {/* Name + aggregate status badge (the badge tone CONSUMES the verdict). */}
         <div className="flex justify-between items-end border-b border-stone-100 pb-2">
-          <span className="font-headline font-bold text-lg tracking-tight uppercase">{rigName}</span>
+          <span className="font-headline font-bold text-lg tracking-tight">{rigName}</span>
           <span
             data-testid={`rig-status-badge-${rigId}`}
             className={cn(
-              "px-2 py-0.5 border font-mono text-[9px] uppercase tracking-wide inline-flex items-center gap-1.5",
+              "px-2 py-0.5 border text-[11px] inline-flex items-center gap-1.5",
               statusBadgeTone[status],
             )}
           >
@@ -113,17 +113,17 @@ export function RigStatusCard({
         </div>
 
         {/* One-line meaning of the status. */}
-        <p className="font-mono text-[9px] leading-relaxed text-secondary">{statusHelp[status]}</p>
+        <p className="font-mono text-[11px] leading-relaxed text-secondary">{statusHelp[status]}</p>
 
         {/* Telemetry grid. */}
         <div className="space-y-1">
-          <div className="flex justify-between font-mono text-[9px] text-secondary">
+          <div className="flex justify-between font-mono text-[11px] text-secondary">
             <span>SEATS RUNNING</span>
             <span data-testid={`seats-${rigId}`}>
               {seatsRunning}/{seatsTotal}
             </span>
           </div>
-          <div className="flex justify-between font-mono text-[9px] text-secondary">
+          <div className="flex justify-between font-mono text-[11px] text-secondary">
             <span>RECOVERABLE</span>
             <span>{recoverable ? "yes" : "no — needs operator"}</span>
           </div>
@@ -137,7 +137,7 @@ export function RigStatusCard({
             disabled={disabled}
             onClick={onPrimary}
             data-testid={`rig-primary-action-${rigId}`}
-            className="w-full font-mono text-[10px] tracking-widest"
+            className="w-full font-mono text-[11px]"
           >
             {status === "up" ? "RUNNING" : primaryLabel}
           </Button>
@@ -146,7 +146,7 @@ export function RigStatusCard({
         {/* Provenance — the composed source signals (composed, not inferred). */}
         <p
           data-testid={`rig-status-src-${rigId}`}
-          className="font-mono text-[8px] leading-snug text-stone-400 border-t border-stone-100 pt-2"
+          className="font-mono text-[11px] leading-snug text-stone-400 border-t border-stone-100 pt-2"
         >
           src: {src.join(" · ")}
         </p>

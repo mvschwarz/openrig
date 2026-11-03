@@ -86,19 +86,22 @@ function MissionGlance({ missionId }: { missionId: string }) {
     // Known-REMOTE only — unknown renders the loading branch (fetches stay
     // gated either way; no misleading gated flash on local cold start).
     return (
-      <div data-testid={`portfolio-glance-remote-gated-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">
+      <div
+      data-testid={`portfolio-glance-remote-gated-${missionId}`}
+      className="text-xs text-on-surface-variant"
+    >
         Local files not shown — the steering glance reads MISSION_BRIEF.md from the selected host&apos;s filesystem, which the remote read view does not browse.
       </div>
     );
   }
 
   if (!selectionKnown || mission.isLoading || brief.isLoading) {
-    return <div data-testid={`portfolio-glance-loading-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">Loading steering…</div>;
+    return <div data-testid={`portfolio-glance-loading-${missionId}`} className="text-xs text-on-surface-variant">Loading steering…</div>;
   }
 
   if (brief.unavailable || !brief.content) {
     return (
-      <div data-testid={`portfolio-glance-empty-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">
+      <div data-testid={`portfolio-glance-empty-${missionId}`} className="text-xs text-on-surface-variant">
         No MISSION_BRIEF.md at this mission root yet — the steering glance projects here once it is briefed.
       </div>
     );
@@ -108,7 +111,7 @@ function MissionGlance({ missionId }: { missionId: string }) {
   const needsYou = briefSection(brief.content, "Needs you");
   if (!building && !needsYou) {
     return (
-      <div data-testid={`portfolio-glance-thin-${missionId}`} className="font-mono text-[11px] text-on-surface-variant">
+      <div data-testid={`portfolio-glance-thin-${missionId}`} className="text-xs text-on-surface-variant">
         MISSION_BRIEF.md has no Building / Needs-you sections yet.
       </div>
     );
@@ -118,13 +121,13 @@ function MissionGlance({ missionId }: { missionId: string }) {
     <div data-testid={`portfolio-glance-${missionId}`} className="space-y-2">
       {building ? (
         <div>
-          <div className="mb-0.5 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">Building</div>
+          <div className="mb-0.5 text-xs font-medium text-on-surface-variant">Building</div>
           <MarkdownViewer content={building} hideFrontmatter hideRawToggle />
         </div>
       ) : null}
       {needsYou ? (
         <div>
-          <div className="mb-0.5 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">Needs you</div>
+          <div className="mb-0.5 text-xs font-medium text-on-surface-variant">Needs you</div>
           <MarkdownViewer content={needsYou} hideFrontmatter hideRawToggle />
         </div>
       ) : null}
@@ -142,24 +145,24 @@ function MissionRow({ mission, expanded, onToggle }: { mission: ProjectMissionGr
   const activeCount = mission.slices.filter((s) => s.status === "active").length;
 
   return (
-    <article data-testid={`portfolio-mission-${mission.id}`} className="border border-outline-variant bg-surface-lowest/35 backdrop-blur-sm">
+    <article data-testid={`portfolio-mission-${mission.id}`} className="rounded-lg border bg-surface-lowest shadow-sm">
       <div className="flex items-stretch">
         <button
           type="button"
           onClick={onToggle}
           aria-expanded={expanded}
           data-testid={`portfolio-toggle-${mission.id}`}
-          className="flex flex-1 items-start gap-3 px-4 py-3 text-left hover:bg-surface-lowest/50"
+          className="flex flex-1 items-start gap-3 px-4 py-3 text-left hover:bg-surface-low"
         >
-          <span aria-hidden className={cn("mt-0.5 font-mono text-[12px] text-on-surface-variant transition-transform", expanded && "rotate-90 text-on-surface-variant")}>
+          <span aria-hidden className={cn("mt-0.5 text-xs text-on-surface-variant transition-transform", expanded && "rotate-90")}>
             ▸
           </span>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[13px] uppercase tracking-[0.06em] text-on-surface">{mission.label}</span>
+              <span className="text-sm font-semibold text-on-surface">{mission.label}</span>
               <MissionStatusBadge status={mission.status} label={mission.statusLabel} />
             </div>
-            <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.06em] text-on-surface-variant">
+            <div className="mt-1 text-xs text-on-surface-variant tabular-nums">
               {provenCount} proven · {activeCount} active · {sliceCount} slice{sliceCount === 1 ? "" : "s"} · {formatActivity(recency)}
             </div>
           </div>
@@ -168,14 +171,14 @@ function MissionRow({ mission, expanded, onToggle }: { mission: ProjectMissionGr
           to="/project/mission/$missionId"
           params={{ missionId: mission.id }}
           data-testid={`portfolio-open-${mission.id}`}
-          className="flex shrink-0 items-center border-l border-outline-variant px-3 font-mono text-[10px] uppercase tracking-[0.08em] text-on-surface-variant hover:bg-surface-lowest/50 hover:text-on-surface"
+          className="flex shrink-0 items-center border-l border-outline-variant px-3 text-xs text-on-surface-variant hover:bg-surface-low hover:text-on-surface"
         >
           Open →
         </Link>
       </div>
       {expanded ? (
-        <div className="border-t border-outline-variant bg-surface-lowest/20 px-4 py-3">
-          <div className="mb-1 font-mono text-[9px] uppercase tracking-[0.16em] text-on-surface-variant">Steering glance · MISSION_BRIEF.md</div>
+        <div className="border-t border-outline-variant bg-surface-low px-4 py-3">
+          <div className="mb-1 text-xs font-medium text-on-surface-variant">Steering glance · MISSION_BRIEF.md</div>
           <MissionGlance missionId={mission.id} />
         </div>
       ) : null}
@@ -216,12 +219,12 @@ export function WorkspacePortfolioPanel() {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   if (isLoading) {
-    return <EmptyState label="LOADING WORKSPACE" description="Reading the mission index." variant="card" testId="portfolio-loading" />;
+    return <EmptyState label="Loading workspace" description="Reading the mission index." variant="card" testId="portfolio-loading" />;
   }
   if (data && "unavailable" in data) {
     return (
       <EmptyState
-        label="WORKSPACE INDEX UNAVAILABLE"
+        label="Workspace index unavailable"
         description={data.hint ?? "The slice index is not available from the configured workspace."}
         variant="card"
         testId="portfolio-unavailable"
@@ -231,7 +234,7 @@ export function WorkspacePortfolioPanel() {
   if (missions.length === 0) {
     return (
       <EmptyState
-        label="NO MISSIONS YET"
+        label="No missions yet"
         description="No missions are indexed in this workspace. Missions appear here as you create them; each row opens to its steering glance."
         variant="card"
         testId="portfolio-empty"
@@ -243,7 +246,7 @@ export function WorkspacePortfolioPanel() {
     <div data-testid="workspace-portfolio" className="space-y-3">
       <div className="flex items-baseline justify-between">
         <SectionHeader>Portfolio · all missions</SectionHeader>
-        <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-on-surface-variant">
+        <span className="text-xs tabular-nums text-on-surface-variant">
           {missions.length} mission{missions.length === 1 ? "" : "s"} · most recently modified
         </span>
       </div>
