@@ -703,6 +703,12 @@ export function previewBody(
   };
 }
 
+// Mark the cut inside the body so readers that discard metadata or stderr can request the complete brief.
+// Counts use code points, like the preview.
+export function previewCutMarker(qitemId: string, shownCodePoints: number, totalCodePoints: number): string {
+  return `…[cut at ${shownCodePoints} of ${totalCodePoints} chars; rig queue show ${shellQuote(qitemId)} --full]`;
+}
+
 function isRecordWithStringBody(v: unknown): v is Record<string, unknown> & { body: string } {
   return (
     typeof v === "object" &&
@@ -1675,7 +1681,10 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           ...(closingTransition === undefined ? [] : [omittedReadField("closingTransition", closingTransition)]),
         ];
         const view = readView(item, fullCommand, omitted);
-        const transformed = { ...record, body: preview, bodyBytes, bodyTruncated, readView: view };
+        const shownBody = bodyTruncated
+          ? `${preview}${previewCutMarker(qitemId, Array.from(preview).length, Array.from(item.body).length)}`
+          : preview;
+        const transformed = { ...record, body: shownBody, bodyBytes, bodyTruncated, readView: view };
         // Slice 15 P2: with output.compact on, the empty fields are left out and counted.
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);
