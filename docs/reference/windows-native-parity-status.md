@@ -1,5 +1,37 @@
 # Native Windows parity: implementation and evidence
 
+## Protected directory DACL drift during existing merges (2026-11-03)
+
+Existing Windows directory merges now compare protected source DACL entries and
+protection against the destination through ordinary no-follow directory handles.
+Dry-run reports permission drift with `p` without changing either directory ACL.
+For a real changed merge, the target identity is rechecked and a protected
+current-user-only inheritable DACL is installed and verified before copying
+children. The captured source DACL is finalized after recursion and timestamps,
+including when a child fails. Finalization refuses a changed destination inode.
+An unsuccessful finalization does not restore broader original permissions over
+partially copied content. Existing target owner/group are retained.
+
+The nine native directory ACL cases passed, including actual contents-only
+merges with and without source children, metadata-only drift, no-write preview,
+unchanged second preview, retained extra private data, private initial merge
+access, and source permissions after a retained nonempty child-directory
+conflict. An earlier test mistakenly exercised copying the source directory
+inside the destination; its failures are not evidence for a contents-only
+merge. The corrected tests exercise the intended target directly. The final
+seven-file local-copy selection passed 48 tests with six skips and no failures;
+CLI type checking and daemon compilation passed. New destination directories
+continue to check their own actual case policy after creation rather than
+assuming that a parent's case policy proves the child's behavior. These are
+scoped native checks, not fresh WSL, full-suite, package or deployment evidence.
+
+This supersedes the earlier unchanged-existing-directory limitation for
+protected source directory DACLs only. Unprotected ACL translation, source
+owner/group translation, directory-link security, regular-file metadata-only
+ACL drift and complete cross-host identity semantics remain incomplete. Native
+handle qualification does not make ancestor path changes, ACL propagation or
+already-open foreign handles atomic. Scoped tests do not establish full parity.
+
 ## Protected DACL during new directory recursion (2026-11-03)
 
 Native regression fixtures reproduced the directory counterpart of the private

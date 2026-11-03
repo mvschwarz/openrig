@@ -34,6 +34,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="copy-new")CopyNew(args[1],args[2]);
       else if(args[0]=="copy-directory-new")CopyDirectoryNew(args[1],args[2]);
       else if(args[0]=="copy-directory-finish")CopyDirectoryFinish(args[1],Console.In.ReadToEnd(),args[2],args[3],args[4]);
+      else if(args[0]=="copy-directory-merge")CopyDirectoryMerge(args[1],args[2],args[3]=="preview");
       else if(args[0]=="move-no-replace") { if(!MoveFileEx(args[1],args[2],8))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
@@ -147,6 +148,48 @@ public static class OpenRigOwnedText {
     try {var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);return bytes;}
     finally {LocalFree(descriptor);}
   }
+  static byte[] PrivateCopyDirectoryDescriptor() {
+    using(var identity=WindowsIdentity.GetCurrent()) {
+      var acl=new DirectorySecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
+      acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
+      return acl.GetSecurityDescriptorBinaryForm();
+    }
+  }
+  static void ApplyCopyDirectoryDacl(SafeFileHandle output,byte[] bytes) {
+    var expected=new RawSecurityDescriptor(bytes,0);
+    if((expected.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0)throw new InvalidOperationException("Captured directory DACL is not protected");
+    var pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
+    try {
+      bool present,defaulted;IntPtr dacl;
+      if(!GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),out present,out dacl,out defaulted))throw new InvalidOperationException("Captured directory DACL is invalid");
+      uint error=SetSecurityInfo(output,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,present?dacl:IntPtr.Zero,IntPtr.Zero);
+      if(error!=0)throw new Win32Exception((int)error);
+    } finally {pinned.Free();}
+    var actual=new RawSecurityDescriptor(CopyDirectoryDacl(output),0);
+    if((actual.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(expected.DiscretionaryAcl,actual.DiscretionaryAcl))throw new InvalidOperationException("Copied directory DACL did not persist");
+  }
+  static void CopyDirectoryMerge(string source,string destination,bool preview) {
+    byte[] snapshot;
+    using(var input=CopyDirectoryHandle(source,false))snapshot=CopyDirectoryDacl(input);
+    var expected=new RawSecurityDescriptor(snapshot,0);
+    if((expected.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0){Console.Write("-\t0");return;}
+    FileInformation identity;
+    using(var output=CopyDirectoryHandle(destination,false)) {
+      identity=CopyDirectoryInfo(output);var actual=new RawSecurityDescriptor(CopyDirectoryDacl(output),0);
+      bool changed=(actual.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(expected.DiscretionaryAcl,actual.DiscretionaryAcl);
+      if(!changed){Console.Write("-\t0");return;}
+      if(preview){Console.Write("-\t1");return;}
+    }
+    using(var output=CopyDirectoryHandle(destination,true)) {
+      var observed=CopyDirectoryInfo(output);
+      if(observed.volume!=identity.volume || observed.indexHigh!=identity.indexHigh || observed.indexLow!=identity.indexLow)throw new InvalidOperationException("Merge directory identity changed");
+      // Narrow access before copying inherited private children. If final
+      // source permissions cannot be applied, do not restore a broader ACL
+      // over partially copied content; the failure remains explicit.
+      ApplyCopyDirectoryDacl(output,PrivateCopyDirectoryDescriptor());
+    }
+    Console.Write(Convert.ToBase64String(snapshot)+"\t"+identity.volume+"\t"+identity.indexHigh+"\t"+identity.indexLow);
+  }
   static void CopyDirectoryNew(string source,string destination) {
     byte[] snapshot;
     using(var input=CopyDirectoryHandle(source,false))snapshot=CopyDirectoryDacl(input);
@@ -157,10 +200,8 @@ public static class OpenRigOwnedText {
       // Restrictive final permissions must not prevent recursion. A protected
       // source gets a current-user-only staging DACL from the creation instant;
       // its captured source DACL is restored after children and timestamps.
-      if(protectedAcl)using(var identity=WindowsIdentity.GetCurrent()) {
-        var acl=new DirectorySecurity();acl.SetOwner(identity.User);acl.SetAccessRuleProtection(true,false);
-        acl.AddAccessRule(new FileSystemAccessRule(identity.User,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
-        creationSecurity=acl.GetSecurityDescriptorBinaryForm();pinned=GCHandle.Alloc(creationSecurity,GCHandleType.Pinned);attributes.descriptor=pinned.AddrOfPinnedObject();
+      if(protectedAcl) {
+        creationSecurity=PrivateCopyDirectoryDescriptor();pinned=GCHandle.Alloc(creationSecurity,GCHandleType.Pinned);attributes.descriptor=pinned.AddrOfPinnedObject();
       }
       if(!CreateDirectory(destination,ref attributes))throw new Win32Exception(Marshal.GetLastWin32Error());
     } finally {if(pinned.IsAllocated)pinned.Free();}
@@ -174,20 +215,11 @@ public static class OpenRigOwnedText {
     }
   }
   static void CopyDirectoryFinish(string destination,string encoded,string volume,string high,string low) {
-    var bytes=Convert.FromBase64String(encoded);var expected=new RawSecurityDescriptor(bytes,0);
-    if((expected.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0)throw new InvalidOperationException("Captured directory DACL is not protected");
+    var bytes=Convert.FromBase64String(encoded);
     using(var output=CopyDirectoryHandle(destination,true)) {
       var info=CopyDirectoryInfo(output);
-      if(info.volume!=uint.Parse(volume) || info.indexHigh!=uint.Parse(high) || info.indexLow!=uint.Parse(low))throw new InvalidOperationException("Created directory identity changed");
-      var pinned=GCHandle.Alloc(bytes,GCHandleType.Pinned);
-      try {
-        bool present,defaulted;IntPtr dacl;
-        if(!GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),out present,out dacl,out defaulted))throw new InvalidOperationException("Captured directory DACL is invalid");
-        uint error=SetSecurityInfo(output,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,present?dacl:IntPtr.Zero,IntPtr.Zero);
-        if(error!=0)throw new Win32Exception((int)error);
-      } finally {pinned.Free();}
-      var actual=new RawSecurityDescriptor(CopyDirectoryDacl(output),0);
-      if((actual.ControlFlags&ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(expected.DiscretionaryAcl,actual.DiscretionaryAcl))throw new InvalidOperationException("Copied directory DACL did not persist");
+      if(info.volume!=uint.Parse(volume) || info.indexHigh!=uint.Parse(high) || info.indexLow!=uint.Parse(low))throw new InvalidOperationException("Copy directory identity changed");
+      ApplyCopyDirectoryDacl(output,bytes);
     }
   }
   static void OwnedPipe(string name) {
@@ -650,17 +682,34 @@ export function copyWindowsFileNew(source: string, destination: string): void {
 
 export interface WindowsCopiedDirectorySecurity { descriptor: string; volume: string; high: string; low: string }
 
+function copiedDirectorySecurity(output: string): WindowsCopiedDirectorySecurity | undefined {
+  const [descriptor, volume, high, low] = output.split("\t");
+  if (!descriptor || !volume || !high || !low || ![volume, high, low].every(value => /^[0-9]+$/.test(value))) throw new Error("Incomplete copied directory security identity");
+  return descriptor === "-" ? undefined : { descriptor, volume, high, low };
+}
+
 /** Create exclusively; protected source directories stay private throughout recursion. */
 export function createWindowsCopiedDirectory(source: string, destination: string): WindowsCopiedDirectorySecurity | undefined {
   const output = execFileSync(nativeHelper(), ["copy-directory-new", toNamespacedPath(source), toNamespacedPath(destination)], {
     encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
   });
-  const [descriptor, volume, high, low] = output.split("\t");
-  if (!descriptor || !volume || !high || !low || ![volume, high, low].every(value => /^[0-9]+$/.test(value))) throw new Error("Incomplete created directory security identity");
-  return descriptor === "-" ? undefined : { descriptor, volume, high, low };
+  return copiedDirectorySecurity(output);
 }
 
-/** Apply the captured protected DACL only to the created ordinary directory inode. */
+/** Preview protected ACL drift without writes, or narrow an existing merge
+ * directory before content and return its captured final DACL and identity. */
+export function prepareWindowsDirectoryMerge(source: string, destination: string, preview: boolean): { changed: boolean; security?: WindowsCopiedDirectorySecurity } {
+  const output = execFileSync(nativeHelper(), ["copy-directory-merge", toNamespacedPath(source), toNamespacedPath(destination), preview ? "preview" : "apply"], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (output === "-\t0") return { changed: false };
+  if (preview && output === "-\t1") return { changed: true };
+  const security = copiedDirectorySecurity(output);
+  if (!security) throw new Error("Incomplete merge directory security");
+  return { changed: true, security };
+}
+
+/** Apply the captured protected DACL only to the qualified ordinary directory inode. */
 export function finishWindowsCopiedDirectory(destination: string, security: WindowsCopiedDirectorySecurity): void {
   execFileSync(nativeHelper(), ["copy-directory-finish", toNamespacedPath(destination), security.volume, security.high, security.low], {
     input: security.descriptor, windowsHide: true, timeout: 10_000, stdio: ["pipe", "pipe", "pipe"],

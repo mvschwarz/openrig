@@ -1,7 +1,7 @@
 import { chmod, cp, lstat, lutimes, mkdir, readdir, readlink, realpath, rename, rmdir, stat, symlink, unlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { copyWindowsFileNew, createWindowsCopiedDirectory, finishWindowsCopiedDirectory, isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide, type WindowsCopiedDirectorySecurity } from "@openrig/daemon/windows-owned-files";
+import { copyWindowsFileNew, createWindowsCopiedDirectory, finishWindowsCopiedDirectory, isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, prepareWindowsDirectoryMerge, replaceWindowsCopiedFile, windowsNamesCollide, type WindowsCopiedDirectorySecurity } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { moveLocalEntryNoReplace } from './local-entry-move.js';
 import { readWindowsEntryTimes } from "@openrig/daemon/windows-owned-files";
@@ -88,27 +88,34 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
         await unlink(original); retainedOriginal = undefined;
         return;
       }
-      let createdSecurity: WindowsCopiedDirectorySecurity | undefined;
-      if (!destination) {
-        changes.push(`cd ${dst}`);
-        if (!plan.dryRun) {
-          if (process.platform === "win32") createdSecurity = createWindowsCopiedDirectory(src, dst);
-          else await mkdir(dst, { mode: 0o700 });
-        }
-      }
-      else {
-        const timeChanged = Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000);
-        // NTFS directory readonly is Explorer state, not directory access.
-        const modeChanged = process.platform !== "win32" && (source.mode & 0o7777) !== (destination.mode & 0o7777);
-        if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
-      }
+      // Validate merge inputs before changing an existing directory ACL. New
+      // directories must check their own actual case policy after creation.
       const names=await readdir(src);
-      if(process.platform === "win32" && windowsNamesCollide(names)){
+      const checkNames = async () => {
+        if(process.platform !== "win32" || !windowsNamesCollide(names))return;
         let selected=dst;
         while(!await stat(selected)){
           const parent=path.dirname(selected);if(parent===selected)throw new Error("Cannot establish destination case sensitivity");selected=parent;
         }
         if(!isWindowsDirectoryCaseSensitive(selected))throw new Error(`Directory contains names that collide on Windows: ${src}`);
+      };
+      if(destination || plan.dryRun)await checkNames();
+      let directorySecurity: WindowsCopiedDirectorySecurity | undefined;
+      if (!destination) {
+        changes.push(`cd ${dst}`);
+        if (!plan.dryRun) {
+          if (process.platform === "win32") directorySecurity = createWindowsCopiedDirectory(src, dst);
+          else await mkdir(dst, { mode: 0o700 });
+          await checkNames();
+        }
+      }
+      else {
+        const timeChanged = Math.floor(source.mtimeMs / 1000) !== Math.floor(destination.mtimeMs / 1000);
+        // NTFS directory readonly is Explorer state, not directory access.
+        const securityChange = process.platform === "win32" ? prepareWindowsDirectoryMerge(src, dst, plan.dryRun) : undefined;
+        directorySecurity = securityChange?.security;
+        const modeChanged = securityChange?.changed ?? ((source.mode & 0o7777) !== (destination.mode & 0o7777));
+        if (timeChanged || modeChanged) changes.push(`.d..${timeChanged ? "t" : "."}${modeChanged ? "p" : "."} ${dst}`);
       }
       const borrowedMode = !plan.dryRun && process.platform !== "win32" && destination && names.length
         && (destination.mode & 0o700) !== 0o700 ? destination.mode & 0o7777 : undefined;
@@ -124,7 +131,7 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
           if (process.platform !== "win32") await chmod(dst, source.mode & 0o7777);
           let timestampError: unknown;
           try { await utimes(dst, source.atime, source.mtime); } catch (error) { timestampError = error; }
-          try { if (createdSecurity) finishWindowsCopiedDirectory(dst, createdSecurity); }
+          try { if (directorySecurity) finishWindowsCopiedDirectory(dst, directorySecurity); }
           catch (error) { if (timestampError) throw new AggregateError([timestampError, error], `Directory timestamps and protected DACL finalization failed: ${dst}`); throw error; }
           if (timestampError) throw timestampError;
         }

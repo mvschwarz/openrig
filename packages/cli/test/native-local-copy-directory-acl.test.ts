@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { windowsAuthFile } from "../../daemon/src/domain/windows-owned-text.js";
 import { runNativeLocalCopy } from "../src/lib/native-local-copy.js";
-import { createPrivateTextFile, createWindowsCopiedDirectory, finishWindowsCopiedDirectory } from "@openrig/daemon/windows-owned-files";
+import { createPrivateTextFile, createWindowsCopiedDirectory, finishWindowsCopiedDirectory, prepareWindowsDirectoryMerge } from "@openrig/daemon/windows-owned-files";
 
 function powershell(script: string) {
   return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(`$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop';${script}`, "utf16le").toString("base64")], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
@@ -67,5 +67,47 @@ describe.skipIf(process.platform !== "win32")("new local directory protected DAC
     await rename(destination, retained);await mkdir(destination);const before = acl(destination);
     expect(() => finishWindowsCopiedDirectory(destination, security!)).toThrow();
     expect(acl(destination)).toEqual(before);
+  }));
+  it.each([false, true])("previews and repairs protected DACL drift in an existing directory (child=%s)", child => fixture(async root => {
+    const source = path.join(root, "source"), destination = path.join(root, "destination");
+    windowsAuthFile("auth-directory", source);await mkdir(destination);
+    if (child) await writeFile(path.join(source, "child"), "owned inherited private child");
+    createPrivateTextFile(path.join(destination, "extra"), "retain extra private file");
+    await utimes(source, 1500000000, 1500000000);await utimes(destination, 1500000000, 1500000000);
+    const original = acl(destination), expected = acl(source), extra = acl(path.join(destination, "extra"));
+    const plan = { src: { kind: "local" as const, path: source + path.sep }, dst: { kind: "local" as const, path: destination }, dryRun: true };
+    const preview = await runNativeLocalCopy(plan);
+    expect(preview.ok, preview.stderr).toBe(true);expect(preview.stdout).toContain(".d...p");
+    expect(acl(destination)).toEqual(original);
+    const copied = await runNativeLocalCopy({ ...plan, dryRun: false });
+    expect(copied.ok, copied.stderr).toBe(true);expect(acl(destination)).toEqual(expected);
+    if (child) {
+      expect(await readFile(path.join(destination, "child"), "utf8")).toBe("owned inherited private child");
+      expect(acl(path.join(destination, "child"))).toEqual(acl(path.join(source, "child")));
+    }
+    expect(await readFile(path.join(destination, "extra"), "utf8")).toBe("retain extra private file");
+    expect(acl(path.join(destination, "extra"))).toEqual(extra);
+    expect((await runNativeLocalCopy(plan)).stdout).toBe("");
+  }));
+  it("narrows a merge directory before children and finalizes its captured DACL", () => fixture(async root => {
+    const source = path.join(root, "source"), destination = path.join(root, "destination");
+    windowsAuthFile("auth-directory", source);await mkdir(destination);const original = acl(destination), expected = acl(source);
+    expect(prepareWindowsDirectoryMerge(source, destination, true)).toEqual({ changed: true });
+    expect(acl(destination)).toEqual(original);
+    const prepared = prepareWindowsDirectoryMerge(source, destination, false);
+    expect(prepared.changed).toBe(true);expect(prepared.security).toBeDefined();expect(acl(destination)).toEqual(expected);
+    await writeFile(path.join(destination, "child"), "owned private staging child");
+    finishWindowsCopiedDirectory(destination, prepared.security!);
+    expect(acl(destination)).toEqual(expected);
+    expect(prepareWindowsDirectoryMerge(source, destination, true)).toEqual({ changed: false });
+  }));
+  it("finalizes source permissions after a child conflict without deleting retained data", () => fixture(async root => {
+    const source = path.join(root, "source"), destination = path.join(root, "destination");
+    windowsAuthFile("auth-directory", source);await writeFile(path.join(source, "child"), "source regular file");
+    await mkdir(destination);await mkdir(path.join(destination, "child"));await writeFile(path.join(destination, "child", "witness"), "retain original data");
+    const result = await runNativeLocalCopy({ src: { kind: "local", path: source + path.sep }, dst: { kind: "local", path: destination }, dryRun: false });
+    expect(result.ok).toBe(false);expect(result.stderr).toContain("nonempty directory");
+    expect(acl(destination)).toEqual(acl(source));
+    expect(await readFile(path.join(destination, "child", "witness"), "utf8")).toBe("retain original data");
   }));
 });
