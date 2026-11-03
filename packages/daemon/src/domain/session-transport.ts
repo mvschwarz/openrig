@@ -1869,6 +1869,8 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  /** #2429: this delivery first submitted a paste OpenRig had left unsubmitted in the seat's input. */
+  ownPasteSubmitted?: true;
   checkedIdentity?: ExpectedConversation;
   identityContract?: 1;
   existingInput?: ExistingInput;

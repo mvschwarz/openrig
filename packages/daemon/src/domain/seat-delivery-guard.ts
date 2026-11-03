@@ -23,6 +23,8 @@ interface Lease {
   humanEpoch: number;
   inputFrame?: string;
   staged?: { text: string; collapsedPaste: string | null };
+  /** #2429: the delivery's own check found the paste this guard left unsubmitted, then the adapter submitted it. */
+  ownLeftover?: "recognized" | "submitted";
 }
 
 export class DeliveryGuardError extends Error {
@@ -424,9 +426,11 @@ export class SeatDeliveryGuard {
     return !!lease?.active && lease.origin === "automatic" && !this.ownsFreshInput(lease) && lease.config?.mode === "draft-aware";
   }
 
-  /** Called at the paste/key boundary after file and buffer preparation. Before a paste, `submitLeftover` lets the
-   * adapter submit a paste this guard left unsubmitted, once it's proven OpenRig's own (#2429). */
-  async beforeInput(name: string, submit = false, pasteText?: string, submitLeftover?: () => Promise<boolean>): Promise<void> {
+  /** Called at the paste/key boundary after file and buffer preparation. A paste this guard left unsubmitted (#2429) can
+   * be submitted ahead of a delivery: its own check passes `"recognize"` to find it, and then the adapter, before the
+   * paste, passes the delivery's other checks and the Enter, which run in that order. */
+  async beforeInput(name: string, submit = false, pasteText?: string,
+    leftover?: "recognize" | { checks: () => Promise<void>; enter: () => Promise<boolean> }): Promise<void> {
     if (!this.needsInputCheck(name)) return;
     const target = this.target(name);
     const lease = this.scope.getStore()!.get(target.nodeId)!;
@@ -445,13 +449,23 @@ export class SeatDeliveryGuard {
       if (submit && lease.staged) this.leftovers.set(target.nodeId, { target: lease.target, humanEpoch: lease.humanEpoch, ...lease.staged });
       throw unknown();
     }
-    if (!submit && submitLeftover && this.takeLeftover(target, input)) {
-      this.checkInput(name);
-      if (await submitLeftover()) {
-        await this.sleep(OWN_INPUT_REREAD_MS);
-        const after = await read();
-        if (!after || after.state === "unknown") throw unknown();
-        input = after;
+    if (leftover === "recognize" && !submit && this.ownsLeftover(target, input)) { lease.ownLeftover = "recognized"; return; }
+    if (typeof leftover === "object" && lease.ownLeftover === "recognized") {
+      if (!this.ownsLeftover(target, input)) this.leftovers.delete(target.nodeId);
+      else {
+        // The delivery's own checks come first; one that refuses leaves the record for the next delivery. Then the input
+        // is read again, since the checks can wait, and the Enter goes only on the same paste.
+        await leftover.checks();
+        const still = await read();
+        const owned = !!still && this.ownsLeftover(target, still);
+        this.leftovers.delete(target.nodeId);
+        if (owned && await leftover.enter()) {
+          lease.ownLeftover = "submitted";
+          await this.sleep(OWN_INPUT_REREAD_MS);
+          const after = await read();
+          if (!after || after.state === "unknown") throw unknown();
+          input = after;
+        }
       }
     }
     if (submit) {
@@ -479,12 +493,17 @@ export class SeatDeliveryGuard {
   }
 
   /** A leftover paste is OpenRig's only while it's exactly there: the same occupant, no person's input through OpenRig
-   * since, and its text or the label recorded for it. A label first seen later proves nothing (#1871). One look uses it up. */
-  private takeLeftover(target: GuardTarget, input: ComposerInput): boolean {
+   * since, and its text or the label recorded for it. A label first seen later proves nothing (#1871). */
+  private ownsLeftover(target: GuardTarget, input: ComposerInput): boolean {
     const left = this.leftovers.get(target.nodeId);
-    this.leftovers.delete(target.nodeId);
     return !!left && this.same(left.target, target) && left.humanEpoch === (this.humanEpochs.get(target.nodeId) ?? 0)
       && (composerContainsOwnedText(input, left.text) || !!left.collapsedPaste && input.cursorAtEnd && input.collapsedPaste === left.collapsedPaste);
+  }
+
+  /** Whether this delivery submitted a paste the guard had left unsubmitted, so its result can say so. */
+  submittedOwnLeftover(name: string): boolean {
+    const target = this.maybeTarget(name);
+    return !!target && this.scope.getStore()?.get(target.nodeId)?.ownLeftover === "submitted";
   }
 
   expectStagedInput(name: string, text: string): void {
