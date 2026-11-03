@@ -81,6 +81,11 @@ describe("accepted queue re-estimates (#2453)", () => {
     expect((await sweep()).findings).toContainEqual({ ...finding, action: "closed" });
     expect(repo.getById(finding.findingQitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on", sourceSession: owner.sourceSession, destinationSession: owner.destinationSession });
     expect(claim(row.qitemId)).toEqual(before);
+    vi.setSystemTime(new Date(Date.parse(later) + 1));
+    const expired = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")!;
+    expect(expired.action).toBe("created");
+    expect(expired.findingQitemId).not.toBe(finding.findingQitemId);
+    expect(claim(row.qitemId)).toEqual(before);
   });
 
   it("leaves an unrelated overdue sibling reportable", async () => {
@@ -98,5 +103,42 @@ describe("accepted queue re-estimates (#2453)", () => {
     expect(repo.getById(row.qitemId)?.closureRequiredAt).toBe(row.closureRequiredAt);
     expect(repo.findOverdue().map(r => r.qitemId)).toContain(row.qitemId);
     expect(claim(row.qitemId)).toEqual(before);
+  });
+
+  it("can add an estimate to a claim without a tier, without requiring a note or resetting its generation", async () => {
+    const row = await repo.create({ sourceSession: "coordinator@fixture", destinationSession: "worker@fixture", body: "untimed", nudge: false });
+    repo.claim({ qitemId: row.qitemId, destinationSession: row.destinationSession });
+    const before = claim(row.qitemId);
+    expect(repo.getById(row.qitemId)?.closureRequiredAt).toBeNull();
+    expect((await post(row.qitemId, { state: "in-progress", closureRequiredAt: "2026-11-03T14:00:00+01:00" })).status).toBe(200);
+    expect(repo.getById(row.qitemId)?.closureRequiredAt).toBe(later);
+    expect(claim(row.qitemId)).toEqual(before);
+    expect(repo.transitionLog.listForQitem(row.qitemId).at(-1)?.transitionNote).toContain(`(none) -> ${later}; accepted by coordinator@fixture`);
+  });
+
+  it.each(["not-a-time", null, 123])("rejects an unpersistable deadline %s without changing the row or ledger", async closureRequiredAt => {
+    const row = await overdue(), count = repo.transitionLog.listForQitem(row.qitemId).length;
+    expect((await post(row.qitemId, { closureRequiredAt, transitionNote: "request" })).status).toBe(400);
+    expect(repo.getById(row.qitemId)).toEqual(row);
+    expect(repo.transitionLog.listForQitem(row.qitemId)).toHaveLength(count);
+  });
+
+  it("does not combine re-estimation with closing work or silently set a pending row's deadline", async () => {
+    const row = await overdue();
+    expect((await post(row.qitemId, { closureRequiredAt: later, state: "done", closureReason: "no-follow-on" })).status).toBe(409);
+    expect(repo.getById(row.qitemId)).toEqual(row);
+    const pending = await repo.create({ sourceSession: "coordinator@fixture", destinationSession: "worker@fixture", body: "pending", nudge: false });
+    expect((await accept(pending.qitemId)).status).toBe(409);
+    expect(repo.getById(pending.qitemId)).toEqual(pending);
+  });
+
+  it("rolls back the deadline when its acceptance receipt cannot be appended", async () => {
+    const row = await overdue(), count = repo.transitionLog.listForQitem(row.qitemId).length;
+    const append = vi.spyOn(repo.transitionLog, "append").mockImplementationOnce(() => { throw new Error("fixture receipt unavailable"); });
+    try {
+      expect(() => repo.update({ qitemId: row.qitemId, actorSession: "coordinator@fixture", closureRequiredAt: later })).toThrow("fixture receipt unavailable");
+    } finally { append.mockRestore(); }
+    expect(repo.getById(row.qitemId)).toEqual(row);
+    expect(repo.transitionLog.listForQitem(row.qitemId)).toHaveLength(count);
   });
 });

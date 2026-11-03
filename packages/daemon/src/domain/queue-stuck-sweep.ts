@@ -933,8 +933,14 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const c of [...new Map(candidates.map(c => [c.row.qitemId, c])).values()]) {
       const dedupTag = findingDedupTag(c.kind, c.row.qitemId);
       const shared = findQueueRecovery(deps.db, c.row.qitemId);
-      if (shared) {
-        const existingTags = deps.queueRepo.getById(shared.qitemId)?.tags ?? [];
+      const sharedRow = shared ? deps.queueRepo.getById(shared.qitemId) : null;
+      // A later accepted deadline can expire after the previous finding closed.
+      // Its newer time is fresh overdue evidence; an OPEN recovery still owns custody.
+      const renewedDeadline = c.kind === "overdue-claim" && sharedRow
+        && !["pending", "in-progress", "blocked"].includes(sharedRow.state)
+        && evidenceIsNewer(c.row.closureRequiredAt ?? "", sharedRow.tsUpdated);
+      if (shared && !renewedDeadline) {
+        const existingTags = sharedRow?.tags ?? [];
         for (const tag of existingTags) if (tag.startsWith("stuck-sweep:")) liveDedupTags.add(tag);
         if (["pending", "in-progress", "blocked"].includes(shared.state)) findings.push({ kind: c.kind, qitemId: c.row.qitemId, findingQitemId: shared.qitemId, action: "refreshed" });
         continue;

@@ -1212,7 +1212,7 @@ describe("rig queue CLI", () => {
     expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toMatchObject({
       closureRequiredAt: "2026-11-04T10:00:00.000Z", transitionNote: "Coordinator accepted the revised estimate",
     });
-    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).not.toHaveProperty("state", "in-progress");
+    expect(calls.find(c => c.path === "/api/queue/qitem-estimate/update")?.body).toHaveProperty("state", undefined);
   });
 
   it("update forwards explicit reopen acknowledgment", async () => {

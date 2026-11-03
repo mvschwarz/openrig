@@ -706,6 +706,7 @@ export function queueRoutes(): Hono {
       classificationBinding?: unknown;
       state?: QueueState;
       reopen?: boolean;
+      closureRequiredAt?: string;
       transitionNote?: string;
       closureReason?: string;
       closureTarget?: string;
@@ -733,6 +734,7 @@ export function queueRoutes(): Hono {
         actorSession,
         state: body.state,
         reopen: body.reopen,
+        closureRequiredAt: body.closureRequiredAt,
         transitionNote: body.transitionNote,
         closureReason: body.closureReason,
         closureTarget: body.closureTarget,
