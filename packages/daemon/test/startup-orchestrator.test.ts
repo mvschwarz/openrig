@@ -28,6 +28,7 @@ import { CommunityHarnessRuntimeAdapter } from "../src/adapters/community-harnes
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { SEAT_SKILLS_BOOTSTRAP_LINE, describeSkillRouterFootprint, seatSkillPaths } from "../src/domain/seat-skill-storage.js";
+import { managedBlockRecords } from "../src/domain/managed-block-records.js";
 import { prepareSeatLaunchAdditions, recordConversationPrompt, systemPromptPendingNote } from "../src/domain/seat-launch-additions.js";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
@@ -516,10 +517,11 @@ describe("StartupOrchestrator", () => {
       nodeFs.writeFileSync(source, "Culture v1.\n");
     });
     afterEach(() => { nodeFs.rmSync(cwd, { recursive: true, force: true }); });
+    // Each adapter gets the records the daemon gives it, so its own guidance writes are checked and recorded.
     function realAdapter(runtime: "codex" | "claude-code", overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
       const real = runtime === "codex"
-        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [] })
-        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever } as never);
+        ? new CodexRuntimeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, listProcesses: () => [], managedBlockRecords: managedBlockRecords(db) } as never)
+        : new ClaudeCodeAdapter({ fsOps: fsOps as never, tmux: tmuxNever, managedBlockRecords: managedBlockRecords(db) } as never);
       // Codex's own projection is what queues launch developer instructions; with an empty plan it does nothing else.
       return mockAdapter({ runtime, ...(real instanceof CodexRuntimeAdapter ? { project: real.project.bind(real) as RuntimeAdapter["project"] } : {}),
         deliverStartup: real.deliverStartup.bind(real) as RuntimeAdapter["deliverStartup"], ...overrides });
@@ -573,6 +575,60 @@ describe("StartupOrchestrator", () => {
       expect((await start()).ok).toBe(true);
       expect(read(guidance)).toContain("Culture v2.");
       expect(read(guidance)).not.toContain("Culture v1.");
+    });
+
+    // Round 1: a block is recorded as it's written, so a later failure in the same start can't lose its record, and a
+    // person's edit before the retry is kept.
+    it("a block a start wrote keeps its record when a later write of that start fails, so an edit before the retry is kept", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const missing: ResolvedStartupFile = { path: "missing.md", absolutePath: nodePath.join(cwd, "spec", "missing.md"), ownerRoot: nodePath.dirname(source), deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+      const start = (startupFiles: ResolvedStartupFile[]) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: startupFiles }));
+      expect((await start([...files(), missing])).ok).toBe(false);
+      expect(read(guidance)).toContain("Culture v1.");
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start(files())).ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: two links to one guidance file name the same file, so they share its records.
+    it("two links to one guidance file share its records: a start through the second keeps an edit made after the first wrote", async () => {
+      const seed = seedSession();
+      const shared = nodePath.join(cwd, "shared", "CLAUDE.md");
+      nodeFs.mkdirSync(nodePath.dirname(shared), { recursive: true });
+      nodeFs.writeFileSync(shared, "# Shared notes\n");
+      for (const dir of ["a", "b"]) {
+        nodeFs.mkdirSync(nodePath.join(cwd, dir));
+        nodeFs.symlinkSync(shared, nodePath.join(cwd, dir, "CLAUDE.md"));
+      }
+      const adapter = realAdapter("claude-code");
+      const startIn = (dir: string) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd: nodePath.join(cwd, dir) }, resolvedStartupFiles: files() }));
+      expect((await startIn("a")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1.");
+      nodeFs.writeFileSync(shared, read(shared).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await startIn("b")).ok).toBe(true);
+      expect(read(shared)).toContain("Culture v1. PERSON EDIT");
+    });
+
+    // Round 1: a start that leaves a block as it is tells the seat in one line once it's ready. A resume types nothing: the
+    // resumed conversation gets no new turn, and the result names the block instead.
+    it("a start that keeps an edited block tells the seat in one line; a resume with the same block types nothing", async () => {
+      const seed = seedSession();
+      const guidance = nodePath.join(cwd, "CLAUDE.md");
+      const adapter = realAdapter("claude-code");
+      const start = (extra?: Partial<StartupInput>) => createOrchestrator().startNode(makeInput(seed, { adapter, binding: { ...makeBinding(), cwd }, resolvedStartupFiles: files(), ...extra }));
+      const typed = () => vi.mocked(tmux.sendText).mock.calls.filter((call) => String(call[1]).includes("OpenRig guidance note"));
+      expect((await start()).ok).toBe(true);
+      nodeFs.writeFileSync(guidance, read(guidance).replace("Culture v1.", "Culture v1. PERSON EDIT"));
+      expect((await start()).ok).toBe(true);
+      expect(typed()).toHaveLength(1);
+      expect(String(typed()[0]![1])).toContain("culture.md");
+      vi.mocked(tmux.sendText).mockClear();
+      const resumed = await start({ isRestore: true, resumeToken: "native-original" });
+      expect(resumed.ok).toBe(true);
+      expect(read(guidance)).toContain("Culture v1. PERSON EDIT");
+      expect(typed()).toHaveLength(0);
     });
   });
 

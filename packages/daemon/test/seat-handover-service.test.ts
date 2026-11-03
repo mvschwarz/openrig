@@ -304,6 +304,10 @@ describe("SeatHandoverService", () => {
       expect(atLaunch).toContain("Team culture. My own note.");
       expect(atLaunch).not.toContain("Team culture, revised.");
       expect(notes.some((note) => note.includes("guidance_block_edited") && note.includes("culture.md")), JSON.stringify(notes)).toBe(true);
+      // The successor is told too, in one line of its packet.
+      const packets = sendText.mock.calls.map((call) => String(call[1])).filter((text) => text.includes("OpenRig guidance note"));
+      expect(packets).toHaveLength(1);
+      expect(packets[0]).toContain("culture.md");
     });
 
     it("leaves a block it has no record of writing, and says it may be stale", async () => {
