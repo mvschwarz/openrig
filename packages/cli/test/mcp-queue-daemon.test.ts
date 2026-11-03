@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 // The MCP queue tools against the daemon's real queue routes, over HTTP, through the real DaemonClient: a seat
 // configured once (OPENRIG_SESSION_NAME in the MCP server's env) hands a task to another seat and reads the
 // answer back by the task's id. Nothing in the tool calls names the sender.
@@ -7,7 +7,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { serve, type ServerType } from "@hono/node-server";
+import { getRequestListener, type ServerType } from "@hono/node-server";
+import { createServer } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type Database from "better-sqlite3";
@@ -53,10 +54,8 @@ describe("MCP queue tools on the daemon's queue routes", () => {
         filesAllowlist: [{ name: "proof", canonicalPath: shared }],
       },
     });
-    server = await new Promise<ServerType>((resolve) => {
-      const s = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, () => resolve(s));
-    });
-    allowOwnedHttpFixture(server);
+    server = createServer(getRequestListener(app.fetch));
+    await listenOwnedHttpFixture(server);
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 

@@ -1,4 +1,4 @@
-import { allowOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
+import { listenOwnedHttpFixture } from "./helpers/owned-http-fixture.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -65,8 +65,7 @@ describe("bootstrap source paths respect the daemon target", () => {
       }
       res.end(JSON.stringify({ status: req.url!.endsWith("plan") ? "planned" : "completed", stages: [], errors: [], warnings: [] }));
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    allowOwnedHttpFixture(server);
+    await listenOwnedHttpFixture(server);
     const port = (server.address() as AddressInfo).port;
     daemonUrl = `http://127.0.0.1:${port}`;
     deps = {

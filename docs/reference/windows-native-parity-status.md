@@ -1,5 +1,23 @@
 # Native Windows parity: implementation and evidence
 
+## Fetch-compatible ports for three full-run fixture files (2026-11-03)
+
+The three bootstrap connection failures in the 58e1b42 full run used ports 1719,
+1720 and 1723. A direct local Node fetch check rejected each with `bad port`
+before a connection, identifying a concrete fixture issue beyond generic load
+flakiness. Bootstrap source-path, MCP queue and walk-profile fixtures now use the
+existing bounded high-port listener helper, which registers only the bound
+loopback origin. The MCP fixture keeps Hono's request listener on that owned HTTP
+server. Production fetch restrictions and daemon routing are unchanged.
+
+The three complete files passed 83 tests with two workers; CLI typecheck and
+whitespace checks passed. The bad-port explanation is directly evidenced for
+the bootstrap URLs; it is not a proven cause of the other two old assertions.
+No fresh full directory run has established that all six old failures are fixed.
+Other test fixtures still use port zero and need a bounded follow-up inventory;
+not every such site is an HTTP fetch fixture. The exhausted Windows Terminal
+discovery path remains untouched. No deployment or public push occurred.
+
 ## SFTP ownership attributes and explicit numeric write primitive (2026-11-03)
 
 The protocol client now retains the server's unsigned uid/gid attributes instead
