@@ -495,6 +495,26 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.bodies.a).toBe("one line");
   });
 
+  it("submits nothing when this send's own check goes invalid during the re-read before the leftover's Enter, and keeps the record (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false, readsAfterPrepare = 0, valid = true;
+    f.hooks.load = () => { prepared = true; };
+    const capture = vi.mocked(f.tmux.captureComposerSnapshot).getMockImplementation()!;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      // The second read after the buffer is prepared is the re-read after this send's checks passed: the caller goes away then.
+      if (prepared && ++readsAfterPrepare === 2) valid = false;
+      return capture(name);
+    });
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (!valid) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+    // The record is kept, so a later ordinary wake still submits the leftover first.
+    expect(await f.send("later-wake", "later work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual(["one line", "later work"]);
+  });
+
   it("a send that needs an idle seat leaves the leftover and is held, so it never types into the turn the leftover would start (#2429)", async () => {
     const f = fixture(); await f.enable();
     await leaveOwnPaste(f, "one line");
