@@ -27,6 +27,11 @@ const CARD_SRC = readFileSync(
   path.resolve(__dirname, "../src/components/dashboard/vellum/VellumDestinationCard.tsx"),
   "utf8",
 );
+const GLOBALS_CSS = readFileSync(path.resolve(__dirname, "../src/globals.css"), "utf8");
+const HOST_CONFIG_SRC = readFileSync(
+  path.resolve(__dirname, "../src/components/dashboard/HostConfigCard.tsx"),
+  "utf8",
+);
 
 describe("Dashboard (C10 v2 composition)", () => {
   it("Dashboard.tsx composes the v2 needs-you surface (no vellum launcher)", () => {
@@ -85,5 +90,17 @@ describe("Dashboard (C10 v2 composition)", () => {
     expect(TOP_LAYER_SRC).toContain("Field Station");
     expect(TOP_LAYER_SRC).toContain("Eyes Everywhere");
     expect(TOP_LAYER_SRC).toContain("backdrop-blur-[6px]");
+  });
+
+  // F4 (#2417): every df-hosts-* class HostConfigCard uses must be defined
+  // in the imported Clean theme (dashboard-fidelity.css is no longer loaded).
+  it("HostConfigCard's df-hosts classes are defined in globals.css", () => {
+    const used = new Set(
+      [...HOST_CONFIG_SRC.matchAll(/df-hosts[a-z-]*/g)].map((m) => m[0]),
+    );
+    expect(used.size).toBeGreaterThan(0);
+    for (const cls of used) {
+      expect(GLOBALS_CSS).toContain(`.${cls}`);
+    }
   });
 });

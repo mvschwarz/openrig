@@ -753,3 +753,58 @@ body, .dark body { background-image: none; }
 .hard-shadow, .hard-shadow-light, .dark .hard-shadow { box-shadow: var(--shadow-card); }
 .hard-shadow-hover:hover, .dark .hard-shadow-hover:hover { box-shadow: var(--shadow-card); translate: none; }
 .reg-tl, .reg-tr, .reg-bl, .reg-br, .reg-mark::before, .reg-mark::after { display: none; }
+
+/* F4 (#2417): HostConfigCard's df-hosts-* rules, moved out of the retired
+   dashboard-fidelity.css (.df-root scope, no longer imported) into the
+   active Clean theme. Scoped to the component's own .df-hosts root so no
+   .df-root ancestor is required; colors ride theme tokens. */
+.df-hosts {
+  margin: 0 0 24px;
+  max-width: 640px;
+}
+.df-hosts-own,
+.df-hosts-row,
+.df-hosts-add,
+.df-hosts-pairing,
+.df-hosts-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  padding: 4px 0;
+}
+.df-hosts-name { font-weight: 600; }
+.df-hosts-tag,
+.df-hosts-transport,
+.df-hosts-status { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.7; }
+.df-hosts-status-unreachable { color: hsl(var(--error)); opacity: 1; }
+.df-hosts-selected { font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid hsl(var(--outline-variant)); padding: 1px 6px; }
+.df-hosts-marker { width: 10px; }
+.df-hosts-id { font-size: 9px; opacity: 0.7; }
+.df-hosts-addr { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.df-hosts-list { border-top: 1px solid hsl(var(--outline-variant)); margin-top: 4px; }
+.df-hosts-row { border-bottom: 1px dashed hsl(var(--outline-variant)); }
+.df-hosts-btn {
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid hsl(var(--outline-variant));
+  padding: 2px 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.df-hosts-btn:hover { background: hsl(var(--surface-container-low)); }
+.df-hosts-input {
+  font-family: inherit;
+  font-size: 11px;
+  border: 1px solid hsl(var(--outline-variant));
+  padding: 3px 6px;
+  background: transparent;
+  flex: 1;
+  max-width: 320px;
+}
+.df-hosts-empty { font-size: 11px; opacity: 0.7; padding: 6px 0; }
+.df-hosts-banner { font-size: 10px; padding: 4px 0; opacity: 0.85; }
+.df-hosts-error { color: hsl(var(--error)); font-size: 10px; }
