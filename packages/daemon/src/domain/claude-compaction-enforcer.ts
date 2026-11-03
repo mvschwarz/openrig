@@ -1,7 +1,7 @@
 import type { TerminalActor, TerminalPolicyStore } from "./terminal-policy.js";
 import { TerminalPolicyRefusal } from "./terminal-policy.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
-import type { SessionTransport, SendResult } from "./session-transport.js";
+import { CAPTURE_READABLE_BUDGET_MS, type SessionTransport, type SendResult } from "./session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "./user-settings/settings-store.js";
 import { postCompactExtraSetting } from "./managed-restore-read-access.js";
 import * as fs from "node:fs";
@@ -1370,11 +1370,11 @@ export class ClaudeCompactionEnforcer {
     };
     const send = async () => {
       check();
-      // Both paths send only to an idle seat, with the same idle wait, bounded by the attempt's existing
-      // deadline. (The automatic path used to send into a seat still finishing its preparation turn.)
+      // Both paths send only to an idle seat. Include the readable observation's budget in the wait,
+      // still bounded by the attempt's existing deadline.
       // Idle comes from a live pane read: the newest hook can predate the rest of the preparation turn.
       return this.sessionTransport.send(input.sessionName, composed.command,
-        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
+        { openrigNotice: true, preserveInput: true, beforeWrite, ...(attempt.deadlineAt !== null ? { waitForIdleMs: Math.max(1, Math.min(this.compactSendIdleWaitMs + CAPTURE_READABLE_BUDGET_MS, this.compactDeadline(attempt)! - this.now())), readinessFromPaneOnly: true } : {}) });
     };
     let result: Pick<SendResult, "ok" | "reason" | "outcome" | "sent" | "inputPhase">;
     let guardRefused = false;
