@@ -536,7 +536,7 @@ describe("StartupOrchestrator", () => {
       const second = await start();
       expect(second.ok).toBe(true);
       expect(read(guidance)).toContain("Culture v2.");
-      expect(second.warnings?.some((w) => w.includes("guidance_block_edited")), JSON.stringify(second.warnings)).toBe(false);
+      expect((second.warnings ?? []).some((w) => w.includes("guidance_block_edited")), JSON.stringify(second.warnings)).toBe(false);
     });
 
     it.each(["codex", "claude-code"] as const)("through the real %s adapter: a start keeps a block a person edited since the last start, and names it", async (runtime) => {
