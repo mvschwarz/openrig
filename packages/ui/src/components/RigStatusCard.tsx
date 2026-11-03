@@ -88,7 +88,7 @@ export function RigStatusCard({
     <div
       data-testid={testId ?? `rig-status-card-${rigId}`}
       data-status={status}
-      className="bg-white border border-stone-900 hard-shadow relative"
+      className="bg-surface-lowest border border-stone-900 dark:border-outline hard-shadow relative"
     >
       {/* Dark header stripe — vellum grammar (matches RigCard). */}
       <div className="bg-stone-900 text-white px-4 py-1.5 font-mono text-[10px] flex justify-between items-center">
@@ -98,7 +98,7 @@ export function RigStatusCard({
 
       <div className="p-4 space-y-3">
         {/* Name + aggregate status badge (the badge tone CONSUMES the verdict). */}
-        <div className="flex justify-between items-end border-b border-stone-100 pb-2">
+        <div className="flex justify-between items-end border-b border-stone-100 dark:border-outline-variant pb-2">
           <span className="font-headline font-bold text-lg tracking-tight uppercase">{rigName}</span>
           <span
             data-testid={`rig-status-badge-${rigId}`}
@@ -146,7 +146,7 @@ export function RigStatusCard({
         {/* Provenance — the composed source signals (composed, not inferred). */}
         <p
           data-testid={`rig-status-src-${rigId}`}
-          className="font-mono text-[8px] leading-snug text-stone-400 border-t border-stone-100 pt-2"
+          className="font-mono text-[8px] leading-snug text-stone-400 border-t border-stone-100 dark:border-outline-variant pt-2"
         >
           src: {src.join(" · ")}
         </p>
