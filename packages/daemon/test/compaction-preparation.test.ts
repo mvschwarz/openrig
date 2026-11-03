@@ -341,6 +341,34 @@ function routeFixture(f:ReturnType<typeof fixture>, cwd?:string){
  return ()=>app.request('/api/compaction/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:seat})});
 }
 
+for(const map of ['complete','removed'])it(`manual route classifies an idle-wait timeout with a ${map} map`,async()=>{
+ const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('busy');});
+ // The transport reports its own elapsed wait before the enforcer's clock observes the deadline.
+ const idle=vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(_session,remaining)=>{
+  expect(remaining).toBeGreaterThan(0);
+  const a=f.e.getPreparationState(seat)!;
+  if(map==='removed')for(const path of [a.mapPath,a.mapPath+'.tmp']){
+   rmSync(path,{force:true});expect(existsSync(path)).toBe(false);
+  }
+  return {ok:false,reason:'wait_for_idle_timeout',waitedMs:remaining,attempts:1} as any;
+ });
+ const response=await routeFixture(f)();const body=await response.json();
+ expect(response.status).toBe(409);
+ expect(body.reason).toBe(map==='complete'?'map_complete_seat_never_idle':'preparation_incomplete');
+ expect(body.error).toContain(map==='complete'?'map complete, seat never idle':'restore map was not completed');
+ expect(body.preparation).toMatchObject({delivery:'delivered',compact:'not_sent'});
+ expect(f.e.getPreparationState(seat)).toMatchObject({status:'stopped',reason:body.reason});
+ expect(idle).toHaveBeenCalledTimes(1);expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
+it('manual route preserves a non-timeout idle-wait refusal after map completion',async()=>{
+ const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('busy');});
+ vi.spyOn(f.transport,'waitUntilIdle').mockResolvedValueOnce({ok:false,reason:'transport_unavailable'} as any);
+ const response=await routeFixture(f)();const body=await response.json();
+ expect(response.status).toBe(409);expect(body.reason).toBe('transport_unavailable');
+ expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
 it('preparation receipt: unresolved permission at deadline discloses the delivered prep and exact attempt',async()=>{
  const f=fixture();f.onSleep(async()=>{stageMap(f);f.activity('needs_input');});
  const res=await routeFixture(f)();const body=await res.json();
