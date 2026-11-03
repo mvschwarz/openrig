@@ -93,7 +93,7 @@ export function Sidebar({
       data-testid="app-rail"
       aria-label="Primary navigation"
       data-collapsed={effectiveCollapsed}
-      style={{ width: effectiveCollapsed ? "var(--sidebar-width-collapsed)" : "var(--sidebar-width)" }}
+      style={isMobileTray ? undefined : { width: effectiveCollapsed ? "var(--sidebar-width-collapsed)" : "var(--sidebar-width)" }}
       className={cn(
         "flex shrink-0 flex-col bg-surface-low border-r",
         isMobileTray && "w-full",
@@ -126,7 +126,7 @@ export function Sidebar({
       </div>
 
       {/* Primary action + search */}
-      <div className={cn("flex flex-col gap-1", effectiveCollapsed ? "items-center px-0" : "px-2")}>
+      <div className={cn("flex flex-col gap-1", effectiveCollapsed ? "items-center px-0" : "px-2", isMobileTray && "pt-2")}>
         <NewRigButton collapsed={effectiveCollapsed} />
         <SearchButton collapsed={effectiveCollapsed} />
       </div>

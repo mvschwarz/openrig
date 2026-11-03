@@ -255,6 +255,18 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(rail.className).not.toMatch(/\boverflow-x-auto\b/);
     });
 
+    // The mobile tray's sidebar must fill the tray. A fixed desktop width
+    // (var(--sidebar-width)) left an empty strip beside it that read as a
+    // second, older sidebar underneath.
+    it("mobile tray sidebar fills the tray (no fixed desktop width)", async () => {
+      const { container } = await renderAt("/", { innerWidth: 375 });
+      const tray = container.querySelector("[data-testid='mobile-rail-tray']") as HTMLElement;
+      const rail = tray.querySelector("[data-testid='app-rail']") as HTMLElement;
+      expect(rail.style.width).toBe("");
+      expect(rail.className).toMatch(/\bw-full\b/);
+      expect(tray.className).toContain("top-12");
+    });
+
     // C06 sidebar: nav items keep a >=44px tap target on mobile
     // (`h-11`) and a compact 36px row at lg: (`lg:h-9`). The icon is
     // centered when the sidebar is collapsed, so no width assertion.
