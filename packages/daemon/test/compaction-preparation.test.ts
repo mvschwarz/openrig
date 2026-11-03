@@ -6,7 +6,7 @@ import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync,
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, COMPACTION_RECORD_FILE, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
-import {SessionTransport} from '../src/domain/session-transport.js';
+import {SessionTransport, CAPTURE_READABLE_BUDGET_MS} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
 import {ContextMonitor} from '../src/domain/context-monitor.js';
@@ -851,13 +851,19 @@ for (const end of ['cancel', 'disable', 'replacement'] as const) it(`automatic: 
 
 
 for(const fresh of [false,null,"below","high"] as const)it(`an armed completed map reaches the next idle boundary with usage freshness ${fresh}`,async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);stageMap(f);
+ const f=fixture();
+ // The idle-wait deadline and injected sleep must advance on the same clock.
+ vi.spyOn(Date,'now').mockImplementation(()=>f.clock());
+ await f.e.maybeAutoCompact(input);stageMap(f);
  f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);f.activity('running');
  const row={node_id:'node-one',session_id:1,session_name:seat,runtime:'claude-code',cwd:null,startup_status:'ready'};
  const db={prepare:()=>({all:()=>[row]})};
  const store={readAndNormalize:()=>fresh===null?null:{availability:'known',fresh:typeof fresh==='string',usedPercentage:fresh==='below'?20:90},persist:()=>{}};
  const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
+ const beforeBusyPoll=f.clock();
  await monitor.pollOnce();expect(compacts(f)).toHaveLength(0);
+ expect(f.clock()-beforeBusyPoll).toBeLessThanOrEqual(1_000+CAPTURE_READABLE_BUDGET_MS);
+ expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
  f.activity('idle');await monitor.pollOnce();
  expect(compacts(f)).toHaveLength(fresh==='below'?0:1);expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);
  if(fresh==='below')expect(f.e.getPreparationState(seat)?.status).toBe('waiting');
