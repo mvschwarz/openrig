@@ -412,9 +412,11 @@ export class StartupOrchestrator {
     // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
     // older snapshot), so the adapter isn't asked again and an existing seat isn't silently repointed.
     if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
-      const chosen = input.adapter.guidanceFileFor(input.binding);
+      const answer = input.adapter.guidanceFileFor(input.binding, { resuming: Boolean(input.resumeToken || input.forkSource) });
+      // Only a real lookup waits: a synchronous answer keeps this start's ordering exactly as before.
+      const chosen = answer instanceof Promise ? await answer : answer;
       if (chosen.note) warnings.push(chosen.note);
-      input = { ...input, binding: { ...input.binding, guidanceFile: chosen.file } };
+      input = { ...input, binding: { ...input.binding, guidanceFile: chosen.file, ...(chosen.launchInstructions ? { guidanceLaunchInstructions: true } : {}) } };
     }
 
     // 1. Mark pending
