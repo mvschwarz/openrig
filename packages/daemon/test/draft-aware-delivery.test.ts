@@ -432,6 +432,65 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.bodies.a).toBe("incoming message");
   });
 
+  // #2429: Claude may still be redrawing a fresh paste when the guard reads before Enter; this frame has no composer yet.
+  const redrawing = (): ComposerSnapshot => ({ screen: "Ready\n❯ [Pasted text #1 +2 lines]\n", cursor: { x: 27, y: 1, width: 240, height: 60 }, inMode: false });
+
+  it("re-reads its own paste once when it can't read the input before Enter, then submits it (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line";
+    let entering = false, readsBeforeEnter = 0;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text && entering && readsBeforeEnter++ === 0) return redrawing();
+      return body == null ? null : frame(body === text ? "[Pasted text #1 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200) entering = true; };
+    expect(await f.send("redrawn-paste", text, { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(readsBeforeEnter).toBe(2);
+    expect(f.submissions).toEqual([text]);
+  });
+
+  it.each([["its recorded collapsed label", "first line\nsecond line\nlast line"], ["its visible text", "one line"]])(
+    "submits its own unreadable leftover, shown as %s, before the next wake (#2429)", async (_shown, text) => {
+    const f = fixture(); await f.enable();
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text.includes("\n") ? "[Pasted text #1 +2 lines]" : text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    const first = await f.send("unreadable-paste", text, { verify: false });
+    expect(first).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    expect(first.error).toContain("Enter was not sent");
+    unreadable = false;
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ ok: true, sent: true });
+    expect(f.submissions).toEqual([text, "next work"]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toHaveLength(2);
+    expect(f.bodies.a).toBe("");
+  });
+
+  it.each(["a different label", "human input", "an unrecorded label"])("keeps the next wake held when its unreadable leftover isn't provably its own: %s (#2429)", async condition => {
+    const f = fixture(); await f.enable();
+    const text = "first line\nsecond line\nlast line", other = "other first\nother second\nother last";
+    let unreadable = condition === "an unrecorded label";
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame("[Pasted text #1 +2 lines]");
+      return body == null ? null : frame(body === other ? "[Pasted text #2 +2 lines]" : body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+    // A person attached directly replaces the paste, or types through OpenRig.
+    if (condition === "a different label") f.bodies.a = other;
+    if (condition === "human input") await f.guard.humanInput("worker@test", async () => {});
+    expect(await f.send("next-wake", "next work", { verify: false })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.submissions).toEqual([]);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe(condition === "a different label" ? other : text);
+  });
+
   it("tries a current request after the person's draft clears, without replaying a saved prerequisite", async () => {
     const f = fixture(); await f.enable(); f.bodies.a = "a person's draft";
     const oldPrerequisite = vi.fn();
