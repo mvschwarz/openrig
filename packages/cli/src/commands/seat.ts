@@ -167,10 +167,18 @@ interface SeatHandoverMutationResult {
   restorePacket?: { status: "unconfirmed"; reason: string };
   sideEffects: {
     departingSessionKilled: false;
+    /** Absent from an older daemon, whose receipt reported both side effects as a fixed false. */
+    departingProcess?: "ended-graceful" | "ended-forced" | "not-touched";
     startupContextDelivered: boolean;
-    provenanceRecordWritten: false;
+    provenanceRecordWritten: boolean;
   };
 }
+
+const DEPARTING_PROCESS_LINES = {
+  "ended-graceful": "The previous occupant's process exited on TERM; its tmux session was kept, and the successor runs in the same pane.",
+  "ended-forced": "The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.",
+  "not-touched": "The previous occupant's process wasn't touched: the successor was an existing session.",
+} as const;
 
 interface SeatSwitchClientResponse {
   seat_ref: string;
@@ -325,6 +333,13 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   console.log(`Current occupant: ${result.currentOccupant}`);
   console.log(`Handover result: ${display(result.currentStatus.handoverResult)}`);
   console.log("Seat binding and inventory provenance were updated.");
+  // An older daemon reports both side effects as a fixed false: say nothing rather than misreport them.
+  if (result.sideEffects.departingProcess) {
+    console.log(result.sideEffects.provenanceRecordWritten
+      ? "The handover's lineage record (occupant tenure) was written."
+      : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
+    console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
+  }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.
   if (result.sourceOutcome?.mode === "fork") {
     console.log(`Native fork of ${result.sourceOutcome.forkedFrom}: the successor carries the incumbent conversation from its first byte.`);
@@ -349,18 +364,18 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
       // live successor agent.
       console.log("The captured startup context (restore packet) was delivered to the successor.");
     }
-    console.log("No conversation continuity, provenance markdown, or session stop was performed.");
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.restorePacket?.status === "unconfirmed") {
     // The packet was pasted and Enter pressed: the successor may already be working on it, so don't send it again.
     console.log(`The captured startup context (restore packet) was sent to the successor, but its submission is unconfirmed: ${result.restorePacket.reason}.`);
     console.log("Check the successor's screen before sending the context again; it may already be working on it.");
-    console.log("No conversation continuity, provenance markdown, or session stop was performed.");
+    console.log("No conversation continuity was carried: the successor started a fresh conversation.");
   } else if (result.source.mode === "fork") {
     console.log("No packet delivery: fork context rides the native conversation itself.");
   } else {
     // discovered handover: the operator-prepared successor is already live, so no
     // separate context delivery is performed.
-    console.log("No conversation continuity, startup context delivery, provenance markdown, or session stop was performed.");
+    console.log("OpenRig delivered no startup context and carried no conversation: the discovered successor was already running.");
   }
 }
 
