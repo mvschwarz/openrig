@@ -1,5 +1,31 @@
 # Native Windows parity: implementation and evidence
 
+## Explicit legacy physical-source migration and stock format qualification (2026-11-03)
+
+Rename intents can now persist an explicit `sourceLegacy` flag for a qualified
+pre-codec prefix-like session. Preparation accepts that physical source only when
+its encoded alternative is positively absent and its unmarked occupant matches
+the requested node/generation and server identity. Recovery retains that choice
+instead of resolving the logical name again. The destination uses the codec;
+interrupted marker installation is repaired on the same recorded occupant.
+Simultaneous legacy/encoded sources, a legacy destination alias, foreign markers,
+unknown alias observations and malformed legacy flags are refused. Alias checks
+run again before reporting completion. This supersedes the preceding legacy
+migration implementation gap, but does not prove real migration acceptance.
+
+Seven selected files passed 167 tests with five skips; daemon build and whitespace
+checks passed. Controlled production-adapter tests cover legacy-source rename
+with a lost reply, marker repair and no replay. Journal tests preserve the flag
+and reject it for nonlegacy source names.
+
+A separate owned ordinary-name session on stock psmux 3.4.0 qualified the actual
+PID, session ID/creation time, environment, absent marker, sole window/pane and
+live pane format fields, and a benign if-shell predicate combining all of them.
+The session was stopped; its private fixture directory was retained. This probe
+performed no rename, mapped-name operation, provider call or user-team operation.
+Real legacy/mapped exchange and attached-client acceptance remain unproven; the
+exhausted mapped-name fixture was not retried. No deployment or public push occurred.
+
 ## Encoded runtime-exchange names and attached-client mapping (2026-11-03)
 
 The planner now validates names through the native codec and checks distinct

@@ -1,4 +1,4 @@
-import { bindNativeSessionName } from "./terminal/native-session-name.js";
+import { bindNativeSessionName, nativeSessionNameMayBeLegacy, type NativeSessionNameBinding } from "./terminal/native-session-name.js";
 import type { NativeExchangeRenameIntent } from "./native-runtime-switch-journal.js";
 
 export interface NativePhysicalSession {
@@ -31,12 +31,30 @@ export class NativeNameTransition {
       && session.sessionCreated === intent.sessionCreated;
   }
   private marker(value: string | undefined): string | undefined { return value === "" ? undefined : value; }
+  private async exclusive(from: NativeSessionNameBinding, to: NativeSessionNameBinding, legacy: boolean): Promise<void> {
+    const alternatives = [
+      ...(legacy ? [bindNativeSessionName(from.logical).physical]
+        : nativeSessionNameMayBeLegacy(from.logical) ? [from.logical] : []),
+      ...(nativeSessionNameMayBeLegacy(to.logical) ? [to.logical] : []),
+    ];
+    for (const physical of alternatives) {
+      if ((await this.io.observe(physical)).state !== "absent") throw new Error("Native name transition has an ambiguous legacy alias");
+    }
+    this.lease();
+  }
 
   async prepare(from: string, to: string, generation: string): Promise<NativeExchangeRenameIntent> {
     this.lease();
-    const sourceName = bindNativeSessionName(from), destinationName = bindNativeSessionName(to);
+    let sourceName = bindNativeSessionName(from);
+    const destinationName = bindNativeSessionName(to);
+    let source = await this.io.observe(sourceName.physical), sourceLegacy = false;
+    if (source.state === "absent" && nativeSessionNameMayBeLegacy(from)) {
+      source = await this.io.observe(from);
+      sourceName = {logical:from,physical:from}; sourceLegacy = true;
+    }
     if (sourceName.physical === destinationName.physical) throw new Error("Native name transition addresses overlap");
-    const source = await this.io.observe(sourceName.physical), destination = await this.io.observe(destinationName.physical);
+    await this.exclusive(sourceName,destinationName,sourceLegacy);
+    const destination = await this.io.observe(destinationName.physical);
     this.lease();
     if (source.state !== "present" || destination.state !== "absent") throw new Error("Native name transition slots are not qualified");
     const session = source.session;
@@ -45,7 +63,8 @@ export class NativeNameTransition {
       throw new Error("Native name transition source occupant changed or identity is not qualified");
     }
     return { schema: "openrig.native-runtime-rename/v1", from, to, generation,
-      serverPid: session.serverPid, sessionId: session.sessionId, sessionCreated: session.sessionCreated };
+      serverPid: session.serverPid, sessionId: session.sessionId, sessionCreated: session.sessionCreated,
+      ...(sourceLegacy ? {sourceLegacy:true as const} : {}) };
   }
 
   /** Reobserve after every attempted operation; callers retain intent on any exception. */
@@ -53,11 +72,14 @@ export class NativeNameTransition {
     this.lease();
     if (intent.schema !== "openrig.native-runtime-rename/v1"
       || !/^[1-9]\d*$/.test(intent.serverPid) || !/^\$\d+$/.test(intent.sessionId)
-      || !/^\d+$/.test(intent.sessionCreated) || !intent.generation || !this.nodeId) {
+      || !/^\d+$/.test(intent.sessionCreated) || !intent.generation || !this.nodeId
+      || intent.sourceLegacy !== undefined && (intent.sourceLegacy !== true || !nativeSessionNameMayBeLegacy(intent.from))) {
       throw new Error("Invalid native name transition intent");
     }
-    const from = bindNativeSessionName(intent.from), to = bindNativeSessionName(intent.to);
+    const from = intent.sourceLegacy ? {logical:intent.from,physical:intent.from,marker:undefined} : bindNativeSessionName(intent.from);
+    const to = bindNativeSessionName(intent.to);
     if (intent.schema !== "openrig.native-runtime-rename/v1" || from.physical === to.physical) throw new Error("Invalid native name transition intent");
+    await this.exclusive(from,to,!!intent.sourceLegacy);
     let source = await this.io.observe(from.physical), destination = await this.io.observe(to.physical);
     this.lease();
     if (source.state === "present" && destination.state === "absent") {
@@ -77,5 +99,6 @@ export class NativeNameTransition {
     this.lease();
     if (old.state !== "absent" || verified.state !== "present" || !this.same(verified.session, intent)
       || this.marker(verified.session.marker) !== to.marker) throw new Error("Native rename marker repair is unconfirmed");
+    await this.exclusive(from,to,!!intent.sourceLegacy);
   }
 }

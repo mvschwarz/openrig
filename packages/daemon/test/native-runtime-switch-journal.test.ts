@@ -130,4 +130,17 @@ describe("durable native runtime exchange",()=>{
       journal.prepare(mapped,"forward");expect(journal.read()?.identity).toEqual(mapped);
     }finally{db.close();}
   });
+  it("retains an explicit legacy physical-source flag and rejects it for ordinary names",()=>{
+    const db=new Database(":memory:");seed(db);
+    try{
+      const mapped={...identity,canonical:"openrig-native-v1-legacy"};
+      db.prepare("UPDATE seat_runtime_switches SET canonical_session = ? WHERE id = ?").run(mapped.canonical,"switch");
+      const journal=new NativeRuntimeSwitchJournal(db,"switch","node");journal.prepare(mapped,"forward");
+      const intent:NativeExchangeRenameIntent={schema:"openrig.native-runtime-rename/v1",from:mapped.canonical,to:mapped.parking,generation:"old",serverPid:"123",sessionId:"$0",sessionCreated:"456",sourceLegacy:true};
+      journal.setRenameIntent(intent);expect(new NativeRuntimeSwitchJournal(db,"switch","node").read()?.renameIntent).toEqual(intent);
+      journal.clearRenameIntent(intent);
+      expect(()=>journal.setRenameIntent({...intent,from:mapped.staging})).toThrow("custody");
+      expect(()=>journal.setRenameIntent({...intent,sourceLegacy:false} as unknown as NativeExchangeRenameIntent)).toThrow("custody");
+    }finally{db.close();}
+  });
 });

@@ -1224,13 +1224,6 @@ export class TmuxAdapter {
         ? `set-option -u -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION}`
         : `set-option -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION} ${shellQuote(marker)}`),
     });
-    const rejectLegacyCollision = async (from: string,to: string) => {
-      for (const logical of [from,to]) {
-        if (bindNativeSessionName(logical).marker && await this.nativeLegacyName(logical)) {
-          throw new Error("Native exchange legacy session needs an explicit physical-name migration");
-        }
-      }
-    };
     const observe = async (session: string): Promise<NativeExchangeSlot> => {
       try {
         const probe = await this.probeSession(session);
@@ -1251,7 +1244,6 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) {
           throw new Error("Native exchange preparation is outside its custody");
         }
-        await rejectLegacyCollision(from,to);
         return transition.prepare(from,to,generation);
       },
       resumeRename: async intent => {
@@ -1260,7 +1252,6 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(intent.generation)) {
           throw new Error("Native exchange recovery intent is outside its custody");
         }
-        await rejectLegacyCollision(intent.from,intent.to);
         await transition.resume(intent);
       },
       observe: async () => ({canonical:await observe(identity.canonical),staging:await observe(identity.staging),parking:await observe(identity.parking)}),
@@ -1270,12 +1261,10 @@ export class TmuxAdapter {
           || ![identity.predecessorGeneration,identity.successorGeneration].includes(generation)) throw new Error("Native exchange rename is outside its custody");
         if (intent) {
           if (intent.from !== from || intent.to !== to || intent.generation !== generation) throw new Error("Native exchange rename intent differs from its command");
-          await rejectLegacyCollision(from,to);
           await transition.resume(intent);
           return;
         }
         if ((await this.probeSession(to)).state !== "absent") throw new Error("Native exchange destination is not proven absent");
-        await rejectLegacyCollision(from,to);
         await transition.resume(await transition.prepare(from,to,generation));
       },
     };

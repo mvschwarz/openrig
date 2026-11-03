@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { nextNativeRuntimeExchangeStep, type NativeExchangeIdentity, type NativeExchangeSlot } from "./native-runtime-switch-exchange.js";
+import { nativeSessionNameMayBeLegacy } from "./terminal/native-session-name.js";
 
 export interface NativeExchangeRecord {
   schema: "openrig.native-runtime-exchange/v1";
@@ -17,10 +18,13 @@ export interface NativeExchangeRenameIntent {
   serverPid: string;
   sessionId: string;
   sessionCreated: string;
+  /** Qualified pre-codec physical source; the destination always uses the codec. */
+  sourceLegacy?: true;
 }
 
 function validIntent(identity: NativeExchangeIdentity, intent: NativeExchangeRenameIntent): boolean {
   return intent?.schema === "openrig.native-runtime-rename/v1"
+    && (intent.sourceLegacy === undefined || intent.sourceLegacy === true && nativeSessionNameMayBeLegacy(intent.from))
     && [identity.canonical, identity.staging, identity.parking].includes(intent.from)
     && [identity.canonical, identity.staging, identity.parking].includes(intent.to) && intent.from !== intent.to
     && [identity.predecessorGeneration, identity.successorGeneration].includes(intent.generation)
