@@ -118,6 +118,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "topology.root",
       "context.root",
       "context.system_world",
+      "specs.builtins_visible",
       "skills.root",
       "skills.router_line.enabled",
       "onboarding.default_pack.enabled",
