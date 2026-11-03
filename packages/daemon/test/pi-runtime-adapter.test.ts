@@ -819,3 +819,16 @@ describe("a Pi seat's managed guidance goes to its own agent folder (#875)", () 
     expect(omp.guidanceFileFor(seat)).toEqual({ file: null });
   });
 });
+
+// #2432 X-F2: a restore's recorded agent file that became a link after its launch gets nothing written through it.
+describe("a Pi seat's recorded guidance file that has since become a link (#2432)", () => {
+  const AGENT_FILE = nodePath.join(piSeatPaths(STATE_ROOT, SESSION).agentDir, "AGENTS.md");
+  it("writes no guidance through it or into the repository AGENTS.md, and says why", async () => {
+    const fs = { ...memFs({ "/spec/SOP.md": "How work flows here." }), linkInfo: (p: string) => (p === AGENT_FILE ? { link: true, nlink: 1 } : null) };
+    const result = await adapterWith(fs, mockTmux()).deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"] }], { tmuxSession: SESSION, cwd: "/work", guidanceFile: AGENT_FILE } as never);
+    expect(AGENT_FILE in fs.files).toBe(false);
+    expect("/work/AGENTS.md" in fs.files).toBe(false);
+    expect(result.warnings?.join("\n")).toMatch(/now a link/);
+  });
+});

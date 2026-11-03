@@ -33,6 +33,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { getNodeDetail } from "../src/domain/node-inventory.js";
 
 const TOKEN = "tok-lead";
 
@@ -319,6 +320,48 @@ describe("a seat's guidance across rig down then rig up --existing (exact resume
     expect(result.nodes[0]?.guidanceGaps).toBeUndefined();
     // The restore hands the launch's recorded choice to the adapter, so a replayed start would use the same file.
     expect((adapter.project.mock.calls[0] as unknown[] | undefined)?.[1]).toMatchObject({ guidanceFile });
+  });
+
+  // #2432 X-F1: an older snapshot (no recorded choice) restored exactly after a newer launch recorded the agent file. The
+  // seat resumes on the repository file, so the record must say so: inventory names it, and another rig's down in the same
+  // cwd leaves the guidance this live seat reads.
+  it("an older snapshot restored exactly after a newer recorded launch records the repository file it resumes on", async () => {
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi" });
+    const nodeId = (db.prepare("SELECT id FROM nodes WHERE rig_id = ?").get(rigId) as { id: string }).id;
+    const newer = path.join(tmp, "pi-state", "orch-lead@poc", "agent", "AGENTS.md");
+    const recorded = () => (db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id = ?").get(nodeId) as { guidance_file: string | null }).guidance_file;
+    await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      // After the snapshot was taken, a newer fresh launch recorded the seat's agent file.
+      betweenDownAndUp: () => { db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(newer, nodeId); } });
+    expect(recorded(), "the record names the file the resumed seat uses").toBeNull();
+    expect(getNodeDetail(db, rigId, "orch.lead")!.installedResources.find((r) => r.id === "lead-role")).toMatchObject({ targetPath: guidanceFile });
+    // Another rig in the same cwd goes down: the resumed seat's live repository guidance stays.
+    const other = rigRepo.createRig("other");
+    const peer = rigRepo.addNode(other.id, "peer", { role: "peer", runtime: "codex", cwd });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(peer.id, "r02-peer").id, "running");
+    await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture, eventBus }).teardown(other.id);
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toContain(MANAGED_BLOCK_START("lead-role"));
+    expect(fs.readFileSync(guidanceFile, "utf-8")).toContain(MANAGED_BLOCK_START("SOP.md"));
+  });
+
+  // #2432 X-F2: after the launch recorded the agent file, the person links it to a shared Pi home's file. The exact resume
+  // writes nothing through that link: the conversation resumes, the gap is reported, and nothing falls back to the
+  // repository file.
+  it("a recorded agent file that became a link after its launch gets nothing put back through it, and the gap is reported", async () => {
+    const tracked = "# Project guidance (tracked in git)\n";
+    const repoFile = path.join(cwd, "AGENTS.md");
+    fs.writeFileSync(repoFile, tracked);
+    const { rigId, guidanceFile } = launchedSeat({ podAware: true, runtime: "pi", piAgentFile: true });
+    const shared = path.join(tmp, "shared-pi-home", "AGENTS.md");
+    fs.mkdirSync(path.dirname(shared), { recursive: true });
+    fs.writeFileSync(shared, "The person's own Pi home guidance\n");
+    const { result } = await downThenUpExisting(rigId, guidanceFile, { podAware: true, runtime: "pi",
+      betweenDownAndUp: () => { fs.rmSync(guidanceFile, { force: true }); fs.symlinkSync(shared, guidanceFile); } });
+    expect(fs.readFileSync(shared, "utf-8"), "the shared file").toBe("The person's own Pi home guidance\n");
+    expect(fs.readFileSync(repoFile, "utf-8"), "no fallback into the tracked file").toBe(tracked);
+    expect(result.nodes[0]?.status).toBe("resumed");
+    expect(result.nodes[0]?.guidanceGaps).toEqual(expect.arrayContaining(["lead-role", "SOP.md"]));
+    expect(result.rigResult).not.toBe("fully_restored");
   });
 
   it("a Pi seat restored from a snapshot with no recorded choice stays on the repository AGENTS.md (no silent repoint)", async () => {
