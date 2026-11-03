@@ -221,7 +221,7 @@ interface SeatHandoverServiceDeps {
    * chain. Wired in production to seat-recap-store (listRecapChain) + the
    * topology.root seat layout.
    */
-  rebuildPrimingResolver?: (seatRef: string) => { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string };
+  rebuildPrimingResolver?: (seatRef: string, logicalId: string) => { artifacts: Array<{ address: string; label: string }> } | { emptyReason: string };
   /** OPR.0.5.5.5 — filesystem existence check for declared rebuild artifacts
    *  (the session-source-rebuild-resolver seam). Default: node:fs existsSync;
    *  tests inject. */
@@ -638,7 +638,7 @@ export class SeatHandoverService {
       // durable chain — the live incumbent's context is deliberately not
       // trusted. The executed set, its gaps, and an empty chain are all named.
       const chain = this.rebuildPrimingResolver
-        ? this.rebuildPrimingResolver(input.seatRef)
+        ? this.rebuildPrimingResolver(input.seatRef, statusResult.status.logical_id)
         : { emptyReason: "no rebuild priming resolver wired on this daemon" };
       let primedArtifacts: Array<{ address: string; label: string }> = [];
       let gaps: string[] = [];

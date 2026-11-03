@@ -12,7 +12,7 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { buildRebuildPrimingChain } from "../src/domain/rebuild-priming-chain.js";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -251,6 +251,58 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(launchOpts?.resumeToken).toBeUndefined();
   });
 
+  it("rebuild: resolves native logical seat artifacts without overstating the receipt", async () => {
+    const seatRef = "orch-lead@sample-rig";
+    const rig = rigRepo.createRig("sample-rig");
+    const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "codex", cwd: "/project" });
+    const session = sessionRegistry.registerSession(node.id, seatRef);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: seatRef, tmuxPane: "%0" });
+    const root = mkdtempSync(join(tmpdir(), "rebuild-logical-seat-"));
+    const topologyRoot = join(root, "topology");
+    const openrigHome = join(root, "home");
+    const seatDir = join(topologyRoot, "rigs", "sample-rig", "seats", "orch.lead");
+    const recap = join(seatDir, "RECAP.md");
+    const learned = join(seatDir, "LEARNED.md");
+    const older = join(seatDir, "recap-superseded", "RECAP-1000.md");
+    const newer = join(seatDir, "recap-superseded", "RECAP-2000.md");
+    const missingPacket = join(openrigHome, "missing-packet");
+    try {
+      mkdirSync(join(seatDir, "recap-superseded"), { recursive: true });
+      for (const file of [recap, learned, older, newer]) writeFileSync(file, "synthetic durable context");
+      const markerDir = join(openrigHome, "compaction", "restore-pending");
+      mkdirSync(markerDir, { recursive: true });
+      writeFileSync(join(markerDir, `${seatRef}.json`), JSON.stringify({ version: 1, outputDir: missingPacket }));
+      rebuildChain.mockImplementation((ref: string, logicalId: string) => buildRebuildPrimingChain(ref, {
+        topologyRoot, openrigHome, logicalId,
+      }));
+      artifactExists.mockImplementation(existsSync);
+
+      const result = await service.handover({ seatRef, source: "rebuild", reason: "recover durable context" });
+
+      if (!result.ok || !("result" in result)) throw new Error(`expected handover result: ${JSON.stringify(result)}`);
+      expect(result.result.sourceOutcome).toMatchObject({
+        mode: "rebuild",
+        primedArtifacts: [recap, learned, newer, older].map(address => expect.objectContaining({ address })),
+        gaps: [missingPacket],
+      });
+      expect(rebuildChain).toHaveBeenCalledWith(seatRef, "orch.lead");
+      expect(rebuildChain.mock.results.at(-1)?.value.artifacts.map((artifact: { address: string }) => artifact.address))
+        .toEqual([recap, learned, missingPacket, newer, older]);
+      expect(result.result).toMatchObject({
+        continuityTransferred: false,
+        sideEffects: { startupContextDelivered: true, provenanceRecordWritten: false },
+      });
+      expect(result.result.sourceOutcome).not.toHaveProperty("emptyChainReason");
+      expect(nodeRow(node.id)).toEqual({ continuity_outcome: "rebuilt", handover_result: "complete" });
+      expect(existsSync(join(topologyRoot, "rigs", "sample-rig", "seats", "orch-lead"))).toBe(false);
+      const delivered = sendText.mock.calls.map(call => String(call[1] ?? call[0])).join("\n");
+      expect(delivered).toContain(recap);
+      expect(delivered).toContain(missingPacket);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("rebuild: a declared artifact missing on disk is recorded as a GAP, not silently dropped and not fatal", async () => {
     seedSeat();
     artifactExists.mockImplementation((path: string) => !String(path).includes("LEARNED"));
@@ -477,7 +529,7 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
   }
 
   function chain(): Array<{ address: string; label: string }> {
-    const result = buildRebuildPrimingChain(SEAT, { topologyRoot, openrigHome });
+    const result = buildRebuildPrimingChain(SEAT, { topologyRoot, openrigHome, logicalId: "dev.impl" });
     if (!("artifacts" in result)) throw new Error(`expected artifacts, got: ${JSON.stringify(result)}`);
     return result.artifacts;
   }
@@ -485,7 +537,7 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
   beforeEach(() => {
     topologyRoot = mkdtempSync(join(tmpdir(), "s05b3-topo-"));
     openrigHome = mkdtempSync(join(tmpdir(), "s05b3-home-"));
-    seatDir = join(topologyRoot, "rigs", "seat-rig", "seats", "dev-impl");
+    seatDir = join(topologyRoot, "rigs", "seat-rig", "seats", "dev.impl");
     mkdirSync(seatDir, { recursive: true });
     mkdirSync(join(openrigHome, "compaction", "restore-pending"), { recursive: true });
   });
@@ -543,7 +595,7 @@ describe("buildRebuildPrimingChain (production resolver, OPR.0.5.5.5 fix B3)", (
   });
 
   it("an unparseable seat ref is a NAMED empty chain, never a guess", () => {
-    const result = buildRebuildPrimingChain("not a canonical ref", { topologyRoot, openrigHome });
+    const result = buildRebuildPrimingChain("not a canonical ref", { topologyRoot, openrigHome, logicalId: "dev.impl" });
     expect(result).toMatchObject({ emptyReason: expect.stringContaining("did not parse as canonical") });
   });
 });

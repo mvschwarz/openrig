@@ -198,9 +198,10 @@ function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverServ
     // (rebuild-priming-chain.ts): RECAP.md, LEARNED.md, latest restore packet
     // when the seat's restore-pending marker names one, superseded recaps
     // newest-first. Declares only; the service existence-filters (named gaps).
-    rebuildPrimingResolver: (seatRef: string) => buildRebuildPrimingChain(seatRef, {
+    rebuildPrimingResolver: (seatRef: string, logicalId: string) => buildRebuildPrimingChain(seatRef, {
       topologyRoot: String(new SettingsStore().resolveOne("topology.root").value),
       openrigHome: OPENRIG_HOME,
+      logicalId,
     }),
     // OPR.0.4.6.PI1 FR-6 — the Pi adapter in the runtime-adapter map exposes
     // the pi-runner sidecar reader; reuse it structurally (no new context var).
