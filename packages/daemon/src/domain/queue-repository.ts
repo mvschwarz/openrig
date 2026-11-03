@@ -3959,6 +3959,24 @@ export class QueueRepository {
   }
 
   /** A park's current question: its latest human-required transition, and that notification's final post receipt, if any. */
+  /** The opaque revision of what a person decides on (#2446): the question (body, intent, questions) and its decision state
+   *  (open, blocked or terminal; who it's addressed to or parked on; its answers, a decision made for them, the current park,
+   *  and the replies returned). A label, a wake, a claim or a note on a park doesn't change it; a new park does, on any blocker. */
+  decisionRevision(item: QueueItem): string {
+    const phase = item.state === "blocked" ? "blocked" : item.state === "pending" || item.state === "in-progress" ? "open" : item.state;
+    const replies = this.hasReplyToColumn ? (this.db.prepare("SELECT qitem_id FROM queue_items WHERE reply_to = ? ORDER BY ts_created, rowid")
+      .all(item.qitemId) as Array<{ qitem_id: string }>).map((row) => row.qitem_id) : [];
+    // The park this is: the transition into blocked from another state (a later blocked-to-blocked note stays this park).
+    const transitions = item.state === "blocked" ? this.transitionLog.listForQitem(item.qitemId) : [];
+    let parkEntry: number | null = null;
+    for (let i = transitions.length - 1; i >= 0 && parkEntry === null; i--) {
+      if (transitions[i]!.state === "blocked" && transitions[i - 1]?.state !== "blocked") parkEntry = transitions[i]!.transitionId;
+    }
+    const decision = [item.body, item.humanIntent ?? null, item.humanQuestions ?? null, phase, item.destinationSession, item.blockedOn,
+      item.humanAnswers ?? null, item.delegatedDecision ?? null, this.currentHumanRequiredEpisode(item.qitemId)?.key ?? null, parkEntry, replies];
+    return `dr1-${createHash("sha256").update(JSON.stringify(decision)).digest("hex").slice(0, 24)}`;
+  }
+
   currentHumanRequiredEpisode(qitemId: string): { key: string; receipt: ReturnType<QueueTransitionLog["getOwnerNotificationReceipt"]> } | null {
     const episode = this.transitionLog.listForQitem(qitemId).filter((transition) => transition.ownerNotificationKind === "human-required").at(-1);
     if (!episode) return null;
