@@ -5,7 +5,7 @@ import { isUtf8 } from "node:buffer";
 
 // SFTP v3 packets over an already authenticated OpenSSH subsystem stream.
 // No SSH keys/config parsing and no remote shell or path interpolation here.
-export interface SftpAttrs { size?: number; mode?: number; atime?: number; mtime?: number }
+export interface SftpAttrs { size?: number; uid?: number; gid?: number; mode?: number; atime?: number; mtime?: number }
 export class SftpStatusError extends Error {
   constructor(readonly code: number, message: string) { super(message); }
 }
@@ -44,7 +44,7 @@ class Packet {
   attrs(): SftpAttrs {
     const flags = this.uint(), attrs: SftpAttrs = {};
     if (flags & 1) attrs.size = this.big();
-    if (flags & 2) { this.uint(); this.uint(); } // uid/gid have no native Windows mapping
+    if (flags & 2) { attrs.uid = this.uint(); attrs.gid = this.uint(); }
     if (flags & 4) attrs.mode = this.uint();
     if (flags & 8) { attrs.atime = this.uint(); attrs.mtime = this.uint(); }
     if (flags & 0x80000000) { const count = this.uint(); for (let i = 0; i < count; i++) { this.bytes(); this.bytes(); } }
@@ -180,6 +180,14 @@ export class SftpClient {
     const times = attrs.atime === undefined || attrs.mtime === undefined ? [] : [timestamp(attrs.atime), timestamp(attrs.mtime)];
     const flags = (mode.length ? 4 : 0) | (times.length ? 8 : 0);
     if (flags) await this.request(9, Buffer.concat([str(file), u32(flags), ...mode, ...times]), 101);
+  }
+  /** Explicit numeric server identities. Callers must qualify their mapping;
+   * reading ownership does not authorize applying those IDs to another host. */
+  async setOwnership(file: string, uid: number, gid: number): Promise<void> {
+    if (![uid,gid].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) {
+      throw new Error("SFTP v3 owner and group IDs require unsigned 32-bit integers");
+    }
+    await this.request(9, Buffer.concat([str(file),u32(2),u32(uid),u32(gid)]),101);
   }
   async setLinkTimes(file: string, attrs: SftpAttrs): Promise<void> {
     await this.ready;

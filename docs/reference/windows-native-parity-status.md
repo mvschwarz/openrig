@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## SFTP ownership attributes and explicit numeric write primitive (2026-11-03)
+
+The protocol client now retains the server's unsigned uid/gid attributes instead
+of discarding them. An explicit `setOwnership` operation sends only ATTR_UIDGID,
+validates both IDs as unsigned 32-bit integers before sending, and propagates a
+server permission refusal. It does not silently add ownership writes to timestamp
+updates or infer a cross-host numeric-ID/Windows identity mapping.
+
+Framed-peer tests verify zero and maximum IDs together with size/mode/timestamps,
+the exact SETSTAT ownership payload, invalid IDs and permission refusal. Eight
+selected protocol/copy files passed 67 with 16 skips on Windows; CLI typecheck and
+whitespace checks passed. A separate real POSIX subsystem probe used an exact
+hash-matched copy of the changed public protocol source, read uid/gid 1000/1000,
+wrote that same identity and read it back with unchanged mode. Its owned temporary
+root was removed and subsystem stopped. This narrow source-hash probe is not a
+fresh complete mirrored-source or full-suite checkpoint.
+
+Copy-level owner/group application, name/ID translation and native Windows
+SID/DACL semantics remain incomplete. This protocol foundation does not supersede
+those gaps or claim archive-equivalent metadata preservation. No user-owned file
+ownership, provider/team state, deployment or public push was changed.
+
 ## Paired current-source checkpoint at 58e1b42 (2026-11-03)
 
 At `58e1b42a4cf0749e6bc765ff4798182854eb1d45`, the same 25 selected files
