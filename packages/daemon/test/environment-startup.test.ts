@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, realpathSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -256,4 +258,27 @@ it("passes generated first input through verified guest files and execs the shor
   expect(f.files.get("/sandbox/openrig/control/first-input.txt")!.toString()).toBe(opts.firstInputText);
   const command = f.tmux.sendShellCommand.mock.calls[0] as unknown as [string, string];
   expect(command[1]).toMatch(/^exec /); expect(command[1]).not.toContain("Selected identity");
+});
+
+it("the real short-command transport leaves no host shell when the environment viewer exits", async () => {
+  const f = await fixture(), bin = join(f.root, "bin"); mkdirSync(bin);
+  writeFileSync(join(bin, "rig"), "#!/bin/sh\nexit 7\n", { mode: 0o700 });
+  const transport = new TmuxAdapter(async () => ""); let invocation = "";
+  vi.spyOn(transport, "sendText").mockImplementation(async (_target, text) => { invocation = text; return { ok: true }; });
+  vi.spyOn(transport, "sendKeys").mockResolvedValue({ ok: true });
+  await f.startup.launch(f.binding, {}, { sendShellCommand: transport.sendShellCommand.bind(transport) });
+  const marker = join(f.root, "host-fell-through");
+  expect(invocation).toContain("environment"); expect(Buffer.byteLength(invocation)).toBeLessThanOrEqual(512);
+  try { execFileSync("/bin/sh", ["-c", `${invocation}\ntouch '${marker}'`], { env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` }, stdio: "ignore" }); } catch {}
+  expect(existsSync(marker)).toBe(false);
+});
+it("a lost prepare reply reconciles the original first input instead of typing it again", async () => {
+  const f = await fixture(); f.losePrepare(); const opts = { firstInputText: "selected immutable input" };
+  await expect(f.startup.launch(f.binding, opts, f.tmux)).rejects.toThrow("Lost preparation reply");
+  const before = sha256(f.files.get("/sandbox/openrig/control/first-input.txt")!);
+  const result = await f.startup.launch(f.binding, opts, f.tmux);
+  expect(result.firstInput).toMatchObject({ path: "/sandbox/openrig/control/first-input.txt", submission: "unconfirmed" });
+  expect(sha256(f.files.get("/sandbox/openrig/control/first-input.txt")!)).toBe(before);
+  expect(f.guest.mock.calls.filter(call => call[1][0] === "--prepare")).toHaveLength(1);
+  expect(f.tmux.sendShellCommand).not.toHaveBeenCalled();
 });

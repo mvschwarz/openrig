@@ -1484,7 +1484,7 @@ describe("StartupOrchestrator", () => {
       const marker = nodePath.join(dir, "host-executed");
       const seed = seedSession(); db.prepare("UPDATE nodes SET runtime='openshell-claude' WHERE id=?").run(seed.nodeId);
       let passed: string | undefined; let viewerExited = false;
-      const contained = { platform: {}, preflight: async () => {}, project: async () => ({ projected: [], skipped: [], failed: [] }),
+      const contained = { platform: { forNode: () => ({ guestRoot: "/sandbox/openrig" }) }, preflight: async () => {}, project: async () => ({ projected: [], skipped: [], failed: [] }),
         deliverStartup: async () => ({ delivered: 1, failed: [] }),
         launch: async (_binding: unknown, opts: { firstInputText?: string }) => { passed = opts.firstInputText;
           return { ok: true, ...(passed ? { firstInput: { path: "/guest/control/first-input.txt", submission: "unconfirmed" } } : {}) }; },

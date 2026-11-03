@@ -596,7 +596,24 @@ export class StartupOrchestrator {
               this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
           }
-          if (input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.firstInput()
+          if (input.adapter.environment) {
+            const selected = input.adapter.environment.forNode(input.nodeId, input.binding.tmuxSession ?? undefined);
+            if (!selected) throw new Error("The selected environment destination is unavailable");
+            launchChallenge = shouldChallenge ? issueStartupChallenge(this.eventBus, {
+              rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
+            }) : null;
+            const actions = input.startupActions.filter(a => a.type === "send_text" && !isSessionIdentityAction(a)
+              && a.appliesOn.includes(context) && !(input.isRestore && !a.idempotent));
+            const guestText = (text: string) => input.binding.cwd && input.binding.cwd !== "/"
+              ? text.split(input.binding.cwd).join(`${selected.guestRoot}/work`) : text;
+            const parts = [
+              ...(identityAction ? [`OpenRig-generated identity context (not a project task):\n${guestText(identityAction.value)}\nEnd of generated identity context.`] : []),
+              ...actions.filter(a => a.phase === "after_ready").map(a => guestText(a.value)),
+              "Read the projected CLAUDE.md and its selected startup files in this guest.",
+              ...postLaunchFiles.map(file => `Read ${selected.guestRoot}/work/.openrig/startup/${encodeURIComponent(file.path)}.`),
+              ...actions.filter(a => a.phase === "after_files").map(a => guestText(a.value)), ...(launchChallenge ? [launchChallenge.promptBlock] : [])];
+            launchPrompt = { prompt: parts.join("\n\n"), remainingFiles: [] };
+          } else if (input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.firstInput()
             && !launchResumeToken && continuityOutcome === "fresh" && identityAction) {
             launchChallenge = startupProof.mode === "authenticated" ? issueStartupChallenge(this.eventBus, {
               rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
@@ -827,6 +844,11 @@ export class StartupOrchestrator {
     // A selected proof still works without a session_identity action: deliver
     // its standalone prompt after the post-launch contract files below.
     const consumedActions = new Set<StartupAction>();
+    const guestInputPassed = !!input.adapter.environment && !!input.firstInputPassed;
+    if (guestInputPassed) {
+      postLaunchFiles = []; // All resolved files were projected before the guest's initial input.
+      for (const action of input.startupActions) if (action.type === "send_text") consumedActions.add(action);
+    }
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = input.firstInputPassed && launchPrompt
@@ -838,7 +860,7 @@ export class StartupOrchestrator {
       }
       postLaunchFiles = initialPrompt.remainingFiles;
       if (challenge) await this.sendProofInstruction(deliveryInput);
-    } else if (challenge) {
+    } else if (challenge && !guestInputPassed) {
       challengeOnlyPrompt = challenge.promptBlock;
     }
 
@@ -857,7 +879,7 @@ export class StartupOrchestrator {
     if (continuityOutcome !== "fresh") {
       const preloadActions = input.startupActions.filter(
         (a) =>
-          !isSessionIdentityAction(a) &&
+          !isSessionIdentityAction(a) && !consumedActions.has(a) &&
           a.type === "send_text" &&
           a.phase === "after_ready" &&
           a.appliesOn.includes(context) &&
@@ -905,7 +927,7 @@ export class StartupOrchestrator {
     }
 
     // 8. Execute after_files actions
-    const afterFilesResult = await this.executeActions(deliveryInput, "after_files");
+    const afterFilesResult = await this.executeActions(deliveryInput, "after_files", consumedActions);
     if (!afterFilesResult.ok) {
       return owed(afterFilesResult.errors) ?? this.fail(deliveryInput, "failed", afterFilesResult.errors, undefined, false, undefined, false, "after_files", true);
     }
@@ -1301,6 +1323,9 @@ export class StartupOrchestrator {
   }
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
+    // Contained startup is passed at launch through the verified guest input file. A viewer can exit
+    // between any observation and input; never use its host terminal as a fallback destination.
+    if (input.adapter.environment) return { error: "Environment startup input was not passed through the guest launch; no host input was sent" };
     // After a refused turn nothing more is typed into the seat. The held input is counted, and startNode reports it as
     // owed (ahead of any later error) before it would mark the seat ready, so returning here never reads as delivered.
     if (input.adapter.runtime === "claude-code" && input.sendOrder > 0 && (input.refusedTurn ??= await this.refusedTurn(input))) {

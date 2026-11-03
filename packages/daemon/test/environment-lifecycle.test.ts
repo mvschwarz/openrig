@@ -281,3 +281,13 @@ it.each(["provider-list", "cleanup-inventory"])("reports the actual pre-dispatch
     expect(row.state).toBe("intent");
   }
 });
+
+it("keeps an uncertain delete requested and reconciles the same operation without another mutation", async () => {
+  const f = await fixture(); const deletion = vi.spyOn(f.driver, "deleteEnvironment").mockRejectedValue(new Error("fixture reply lost at delete boundary"));
+  const request = { effect: "delete-owned", operationId: "delete-uncertain", generation: "generation-one" };
+  const first = await f.request("/binding-one/effect", request);
+  expect(first.body).toMatchObject({ state: "unconfirmed", stage: "delete-dispatch", dispatched: "unknown", error: { message: "fixture reply lost at delete boundary" } });
+  expect((f.db.prepare("SELECT state FROM environment_operations WHERE operation_id=?").get(request.operationId) as { state: string }).state).toBe("requested");
+  await f.request("/binding-one/effect", request);
+  expect(deletion).toHaveBeenCalledTimes(1);
+});
