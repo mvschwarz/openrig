@@ -44,12 +44,15 @@ function fixture() {
   closes.push(() => db.close());
   const ask = async () => (await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Synthetic two-question ask",
     summary: "Ship?", humanIntent: "decision", humanQuestions: QUESTIONS, nudge: false })).qitemId;
-  const park = async () => {
+  const park = async (blockedOn = PERSON) => {
     const row = await repo.create({ sourceSession: ASKER, destinationSession: "owner@test-rig", body: "Work waiting on a person", nudge: false });
     repo.claim({ qitemId: row.qitemId, destinationSession: "owner@test-rig" });
-    repo.update({ qitemId: row.qitemId, actorSession: "owner@test-rig", state: "blocked", blockedOn: PERSON });
+    repo.update({ qitemId: row.qitemId, actorSession: "owner@test-rig", state: "blocked", blockedOn });
     return row.qitemId;
   };
+  // A runner's permission request: the person's typed answer is recorded on the ask itself, with no reply row.
+  const permissionAsk = async () => (await repo.create({ sourceSession: ASKER, destinationSession: PERSON, body: "Allow the runner to write?",
+    summary: "Allow?", humanIntent: "decision", tags: ["runner-permission", "permission-node:node-1", "permission-generation:gen-1"], nudge: false })).qitemId;
   const revision = async (id: string) => (await (await app.request(`/api/queue/${id}`)).json() as { decisionRevision?: unknown }).decisionRevision;
   const act = async (body: Record<string, unknown>) => {
     const response = await app.request("/api/mission-control/action", { method: "POST",
@@ -60,7 +63,7 @@ function fixture() {
   const written = (id: string) => ({ row: repo.getById(id), transitions: repo.listTransitions(id).length,
     replies: count("SELECT count(*) n FROM queue_items WHERE reply_to = ?", id),
     actions: count("SELECT count(*) n FROM mission_control_actions WHERE qitem_id = ?", id) });
-  return { db, repo, ask, park, revision, act, written };
+  return { db, repo, ask, park, permissionAsk, revision, act, written };
 }
 
 describe("an opt-in decision revision on the settling verbs (#2446)", () => {
@@ -106,6 +109,26 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     expect(f.written(id)).toMatchObject({ actions: 1, replies: 0 });
   });
 
+  it("concurrent typed answers to a runner's permission ask on one revision: one closes it, the other conflicts", async () => {
+    const f = fixture(); const id = await f.permissionAsk();
+    const read = await f.revision(id);
+    const results = await Promise.all(["Allow it", "Deny it"].map(decision => f.act({ verb: "answer", qitemId: id, decision, expectedRevision: read })));
+    expect(results.map(r => r.status).sort()).toEqual([200, 409]);
+    expect(results.find(r => r.status === 409)!.body.error).toBe("decision_revision_changed");
+    expect(f.written(id)).toMatchObject({ row: { state: "done" }, actions: 1 });
+  });
+
+  it("a typed-gate park resolved and parked again on the same gate is a new decision; a note on a park isn't", async () => {
+    const f = fixture(); const id = await f.park("external:qa-pass");
+    const first = await f.revision(id);
+    f.repo.update({ qitemId: id, actorSession: "owner@test-rig", state: "blocked", blockedOn: "external:qa-pass", transitionNote: "still waiting" });
+    expect(await f.revision(id)).toBe(first);
+    expect(await f.act({ verb: "resolve", qitemId: id, decision: "QA passed" })).toMatchObject({ status: 200 });
+    f.repo.update({ qitemId: id, actorSession: "owner@test-rig", state: "blocked", blockedOn: "external:qa-pass" });
+    expect(await f.act({ verb: "resolve", qitemId: id, decision: "QA passed", expectedRevision: first }))
+      .toMatchObject({ status: 409, body: { error: "decision_revision_changed" } });
+  });
+
   it("a caller that sends no revision acts exactly as before, with the same result fields", async () => {
     const f = fixture(); const answered = await f.ask(), approved = await f.ask();
     f.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id IN (?, ?)").run(JSON.stringify([{ ...QUESTIONS[0], question: "Changed" }, QUESTIONS[1]]), answered, approved);
@@ -130,12 +153,10 @@ describe("an opt-in decision revision on the settling verbs (#2446)", () => {
     expect(f.written(id).actions).toBe(1);
   });
 
-  it("a revision sent with a verb that doesn't settle a decision is refused, not silently ignored", async () => {
+  it("a revision sent with a verb that doesn't settle a decision isn't checked: the act runs as today and says so", async () => {
     const f = fixture(); const id = await f.ask();
-    const before = f.written(id);
-    expect(await f.act({ verb: "hold", qitemId: id, reason: "later", expectedRevision: await f.revision(id) }))
-      .toMatchObject({ status: 400, body: { error: "decision_revision_unsupported" } });
-    expect(f.written(id)).toEqual(before);
+    expect(await f.act({ verb: "hold", qitemId: id, reason: "later", expectedRevision: "dr1-not-this-row" }))
+      .toMatchObject({ status: 200, body: { closedQitem: { state: "blocked" }, revisionNote: expect.stringContaining("isn't checked for hold") } });
   });
 
   it("a summary, a wake or a claim leaves the revision alone", async () => {
