@@ -29,6 +29,7 @@ import { SnapshotCapture } from "./snapshot-capture.js";
 import { SnapshotRepository } from "./snapshot-repository.js";
 import { CheckpointStore } from "./checkpoint-store.js";
 import { DeliveryGuardError } from "./seat-delivery-guard.js";
+import { heldMessagesNotice } from "./outbox-handler.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { planRuntimeSwitchMaterials, type RuntimeSwitchMaterials, type RuntimeSwitchMaterialsInput, type SwitchRuntime } from "./runtime-switch-materials.js";
 import { terminatePaneInPlace } from "./pane-cutover.js";
@@ -490,6 +491,8 @@ export class SeatRuntimeSwitchService {
     // 5. Retire the predecessor and tell the successor it holds the seat. A failure here leaves the switch committed.
     const finished = await this.finishCommitted({ id, node_id: node.id, canonical_session: sessionName, staging_session: row.staging_session,
       to_runtime: target, from_runtime: node.runtime!, successor_generation: successorGeneration });
+    const held = heldMessagesNotice(db, node.id, sessionName);
+    if (held) warnings.push(held);
     return { ok: true, dryRun: false, changed: true, ...ctx.plan, switchId: id, generation: successorGeneration, previousGeneration: ctx.predecessorGeneration,
       claimsMoved: committed.claimsMoved, openRows: queue.length, confirmation, recoveryPending: !finished.ok,
       warnings: finished.ok ? warnings : [...warnings, `The switch committed, but ${finished.message} Finish it with rig seat set-runtime ${ctx.seatRef} --recover.`] };
@@ -604,7 +607,9 @@ export class SeatRuntimeSwitchService {
     if (!env.ok) problems.push(`the seat's session environment couldn't be updated (${env.message})`);
     tmux.finishLaunchBinding(row.staging_session);
     if (retired.ok) {
-      const text = `OpenRig: runtime switch ${row.id} committed. You now hold ${row.canonical_session} on ${row.to_runtime}; the ${row.from_runtime} occupant has retired. Carry on from the handover: the seat's queue rows and claims are yours.`;
+      // Held messages are never replayed, so the activation tells the successor of them, as a started seat is told (#2431).
+      const held = heldMessagesNotice(db, row.node_id, row.canonical_session);
+      const text = `OpenRig: runtime switch ${row.id} committed. You now hold ${row.canonical_session} on ${row.to_runtime}; the ${row.from_runtime} occupant has retired. Carry on from the handover: the seat's queue rows and claims are yours.${held ? ` ${held}` : ""}`;
       const typed = await tmux.sendText(row.canonical_session, text);
       const entered = typed.ok ? (await this.sleep(200), await tmux.sendKeys(row.canonical_session, ["Enter"])) : typed;
       if (!entered.ok) problems.push(`the activation message couldn't be delivered (${entered.message})`);

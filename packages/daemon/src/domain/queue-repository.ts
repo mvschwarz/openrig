@@ -1260,8 +1260,9 @@ export class QueueRepository {
 
   /** A handoff's wake, staged as create stages one: a recipient whose held-message quota is full still gets the row,
    *  which records its wake as not retained, so work keeps moving between other seats (#2430). Any other staging
-   *  failure rolls the act back. */
-  private stageHandoffWake(successorQitemId: string, fromSession: string, toSession: string, identityProvenance: string | null, nudge: boolean | undefined): void {
+   *  failure rolls the act back. Every close-and-successor writer (queue handoffs, mission control, workflow steps)
+   *  stages through it. */
+  stageHandoffWake(successorQitemId: string, fromSession: string, toSession: string, identityProvenance: string | null, nudge: boolean | undefined): void {
     try {
       this.db.transaction(() => this.stageWakeIntent(successorQitemId, fromSession, toSession, identityProvenance, nudge))();
     } catch (err) {

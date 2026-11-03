@@ -228,7 +228,7 @@ export class MissionControlWriteContract {
           // P34: stage the successor's WAKE INTENT inside this transaction, so the
           // close and the durable wake commit as ONE act or NONE. The pane write
           // itself stays post-commit (reversed-never).
-          this.queueRepo.stageWakeIntent(
+          this.queueRepo.stageHandoffWake(
             created.qitemId,
             input.actorSession,
             created.destinationSession,

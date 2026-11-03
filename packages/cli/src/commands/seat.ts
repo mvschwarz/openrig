@@ -159,6 +159,8 @@ interface SeatHandoverMutationResult {
   currentStatus: SeatHandoverPlan["currentStatus"];
   handoverAt: string;
   eventSeq: number;
+  /** What the successor was told on taking the seat, such as its held messages. */
+  warnings?: string[];
   /** OPR.0.5.5.5 — per-source execution record (wire mirror of the daemon shape). */
   sourceOutcome?:
     | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
@@ -333,6 +335,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   console.log(`Current occupant: ${result.currentOccupant}`);
   console.log(`Handover result: ${display(result.currentStatus.handoverResult)}`);
   console.log("Seat binding and inventory provenance were updated.");
+  for (const warning of result.warnings ?? []) console.warn(`Warning: ${warning}`);
   // An older daemon reports both side effects as a fixed false: say nothing rather than misreport them.
   if (result.sideEffects.departingProcess) {
     console.log(result.sideEffects.provenanceRecordWritten

@@ -458,3 +458,11 @@ export class OutboxHandler {
     };
   }
 }
+
+/** The line a seat's new occupant is told when its seat holds messages (#2431): a started seat, a handover successor and a
+ *  runtime-switch successor alike. Held messages are never replayed; null when there are none or no held-message store. */
+export function heldMessagesNotice(db: Database.Database, nodeId: string, seat: string): string | null {
+  let count = 0;
+  try { count = new OutboxHandler(db).retentionUsage(nodeId).count; } catch { /* no held-message store: nothing to tell */ }
+  return count ? `${count} held message${count === 1 ? " was" : "s were"} kept for this seat and not delivered: read ${count === 1 ? "it" : "them"} with rig seat held-messages ${seat}.` : null;
+}

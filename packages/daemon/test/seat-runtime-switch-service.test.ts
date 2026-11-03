@@ -21,6 +21,9 @@ import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.j
 import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 import { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import { SeatRuntimeSwitchService, runtimeSwitchSummary } from "../src/domain/seat-runtime-switch-service.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
@@ -376,6 +379,20 @@ describe("live seat runtime switch", () => {
     const event = db.prepare("SELECT payload FROM events WHERE type = 'seat.runtime_changed'").get() as { payload: string };
     expect(JSON.parse(event.payload)).toMatchObject({ from: "codex", to: "claude-code", reason: "Codex usage limit", requestedBy: "operator-agent@kernel", claimsMoved: 1 });
     expect(declareOccupantSwap).toHaveBeenCalledWith(nodeId, row.successor_generation);
+  });
+
+  it("tells the successor of messages held for the seat once per activation attempt, and names them in the switch's warnings (#2431)", async () => {
+    db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql); // as the guard suites add the held-message store
+    new OutboxHandler(db).retain({ outboxId: "held-1", senderSession: "orch-lead@seat-rig", destinationSession: SEAT, body: "Real work for you" },
+      { nodeId, session: SEAT, occupant: null, pane: null });
+    const svc = service();
+    successorConfirms(svc);
+
+    const result = await svc.setRuntime({ seatRef: SEAT, runtime: "claude-code", reason: "Codex usage limit" });
+
+    const notice = `1 held message was kept for this seat and not delivered: read it with rig seat held-messages ${SEAT}.`;
+    expect(result).toMatchObject({ ok: true, changed: true, recoveryPending: false, warnings: expect.arrayContaining([notice]) });
+    expect(typed.filter((t) => t.text.includes(notice))).toEqual([{ target: SEAT, text: expect.stringMatching(/You now hold dev-impl@seat-rig on claude-code/) }]);
   });
 
   it.each([undefined, "none"] as const)("carries retained Claude rules and MCP selection (%s) into the target successor", async claudeMcp => {

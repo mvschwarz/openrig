@@ -30,6 +30,7 @@ import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { heldMessagesNotice } from "./outbox-handler.js";
 import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./claude-core-plugin-env.js";
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
@@ -100,6 +101,8 @@ export interface SeatHandoverMutationResult {
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string; permissions?: CodexPermissionContinuity };
   /** OPR.0.7.0.9: a seat launch addition the successor launched without (missing or refused), named. */
   launchAdditionNotes?: string[];
+  /** What the successor was told on taking the seat: its held messages, which are never replayed (#2431). */
+  warnings?: string[];
 }
 
 export type SeatHandoverResult =
@@ -884,6 +887,17 @@ export class SeatHandoverService {
         sessionName: discovered.tmuxSession,
         runtime: input.node.runtime,
       });
+    }
+    // Held messages are never replayed, so every source's result names them, as a started seat is told (#2431). The
+    // successor is also told, typed as its packets are, unless OpenRig types nothing more into it: a discovered session it
+    // didn't launch, or an unconfirmed packet, where an Enter could submit someone else's text. Best-effort: the handover
+    // has committed.
+    const held = heldMessagesNotice(this.db, input.node.id, discovered.tmuxSession);
+    if (held && "result" in committed) {
+      committed.result.warnings = [held];
+      const typed = input.reportedSource.mode !== "discovered" && input.restorePacket?.status !== "unconfirmed";
+      try { if (typed && (await this.tmuxAdapter.sendText(discovered.tmuxSession, held)).ok) { await this.sleep(200); await this.tmuxAdapter.sendKeys(discovered.tmuxSession, ["Enter"]); } }
+      catch { /* the notice is best-effort */ }
     }
     return committed;
   }
