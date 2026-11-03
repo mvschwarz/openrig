@@ -1,16 +1,20 @@
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { it, expect, vi } from "vitest";
-import { execArgvCommand } from "../src/adapters/tmux-exec.js";
+import { describe, it, expect, vi } from "vitest";
+import { execArgvCommand, execTmuxCommand } from "../src/adapters/tmux-exec.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
 // This owns only a fake executable and child in a private home; it never contacts a tmux server.
-it.skipIf(process.platform === "win32")("kills a stalled tmux client at the deadline and releases the next operation for that seat", async () => {
+describe.skipIf(process.platform === "win32")("tmux execution deadline", () => {
+it.each(["argv", "shell"] as const)("kills a stalled %s client and releases the next operation for that seat", async mode => {
   const home = mkdtempSync(join(tmpdir(), "openrig-tmux-deadline-"));
   const pidFile = join(home, "child.json"), calls = join(home, "calls"), script = join(home, "client.cjs");
   const seat = "deadline-worker@fixture";
+  const execute = (verb: string) => mode === "argv"
+    ? execArgvCommand(["tmux", verb, "-p", "-t", seat])
+    : execTmuxCommand(`tmux ${verb} -p -t ${shellQuote(seat)}`);
   writeFileSync(script, `const fs = require("node:fs");
 fs.appendFileSync(${JSON.stringify(calls)}, process.argv[2] + "\\n");
 if (process.argv[2] === "capture-pane") {
@@ -28,7 +32,7 @@ if (process.argv[2] === "capture-pane") {
   const guard = new SeatDeliveryGuard(db as never, name => name === seat ? target : null);
   let pid: number | undefined, settled = false, nextStarted = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const first = guard.operation(seat, () => execArgvCommand(["tmux", "capture-pane", "-p", "-t", seat]))
+  const first = guard.operation(seat, () => execute("capture-pane"))
     .then(value => { settled = true; return { kind: "resolved" as const, value }; },
       error => { settled = true; return { kind: "rejected" as const, error }; });
   let next: Promise<unknown> | undefined;
@@ -43,7 +47,7 @@ if (process.argv[2] === "capture-pane") {
     pid = ownedPid();
     next = guard.operation(seat, async () => {
       nextStarted = true;
-      return execArgvCommand(["tmux", "display-message", "-p", "-t", seat]);
+      return execute("display-message");
     });
     expect(nextStarted).toBe(false);
     const result = await Promise.race([first, new Promise<{ kind: "not-settled" }>(resolve => {
@@ -70,3 +74,4 @@ if (process.argv[2] === "capture-pane") {
     rmSync(home, { recursive: true, force: true });
   }
 }, 55_000);
+});
