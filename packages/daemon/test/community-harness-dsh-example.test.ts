@@ -19,7 +19,11 @@ import { createInterface } from "node:readline";
 const log = (entry) => appendFileSync(process.env.FAKE_LOG, JSON.stringify(entry) + "\\n");
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
 // Like dsh 0.2.1-rc.2: its CLI reports its real version, and its ACP handshake reports 0.0.1.
-if (process.argv.includes("--version")) { process.stdout.write("dsh 0.2.1-rc.2\\n"); process.exit(0); }
+if (process.argv.includes("--version")) {
+  // FAKE_VERSION=stuck: a version lookup that ignores SIGTERM and doesn't exit for 30 seconds.
+  if (process.env.FAKE_VERSION === "stuck") { process.on("SIGTERM", () => {}); setTimeout(() => process.exit(0), 30_000); await new Promise(() => {}); }
+  process.stdout.write("dsh 0.2.1-rc.2\\n"); process.exit(0);
+}
 log({ start: { argv: process.argv.slice(2), DSH_HOME: process.env.DSH_HOME ?? null, DSH_PERMISSION_MODE: process.env.DSH_PERMISSION_MODE ?? null,
   DSH_TELEMETRY_DISABLED: process.env.DSH_TELEMETRY_DISABLED ?? null, token: "OPENRIG_ACTIVITY_HOOK_TOKEN" in process.env } });
 process.stdout.write("dsh: a log line that isn't JSON\\n");
@@ -227,7 +231,8 @@ const responseTo = (log: Array<Record<string, unknown>>, id: string) => log.find
 describe("the documented dsh example runner", () => {
   it("opens a conversation, writes the launch record, and only then reads ready, with uploads off and no hook token for dsh", async () => {
     const openrig = await fakeOpenRig("absent");
-    const seat = start(openrig);
+    // A DSH_HOME the person's shell exports (its startup files run after the seat's env:) isn't the seat's home.
+    const seat = start(openrig, { DSH_HOME: join(tmpdir(), "a-persons-own-dsh-home") });
     const record = await waitFor(seat.launch, "the launch record");
     expect(record).toMatchObject({ format: 1, attempt: "attempt-1", harness: "dsh", nativeRef: "sess-new-1" });
     expect(String(record.producer)).toMatch(/openrig-dsh-runner .*dsh 0\.2\.1-rc\.2.*ACP 1/);
@@ -245,14 +250,22 @@ describe("the documented dsh example runner", () => {
     expect(idle.auth).toBe("Bearer test-token");
   });
 
-  it("takes its dsh binary and home from DSH_BIN and DSH_HOME, which a rig spec's env: can set", async () => {
+  it("takes its dsh binary and home from DSH_SEAT_BIN and DSH_SEAT_HOME, which a rig spec's env: can set, over an exported DSH_HOME", async () => {
     const openrig = await fakeOpenRig("absent");
     const home = mkdtempSync(join(tmpdir(), "dsh-prepared-home-"));
     cleanups.push(() => rmSync(home, { recursive: true, force: true }));
-    const seat = start(openrig, { DSH_HOME: home }, "DSH_BIN");
+    const seat = start(openrig, { DSH_SEAT_HOME: home, DSH_HOME: join(tmpdir(), "a-persons-own-dsh-home") }, "DSH_SEAT_BIN");
     await waitFor(seat.launch, "the launch record");
     expect((seat.log()[0] as { start: Record<string, unknown> }).start).toMatchObject({ argv: ["--profile", "acp"], DSH_HOME: home });
   });
+
+  it("starts without waiting on a version lookup that ignores SIGTERM, and names the handshake's version", async () => {
+    const openrig = await fakeOpenRig("absent");
+    const seat = start(openrig, { FAKE_VERSION: "stuck" });
+    const record = await waitFor(seat.launch, "the launch record", 15_000);
+    expect(record).toMatchObject({ nativeRef: "sess-new-1" });
+    expect(String(record.producer)).toMatch(/dsh 0\.0\.1 \(as its ACP handshake reports it\); ACP 1/);
+  }, 30_000);
 
   it("sends one submitted block as one prompt and reports working, then idle, in order", async () => {
     const openrig = await fakeOpenRig("absent");
