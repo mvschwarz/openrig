@@ -1,5 +1,30 @@
 # Native Windows parity: implementation and evidence
 
+## Real psmux literal-name rename correction (2026-11-03)
+
+A compiled production-adapter probe on stock psmux 3.4.0 exposed two distinct
+POSIX-format assumptions. Escaping the rename operand persisted doubled hashes;
+after removing that escaping, the actual name was correct but a nested format
+comparison using POSIX literal escapes returned false. The adapter now supplies
+the literal psmux rename operand and compares the returned session name directly
+in JavaScript. Command-boundary checks use the exact physical target plus server
+PID, session ID, creation time, node, generation, marker and live sole pane/window;
+they no longer embed the name in an unsupported nested comparison. Client following
+also avoids that name-comparison expression on its exact physical source target.
+
+The real production-adapter rename from an owned ordinary name to
+`owned-#{literal}` now preserves the exact name and accepts a second recovery call
+without another rename. All probe sessions, including the earlier failed cases,
+were stopped; private fixture directories remain retained. This is ordinary-name
+rename/recovery evidence, not mapped-name/marker migration or attached-client
+continuity acceptance. No team, provider, deployment or public push was involved.
+
+Seven selected files passed 170 tests with five skips; daemon build and whitespace
+checks passed. Controlled adapter regressions cover literal hashes, braces, style
+brackets and commas. The separate nested-comparison diagnostic read back the exact
+literal name while its previous comparison returned zero, identifying the second
+failure rather than treating the successful raw rename as full recovery success.
+
 ## Explicit legacy physical-source migration and stock format qualification (2026-11-03)
 
 Rename intents can now persist an explicit `sourceLegacy` flag for a qualified

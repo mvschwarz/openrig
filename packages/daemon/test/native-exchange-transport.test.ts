@@ -2,8 +2,8 @@ import { expect, it } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { bindNativeSessionName } from "../src/domain/terminal/native-session-name.js";
 
-function fixture(mapped=false,legacy=false) {
-  const identity = {canonical:legacy?"openrig-native-v1-legacy":mapped?"seat:canonical":"canonical",staging:"staging",parking:mapped?"seat|parking":"parking",predecessorGeneration:"old",successorGeneration:"new"};
+function fixture(mapped=false,legacy=false,parking?:string) {
+  const identity = {canonical:legacy?"openrig-native-v1-legacy":mapped?"seat:canonical":"canonical",staging:"staging",parking:parking??(mapped?"seat|parking":"parking"),predecessorGeneration:"old",successorGeneration:"new"};
   const source=legacy?{logical:identity.canonical,physical:identity.canonical,marker:undefined}:bindNativeSessionName(identity.canonical),destination=bindNativeSessionName(identity.parking);
   const slots = new Map([[source.physical, `123|$0|456|node|old|${source.marker??""}|1|1|0|1`]]);
   const writes: string[][] = [];
@@ -15,7 +15,7 @@ function fixture(mapped=false,legacy=false) {
       if (!slots.has(target)) throw Object.assign(Error("absent"),{code:1,stdout:"",stderr:""});
       return "";
     }
-    if (command === "display-message") return slots.get(target)!;
+    if (command === "display-message") return slots.get(target)!.replace(/\|1$/, "|"+target);
     if (command === "if-shell") {
       writes.push(argv);
       const condition = argv[argv.indexOf("-t") + 2]!;
@@ -64,4 +64,9 @@ it("prepares and resumes an unmarked legacy physical source through the producti
   f.loseReply();await expect(f.backend.rename(canonical,parking,"old",intent)).rejects.toThrow("reply lost");
   await f.backend.resumeRename!(intent);expect(f.writes).toHaveLength(2);
   expect(f.slots.has(canonical)).toBe(false);expect(f.slots.get(f.destination.physical)!.split("|")[5]).toBe(f.destination.marker);
+});
+it.each(["owned-#{literal}","owned-#[fg=red]","owned-#comma,"])("keeps psmux rename operands literal for %s",async parking=>{
+  const f=fixture(false,false,parking),intent=await f.backend.prepareRename!(f.identity.canonical,parking,"old");
+  await f.backend.rename(f.identity.canonical,parking,"old",intent);
+  expect(f.slots.has(parking)).toBe(true);expect(f.writes).toHaveLength(1);
 });

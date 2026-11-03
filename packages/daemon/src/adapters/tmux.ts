@@ -1162,8 +1162,9 @@ export class TmuxAdapter {
         const refused=`openrig-native-client-refused-${randomUUID()}`;
         const marker = bindNativeSessionName(identity.staging).marker ?? "";
         const occupant=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${identity.predecessorGeneration}}}`;
-        const name=`#{&&:#{==:#{session_name},${tmuxFormatLiteral(source)}},#{==:#{${NATIVE_LOGICAL_SESSION_OPTION}},${tmuxFormatLiteral(marker)}}}`;
-        const condition=`#{&&:${occupant},${name}}`;
+        // The exact physical target selects the server. psmux does not implement
+        // POSIX nested-format name escaping for literal hashes/braces.
+        const condition=`#{&&:${occupant},#{==:#{${NATIVE_LOGICAL_SESSION_OPTION}},${tmuxFormatLiteral(marker)}}}`;
         const output=await this.nativeRaw(["tmux","if-shell","-F","-t",`=${source}:`,condition,
           `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${destination}`)}`,`display-message -p ${refused}`]);
         if(output.includes(refused))throw new Error("Native predecessor identity changed before client following");
@@ -1196,8 +1197,8 @@ export class TmuxAdapter {
       try {
         if (!await this.nativeSessionExists(physical)) return {state:"absent"};
         const values = (await this.nativeRaw(["tmux","display-message","-p","-t",`=${physical}:`,
-          `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{==:#{session_name},${tmuxFormatLiteral(physical)}}`])).trim().split("|");
-        if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || values[8] !== "0" || values[9] !== "1"
+          `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{session_name}`])).trim().split("|");
+        if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || values[8] !== "0" || values[9] !== physical
           || !/^[1-9]\d*$/.test(values[0]!) || !/^\$\d+$/.test(values[1]!) || !/^\d+$/.test(values[2]!)) return {state:"unknown"};
         return {state:"present",session:{serverPid:values[0]!,sessionId:values[1]!,sessionCreated:values[2]!,nodeId:values[3]!,generation:values[4]!,marker:values[5] || undefined}};
       } catch { return {state:"unknown"}; }
@@ -1206,7 +1207,7 @@ export class TmuxAdapter {
       if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
       const terms = [
         ["pid",expected.serverPid],["session_id",expected.sessionId],["session_created",expected.sessionCreated],
-        ["session_name",physical],["OPENRIG_NODE_ID",expected.nodeId],["OPENRIG_OCCUPANT_GENERATION",expected.generation],
+        ["OPENRIG_NODE_ID",expected.nodeId],["OPENRIG_OCCUPANT_GENERATION",expected.generation],
         [NATIVE_LOGICAL_SESSION_OPTION,expected.marker ?? ""],["session_windows","1"],["window_panes","1"],["pane_dead","0"],
       ].map(([key,value]) => `#{==:#{${key}},${tmuxFormatLiteral(value!)}}`);
       const condition = terms.reduce((left,right) => `#{&&:${left},${right}}`);
@@ -1218,7 +1219,9 @@ export class TmuxAdapter {
       ownsLifecycle, observe:physicalObserve,
       rename: async (from,to,expected) => {
         if (await this.nativeSessionExists(to)) throw new Error("Native exchange destination is not proven absent");
-        await physicalWrite(from,expected,`rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(tmuxSessionNameFormat(to))}`);
+        // This backend is psmux-only: rename-session stores the operand literally.
+        // POSIX tmux's name-format escaping would persist doubled hashes here.
+        await physicalWrite(from,expected,`rename-session -t ${shellQuote(`=${from}`)} ${shellQuote(to)}`);
       },
       writeMarker: async (physical,marker,expected) => physicalWrite(physical,expected,marker === undefined
         ? `set-option -u -t ${shellQuote(`=${physical}:`)} ${NATIVE_LOGICAL_SESSION_OPTION}`
