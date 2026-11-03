@@ -7,6 +7,10 @@ const clientFor = (entries: object[]) => ({ get: vi.fn(async () => ({ status: 20
 afterEach(() => vi.restoreAllMocks());
 
 describe("first-project compatibility alias", () => {
+  it("keeps same-name user and built-in specs ambiguous when both are visible", async () => {
+    const user = { ...starter, id: "user-id", sourceType: "user_file" };
+    await expect(resolveLibrarySpec(clientFor([starter, user]), "starter", { kind: "rig" })).rejects.toThrow("ambiguous");
+  });
   it("finds an explicitly requested hidden built-in without shadowing a visible user spec", async () => {
     const user = { ...starter, id: "user-id", sourceType: "user_file" };
     const get = vi.fn(async (url: string) => ({ status: 200, data: url.includes("include_builtins=true") ? [starter, user] : [user] }));

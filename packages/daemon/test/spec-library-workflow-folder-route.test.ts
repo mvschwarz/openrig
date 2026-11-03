@@ -141,6 +141,33 @@ describe("spec-library route folder scan (slice 11)", () => {
     expect(after.filter((entry) => entry.sourcePath === user)).toHaveLength(1);
   });
 
+  it("reviews the current file through its source link without changing version history", async () => {
+    const builtin = join(builtinDir, "same.yaml");
+    const user = join(folder, "same.yaml");
+    const version = (value: string) => VALID_YAML("same")
+      .replace("version: '1'", `version: '${value}'`)
+      .replace("Folder-scan fixture", `Objective ${value}`)
+      .replace("objective: Draft.", `objective: Step ${value}.`);
+    writeFileSync(builtin, version("1"));
+    cache.readThrough(builtin);
+    writeFileSync(user, version("1"));
+    writeFileSync(join(tmp, "config.json"), JSON.stringify({ specs: { builtinsVisible: false } }));
+    const app = createApp();
+    const entries = await (await app.request("/api/specs/library?kind=workflow")).json() as Array<{ id: string }>;
+    const sourceId = entries[0]!.id;
+    for (const value of ["2", "10", "2"]) {
+      writeFileSync(user, version(value));
+      const response = await app.request(`/api/specs/library/${encodeURIComponent(sourceId)}/review`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ version: value, sourcePath: user, purpose: `Objective ${value}`,
+        steps: [expect.objectContaining({ objective: `Step ${value}.` })] });
+    }
+    const history = await app.request(`/api/specs/library/${encodeURIComponent("workflow:same:10")}/review`);
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({ version: "10", purpose: "Objective 10",
+      steps: [expect.objectContaining({ objective: "Step 10." })] });
+  });
+
   it("keeps accepted name/version pairs distinct and reviewable when a version contains a colon", async () => {
     writeFileSync(join(folder, "first.yaml"), VALID_YAML("demo").replace("version: '1'", "version: 'release:1'"));
     writeFileSync(join(folder, "second.yaml"), VALID_YAML("demo:release"));

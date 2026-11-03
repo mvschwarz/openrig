@@ -1280,7 +1280,9 @@ To omit built-in rigs, agents and workflows from the shared spec inventory, run
 consumers of the library listing; user specs remain visible. Use
 `rig specs ls --include-builtins` to list them deliberately, and set the value
 back to `true` to restore the default. Explicit `show`, `preview`, and launch
-lookups can still find hidden built-ins. When a user spec has the same name, it
-wins the name lookup; use the built-in's ID from the explicit listing to select
-the built-in. This is an inventory preference, not an access-control boundary;
-other endpoints and on-disk files can still expose the built-ins.
+lookups can still find hidden built-ins. When built-ins are hidden and a user
+spec has the same name, the user spec wins the name lookup; use the built-in's
+ID from the explicit listing to select the built-in. With built-ins visible,
+same-name matches remain ambiguous. This is an inventory preference, not an
+access-control boundary; other endpoints and on-disk files can still expose the
+built-ins.

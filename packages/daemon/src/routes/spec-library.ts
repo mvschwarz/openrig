@@ -69,9 +69,19 @@ export function specLibraryRoutes(): Hono {
       }
       // Keep a source-specific link valid when an identical copy is edited and
       // becomes the cache's own user-file row. The normal row is listed once.
-      if (folder) {
+      if (folder && cache) {
+        const sourceHashes = new Map<string, string>();
         for (const entry of [...workflowEntries]) {
           if (entry.sourceType !== "user_file" || entry.status === "error" || dirname(entry.sourcePath) !== folder) continue;
+          try {
+            let sourceHash = sourceHashes.get(entry.sourcePath);
+            if (sourceHash === undefined) {
+              sourceHash = createHash("sha256").update(readFileSync(entry.sourcePath, "utf8")).digest("hex");
+              sourceHashes.set(entry.sourcePath, sourceHash);
+            }
+            const cached = cache.getByNameVersion(entry.name, entry.version);
+            if (!cached || cached.sourcePath !== entry.sourcePath || cached.sourceHash !== sourceHash) continue;
+          } catch { continue; /* Missing or changed source: do not project an unverified alias. */ }
           workflowEntries.push({ ...entry, id: `workflow-source:${createHash("sha256").update(entry.sourcePath).digest("hex")}` });
         }
       }
