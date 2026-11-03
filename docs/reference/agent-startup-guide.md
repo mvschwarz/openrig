@@ -530,11 +530,11 @@ remain shared.
 
 ### Codex guidance at launch
 
-On a fresh launch of Codex 0.164.0 or later, OpenRig passes a seat's managed guidance (the rig's and project's
-context, culture and SOP files) with the launch, as `-c developer_instructions=…`, instead of merging it into the
-repository `AGENTS.md`. Neither the tracked `AGENTS.md` nor the Codex home is written for it, and both still load as
-usual. The text opens: "OpenRig seat guidance for this session follows. Where it conflicts with AGENTS.md guidance in
-the repository or the Codex home, follow AGENTS.md."
+On a fresh launch of Codex 0.164.0 or later, OpenRig passes a seat's managed guidance (OpenRig's start file and the
+rig's and project's context, culture and SOP files) with the launch, as `-c developer_instructions=…`, instead of
+merging it into the repository `AGENTS.md`. Neither the tracked `AGENTS.md` nor the Codex home is written for it, and
+both still load as usual. The text opens: "OpenRig seat guidance for this session follows. Where it conflicts with
+AGENTS.md guidance in the repository or the Codex home, follow AGENTS.md."
 
 A launch value replaces a configured one, so this happens only when no Codex config layer OpenRig reads sets
 `developer_instructions`. OpenRig reads:
@@ -551,6 +551,8 @@ The guidance still goes to the repository `AGENTS.md`, as before, when:
 - a layer OpenRig reads sets `developer_instructions`, or can't be read. A launch warning names the file;
 - the launch resumes or forks a conversation. Developer instructions on a resume haven't been tested, and an exact
   resume puts the guidance back in the repository `AGENTS.md`;
+- the seat is restored, even when the restore starts a new conversation. A restore keeps the guidance file its launch
+  recorded, which for Codex is the repository `AGENTS.md`;
 - Codex is older than 0.164.0, or its version is unknown.
 
 A seat's role still arrives as startup text, and the seat-skills line, after the person's yes, still goes to
