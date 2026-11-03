@@ -470,6 +470,50 @@ describe("current draft-aware delivery through the real transport", () => {
     expect(f.bodies.a).toBe("");
   });
 
+  // A wake whose Enter was refused on an unreadable input, leaving its paste behind.
+  async function leaveOwnPaste(f: ReturnType<typeof fixture>, text: string) {
+    let unreadable = false;
+    vi.mocked(f.tmux.captureComposerSnapshot).mockImplementation(async name => {
+      const body = f.bodies[f.guard.target(name).nodeId];
+      if (body === text) return unreadable ? redrawing() : frame(text);
+      return body == null ? null : frame(body);
+    });
+    f.hooks.sleep = ms => { if (ms === 200 && f.bodies.a === text) unreadable = true; };
+    expect(await f.send("unreadable-paste", text, { verify: false })).toMatchObject({ ok: false, sent: true, reason: "draft_input_unknown" });
+    unreadable = false;
+  }
+
+  it("submits the leftover only after this send's own checks pass: a check that refuses after buffer preparation sends no key (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    let prepared = false;
+    f.hooks.load = () => { prepared = true; };
+    // The caller's own check passes until the send's buffer is prepared, then refuses (as a cancellation would).
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (prepared) throw new Error("fixture: the caller went away"); } });
+    expect(next.sent).not.toBe(true);
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("a send that needs an idle seat leaves the leftover and is held, so it never types into the turn the leftover would start (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    expect(await f.send("idle-wake", "next work", { verify: false, waitForIdleMs: 60000 })).toMatchObject({ outcome: "retained", sent: false, reason: "draft_input_busy" });
+    expect(f.writes.filter(write => write.startsWith("keys:"))).toEqual([]);
+    expect(f.bodies.a).toBe("one line");
+  });
+
+  it("says it submitted the leftover even when its own text then isn't sent (#2429)", async () => {
+    const f = fixture(); await f.enable();
+    await leaveOwnPaste(f, "one line");
+    // The caller goes away after the leftover's Enter, before this send's own paste.
+    const next = await f.send("next-wake", "next work", { verify: false, beforeWrite: () => { if (f.submissions.length) throw new Error("fixture: the caller went away"); } });
+    expect(next).toMatchObject({ ownPasteSubmitted: true, warning: expect.stringContaining("earlier paste") });
+    expect(next.sent).not.toBe(true);
+    expect(f.submissions).toEqual(["one line"]);
+    expect(f.bodies.a).toBe("");
+  });
+
   it.each(["a different label", "human input", "an unrecorded label"])("keeps the next wake held when its unreadable leftover isn't provably its own: %s (#2429)", async condition => {
     const f = fixture(); await f.enable();
     const text = "first line\nsecond line\nlast line", other = "other first\nother second\nother last";
