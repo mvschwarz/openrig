@@ -66,8 +66,6 @@ export interface CreateQitemInput {
   inReplyTo?: string;
   /** A current typed/button answer, never a reaction or a recovered late message. */
   humanAnswer?: boolean;
-  /** The answer is a typed thread reply: on a decision parked on its person, its row belongs to the current question. */
-  typedReply?: boolean;
 }
 
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
@@ -268,8 +266,8 @@ export function makeQueuePorts(
       };
       let created = directAnswer && input.inReplyTo
         ? await queueRepo.createHumanAnswer({ ...createInput, inboundReplyTo: input.inReplyTo,
-          // A parked decision's answer belongs to its current question, so a re-park gets its own.
-          ...(input.typedReply && ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
+          // A parked decision's answer, typed or clicked, belongs to its current question, so a re-park gets its own.
+          ...(ask?.state === "blocked" ? { episodeKey: queueRepo.currentHumanRequiredEpisode(input.inReplyTo)?.key } : {}) })
         : await queueRepo.create(createInput);
       // Another registered person's answer already settled the ask: these words still reach the agent, as correspondence.
       if (directAnswer && created.qitemId !== input.inReplyTo && created.sourceSession !== input.source) {

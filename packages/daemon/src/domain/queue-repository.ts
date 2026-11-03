@@ -3911,7 +3911,10 @@ export class QueueRepository {
       const question = item.humanQuestions.find((q) => q.id === input.questionId);
       if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
       const recorded = item.humanAnswers ?? {};
-      if (unansweredQuestions(item.humanQuestions, recorded).length === 0) {
+      // A park's set is final once this park has its answer: until then a complete set is an earlier park's, and a click
+      // on the re-park records over it.
+      if (unansweredQuestions(item.humanQuestions, recorded).length === 0
+        && (item.state === "pending" || this.currentEpisodeAnswer(item.qitemId, input.actorSession))) {
         return { status: "recorded" as const, answers: recorded, complete: true, questions: item.humanQuestions };
       }
       const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
