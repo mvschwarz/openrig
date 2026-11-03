@@ -8,6 +8,13 @@ import { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 
 // This owns only a fake executable and child in a private home; it never contacts a tmux server.
 describe.skipIf(process.platform === "win32")("tmux execution deadline", () => {
+it("keeps kill on the shell builtin when PATH has no kill executable", async () => {
+  const home = mkdtempSync(join(tmpdir(), "openrig-tmux-kill-builtin-"));
+  vi.stubEnv("PATH", home);
+  try { await expect(execTmuxCommand(`kill -0 ${process.pid}`)).resolves.toBe(""); }
+  finally { vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); }
+});
+
 it.each(["argv", "shell"] as const)("kills a stalled %s client and releases the next operation for that seat", async mode => {
   const home = mkdtempSync(join(tmpdir(), "openrig-tmux-deadline-"));
   const pidFile = join(home, "child.json"), calls = join(home, "calls"), script = join(home, "client.cjs");
