@@ -300,11 +300,16 @@ small presentation provenance, separate from queue membership. Herdr display
 labels are not that provenance. Other providers/platforms remain unsupported
 for ensure-viewer until qualified; ordinary open retains its existing behavior.
 
-Writable tile clients use `tmux attach -f ignore-size`; read-only clients keep
-`-r` (which also implies ignore-size). This can avoid contributing to sizing
-when other clients establish the agent window's dimensions. It is **not resize
-isolation**: opening a tile can change the agent's terminal size when it is the
-only sizing client. Observers of a Herdr terminal do not themselves resize it;
+A writable tile attaches with `tmux attach -f ignore-size` when its session
+already has a client that sizes it, so the tile doesn't fight that client over
+the agent window's dimensions. When the session has no sizing client, as with a
+freshly launched seat, the tile attaches without the flag and sizes the window
+itself: tmux applies ignore-size across the whole server, so a session viewed
+only by ignore-size clients would otherwise keep its 80x24 creation size while
+any other session has a sizing client. Read-only clients keep `-r` (which also
+implies ignore-size), and the printed manual attach commands keep
+`-f ignore-size`. This is **not resize isolation**: opening a tile can change
+the agent's terminal size. Observers of a Herdr terminal do not themselves resize it;
 a controlling browser can. No cross-version resize guarantee is implied.
 
 
