@@ -1338,6 +1338,8 @@ export function queueRoutes(): Hono {
     const closing = repo.closingTransition(qitemId, item.state);
     return c.json({
       ...item,
+      // #2446: what a settling Mission Control act can be guarded with (expectedRevision).
+      decisionRevision: repo.decisionRevision(item),
       // A closed row's outcome (its note and reason) lives only in the transition log; omitted while the row is open.
       ...(closing ? { closingTransition: {
         transitionId: closing.transitionId,

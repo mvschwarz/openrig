@@ -39,6 +39,7 @@
 //                closure_target+handed_off_to=<destination>;
 //                creates new qitem at destination (4-step canonical)
 
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { EventBus } from "../event-bus.js";
 import { isTypedGateBlocker, UNATTRIBUTED_ACTOR, type QueueRepository, type QueueItem } from "../queue-repository.js";
@@ -100,6 +101,9 @@ export interface MissionControlActionInput {
    *  the default person or the claim; the audit notes say whose ask it was. Only a request with no transport identity
    *  carries it. A surface that knows its person sends them without it. */
   authority?: "primary-user";
+  /** #2446, opt-in: the `decisionRevision` the caller read. A settling act then runs only on that decision; omitted, the
+   *  act and its result are exactly as before. An `operationId` in `auditNotes` lets a retry be answered from the record. */
+  expectedRevision?: string;
   /**
    * For handoff: opt-in best-effort wake. Default true (PL-004 Phase A R1
    * pattern: durable + waking by default; operators opt out for cold queues).
@@ -119,6 +123,10 @@ export interface MissionControlActionResult {
   auditedAt: string;
   /** For `answer`: recorded with questions still open, or answered (returned to the asker, and the ask closed). */
   answer?: { outcome: "recorded" | "answered"; unanswered: string[]; message?: string };
+  /** With expectedRevision only: the decision's revision as saved. */
+  decisionRevision?: string;
+  /** With expectedRevision only: this retry is the caller's own committed operation, answered from its record. */
+  reconciled?: true;
 }
 
 interface WriteContractDeps {
@@ -150,6 +158,34 @@ export class MissionControlWriteContract {
    * notify subscribers + opt-in transport wake (handoff only).
    */
   async act(input: MissionControlActionInput): Promise<MissionControlActionResult> {
+    if (input.expectedRevision === undefined) return this.actOn(input);
+    if (!SETTLING_VERBS.has(input.verb)) {
+      throw new MissionControlWriteContractError("decision_revision_unsupported",
+        `verb=${input.verb} doesn't take expectedRevision; answer, resolve, approve and deny do. Nothing was written.`, { verb: input.verb });
+    }
+    // #2446: the act runs only on the decision its caller read. No await separates this check from the act's first
+    // write, so no other request in this daemon changes the decision in between.
+    const operation = typeof input.auditNotes?.operationId === "string" ? operationFingerprint(input) : null;
+    const item = this.queueRepo.getById(input.qitemId);
+    const current = item ? this.queueRepo.decisionRevision(item) : null;
+    if (item && current !== input.expectedRevision) {
+      const last = this.actionLog.listForQitem(input.qitemId, 1)[0];
+      // The caller's own committed operation retried after an uncertain result: answered from its record, nothing written.
+      if (operation && last?.auditNotes?.operation === operation) {
+        return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
+          notifyAttempted: false, notifyResult: null, auditedAt: last.actedAt, reconciled: true, decisionRevision: current! };
+      }
+      throw new MissionControlWriteContractError("decision_revision_changed",
+        `qitem ${input.qitemId} changed since this revision was read, so nothing was written. Read it again for the current decision.`,
+        { qitemId: input.qitemId, currentRevision: current, state: item.state, humanAnswers: item.humanAnswers ?? null,
+          lastAction: last ? { actionId: last.actionId, verb: last.actionVerb, actorSession: last.actorSession, actedAt: last.actedAt, auditNotes: last.auditNotes } : null });
+    }
+    const result = await this.actOn(operation ? { ...input, auditNotes: { ...input.auditNotes, operation } } : input);
+    const saved = this.queueRepo.getById(input.qitemId);
+    return saved ? { ...result, decisionRevision: this.queueRepo.decisionRevision(saved) } : result;
+  }
+
+  private async actOn(input: MissionControlActionInput): Promise<MissionControlActionResult> {
     if (input.verb === "annotate") {
       return this.annotateOnly(input);
     }
@@ -718,6 +754,14 @@ interface ClosureMapping {
   closureTarget: string | null;
   handedOffTo?: string;
   blockedOn?: string;
+}
+
+/** One logical operation (#2446): the caller's operationId with the verb, who sent it and what it carries, so a retry
+ *  matches only itself, never another verb or payload sent under the same ID. */
+function operationFingerprint(input: MissionControlActionInput): string {
+  const sent = [input.auditNotes?.operationId, input.verb, input.actorSession, input.authority ?? null, input.questionId ?? null,
+    input.optionId ?? null, input.decision ?? null, input.reason ?? null, input.destinationSession ?? null, input.body ?? null, input.annotation ?? null];
+  return createHash("sha256").update(JSON.stringify(sent)).digest("hex").slice(0, 24);
 }
 
 function verbToClosure(input: MissionControlActionInput): ClosureMapping {
