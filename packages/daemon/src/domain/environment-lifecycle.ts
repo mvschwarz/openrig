@@ -23,7 +23,7 @@ export type EnvironmentCheckpoint = {
   destinationCwd: string; nativeState: string; artifacts: Array<{ path: string; source: string; sha256: string; bytes: number; taskId: string }>; files: Array<{ path: string; source: string; sha256: string; bytes: number }>;
 };
 export type EffectReceipt = { version: 1; operationId: string; bindingId: string; generation: string | null; resourceId: string;
-  effect: EnvironmentEffect; state: "confirmed" | "pending" | "unconfirmed"; remaining?: DependentObservation; detail?: string };
+  effect: EnvironmentEffect; state: "confirmed" | "pending" | "unconfirmed"; remaining?: DependentObservation; detail?: string; stage?: string; dispatched?: false | "unknown"; error?: { name: string; code?: string; message: string } };
 type Operation = { binding_id: string; kind: string; request_json: string; state: string; receipt_json: string | null; effect_id: string | null };
 const stable = (v: unknown): string => JSON.stringify(v, (_key, x) => x && typeof x === "object" && !Array.isArray(x)
   ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b))) : x);
@@ -92,6 +92,7 @@ export class EnvironmentLifecycle {
     const base = { version: 1 as const, operationId: input.operationId, bindingId: id, generation: input.generation, resourceId: binding.resource!.id, effect: input.effect, ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}) };
     const result = (state: EffectReceipt["state"], extra: Partial<EffectReceipt> = {}): EffectReceipt => ({ ...base, state, ...extra });
     const confirm = (extra: Partial<EffectReceipt> = {}) => { const receipt = result("confirmed", extra); this.save(input.operationId, receipt); return receipt; };
+    let stage = "selection";
     // Re-check at Core's call boundary AND inside the driver's final identity await.
     // Only a known pre-dispatch refusal releases the claim; transport uncertainty never does.
     const dispatch = async (run: (allowed: () => boolean) => Promise<void>): Promise<boolean> => {
@@ -104,7 +105,7 @@ export class EnvironmentLifecycle {
         return eligible;
       };
       try { if (!allowed()) throw new Error("selection changed"); await run(allowed); }
-      catch { if (refused) { this.platform.db.prepare("UPDATE environment_operations SET state='intent' WHERE operation_id=? AND state='requested'").run(input.operationId); return false; } }
+      catch (error) { if (refused) { this.platform.db.prepare("UPDATE environment_operations SET state='intent' WHERE operation_id=? AND state='requested'").run(input.operationId); return false; } if (input.effect === "delete-owned") throw error; }
       return true;
     };
     try {
@@ -115,6 +116,7 @@ export class EnvironmentLifecycle {
       }
       if (input.effect === "delete-owned") {
         if (!this.driver.deleteEnvironment || !this.driver.cleanupState) refuse("environment_effect_unsupported", "This driver cannot verify workload/supervisor/volume cleanup", 501);
+        stage = "provider-list";
         let listed = await this.driver.list(binding.placement);
         if (!listed.complete) return result("unconfirmed", { detail: "Provider listing is incomplete" });
         if (listed.resources.some(row => row.name === binding.resource!.name && row.id !== binding.resource!.id)) refuse("environment_identity_changed", "The resource name was reused; nothing was deleted");
@@ -122,6 +124,7 @@ export class EnvironmentLifecycle {
         let inventory = this.operation(inventoryId)?.receipt_json;
         if (this.driver.captureCleanup && !inventory) {
           if (!input.engineSocket) refuse("environment_engine_required", "Select the local provider's rootless Podman socket before delete", 400);
+          stage = "cleanup-inventory";
           const captured = await this.driver.captureCleanup(binding, input.engineSocket);
           this.intent(binding, inventoryId, "cleanup-inventory", { resourceId: binding.resource!.id, engineSocket: input.engineSocket });
           this.save(inventoryId, captured); inventory = JSON.stringify(captured);
@@ -130,11 +133,14 @@ export class EnvironmentLifecycle {
         if (found) {
           this.platform.assertResource(binding, found);
           select();
+          stage = "delete-dispatch";
           if (!await dispatch(allowed => this.driver.deleteEnvironment!(binding, op.effect_id!, allowed)))
             return result("pending", { detail: "The selection changed before dispatch; no delete was sent" });
+          stage = "provider-absence";
           listed = await this.driver.list(binding.placement);
         }
         if (!listed.complete || listed.resources.some(row => row.id === binding.resource!.id || row.name === binding.resource!.name)) return result("pending", { detail: "Exact provider absence is not confirmed" });
+        stage = "dependent-cleanup";
         const remaining = await this.driver.cleanupState(binding, inventory ? JSON.parse(inventory) : undefined);
         if (Object.values(remaining).some(value => value !== false)) return result("unconfirmed", { remaining, detail: "Provider absence does not establish dependent cleanup" });
         return confirm({ remaining });
@@ -159,7 +165,11 @@ export class EnvironmentLifecycle {
       return !after.running ? confirm() : result("pending", { detail: "Native TERM requested; execution is still present" });
     } catch (error) {
       if (error instanceof EnvironmentError) throw error;
-      return result("unconfirmed", { detail: "The original effect could not be observed; its intent remains, and it was not retried" });
+      if (input.effect !== "delete-owned") return result("unconfirmed", { detail: "The original effect could not be observed; its intent remains, and it was not retried" });
+      const dispatched = this.operation(input.operationId)?.state === "intent" ? false : "unknown" as const;
+      const cause = error as Error & { code?: string };
+      return result("unconfirmed", { stage, dispatched, error: { name: cause.name ?? "Error", ...(typeof cause.code === "string" ? { code: cause.code } : {}), message: cause.message ?? String(error) },
+        detail: dispatched === false ? "Stopped before effect dispatch; the saved intent remains for reconciliation" : "The original effect could not be observed; its intent remains, and it was not retried" });
     }
   }
   checkpointRecord(id: string): EnvironmentCheckpoint | null {

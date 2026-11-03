@@ -128,8 +128,10 @@ export function environmentCommand(override?: EnvironmentCommandDeps): Command {
     .action(action(async (binding: string, opts: { live?: boolean }) => report(checked(await (await client()).get<Record<string, any>>(`/api/environments/${encodeURIComponent(binding)}${opts.live ? "?live=true" : ""}`)))));
   cmd.command("connect").argument("<binding>").requiredOption("--generation <id>").description("Open only the bound execution's viewer; closing it does not prove native or compute stopped")
     .action(action(async (id: string, opts: { generation: string }) => {
-      const c = await client(), b = checked(await c.get<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}?live=true`));
-      checked(await c.post<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}/validate`, { generation: opts.generation }));
+      // Launch and the guest latch already verify all projected files. Opening a viewer needs only one live
+      // resource lookup (the driver bounds it at 30s), not another serial validation of every startup file.
+      const c = await client(), b = checked(await c.get<Record<string, any>>(`/api/environments/${encodeURIComponent(id)}?live=true`, { timeoutMs: 35_000 }));
+      if (b.generation !== opts.generation) throw new Error("The selected environment generation changed; no viewer was opened");
       const args = ["--gateway", b.placement.gateway, "--workspace", b.placement.workspace, "sandbox", "connect", b.placement.name];
       await new Promise<void>((resolveExit, reject) => {
         const child = spawn("openshell", args, { stdio: "inherit" });
