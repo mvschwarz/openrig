@@ -2036,6 +2036,8 @@ export class RestoreOrchestrator {
 
           const binding = {
             ...launchResult.binding,
+            // #875: the guidance file this seat's launch recorded; an older snapshot recorded none, so its file stays the rule's.
+            guidanceFile: startupCtx.guidanceFile ?? null,
             ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
             ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             cwd: launchCwd,

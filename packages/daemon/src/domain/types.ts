@@ -389,6 +389,8 @@ export interface NodeStartupSnapshot {
   resolvedStartupFiles: import("./runtime-adapter.js").ResolvedStartupFile[];
   startupActions: StartupAction[];
   runtime: string;
+  /** #875: the guidance file this seat's launch chose and recorded. Absent (every older snapshot) means the rule's file. */
+  guidanceFile?: string;
 }
 
 export interface SnapshotData {

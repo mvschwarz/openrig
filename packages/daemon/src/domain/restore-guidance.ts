@@ -13,6 +13,7 @@
 // Guidance problems never block the exact resume. What can't be put back is reported.
 
 import nodePath from "node:path";
+import type Database from "better-sqlite3";
 import {
   MANAGED_BLOCK_START,
   MANAGED_BLOCK_END,
@@ -46,18 +47,30 @@ export interface SeatGuidance {
   items: GuidanceItem[];
 }
 
-/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the rig's
- *  Claude file for Claude, `AGENTS.md` for Codex, Pi and omp, or null for a runtime this doesn't know. Teardown, its
- *  live-file protection, exact resume and node inventory all read the target from here. */
+/** The file a seat's runtime merges its managed guidance blocks into, whatever a spec's `target` declares: the file its
+ *  launch recorded (`recorded`, a Pi seat's agent folder AGENTS.md, #875), else the rig's Claude file for Claude,
+ *  `AGENTS.md` for Codex, Pi and omp, or null for a runtime this doesn't know. Teardown, its live-file protection, exact
+ *  resume and node inventory all read the target from here. */
 export function seatGuidanceFile(
   runtime: string | null | undefined,
   cwd: string,
   claudeManagedBlockFile: string | null | undefined,
+  recorded?: string | null,
 ): string | null {
+  if (recorded) return recorded;
   const fileName = runtime === "claude-code"
     ? (claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
     : runtime === "codex" || runtime === "pi" || runtime === "omp" ? "AGENTS.md" : null;
   return fileName ? nodePath.join(cwd, fileName) : null;
+}
+
+/** The guidance file a node's last launch recorded (#875), or null: none recorded, or a database from before the column. */
+export function recordedGuidanceFile(db: Pick<Database.Database, "prepare">, nodeId: string | null | undefined): string | null {
+  if (!nodeId) return null;
+  try {
+    const row = db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id = ?").get(nodeId) as { guidance_file: string | null } | undefined;
+    return row?.guidance_file || null;
+  } catch { return null; }
 }
 
 /** Whether guidance text holds this id's block as it is written: a BEGIN marker followed later by its END, in the
@@ -80,7 +93,7 @@ export function seatGuidance(
   readFile: (path: string) => string,
 ): SeatGuidance | null {
   if (!startupCtx || !cwd) return null;
-  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile);
+  const targetPath = seatGuidanceFile(startupCtx.runtime, cwd, claudeManagedBlockFile, startupCtx.guidanceFile);
   if (!targetPath) return null;
   const items = new Map<string, GuidanceItem>();
   for (const saved of startupCtx.projectionEntries) {
