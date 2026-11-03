@@ -577,7 +577,9 @@ export function FeedCard({
                 }
               /> : hasQuestions ? (
                 <span className="font-mono text-[10px] text-on-surface-variant break-words min-w-0">
-                  {`This ask has questions. Answer in the TUI (rig tui)${terminalSession ? `, or tell ${terminalSession} in Chat.` : "."}`}
+                  {card.hostId && card.hostId !== "local"
+                    ? `This ask has questions. Answer in the TUI on host ${card.hostId} (rig tui).`
+                    : `This ask has questions. Answer in the TUI (rig tui)${terminalSession ? `, or tell ${terminalSession} in Chat.` : "."}`}
                 </span>
               ) : null}
               <button

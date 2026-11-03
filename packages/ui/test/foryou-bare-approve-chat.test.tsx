@@ -152,6 +152,28 @@ describe("For-You quick actions — bare APPROVE + CHAT only (N-1, BR-12)", () =
     expect(raw).toHaveLength(0);
   });
 
+  it.each([true, false])("remote questions name the origin host without suggesting Chat (terminal: %s)", (hasTerminal) => {
+    stubActionFetch();
+    const card = actionCard();
+    card.hostId = "remote-host";
+    card.source.payload.humanQuestions = [{ id: "note", question: "What should change?" }];
+    if (!hasTerminal) delete card.source.payload.source_session;
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.getByText("This ask has questions. Answer in the TUI on host remote-host (rig tui).")).toBeTruthy();
+    expect(view.queryByText(/or tell .* in Chat/)).toBeNull();
+    expect(view.queryByTestId("mc-verb-approve")).toBeNull();
+    expect(view.getByTestId("feed-card-chat-queue.enqueued-7").hasAttribute("disabled")).toBe(!hasTerminal);
+  });
+
+  it.each([undefined, "local"])("local questions retain TUI and Chat guidance (host: %s)", (hostId) => {
+    stubActionFetch();
+    const card = actionCard();
+    card.hostId = hostId;
+    card.source.payload.humanQuestions = [{ id: "note", question: "What should change?" }];
+    const view = withQuery(<FeedCard card={card} />);
+    expect(view.getByText("This ask has questions. Answer in the TUI (rig tui), or tell dev-owner@rig in Chat.")).toBeTruthy();
+  });
+
   it.each([undefined, "remote"])("keeps Approve for runner permission questions on host %s", async (hostId) => {
     const raw = stubActionFetch();
     const card = actionCard();
