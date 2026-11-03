@@ -3,3 +3,4 @@ export { readWindowsRegularText, readWindowsOwnedText, writeWindowsOwnedText, re
 export { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "./domain/windows-owned-text.js";
 export { moveWindowsEntryNoReplace } from "./domain/windows-owned-text.js";
 export { readWindowsEntryTimes } from "./domain/windows-owned-text.js";
+export { copyWindowsFileNew } from "./domain/windows-owned-text.js";

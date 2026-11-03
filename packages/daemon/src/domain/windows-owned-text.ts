@@ -31,6 +31,7 @@ public static class OpenRigOwnedText {
       else if(args[0]=="replace-preserve") { if(!ReplaceFile(args[1],args[2],null,0u,IntPtr.Zero,IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="replace-artifact")ReplaceArtifact(args[1],args[2]);
       else if(args[0]=="replace-copy")ReplaceArtifact(args[1],args[2],false);
+      else if(args[0]=="copy-new")CopyNew(args[1],args[2]);
       else if(args[0]=="move-no-replace") { if(!MoveFileEx(args[1],args[2],8))throw new Win32Exception(Marshal.GetLastWin32Error()); }
       else if(args[0]=="directory-link") { uint attrs=GetFileAttributes(args[1]); if(attrs==uint.MaxValue)throw new Win32Exception(Marshal.GetLastWin32Error()); if((attrs&0x400u)==0)throw new InvalidOperationException("Selected entry is not a link"); Console.Write((attrs&0x10u)!=0?"true":"false"); }
       else if(args[0]=="directory-case-sensitive")DirectoryCaseSensitive(args[1]);
@@ -71,6 +72,60 @@ public static class OpenRigOwnedText {
   [DllImport("advapi32.dll")] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor,out bool present,out IntPtr dacl,out bool defaulted);
   [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle file,int type,uint requested,IntPtr owner,IntPtr group,IntPtr dacl,IntPtr sacl);
   [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle file,int type,uint requested,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
+  delegate uint CopyProgress(long total,long transferred,long size,long used,uint stream,uint reason,IntPtr source,IntPtr destination,IntPtr data);
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CopyFileEx(string source,string destination,CopyProgress progress,IntPtr data,IntPtr cancel,uint flags);
+  static void CopyNew(string source,string destination) {
+    // CopyFileEx keeps alternate streams and native attributes. A protected
+    // source DACL must be applied through the copy handle before any bytes,
+    // rather than exposing copied content under the parent's inherited ACL.
+    using(var pinned=Open(source,false)) {
+      var expected=Regular(pinned,false);Exception failure=null;bool checkedAcl=false;
+      CopyProgress callback=delegate(long total,long transferred,long size,long used,uint stream,uint reason,IntPtr src,IntPtr dst,IntPtr data) {
+        if(checkedAcl)return 0;
+        try {
+          if(reason!=1 || transferred!=0)throw new InvalidOperationException("Copy lacks a pre-content security callback");
+          using(var input=new SafeFileHandle(src,false))using(var output=new SafeFileHandle(dst,false)) {
+            var observed=Regular(input,false);Regular(output,false);
+            if(observed.volume!=expected.volume || observed.indexHigh!=expected.indexHigh || observed.indexLow!=expected.indexLow)
+              throw new InvalidOperationException("Copy source identity changed");
+            IntPtr owner,group,dacl,sacl,descriptor;
+            uint error=GetSecurityInfo(input,1,4,out owner,out group,out dacl,out sacl,out descriptor);
+            if(error!=0)throw new Win32Exception((int)error);
+            try {
+              var bytes=new byte[GetSecurityDescriptorLength(descriptor)];Marshal.Copy(descriptor,bytes,0,bytes.Length);
+              var security=new RawSecurityDescriptor(bytes,0);
+              if((security.ControlFlags & ControlFlags.DiscretionaryAclProtected)!=0) {
+                error=SetSecurityInfo(output,1,0x80000004u,IntPtr.Zero,IntPtr.Zero,dacl,IntPtr.Zero);
+                if(error!=0)throw new Win32Exception((int)error);
+                IntPtr o,g,d,s,readback;
+                error=GetSecurityInfo(output,1,4,out o,out g,out d,out s,out readback);
+                if(error!=0)throw new Win32Exception((int)error);
+                try {
+                  var actual=new byte[GetSecurityDescriptorLength(readback)];Marshal.Copy(readback,actual,0,actual.Length);
+                  var verified=new RawSecurityDescriptor(actual,0);
+                  if((verified.ControlFlags & ControlFlags.DiscretionaryAclProtected)==0 || !SameAcl(security.DiscretionaryAcl,verified.DiscretionaryAcl))
+                    throw new InvalidOperationException("Copied protected DACL did not persist");
+                } finally {LocalFree(readback);}
+              }
+            } finally {LocalFree(descriptor);}
+          }
+          checkedAcl=true;return 0;
+        } catch(Exception error) {failure=error;return 1;}
+      };
+      bool copied=CopyFileEx(source,destination,callback,IntPtr.Zero,IntPtr.Zero,1u);
+      int code=Marshal.GetLastWin32Error();GC.KeepAlive(callback);
+      if(failure!=null)throw failure;
+      if(!copied)throw new Win32Exception(code);
+      if(!checkedAcl)throw new InvalidOperationException("Copy did not qualify destination security");
+    }
+  }
+  static bool SameAcl(RawAcl left,RawAcl right) {
+    if(left==null || right==null)return left==right;
+    if(left.BinaryLength!=right.BinaryLength)return false;
+    var a=new byte[left.BinaryLength];var b=new byte[right.BinaryLength];left.GetBinaryForm(a,0);right.GetBinaryForm(b,0);
+    for(int i=0;i<a.Length;i++)if(a[i]!=b[i])return false;
+    return true;
+  }
   static void OwnedPipe(string name) {
     using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",name,System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.None)) {
       pipe.Connect(1500); uint pid;
@@ -518,6 +573,14 @@ export function replaceWindowsFilePreservingMetadata(target: string, staging: st
 export function replaceWindowsCopiedFile(target: string, staging: string): void {
   execFileSync(nativeHelper(), ["replace-copy", toNamespacedPath(target), toNamespacedPath(staging)], {
     windowsHide: true, timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+/** Exclusive native regular-file copy. Protected source DACLs are installed
+ * before content; unprotected ACL inheritance and owner/group are unchanged. */
+export function copyWindowsFileNew(source: string, destination: string): void {
+  execFileSync(nativeHelper(), ["copy-new", toNamespacedPath(source), toNamespacedPath(destination)], {
+    windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   });
 }
 

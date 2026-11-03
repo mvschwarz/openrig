@@ -1,5 +1,32 @@
 # Native Windows parity: implementation and evidence
 
+## Protected DACL on new local file copies (2026-11-03)
+
+An owned native probe confirmed that the previous `fs.cp` new-file path copied
+private bytes into a destination inheriting its parent's permissions. Existing
+file replacement already retained the destination DACL and keeps that behavior.
+
+New Windows regular-file copies and regular-file stages now use exclusive
+`CopyFileEx`. Its first stream callback qualifies the source inode against a
+pinned no-follow regular-file handle and installs a protected source DACL on the
+destination handle before any content transfer. The callback verifies protection
+and exact ACL entries; failures cancel the native copy. Native copying retains
+alternate data streams. This is not a shell copy or a post-content pathname ACL
+repair. Windows may add an auto-inheritance control bit without changing the
+protected ACL entries.
+
+Native validation: seven new tests passed, covering empty/nonempty files with
+and without alternate streams, exclusive destination refusal, retained existing
+private destination permissions, and final-source-link refusal. Related local
+copy selections passed 26 tests with one skip and 11 tests with five skips. CLI
+type checking and daemon compilation passed. These are scoped Windows results,
+not a fresh full-suite, WSL, package, deployment or real-provider qualification.
+
+Limits: unprotected source ACL inheritance, source owner/group translation,
+directory/link DACLs and metadata-only ACL drift remain unimplemented. Existing
+destination security remains authoritative on regular-file replacement. This
+change does not establish complete SID/DACL or Linux/WSL behavior equivalence.
+
 ## Empty-directory replacement identity and Windows directory-mode fallback (2026-11-03)
 
 Regular file stages now retain known same-server uid/gid when replacing an empty

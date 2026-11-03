@@ -1,7 +1,7 @@
 import { chmod, cp, lstat, lutimes, mkdir, readdir, readlink, realpath, rename, rmdir, stat, symlink, unlink, utimes } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
+import { copyWindowsFileNew, isWindowsDirectoryCaseSensitive, isWindowsDirectoryLink, replaceWindowsCopiedFile, windowsNamesCollide } from "@openrig/daemon/windows-owned-files";
 import type { CopyPlan, FileCopyResult } from "./file-transfer.js";
 import { moveLocalEntryNoReplace } from './local-entry-move.js';
 import { readWindowsEntryTimes } from "@openrig/daemon/windows-owned-files";
@@ -163,7 +163,7 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
         if (source.isSymbolicLink()) {
           await symlink(await readlink(src), staged, directoryLink ? "dir" : "file");
           await lutimes(staged, source.atime, source.mtime);
-        } else { await cp(src, staged, { force: false, errorOnExist: true }); await utimes(staged, source.atime, source.mtime); }
+        } else { if (process.platform === "win32") copyWindowsFileNew(src, staged); else await cp(src, staged, { force: false, errorOnExist: true }); await utimes(staged, source.atime, source.mtime); }
         // Nonrecursive removal is the final emptiness check; a newly added
         // child makes it fail without deleting that child's data.
         directoryReplacementAttempted = true;
@@ -190,14 +190,15 @@ export async function runNativeLocalCopy(plan: CopyPlan, moveEntry = moveLocalEn
       }
       if (process.platform === "win32" && source.isFile() && destination?.isFile()) {
         staged = path.join(path.dirname(dst), `.openrig-copy-${randomUUID()}`);
-        await cp(src, staged, { force: false, errorOnExist: true });
+        copyWindowsFileNew(src, staged);
         await utimes(staged, source.atime, source.mtime);
         replaceWindowsCopiedFile(dst, staged);
         staged = undefined;
         return;
       }
       // fs.cp overwrites the entry, preserving links rather than following their targets.
-      await cp(src, dst, { force: true, verbatimSymlinks: true });
+      if (process.platform === "win32" && source.isFile() && !destination) copyWindowsFileNew(src, dst);
+      else await cp(src, dst, { force: true, verbatimSymlinks: true });
       if (source.isSymbolicLink()) await lutimes(dst, source.atime, source.mtime);
       else await utimes(dst, source.atime, source.mtime);
     }
