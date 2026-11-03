@@ -101,9 +101,9 @@ export function BundleInstallFlow() {
 
       {step === "done" && planResult && (
         <div data-testid="step-done">
-          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">Complete</h3>
+          <h3 className="text-sm font-semibold text-on-surface mb-spacing-3">{planResult.status === "partial" ? "Partially installed" : "Complete"}</h3>
           <div className="text-xs space-y-1">
-            <div>Status: <StatusBadge status={planResult.status === "completed" ? "done" : planResult.status} label={planResult.status === "completed" ? "Completed" : undefined} /></div>
+            <div>Status: <StatusBadge status={planResult.status === "completed" ? "done" : planResult.status} label={planResult.status === "completed" ? "Completed" : planResult.status === "partial" ? "Partially installed" : undefined} /></div>
             {planResult.stages.some((s) => s.detail?.source === "pod_bundle") ? (
               <span className="ml-spacing-2 text-primary" data-testid="bundle-type-label">Pod-aware bundle</span>
             ) : (

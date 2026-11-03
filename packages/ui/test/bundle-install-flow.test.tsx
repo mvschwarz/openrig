@@ -123,4 +123,45 @@ describe("BundleInstallFlow", () => {
     const label = screen.getByTestId("bundle-type-label");
     expect(label.textContent).toContain("Legacy bundle");
   });
+
+  // F3: partial installs say "partial", not "Complete".
+  it("shows partial-install wording when the install status is partial", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        runId: "run-p",
+        status: "planned",
+        stages: [{ stage: "resolve_spec", status: "ok" }],
+        errors: [],
+      }),
+    });
+
+    renderFlow();
+    await waitFor(() => expect(screen.getByTestId("bundle-install-flow")).toBeTruthy());
+
+    act(() => {
+      fireEvent.change(screen.getByTestId("bundle-input"), { target: { value: "/tmp/pod.rigbundle" } });
+      fireEvent.change(screen.getByTestId("target-input"), { target: { value: "/tmp/target" } });
+    });
+
+    act(() => { fireEvent.click(screen.getByTestId("plan-btn")); });
+    await waitFor(() => expect(screen.getByTestId("step-planned")).toBeTruthy());
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true, status: 201,
+      json: async () => ({
+        runId: "run-p",
+        status: "partial",
+        stages: [{ stage: "resolve_spec", status: "ok" }],
+        errors: ["instantiate skipped"],
+      }),
+    });
+
+    act(() => { fireEvent.click(screen.getByTestId("apply-btn")); });
+    await waitFor(() => expect(screen.getByTestId("step-done")).toBeTruthy());
+
+    const done = screen.getByTestId("step-done");
+    expect(done.textContent).toContain("Partial");
+    expect(done.textContent).not.toContain("Complete");
+  });
 });

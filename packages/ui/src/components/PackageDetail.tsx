@@ -243,8 +243,9 @@ export function PackageDetail() {
         <EmptyState
           label="No installs yet"
           title="No installs yet"
-          description="No installs recorded for this package yet. Install it from the packages page to see history here."
+          description="No installs recorded for this package yet."
           testId="empty-installs"
+          action={{ label: "Install this package", href: "/packages/install" }}
         />
       ) : (
         <div data-testid="install-list">
