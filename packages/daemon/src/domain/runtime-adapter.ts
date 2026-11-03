@@ -17,6 +17,10 @@ export interface NodeBinding extends Binding {
   /** Claude-only, session-scoped Advisor model. */
   advisor?: string;
   codexConfigProfile?: string;
+  /** #875: the file this launch merges its managed guidance blocks into, chosen once at a fresh launch
+   *  (`guidanceFileFor`) or carried from a restore's saved startup context. Null means the rule's file in `cwd`;
+   *  undefined means not chosen yet. */
+  guidanceFile?: string | null;
   /** A staged account-home selection; null explicitly returns to configured defaults before commit. */
   accountHome?: string | null;
   accountToken?: import("./claude-seat-token.js").ClaudeSeatTokenRef | null;
@@ -234,6 +238,9 @@ export interface RuntimeAdapter {
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */
   skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
+  /** #875: where this seat's managed guidance should go, decided at a fresh launch and recorded with its startup context.
+   *  Absent, or a null file, keeps the rule's file in the working directory; a note says why the seat's own file wasn't used. */
+  guidanceFileFor?(binding: NodeBinding): { file: string | null; note?: string };
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

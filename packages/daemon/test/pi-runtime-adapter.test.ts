@@ -765,3 +765,70 @@ describe("durable catch-up cursor survives launch-attempt resets", () => {
     }
   });
 });
+
+// #875 direction 2: Pi loads its agent folder's AGENTS.md before the repository's (Quality's native run on Pi 1.0.1), so a
+// Pi seat's managed guidance goes there and the person's tracked repository AGENTS.md is never written.
+describe("a Pi seat's managed guidance goes to its own agent folder (#875)", () => {
+  const AGENT_FILE = nodePath.join(piSeatPaths(STATE_ROOT, SESSION).agentDir, "AGENTS.md");
+  const seat = { tmuxSession: SESSION, cwd: "/work" } as never;
+
+  it("chooses the seat's agent-folder AGENTS.md, and nothing without a session", () => {
+    const adapter = adapterWith(memFs(), mockTmux());
+    expect(adapter.guidanceFileFor(seat)).toEqual({ file: AGENT_FILE });
+    expect(adapter.guidanceFileFor({ tmuxSession: null, cwd: "/work" } as never)).toEqual({ file: null });
+  });
+
+  it.each([
+    ["the agent AGENTS.md is a symlink", AGENT_FILE, { link: true, nlink: 1 }],
+    ["the agent AGENTS.md is a hard link", AGENT_FILE, { link: false, nlink: 2 }],
+    ["the agent folder is a symlink", piSeatPaths(STATE_ROOT, SESSION).agentDir, { link: true, nlink: 1 }],
+  ])("keeps the repository file when %s, which other sessions could read, and says so", (_case, linked, info) => {
+    const fs = { ...memFs(), linkInfo: (p: string) => (p === linked ? info : null) };
+    const chosen = adapterWith(fs, mockTmux()).guidanceFileFor(seat);
+    expect(chosen.file).toBeNull();
+    expect(chosen.note).toMatch(/repository AGENTS\.md/);
+  });
+
+  it("merges startup guidance and projected guidance into the chosen file, creating its folder, and never the repository AGENTS.md", async () => {
+    const fs = memFs({ "/spec/SOP.md": "How work flows here.", "/spec/culture.md": "Team culture." });
+    const adapter = adapterWith(fs, mockTmux());
+    const binding = { tmuxSession: SESSION, cwd: "/work", guidanceFile: AGENT_FILE } as never;
+    const delivered = await adapter.deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }], binding);
+    expect(delivered.failed).toEqual([]);
+    const projected = await adapter.project({ runtime: "pi", cwd: "/work", entries: [{ effectiveId: "culture", category: "guidance",
+      mergeStrategy: "managed_block", absolutePath: "/spec/culture.md", classification: "safe_projection" }],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] } as never, binding);
+    expect(projected.failed).toEqual([]);
+    expect(fs.files[AGENT_FILE]).toContain("How work flows here.");
+    expect(fs.files[AGENT_FILE]).toContain("Team culture.");
+    expect(fs.dirs.has(nodePath.dirname(AGENT_FILE))).toBe(true);
+    expect("/work/AGENTS.md" in fs.files).toBe(false);
+  });
+
+  it("a binding with no chosen file (a restore from an older snapshot) still merges into the repository AGENTS.md", async () => {
+    const fs = memFs({ "/spec/SOP.md": "How work flows here." });
+    await adapterWith(fs, mockTmux()).deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start"] }], { tmuxSession: SESSION, cwd: "/work", guidanceFile: null } as never);
+    expect(fs.files["/work/AGENTS.md"]).toContain("How work flows here.");
+    expect(AGENT_FILE in fs.files).toBe(false);
+  });
+
+  it("an OMP seat keeps the repository file: nothing has shown OMP loads its agent folder's AGENTS.md", () => {
+    const omp = new OmpRuntimeAdapter({ tmux: mockTmux(), fsOps: memFs(), stateRoot: STATE_ROOT, runnerEntryPath: RUNNER });
+    expect(omp.guidanceFileFor(seat)).toEqual({ file: null });
+  });
+});
+
+// #2432 X-F2: a restore's recorded agent file that became a link after its launch gets nothing written through it.
+describe("a Pi seat's recorded guidance file that has since become a link (#2432)", () => {
+  const AGENT_FILE = nodePath.join(piSeatPaths(STATE_ROOT, SESSION).agentDir, "AGENTS.md");
+  it("writes no guidance through it or into the repository AGENTS.md, and says why", async () => {
+    const fs = { ...memFs({ "/spec/SOP.md": "How work flows here." }), linkInfo: (p: string) => (p === AGENT_FILE ? { link: true, nlink: 1 } : null) };
+    const result = await adapterWith(fs, mockTmux()).deliverStartup([{ path: "SOP.md", absolutePath: "/spec/SOP.md", ownerRoot: "/spec",
+      deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"] }], { tmuxSession: SESSION, cwd: "/work", guidanceFile: AGENT_FILE } as never);
+    expect(AGENT_FILE in fs.files).toBe(false);
+    expect("/work/AGENTS.md" in fs.files).toBe(false);
+    expect(result.warnings?.join("\n")).toMatch(/now a link/);
+  });
+});

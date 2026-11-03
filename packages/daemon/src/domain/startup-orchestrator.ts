@@ -409,6 +409,13 @@ export class StartupOrchestrator {
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(input.nodeId)?.generationUuid;
     if (input.adapter.environment) input = { ...input, binding: { ...input.binding, launchGeneration: input.binding.launchGeneration ?? launchGeneration } };
+    // #875: a fresh launch decides once where its managed guidance goes; a restore carries its saved choice (null for an
+    // older snapshot), so the adapter isn't asked again and an existing seat isn't silently repointed.
+    if (input.binding.guidanceFile === undefined && input.adapter.guidanceFileFor) {
+      const chosen = input.adapter.guidanceFileFor(input.binding);
+      if (chosen.note) warnings.push(chosen.note);
+      input = { ...input, binding: { ...input.binding, guidanceFile: chosen.file } };
+    }
 
     // 1. Mark pending
     this.sessionRegistry.updateStartupStatus(input.sessionId, "pending");
@@ -565,6 +572,10 @@ export class StartupOrchestrator {
         JSON.stringify(input.startupActions),
         input.adapter.runtime,
       );
+      // The chosen guidance file rides with the context it was chosen for; the row above leaves it null otherwise.
+      if (input.binding.guidanceFile) {
+        this.db.prepare("UPDATE node_startup_context SET guidance_file = ? WHERE node_id = ?").run(input.binding.guidanceFile, input.nodeId);
+      }
     } catch (error) {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
     }
