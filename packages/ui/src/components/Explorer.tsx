@@ -313,7 +313,7 @@ export function Explorer({
         aria-label="Expand explorer"
         onClick={onDesktopToggle}
         className={cn(
-          "hidden lg:flex fixed top-[5.5rem] left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
+          "hidden lg:flex absolute top-8 left-[3.5rem] z-30 h-8 w-8 items-center justify-center",
           "rounded-full border border-outline-variant bg-background/90 text-on-surface",
           "shadow-[0_2px_8px_rgba(41,37,36,0.08)] backdrop-blur-sm transition-colors",
           "hover:bg-surface-low hover:text-on-surface",
@@ -361,8 +361,8 @@ export function Explorer({
         isOverlay
           ? "vellum z-30 shadow-[6px_0_14px_rgba(46,52,46,0.06)]"
           : "z-40 bg-[hsl(var(--background)/0.035)] supports-[backdrop-filter]:bg-[hsl(var(--background)/0.018)] backdrop-blur-[14px] backdrop-saturate-75 shadow-[6px_0_14px_rgba(46,52,46,0.04)]",
-        // Mobile: slide-over from left below the top-bar header (h-14).
-        "fixed top-14 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
+        // Mobile: slide-over within the shell content, below the notice and header.
+        "absolute top-0 bottom-0 left-0 transition-transform duration-200 ease-tactical w-72 max-w-[80vw]",
         open ? "translate-x-0" : "-translate-x-full",
         // Desktop (>=lg): persistent column at 280px (lg:w-72) per
         // universal-shell.md L34. Positioned absolutely after the 48px
