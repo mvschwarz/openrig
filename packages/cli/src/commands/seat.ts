@@ -337,7 +337,7 @@ function printHumanHandoverResult(result: SeatHandoverMutationResult): void {
   if (result.sideEffects.departingProcess) {
     console.log(result.sideEffects.provenanceRecordWritten
       ? "The handover's lineage record (occupant tenure) was written."
-      : "The handover's lineage record (occupant tenure) was NOT written; the daemon log says why. The seat is already bound to the successor, so don't run the handover again.");
+      : "The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
     console.log(DEPARTING_PROCESS_LINES[result.sideEffects.departingProcess]);
   }
   // OPR.0.5.5.5 — the per-source execution record: what actually carried context.

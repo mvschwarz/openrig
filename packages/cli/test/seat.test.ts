@@ -736,7 +736,7 @@ describe("rig seat status", () => {
     });
     const output = logs.join("\n");
     expect(exitCode).toBeUndefined(); // the handover itself completed
-    expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; the daemon log says why. The seat is already bound to the successor, so don't run the handover again.");
+    expect(output).toContain("The handover's lineage record (occupant tenure) was NOT written; check the daemon log, which names the first such failure since the daemon started. The seat is already bound to the successor, so don't run the handover again.");
     expect(output).toContain("The previous occupant's process didn't exit on TERM and was killed; its tmux session was kept, and the successor runs in the same pane.");
     expect(output).toContain("No conversation continuity was carried: the successor started a fresh conversation.");
     expect(output).not.toContain("session stop");
