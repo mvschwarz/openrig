@@ -618,6 +618,7 @@ export class MissionControlWriteContract {
     const resume = !chose && !words && questions.length > 0 && unansweredQuestions(questions, ask.humanAnswers ?? {}).length === 0;
     const answersReply = (answers: HumanAnswers) => `${formatHumanAnswers(questions, answers).join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(answers)}\nIn reply to: ${input.qitemId} (its humanAnswers field holds the same)`;
     let reply: string;
+    let wrote = false; // whether this call changed the ask before the return below awaits
     if (chose) {
       const recorded = this.queueRepo.recordHumanAnswer({ qitemId: input.qitemId, actorSession: input.actorSession,
         questionId: input.questionId ?? "", optionId: input.optionId ?? "", primaryUser });
@@ -625,6 +626,8 @@ export class MissionControlWriteContract {
         throw new MissionControlWriteContractError("answer_not_recorded", `The answer wasn't recorded: ${recorded.reason}.`,
           { qitemId: input.qitemId, reason: recorded.reason });
       }
+      // An already-complete set (an interrupted return) comes back without a write.
+      wrote = JSON.stringify(recorded.answers) !== JSON.stringify(ask.humanAnswers ?? {});
       const [just] = formatHumanAnswers(recorded.questions.filter((q) => q.id === input.questionId), recorded.answers);
       if (!recorded.complete) {
         return this.recordAnswer(input, before, just ?? `answered ${input.questionId}`, {
@@ -669,9 +672,11 @@ export class MissionControlWriteContract {
     const decision = chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
       : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
-    // #2446: typed words to a runner's permission ask have written nothing yet (no reply row, unlike a choice), and the
-    // await above let other requests in, so a guarded answer compares its revision again here, with no await before the close.
-    if (input.expectedRevision !== undefined && replyId === input.qitemId && !chose) {
+    // #2446: on a runner's permission ask (no reply row), a call that changed nothing before the await above (typed words,
+    // or a choice whose set was already complete) still has its first write ahead, and the await let other requests in, so
+    // a guarded answer compares its revision again here, with no await before the close. A call that wrote was compared
+    // before that write.
+    if (input.expectedRevision !== undefined && replyId === input.qitemId && !wrote) {
       const now = this.queueRepo.getById(input.qitemId);
       const revision = now ? this.queueRepo.decisionRevision(now) : null;
       if (now && revision !== input.expectedRevision) throw this.revisionChanged(now, revision!);
