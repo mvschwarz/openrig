@@ -673,6 +673,17 @@ export class TmuxAdapter {
     }
   }
 
+  private async nativePhysicalSession(physical: string, allowDead = false): Promise<NativePhysicalObservation> {
+    try {
+      if (!await this.nativeSessionExists(physical)) return {state:"absent"};
+      const values = (await this.nativeRaw(["tmux","display-message","-p","-t",`=${physical}:`,
+        `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{session_name}`])).trim().split("|");
+      if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || !(allowDead ? /^[01]$/.test(values[8]!) : values[8] === "0") || values[9] !== physical
+        || !/^[1-9]\d*$/.test(values[0]!) || !/^\$\d+$/.test(values[1]!) || !/^\d+$/.test(values[2]!)) return {state:"unknown"};
+      return {state:"present",session:{serverPid:values[0]!,sessionId:values[1]!,sessionCreated:values[2]!,nodeId:values[3]!,generation:values[4]!,marker:values[5] || undefined}};
+    } catch { return {state:"unknown"}; }
+  }
+
   private async nativeLegacyName(logical: string): Promise<boolean> {
     if (!nativeSessionNameMayBeLegacy(logical) || !await this.nativeSessionExists(logical)) return false;
     return !(await this.nativeRaw(["tmux", "show-options", "-qv", "-t", `=${logical}:`, NATIVE_LOGICAL_SESSION_OPTION])).trim();
@@ -1139,6 +1150,20 @@ export class TmuxAdapter {
           throw new Error("Native exchange predecessor identity is not established");
         }
       }
+      const source = await this.nativeBoundName(identity.staging), destination = await this.nativeBoundName(identity.canonical);
+      const predecessor = await this.nativePhysicalSession(source,true), successor = await this.nativePhysicalSession(destination);
+      const qualified = (value: NativePhysicalObservation, logical: string, physical: string, generation: string): value is {state:"present";session:NativePhysicalSession} =>
+        value.state === "present" && value.session.nodeId === nodeId && value.session.generation === generation
+        && value.session.marker === (physical === logical ? undefined : bindNativeSessionName(logical).marker);
+      if (!qualified(predecessor,identity.staging,source,identity.predecessorGeneration)
+        || !qualified(successor,identity.canonical,destination,identity.successorGeneration)) throw new Error("Native client-follow physical identities are not qualified");
+      const same = (actual: NativePhysicalObservation, expected: NativePhysicalSession) => actual.state === "present"
+        && (Object.keys(expected) as Array<keyof NativePhysicalSession>).every(key => actual.session[key] === expected[key]);
+      const unchanged = async () => {
+        if (await this.nativeBoundName(identity.staging) !== source || await this.nativeBoundName(identity.canonical) !== destination
+          || !same(await this.nativePhysicalSession(source,true),predecessor.session)
+          || !same(await this.nativePhysicalSession(destination),successor.session)) throw new Error("Native client-follow server or occupant changed");
+      };
       const clients=async()=>{
         const output=await this.runNamedSession(["tmux","list-clients","-t",`=${identity.staging}`,"-F",CLIENT_FORMAT], identity.staging);
         const rows=parseLines(output,parseClientLine);
@@ -1155,16 +1180,19 @@ export class TmuxAdapter {
       if(attached.some(client=>client.session!==identity.staging))throw new Error("Native client listing contains an unexpected session");
       for(const client of attached){
         if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost");
-        const source = await this.nativeBoundName(identity.staging), destination = await this.nativeBoundName(identity.canonical);
+        await unchanged();
         const current = await backend.observe();
         if (current.canonical.state !== "present" || current.canonical.generation !== identity.successorGeneration
           || current.parking.state !== "absent") throw new Error("Native successor identity changed before client following");
         const refused=`openrig-native-client-refused-${randomUUID()}`;
-        const marker = bindNativeSessionName(identity.staging).marker ?? "";
-        const occupant=`#{&&:#{==:#{OPENRIG_NODE_ID},${nodeId}},#{==:#{OPENRIG_OCCUPANT_GENERATION},${identity.predecessorGeneration}}}`;
+        const fields = [["pid",predecessor.session.serverPid],["session_id",predecessor.session.sessionId],
+          ["session_created",predecessor.session.sessionCreated],["OPENRIG_NODE_ID",nodeId],
+          ["OPENRIG_OCCUPANT_GENERATION",identity.predecessorGeneration],[NATIVE_LOGICAL_SESSION_OPTION,predecessor.session.marker ?? ""],
+          ["session_windows","1"],["window_panes","1"]];
         // The exact physical target selects the server. psmux does not implement
         // POSIX nested-format name escaping for literal hashes/braces.
-        const condition=`#{&&:${occupant},#{==:#{${NATIVE_LOGICAL_SESSION_OPTION}},${tmuxFormatLiteral(marker)}}}`;
+        const condition=fields.map(([key,value])=>`#{==:#{${key}},${tmuxFormatLiteral(value!)}}`).reduce((left,right)=>`#{&&:${left},${right}}`);
+        if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost before client following");
         const output=await this.nativeRaw(["tmux","if-shell","-F","-t",`=${source}:`,condition,
           `switch-client -c ${shellQuote(client.name)} -t ${shellQuote(`=${destination}`)}`,`display-message -p ${refused}`]);
         if(output.includes(refused))throw new Error("Native predecessor identity changed before client following");
@@ -1173,9 +1201,11 @@ export class TmuxAdapter {
       // while it still owns an attached client, including a newly attached one.
       for(let attempt=0;attempt<20;attempt++){
         if((await clients()).length===0){
+          await unchanged();
           const current=await backend.observe();
           if(current.canonical.state!=="present" || current.canonical.generation!==identity.successorGeneration
             || current.parking.state!=="absent")throw new Error("Native successor identity changed during client following");
+          if(!backend.ownsLifecycle())throw new Error("Native exchange lifecycle lease was lost during client following");
           return {ok:true};
         }
         await new Promise(resolve=>setTimeout(resolve,50));
@@ -1193,16 +1223,7 @@ export class TmuxAdapter {
         staging: {state:"present",generation:identity.successorGeneration}, parking:{state:"absent"},
       }, "forward").state !== "rename") throw new Error("Invalid native runtime exchange backend or identity");
     const ownsLifecycle = () => !this.deliveryGuard || this.deliveryGuard.ownsLifecycle(nodeId);
-    const physicalObserve = async (physical: string): Promise<NativePhysicalObservation> => {
-      try {
-        if (!await this.nativeSessionExists(physical)) return {state:"absent"};
-        const values = (await this.nativeRaw(["tmux","display-message","-p","-t",`=${physical}:`,
-          `#{pid}|#{session_id}|#{session_created}|#{OPENRIG_NODE_ID}|#{OPENRIG_OCCUPANT_GENERATION}|#{${NATIVE_LOGICAL_SESSION_OPTION}}|#{session_windows}|#{window_panes}|#{pane_dead}|#{session_name}`])).trim().split("|");
-        if (values.length !== 10 || values[6] !== "1" || values[7] !== "1" || values[8] !== "0" || values[9] !== physical
-          || !/^[1-9]\d*$/.test(values[0]!) || !/^\$\d+$/.test(values[1]!) || !/^\d+$/.test(values[2]!)) return {state:"unknown"};
-        return {state:"present",session:{serverPid:values[0]!,sessionId:values[1]!,sessionCreated:values[2]!,nodeId:values[3]!,generation:values[4]!,marker:values[5] || undefined}};
-      } catch { return {state:"unknown"}; }
-    };
+    const physicalObserve = (physical: string) => this.nativePhysicalSession(physical);
     const physicalWrite = async (physical: string, expected: NativePhysicalSession, command: string): Promise<void> => {
       if (!ownsLifecycle()) throw new Error("Native exchange lifecycle lease was lost");
       const terms = [

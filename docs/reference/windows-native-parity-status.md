@@ -1,5 +1,27 @@
 # Native Windows parity: implementation and evidence
 
+## Client following pins both physical occupants (2026-11-03)
+
+Client following now shares the rename path's physical identity reader. It pins
+both servers' PID, session ID, creation time, node, generation and marker, and
+requires the same physical bindings before each switch and before completion.
+The predecessor's command-boundary predicate additionally checks its PID/ID/time
+and sole window/pane, so an equal node/generation alone no longer authorizes the
+write. A retained dead predecessor pane remains eligible for client evacuation;
+the successor must remain live. Lifecycle ownership is checked again immediately
+before the command and after the final asynchronous observations.
+
+Controlled tests cover a predecessor replaced before the write, a successor
+replaced after it, lease loss during observations, foreign markers, predicate
+refusal, a dead retained predecessor and normal mapped-client following. A
+changed successor returns pending even after clients leave the predecessor.
+These observations are sequential across two servers, not an atomic transaction
+covering independent terminal servers. Real attached-client continuity remains
+unverified. No exhausted console/attach fixture was retried.
+
+Seven selected files passed 174 tests with five skips; daemon build and whitespace
+checks passed. No runtime/team operation, deployment or public push occurred.
+
 ## Real psmux literal-name rename correction (2026-11-03)
 
 A compiled production-adapter probe on stock psmux 3.4.0 exposed two distinct
