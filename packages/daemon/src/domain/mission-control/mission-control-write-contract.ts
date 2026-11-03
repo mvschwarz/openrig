@@ -127,6 +127,8 @@ export interface MissionControlActionResult {
   decisionRevision?: string;
   /** With expectedRevision only: this retry is the caller's own committed operation, answered from its record. */
   reconciled?: true;
+  /** With expectedRevision on a verb that doesn't settle a decision: it wasn't checked, and the act ran as without it. */
+  revisionNote?: string;
 }
 
 interface WriteContractDeps {
@@ -159,12 +161,13 @@ export class MissionControlWriteContract {
    */
   async act(input: MissionControlActionInput): Promise<MissionControlActionResult> {
     if (input.expectedRevision === undefined) return this.actOn(input);
+    // Only the settling verbs compare it. Another verb acts as today, and says the revision wasn't checked.
     if (!SETTLING_VERBS.has(input.verb)) {
-      throw new MissionControlWriteContractError("decision_revision_unsupported",
-        `verb=${input.verb} doesn't take expectedRevision; answer, resolve, approve and deny do. Nothing was written.`, { verb: input.verb });
+      return { ...await this.actOn(input), revisionNote: `expectedRevision isn't checked for ${input.verb}; only answer, resolve, approve and deny compare it.` };
     }
     // #2446: the act runs only on the decision its caller read. No await separates this check from the act's first
-    // write, so no other request in this daemon changes the decision in between.
+    // write, so no other request in this daemon changes the decision in between. The one path whose first write follows
+    // an await, a typed answer to a runner's permission ask, compares again before it (answerAsk).
     const operation = typeof input.auditNotes?.operationId === "string" ? operationFingerprint(input) : null;
     const item = this.queueRepo.getById(input.qitemId);
     const current = item ? this.queueRepo.decisionRevision(item) : null;
@@ -175,14 +178,20 @@ export class MissionControlWriteContract {
         return { actionId: last.actionId, verb: input.verb, qitemId: input.qitemId, closedQitem: item, createdQitemId: null,
           notifyAttempted: false, notifyResult: null, auditedAt: last.actedAt, reconciled: true, decisionRevision: current! };
       }
-      throw new MissionControlWriteContractError("decision_revision_changed",
-        `qitem ${input.qitemId} changed since this revision was read, so nothing was written. Read it again for the current decision.`,
-        { qitemId: input.qitemId, currentRevision: current, state: item.state, humanAnswers: item.humanAnswers ?? null,
-          lastAction: last ? { actionId: last.actionId, verb: last.actionVerb, actorSession: last.actorSession, actedAt: last.actedAt, auditNotes: last.auditNotes } : null });
+      throw this.revisionChanged(item, current!);
     }
     const result = await this.actOn(operation ? { ...input, auditNotes: { ...input.auditNotes, operation } } : input);
     const saved = this.queueRepo.getById(input.qitemId);
     return saved ? { ...result, decisionRevision: this.queueRepo.decisionRevision(saved) } : result;
+  }
+
+  /** A guarded act's decision changed since its revision was read: nothing was written, and the caller gets what's saved. */
+  private revisionChanged(item: QueueItem, current: string): MissionControlWriteContractError {
+    const last = this.actionLog.listForQitem(item.qitemId, 1)[0];
+    return new MissionControlWriteContractError("decision_revision_changed",
+      `qitem ${item.qitemId} changed since this revision was read, so nothing was written. Read it again for the current decision.`,
+      { qitemId: item.qitemId, currentRevision: current, state: item.state, humanAnswers: item.humanAnswers ?? null,
+        lastAction: last ? { actionId: last.actionId, verb: last.actionVerb, actorSession: last.actorSession, actedAt: last.actedAt, auditNotes: last.auditNotes } : null });
   }
 
   private async actOn(input: MissionControlActionInput): Promise<MissionControlActionResult> {
@@ -660,6 +669,13 @@ export class MissionControlWriteContract {
     const decision = chose || resume
       ? formatHumanAnswers(questions, this.queueRepo.getById(input.qitemId)?.humanAnswers ?? {}).join("; ")
       : returned.qitemId === input.qitemId ? words : humanAnswerText(returned.body);
+    // #2446: typed words to a runner's permission ask have written nothing yet (no reply row, unlike a choice), and the
+    // await above let other requests in, so a guarded answer compares its revision again here, with no await before the close.
+    if (input.expectedRevision !== undefined && replyId === input.qitemId && !chose) {
+      const now = this.queueRepo.getById(input.qitemId);
+      const revision = now ? this.queueRepo.decisionRevision(now) : null;
+      if (now && revision !== input.expectedRevision) throw this.revisionChanged(now, revision!);
+    }
     if (!this.queueRepo.resolveDirectHumanReply({ qitemId: input.qitemId, actorSession: input.actorSession, decision, primaryUser })
       && this.queueRepo.getById(input.qitemId)?.state !== "done") {
       throw new MissionControlWriteContractError("answer_not_closed",
