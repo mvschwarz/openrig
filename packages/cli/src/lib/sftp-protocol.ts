@@ -15,6 +15,12 @@ function timestamp(value: number): Buffer {
   if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error("SFTP v3 timestamps require integer seconds from 0 to 4294967295; this server protocol cannot preserve the source time");
   return u32(value);
 }
+function ownershipAttrs(uid: number, gid: number): Buffer {
+  if (![uid,gid].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) {
+    throw new Error("SFTP v3 owner and group IDs require unsigned 32-bit integers");
+  }
+  return Buffer.concat([u32(2),u32(uid),u32(gid)]);
+}
 const str = (value: string | Buffer) => {
   const b = typeof value === "string" ? Buffer.from(value) : value;
   if (typeof value === "string" && b.toString("utf8") !== value) throw new Error("SFTP text cannot be encoded losslessly as UTF-8");
@@ -166,13 +172,23 @@ export class SftpClient {
       }
     } finally { await this.request(4, str(handle), 101); }
   }
-  async write(file: string, chunks: AsyncIterable<Buffer>): Promise<void> {
+  async write(file: string, chunks: AsyncIterable<Buffer>, ownership?: { uid: number; gid: number }): Promise<void> {
+    const retainedOwnership = ownership && ownershipAttrs(ownership.uid,ownership.gid);
     // Restrict at OPEN, before yielding source bytes. Final source permissions
     // are installed only after the complete staged file has been written.
     const handle = (await this.request(3, Buffer.concat([str(file), u32(2 | 8 | 32), u32(4), u32(0o600)]), 102)).bytes();
     try {
       let offset = 0;
       for await (const data of chunks) { await this.request(6, Buffer.concat([str(handle), u64(offset), str(data)]), 101); offset += data.length; }
+      if (ownership && retainedOwnership) {
+        // FSTAT/FSETSTAT bind this operation to the newly opened stage, never a
+        // path which another actor could replace with a link after OPEN.
+        const before = (await this.request(8,str(handle),105)).attrs();
+        if ((before.mode! & 0o170000) !== 0o100000 || before.uid === undefined || before.gid === undefined) throw new Error("SFTP staged file ownership cannot be qualified");
+        if (before.uid !== ownership.uid || before.gid !== ownership.gid) await this.request(10,Buffer.concat([str(handle),retainedOwnership]),101);
+        const verified = (await this.request(8,str(handle),105)).attrs();
+        if (verified.uid !== ownership.uid || verified.gid !== ownership.gid) throw new Error("SFTP staged file ownership was not preserved");
+      }
     } finally { await this.request(4, str(handle), 101); }
   }
   async setTimes(file: string, attrs: SftpAttrs): Promise<void> {
@@ -184,10 +200,7 @@ export class SftpClient {
   /** Explicit numeric server identities. Callers must qualify their mapping;
    * reading ownership does not authorize applying those IDs to another host. */
   async setOwnership(file: string, uid: number, gid: number): Promise<void> {
-    if (![uid,gid].every(value => Number.isInteger(value) && value >= 0 && value <= 0xffffffff)) {
-      throw new Error("SFTP v3 owner and group IDs require unsigned 32-bit integers");
-    }
-    await this.request(9, Buffer.concat([str(file),u32(2),u32(uid),u32(gid)]),101);
+    await this.request(9, Buffer.concat([str(file),ownershipAttrs(uid,gid)]),101);
   }
   async setLinkTimes(file: string, attrs: SftpAttrs): Promise<void> {
     await this.ready;

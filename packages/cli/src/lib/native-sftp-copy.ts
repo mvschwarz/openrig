@@ -22,7 +22,7 @@ interface Endpoint {
   remove(file: string): Promise<void>;
   symlink(target: string, file: string, directory?: boolean): Promise<void>;
   read(file: string): AsyncIterable<Buffer>;
-  write(file: string, data: AsyncIterable<Buffer>): Promise<void>;
+  write(file: string, data: AsyncIterable<Buffer>, ownership?: {uid:number;gid:number}): Promise<void>;
   times(file: string, attrs: SftpAttrs): Promise<void>;
   linkTimes?(file: string, attrs: SftpAttrs): Promise<void>;
   rename(src: string, dst: string, replacing: boolean): Promise<void>;
@@ -30,7 +30,7 @@ interface Endpoint {
 const local: Endpoint = {
   paths: path,
   async stat(file) {
-    try { const s = await lstat(file); return { size: s.size, mode: s.mode, ...(process.platform === "win32" ? readWindowsEntryTimes(file, s) : { atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) }) }; }
+    try { const s = await lstat(file); return { size: s.size, mode: s.mode, ...(process.platform === "win32" ? readWindowsEntryTimes(file, s) : { uid:s.uid,gid:s.gid,atime: Math.floor(s.atimeMs / 1000), mtime: Math.floor(s.mtimeMs / 1000) }) }; }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   },
   names: readdir, link: readlink,
@@ -121,7 +121,7 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
       paths: path.posix, stat: file => client!.lstat(file), names: file => client!.readdir(file),
       followsDirectory: async file => { const attrs=await client!.stat(file); return attrs ? kind(attrs) === 0o040000 : undefined; },
       link: file => client!.readlink(file), mkdir: file => client!.mkdir(file), rmdir: file => client!.rmdir(file), remove: file => client!.remove(file), symlink: (target, file) => client!.symlink(target, file),
-      read: file => client!.read(file), write: (file, data) => client!.write(file, data),
+      read: file => client!.read(file), write: (file, data, ownership) => client!.write(file, data, ownership),
       times: (file, attrs) => client!.setTimes(file, attrs), rename: (src, dst, replacing) => client!.rename(src, dst, replacing),
       ...(client.extensionVersions.get("lsetstat@openssh.com") === "1"
         ? { linkTimes: (file: string, attrs: SftpAttrs) => client!.setLinkTimes(file, attrs) } : {}),
@@ -258,7 +258,13 @@ export async function runNativeSftpCopy(plan: CopyPlan, start: (argv: string[]) 
           // advertised more bytes. Refuse before metadata/rename publication.
           if (attrs.size !== undefined && observedBytes !== attrs.size) throw sizeMismatch();
         };
-        await destination.write(staged, verifiedSource());
+        // A native Windows source has no POSIX identity to translate. Retain a
+        // known existing regular destination's same-server identity rather than
+        // silently replacing it with the staging creator's owner/group.
+        const retainedOwnership = destination === remote && !windowsRemote && attrs.uid === undefined && attrs.gid === undefined
+          && kind(existing) === 0o100000 && existing?.uid !== undefined && existing.gid !== undefined
+          ? {uid:existing.uid,gid:existing.gid} : undefined;
+        await destination.write(staged, verifiedSource(), retainedOwnership);
         if (attrs.size === undefined) bytesTransferred += observedBytes;
         await destination.times(staged, attrs);
       }

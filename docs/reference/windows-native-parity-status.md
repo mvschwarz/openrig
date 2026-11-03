@@ -1,5 +1,40 @@
 # Native Windows parity: implementation and evidence
 
+## Native upload retains known existing POSIX destination identity (2026-11-03)
+
+When a source lacks POSIX uid/gid, the destination is a known existing regular
+file on a POSIX-shaped SFTP endpoint, and both destination IDs are available,
+the copy now retains those same-server destination IDs. It does not reinterpret
+Windows Node's placeholder numeric identity as a remote account. POSIX local
+source observations now retain their actual uid/gid rather than confusing them
+with the identity-less native Windows case. Source-name/ID translation is still
+unimplemented and is not inferred by this fallback policy.
+
+The upload's still-open stage handle supplies FSTAT identity and receives any
+necessary FSETSTAT ownership change, followed by FSTAT verification before close
+and rename publication. Incomplete input, unqualified attributes, permission
+refusal or a server that reports success without installing the IDs aborts before
+publication. Ownership precedes the existing final mode/time application. This
+does not make the later path-based metadata/rename sequence atomic against a
+hostile actor or qualify directory/link ownership preservation.
+
+Seven selected protocol/copy files passed 58 tests with 15 skips and no failures;
+CLI typecheck and whitespace checks passed. Framed-peer tests cover changed and
+already-correct stage identities, exact handle-bound FSETSTAT, permission denial,
+ineffective writes, missing attributes and incomplete input. Four native Windows
+copy cases verify that only qualified stages reach rename publication.
+
+A separate real Windows-source upload into an owned WSL POSIX SFTP subsystem
+updated the file while retaining its existing uid/gid 1000/1000. A controlled
+foreign-UID injection was refused by that real server; original target content
+and identity remained unchanged, with a retained-stage hint. This proves that
+refusal path, not successful cross-user chown. Public protocol/copy source hashes
+matched before and after. Both temporary roots and owned subsystem processes
+were cleaned up. No SSH authentication, user-file change, original-team action,
+deployment or public push occurred. Windows SID/DACL mapping, source identity
+translation, omitted server attributes and complete archive equivalence remain
+outstanding rather than being counted as completed by this narrow policy.
+
 ## Closed-port refusal fixtures now avoid fetch's bad-port list (2026-11-03)
 
 The two previously identified closed-port helpers in front-door and busy-daemon
