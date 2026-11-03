@@ -265,6 +265,10 @@ describe("AppShell — Phase 2 chrome", () => {
       expect(rail.style.width).toBe("");
       expect(rail.className).toMatch(/\bw-full\b/);
       expect(tray.className).toContain("top-12");
+      // The rail must be allowed to shrink so its link list scrolls
+      // inside the tray instead of running under the bottom nav.
+      expect(rail.className).toMatch(/\bmin-h-0\b/);
+      expect(rail.className).not.toMatch(/\bshrink-0\b/);
     });
 
     // C06 sidebar: nav items keep a >=44px tap target on mobile

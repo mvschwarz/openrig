@@ -366,7 +366,7 @@ function AppShellInner({ children }: AppShellProps) {
                     data-testid="mobile-rail-tray"
                     className={cn(
                       "fixed top-12 left-0 bottom-0 z-30 bg-background transition-transform duration-200 ease-tactical lg:hidden",
-                      "w-72 max-w-[85vw] flex flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))]",
+                      "w-72 max-w-[80vw] flex flex-col pb-[calc(3.5rem+env(safe-area-inset-bottom))]",
                       explorerOpen ? "translate-x-0" : "-translate-x-full",
                     )}
                   >

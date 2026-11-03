@@ -95,8 +95,10 @@ export function Sidebar({
       data-collapsed={effectiveCollapsed}
       style={isMobileTray ? undefined : { width: effectiveCollapsed ? "var(--sidebar-width-collapsed)" : "var(--sidebar-width)" }}
       className={cn(
-        "flex shrink-0 flex-col bg-surface-low border-r",
-        isMobileTray && "w-full",
+        "flex flex-col bg-surface-low border-r",
+        // In the mobile tray the sidebar fills the tray and its link list
+        // scrolls inside it; on desktop it keeps its fixed column width.
+        isMobileTray ? "w-full min-h-0 flex-1" : "shrink-0",
       )}
     >
       {/* Header row: desktop wordmark (C07) + collapse toggle on desktop only. */}
