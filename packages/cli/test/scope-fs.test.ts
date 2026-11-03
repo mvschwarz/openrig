@@ -326,6 +326,44 @@ describe("listMissions + listSlices + nextSliceNN", () => {
   });
 });
 
+describe("a slice's standing: in flight, delivered in place, or closed (#2427)", () => {
+  let root: string;
+  let missionsRoot: string;
+
+  beforeEach(() => {
+    root = mktemp();
+    missionsRoot = path.join(root, "missions");
+    writeFile(path.join(missionsRoot, "m1", "README.md"), "---\nid: OPR.9.1\n---\n# m1\n");
+    const slice = (dir: string, frontmatter: string) => writeFile(path.join(missionsRoot, "m1", dir, "README.md"), `---\n${frontmatter}\n---\nbody\n`);
+    slice("slices/01-open", "id: OPR.9.1.1\nstatus: active");
+    slice("slices/02-blocked", "id: OPR.9.1.2\nstatus: blocked");
+    slice("slices/03-shipped", "id: OPR.9.1.3\nstatus: shipped");
+    slice("slices/04-done", "id: OPR.9.1.4\nstatus: done");
+    slice("slices/05-replaced", "id: OPR.9.1.5\nstatus: active\nstage: superseded\nsuperseded-by: OPR.9.1.9");
+    slice("slices/06-superseded", "id: OPR.9.1.6\nstatus: superseded");
+    slice("closed/07-stale", "id: OPR.9.1.7\nstatus: closed-stale");
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("slice ls: active is work in flight (blocked included); shipped is delivered in place; closed includes exits in place", () => {
+    const mission = findMission(missionsRoot, "m1");
+    const names = (state: "active" | "shipped" | "closed" | "all") => listSlices(mission, state).map((s) => s.name);
+    expect(names("active")).toEqual(["01-open", "02-blocked"]);
+    expect(names("shipped")).toEqual(["03-shipped", "04-done"]);
+    expect(names("closed")).toEqual(["05-replaced", "06-superseded", "07-stale"]);
+    expect(names("all")).toHaveLength(7);
+  });
+
+  it("mission counts give each slice one standing, the same as slice ls", () => {
+    const counts = { activeSliceCount: 2, shippedSliceCount: 2, closedSliceCount: 3 };
+    expect(listMissions(missionsRoot)[0]).toMatchObject(counts);
+    expect(findMission(missionsRoot, "m1")).toMatchObject(counts);
+  });
+});
+
 describe("findSlice + resolution variants", () => {
   let root: string;
   let missionsRoot: string;

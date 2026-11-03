@@ -213,7 +213,7 @@ function buildSliceLsCommand(): Command {
   const cmd = new Command("ls")
     .description("List slices in a mission (or across all missions)")
     .option("--mission <name>", "Restrict to a single mission")
-    .option("--state <state>", "Filter: active | closed | shipped | all", "active")
+    .option("--state <state>", "Filter: active (in flight, blocked included) | shipped (delivered in place: shipped or done) | closed (in closed/, or superseded, retired or closed in place) | all", "active")
     .option("--json", "Machine-readable output")
     .action(async (opts, command) => {
       const out = makeStdout();
@@ -727,12 +727,13 @@ function buildMissionLsCommand(): Command {
           id: m.id,
           path: m.absPath,
           activeSliceCount: m.activeSliceCount,
+          shippedSliceCount: m.shippedSliceCount,
           closedSliceCount: m.closedSliceCount,
         }));
         emit(out, { ok: true, count: rows.length, missions: rows }, json,
           rows.length === 0
             ? ["(no missions)"]
-            : rows.map((r) => `${r.name}    ${r.id ?? "—"}    active=${r.activeSliceCount}  closed=${r.closedSliceCount}`),
+            : rows.map((r) => `${r.name}    ${r.id ?? "—"}    active=${r.activeSliceCount}  shipped=${r.shippedSliceCount}  closed=${r.closedSliceCount}`),
         );
       } catch (err) {
         fail(err, json, out);
@@ -764,6 +765,7 @@ function buildMissionShowCommand(): Command {
             id: mission.id,
             path: mission.absPath,
             activeSliceCount: mission.activeSliceCount,
+            shippedSliceCount: mission.shippedSliceCount,
             closedSliceCount: mission.closedSliceCount,
             frontmatter: mission.frontmatter,
             trust,
@@ -778,6 +780,7 @@ function buildMissionShowCommand(): Command {
           out.write(`  id: ${mission.id ?? "—"}\n`);
           out.write(formatTrustLine(trust));
           out.write(`  active slices: ${mission.activeSliceCount}\n`);
+          out.write(`  shipped slices: ${mission.shippedSliceCount}\n`);
           out.write(`  closed slices: ${mission.closedSliceCount}\n`);
           out.write(`  path: ${mission.absPath}\n`);
           if (readme) {
@@ -1100,6 +1103,7 @@ function buildAuditCommand(): Command {
               frontmatter: {},
               id: null,
               activeSliceCount: 0,
+              shippedSliceCount: 0,
               closedSliceCount: 0,
             };
         const graph = buildMissionDependencyGraph(auditMission);
