@@ -7,6 +7,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { runStuckSweep } from "../src/domain/queue-stuck-sweep.js";
+import { recoveryId } from "../src/domain/queue-recovery.js";
+import { lastMeaningfulTransition } from "../src/domain/queue-waiting.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
 describe("accepted queue re-estimates (#2453)", () => {
@@ -31,7 +33,7 @@ describe("accepted queue re-estimates (#2453)", () => {
     });
     app.route("/api/queue", queueRoutes());
   });
-  afterEach(() => { db.close(); vi.useRealTimers(); });
+  afterEach(() => { db.close(); vi.useRealTimers(); vi.unstubAllEnvs(); });
 
   async function overdue() {
     const row = await repo.create({ sourceSession: "coordinator@fixture", destinationSession: "worker@fixture", body: "work", tier: "fast", nudge: false });
@@ -88,6 +90,32 @@ describe("accepted queue re-estimates (#2453)", () => {
     const expired = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")!;
     expect(expired.action).toBe("created");
     expect(expired.findingQitemId).not.toBe(finding.findingQitemId);
+    expect(claim(row.qitemId)).toEqual(before);
+  });
+
+  it("creates one live overdue after a post-estimate pickup recovery closes before the revised deadline", async () => {
+    vi.stubEnv("OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES", "3");
+    const row = await overdue(), before = claim(row.qitemId);
+    expect((await accept(row.qitemId)).status).toBe(200);
+    const accepted = lastMeaningfulTransition(db, row.qitemId);
+    vi.setSystemTime(new Date("2026-11-03T12:10:00.000Z"));
+    const pickup = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "stalled-after-claim")!;
+    expect(pickup.action).toBe("created");
+    expect(pickup.findingQitemId).toBe(recoveryId(db, row.qitemId));
+    repo.update({ qitemId: pickup.findingQitemId, actorSession: "coordinator@fixture", state: "done", closureReason: "no-follow-on", transitionNote: "Owner is working; pickup recovery resolved" });
+    repo.attachActivityReader(() => ({ activity: "working", needsInput: { count: 0, reason: null }, decidedBy: "lifecycle-hooks" }));
+    vi.setSystemTime(new Date(Date.parse(later) + 1));
+    expect(repo.getById(row.qitemId)?.pickup?.state).toBe("working");
+    const expired = (await sweep()).findings.find(f => f.qitemId === row.qitemId && f.kind === "overdue-claim")!;
+    expect(expired.action).toBe("created");
+    expect(lastMeaningfulTransition(db, row.qitemId)).toEqual(accepted);
+    expect(recoveryId(db, row.qitemId)).toBe(pickup.findingQitemId);
+    const live = repo.list({ limit: 100 }).filter(r => ["pending", "in-progress", "blocked"].includes(r.state) && r.tags?.includes(`recovery-for:${row.qitemId}`));
+    expect(live).toHaveLength(1);
+    expect(live[0]!.qitemId).toBe(expired.findingQitemId);
+    expect(expired.findingQitemId).not.toBe(pickup.findingQitemId);
+    expect(repo.getById(pickup.findingQitemId)?.state).toBe("done");
+    expect((await sweep()).findings).toContainEqual({ ...expired, action: "refreshed" });
     expect(claim(row.qitemId)).toEqual(before);
   });
 
