@@ -3288,8 +3288,11 @@ export class SessionTransport {
     if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
     const preserveInput = opts?.preserveInput ? async () => {
-      const box = runtime === "claude-code" || runtime === "codex"
-        ? await this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      const readBox = async () => runtime === "claude-code" || runtime === "codex"
+        ? this.captureInputBox(readTarget, runtime, { remainingMs: INPUT_BOX_READ_DEADLINE_MS }) : null;
+      const box = opts?.readinessFromPaneOnly && runtime === "claude-code"
+        ? (await this.readAtReadableSize(sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readBox)).value
+        : await readBox();
       if (bindingChanged()) throw new DeliveryGuardError("draft_input_changed", "The managed input target changed; no input was written.");
       if (box?.status !== "empty" && !(box?.status === "likely-suggestion" && box.confidence === "high")) {
         throw new DeliveryGuardError(box?.status === "typed" ? "draft_input_busy" : "draft_input_unknown",
@@ -3794,7 +3797,7 @@ export class SessionTransport {
       }
     }
 
-    const probe = await probeSessionActivity({
+    const readPane = () => probeSessionActivity({
       communityHarness, communityHarnessSendProbe: true,
       composerSnapshot,
       sessionName: input.sessionName,
@@ -3808,6 +3811,10 @@ export class SessionTransport {
       timerlessStatusIsLive: input.readinessFromPaneOnly === true,
       postCompactTurnBoundary: input.postCompactTurnBoundary === true,
     });
+    // Managed compaction must read a tiled Claude pane at the same size as a readable capture.
+    const probe = input.readinessFromPaneOnly && input.runtime === "claude-code"
+      ? (await this.readAtReadableSize(input.sessionName, { width: 120, height: 40 }, { remainingMs: CAPTURE_READABLE_BUDGET_MS }, readPane)).value
+      : await readPane();
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
     // running/needs_input hook such as UserPromptSubmit: keep it until it ages out. An `unknown`
