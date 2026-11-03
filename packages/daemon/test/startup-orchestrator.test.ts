@@ -795,6 +795,26 @@ describe("StartupOrchestrator", () => {
     expect(recorded()).toBeNull();
   });
 
+  // #875 Codex: the adapter may answer asynchronously, a resume is named to it, and a choice of launch instructions rides
+  // the binding to projection, delivery and the launch; nothing is recorded as a guidance file for it.
+  it("passes whether the launch resumes, and carries an adapter's launch-instructions choice on the binding", async () => {
+    const seed = seedSession(); const orch = createOrchestrator();
+    const guidanceFileFor = vi.fn(async (_binding: NodeBinding, opts?: { resuming?: boolean }) =>
+      opts?.resuming ? { file: null } : { file: null, launchInstructions: true });
+    const adapter = mockAdapter({ runtime: "codex", guidanceFileFor } as never);
+    expect((await orch.startNode(makeInput(seed, { adapter }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: false });
+    const chosen = { guidanceFile: null, guidanceLaunchInstructions: true };
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.deliverStartup).mock.calls[0]?.[1]).toMatchObject(chosen);
+    expect(vi.mocked(adapter.launchHarness).mock.calls[0]?.[0]).toMatchObject(chosen);
+    expect((db.prepare("SELECT guidance_file FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { guidance_file: string | null }).guidance_file).toBeNull();
+    vi.mocked(adapter.project).mockClear();
+    expect((await orch.startNode(makeInput(seed, { adapter, resumeToken: "native-original" }))).ok).toBe(true);
+    expect(guidanceFileFor).toHaveBeenLastCalledWith(expect.anything(), { resuming: true });
+    expect(vi.mocked(adapter.project).mock.calls[0]?.[1]).not.toMatchObject({ guidanceLaunchInstructions: true });
+  });
+
   it("exact resume retains configured fresh context while sending no replay", async () => {
     const seed = seedSession(); const orch = createOrchestrator();
     const action = makeAction({ type: "send_text", value: "configured context" });
