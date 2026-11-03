@@ -2305,17 +2305,25 @@ export class PodRigInstantiator {
     return (rigLayers.podStartupFiles?.[pod.id] ?? []).map((f) => ({ ...f, absolutePath: nodePath.resolve(rigLayers.root, f.path), ownerRoot: rigLayers.root }));
   }
 
-  /** The rig culture file and rig startup block a seat launches with, and the root they resolve against: the spec's
-   *  own when it declares them, else those stored when the rig was created. Expand, add-member and first-start retry
-   *  launch from a synthetic spec that declares neither, so an added seat gets the rig's layers as an original seat did. */
+  /** The rig culture file and rig startup block a seat launches with, and the root they resolve against. The two are
+   *  decided as a pair: a spec that declares either one supplies both (an undeclared one is absent), resolved against
+   *  the spec's root; a spec that declares neither gets both as stored when the rig was created, against that root.
+   *  Expand, add-member and first-start retry launch from a synthetic spec that declares neither, so an added seat gets
+   *  the rig's layers as an original seat did. */
   private rigStartupLayers(rigSpec: PodRigSpec, rigRoot: string, rigId: string): RigStartupLayers {
     if (rigSpec.cultureFile || rigSpec.startup) return { root: rigRoot, cultureFile: rigSpec.cultureFile, startup: rigSpec.startup };
     return this.deps.rigRepo.getRigStartupLayers(rigId) ?? { root: rigRoot };
   }
 
-  /** The spec as the startup layering sees it: carrying the rig layers the seat launches with. */
+  /** The spec as the startup layering sees it: carrying the rig layers the seat launches with, and only those there
+   *  are (#2454: a missing layer is no key, not a key whose value is undefined). */
   private withRigStartupLayers(rigSpec: PodRigSpec, layers: RigStartupLayers): PodRigSpec {
-    return { ...rigSpec, cultureFile: layers.cultureFile, startup: layers.startup };
+    const spec: PodRigSpec = { ...rigSpec };
+    delete spec.cultureFile;
+    delete spec.startup;
+    if (layers.cultureFile !== undefined) spec.cultureFile = layers.cultureFile;
+    if (layers.startup !== undefined) spec.startup = layers.startup;
+    return spec;
   }
 
   /** Seam B Guard-F2: the STRICT materialize/add-member persist — provenance here is
