@@ -98,9 +98,10 @@ node "$SKILL_DIR/scripts/backup-sqlite.mjs" \
   --destination "/safe/path/openrig-before-upgrade.sqlite"
 ```
 
-The helper refuses to overwrite a destination, uses SQLite's backup operation,
-and verifies the backup with `PRAGMA integrity_check`. It does not stop the
-daemon or restore a database.
+The helper refuses to overwrite a destination, uses the `sqlite3` CLI `.backup`
+command when available (falling back to an in-process backup via `node:sqlite`
+when the CLI is absent), and verifies the backup with `PRAGMA integrity_check`.
+It does not stop the daemon or restore a database.
 
 ### Plan or apply safe managed-plugin refreshes
 
